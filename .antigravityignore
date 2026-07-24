@@ -1,0 +1,40 @@
+# ============================================================
+# .antigravityignore — yvoke-desktop
+# Controls which files are included in the Antigravity AI corpus.
+# Syntax follows .gitignore conventions.
+# ============================================================
+
+# ── Dependencies ────────────────────────────────────────────
+node_modules/
+
+# ── Build & Package output ──────────────────────────────────
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# ── Secrets & environment config ────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# ── IDE / editor noise ──────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── Docker / CI / Git internals ─────────────────────────────
+.git/
+.github/
+Dockerfile
+docker-compose*.yml
+docker/
+.antigravity/

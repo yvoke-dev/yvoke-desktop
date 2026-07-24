@@ -1,0 +1,30 @@
+# Unsigned, file-shareable distribution (M20 decision): macOS gets an ad-hoc
+# signature and ships as zip; Windows ships an NSIS installer + portable zip.
+# Auto-update is intentionally absent (it effectively requires code signing).
+appId: de.palsoftware.yvoke.desktop
+productName: Yvoke - Desktop
+directories:
+  output: release
+files:
+  - out/**
+# Ship the production defaults alongside the app; loadProjectDefaults() reads this
+# from process.resourcesPath in a packaged (Finder/Explorer-launched) build.
+extraResources:
+  - from: settings.json
+    to: settings.json
+# The Agent SDK spawns a bundled native Claude Code binary — it cannot run from
+# inside the asar archive, so the SDK and its platform-binary packages are unpacked.
+asarUnpack:
+  - 'node_modules/@anthropic-ai/claude-agent-sdk*/**'
+mac:
+  target:
+    - zip
+  identity: null
+  category: public.app-category.productivity
+win:
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: true
+  perMachine: false

@@ -1,0 +1,32 @@
+{
+  "serverBaseUrl": "https://app.yvoke.dev/",
+  "mcpTransport": "http",
+  "serverAuthMode": "entra",
+  "entra": {
+    "clientId": "a1824d0a-79eb-4dde-8c0b-242dde321967",
+    "tenantId": "b0b1499f-1764-4eb8-855b-a5658b219405",
+    "scope": "api://a1824d0a-79eb-4dde-8c0b-242dde321967/desktop"
+  },
+  "models": [
+    "sonnet",
+    "opus",
+    "haiku"
+  ],
+  "defaultModel": "sonnet",
+  "defaultThinkingLevel": "medium",
+  "webSearch": {
+    "enabled": false,
+    "allowedDomains": []
+  },
+  "maxTurns": 25,
+  "orchestrator": {
+    "orchestrator": { "model": "opus", "thinkingLevel": "high" },
+    "reviewer": { "model": "opus", "thinkingLevel": "high" },
+    "specialist": { "model": "sonnet", "thinkingLevel": "high" },
+    "maxReviewRounds": 2,
+    "maxSpecialistCalls": 8,
+    "requireReview": true,
+    "orchestratorMaxTurns": 60,
+    "specialistMaxTurns": 20
+  }
+}
