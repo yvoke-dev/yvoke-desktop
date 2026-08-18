@@ -46,4 +46,52 @@ describe('SettingsView', () => {
       expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ serverBaseUrl: 'https://app.example/' })),
     );
   });
+
+  it('saves edited maxTurns and orchestrator budgets', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/Max turns per message/), { target: { value: '40' } });
+    fireEvent.change(screen.getByLabelText('Max review rounds'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('Specialist max turns'), { target: { value: '15' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxTurns: 40,
+          orchestrator: expect.objectContaining({ maxReviewRounds: 3, specialistMaxTurns: 15 }),
+        }),
+      ),
+    );
+  });
+
+  it('re-points defaultModel when the models list no longer contains it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <SettingsView
+        settings={{ ...settings, models: ['sonnet', 'opus'] }}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('Available models (one per line)'), {
+      target: { value: 'opus\nhaiku' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ models: ['opus', 'haiku'], defaultModel: 'opus' }),
+      ),
+    );
+  });
+
+  it('renders the orchestrator form from defaults when settings.json omits the block', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { orchestrator: _omitted, ...withoutOrchestrator } = settings;
+    render(<SettingsView settings={withoutOrchestrator} onSave={onSave} onClose={vi.fn()} />);
+    expect((screen.getByLabelText('Max specialist calls') as HTMLInputElement).value).toBe('8');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ maxTurns: 25 })));
+    // An untouched form must not invent an orchestrator block the user never configured.
+    expect(onSave.mock.calls[0][0].orchestrator).toBeUndefined();
+  });
 });

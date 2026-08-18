@@ -1,0 +1,168 @@
+name: Release
+
+# Tag-triggered rather than per-push: macOS runner minutes bill at 10x the Linux rate on a
+# private repo, and each job downloads a ~220MB native binary.
+on:
+  push:
+    # Bare-version tags (1.0.1, not v1.0.1) — tag-version-prefix="" in .npmrc makes
+    # `npm version` produce these.
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # electron-builder stamps artifact names and app metadata from package.json, not from the
+  # tag — a mismatched tag would publish a release whose assets all claim the wrong version.
+  # Cut releases with `npm version`, which bumps and tags together. Runs on a cheap Linux
+  # runner so a mismatch fails before any macOS minutes are spent; workflow_dispatch runs
+  # (no tag) pass through.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="$GITHUB_REF_NAME"
+          pkg="$(node -p "require('./package.json').version")"
+          [ "$tag" = "$pkg" ] || { echo "::error::Tag $tag does not match package.json version $pkg. Release with 'npm version <patch|minor|major>' so they stay in sync."; exit 1; }
+
+  macos:
+    needs: guard
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # ~220MB per target. Keyed on the installed SDK version, which is what
+      # fetch-claude-binary.ts pins the download to.
+      - name: Resolve SDK version
+        id: sdk
+        run: echo "version=$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: build/claude
+          key: claude-bin-mac-${{ steps.sdk.outputs.version }}
+      - run: npm run fetch:claude -- mac-arm64 mac-x64
+
+      # The certificate is self-signed, so importing the .p12 is not enough: `security
+      # find-identity -v -p codesigning` only lists identities macOS considers valid, and a
+      # self-signed root in a fresh keychain carries no trust settings. Establish trust
+      # explicitly, then let electron-builder sign against this keychain.
+      - name: Import signing certificate
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MAC_CSC_LINK" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MAC_CSC_KEY_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+          # Trust the self-signed root so it counts as a valid codesigning identity.
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys \
+            -passin pass:"$MAC_CSC_KEY_PASSWORD" -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning
+
+      - name: Build
+        env:
+          # electron-builder signs against the keychain prepared above; auto-discovery would
+          # otherwise look for an Apple-issued identity and find nothing.
+          CSC_KEYCHAIN: ${{ runner.temp }}/build.keychain
+        run: |
+          npx electron-vite build
+          npx electron-builder --mac --publish never
+
+      # An artifact that merely looks successful is the failure mode worth guarding against:
+      # if signing silently fell back to ad-hoc, the app ships and re-prompts every user.
+      - name: Assert signature
+        run: |
+          set -euo pipefail
+          fail=0
+          for app in release/mac*/*.app; do
+            echo "== $app"
+            info="$(codesign -dvvv "$app" 2>&1)"
+            echo "$info"
+            grep -q 'Authority=Yvoke Desktop Signing' <<<"$info" || { echo "::error::$app is not signed with the expected identity"; fail=1; }
+            grep -q 'Identifier=de.palsoftware.yvoke.desktop' <<<"$info" || { echo "::error::$app has the wrong bundle identifier"; fail=1; }
+            codesign --verify --deep --strict "$app" || { echo "::error::$app failed signature verification"; fail=1; }
+            count="$(find "$app" -name 'claude' -type f | wc -l | tr -d ' ')"
+            [ "$count" = "1" ] || { echo "::error::$app bundles $count claude binaries, expected 1"; fail=1; }
+          done
+          exit $fail
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: release/*.zip
+
+  windows:
+    needs: guard
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Resolve SDK version
+        id: sdk
+        shell: bash
+        run: echo "version=$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: build/claude
+          key: claude-bin-win-${{ steps.sdk.outputs.version }}
+      - run: npm run fetch:claude -- win-x64
+
+      # Unsigned for now. Azure Artifact Signing plugs in here once Identity Validation is
+      # approved — this runner is the reason the job exists, since electron-builder's
+      # Invoke-TrustedSigning path cannot run from macOS. See docs/signing.md.
+      - name: Build
+        run: |
+          npx electron-vite build
+          npx electron-builder --win --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            release/*.exe
+            release/*.zip
+
+  release:
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          body: |
+            macOS builds are signed with the project's self-signed certificate and are **not**
+            notarized — on first launch use **right-click → Open**.
+            Windows builds are unsigned — SmartScreen shows "More info → Run anyway".

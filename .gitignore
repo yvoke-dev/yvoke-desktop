@@ -6,6 +6,10 @@ dist/
 out/
 release/
 
+# Native Claude Code binaries staged per build target (~220MB each, see
+# scripts/fetch-claude-binary.ts) — fetched from npm, never committed.
+build/claude/
+
 # TypeScript build info / cache files
 *.tsbuildinfo
 

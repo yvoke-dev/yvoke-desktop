@@ -1,5 +1,93 @@
 import React, { useState } from 'react';
-import type { AppSettings, ThinkingLevel } from '../../../shared/types';
+import { DEFAULT_ORCHESTRATOR_SETTINGS } from '../../../shared/types';
+import type {
+  AppSettings,
+  OrchestratorSettings,
+  RoleModelConfig,
+  ThinkingLevel,
+} from '../../../shared/types';
+
+const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
+
+/** Parse a number field, keeping a cleared/garbage input at 0 rather than NaN. */
+function toNumber(value: string): number {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Model dropdown for one role. Options come from the configured model list, plus the current value
+ * when settings.json binds a role to a model that is not in it — so opening settings never silently
+ * rewrites that binding to whatever happens to be first in the list.
+ */
+function ModelSelect(props: {
+  value: string;
+  models: string[];
+  onChange: (value: string) => void;
+}): React.JSX.Element {
+  const options = props.models.includes(props.value)
+    ? props.models
+    : [props.value, ...props.models].filter(Boolean);
+  return (
+    <select value={props.value} onChange={(e) => props.onChange(e.target.value)}>
+      {options.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ThinkingSelect(props: {
+  value: ThinkingLevel;
+  onChange: (value: ThinkingLevel) => void;
+}): React.JSX.Element {
+  return (
+    <select value={props.value} onChange={(e) => props.onChange(e.target.value as ThinkingLevel)}>
+      {THINKING_LEVELS.map((l) => (
+        <option key={l} value={l}>
+          {l}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** One orchestrator role: the Claude model it runs on and how hard it thinks. */
+function RoleRow(props: {
+  label: string;
+  hint: string;
+  value: RoleModelConfig;
+  models: string[];
+  onChange: (value: RoleModelConfig) => void;
+}): React.JSX.Element {
+  return (
+    <div className="settings-role">
+      <div className="settings-role-label">
+        {props.label}
+        <span className="settings-hint">{props.hint}</span>
+      </div>
+      <div className="settings-row">
+        <label>
+          Model
+          <ModelSelect
+            value={props.value.model}
+            models={props.models}
+            onChange={(model) => props.onChange({ ...props.value, model })}
+          />
+        </label>
+        <label>
+          Thinking
+          <ThinkingSelect
+            value={props.value.thinkingLevel}
+            onChange={(thinkingLevel) => props.onChange({ ...props.value, thinkingLevel })}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsView(props: {
   settings: AppSettings;
@@ -9,6 +97,21 @@ export function SettingsView(props: {
   const [draft, setDraft] = useState<AppSettings>(props.settings);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const orch: OrchestratorSettings = draft.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
+  const updateOrch = (patch: Partial<OrchestratorSettings>): void =>
+    setDraft({ ...draft, orchestrator: { ...orch, ...patch } });
+
+  /**
+   * Editing the model list must not leave `defaultModel` pointing at a model that is gone — the
+   * select would render blank and save an empty default. Re-point it at the first entry instead.
+   */
+  const setModels = (models: string[]): void =>
+    setDraft({
+      ...draft,
+      models,
+      defaultModel: models.includes(draft.defaultModel) ? draft.defaultModel : (models[0] ?? ''),
+    });
 
   const handleSave = async (): Promise<void> => {
     setSaving(true);
@@ -87,6 +190,21 @@ export function SettingsView(props: {
       <section>
         <h3>Model</h3>
         <label>
+          Available models (one per line)
+          <textarea
+            rows={3}
+            value={draft.models.join('\n')}
+            onChange={(e) =>
+              setModels(
+                e.target.value
+                  .split('\n')
+                  .map((m) => m.trim())
+                  .filter(Boolean),
+              )
+            }
+          />
+        </label>
+        <label>
           Default model
           <select value={draft.defaultModel} onChange={(e) => setDraft({ ...draft, defaultModel: e.target.value })}>
             {draft.models.map((m) => (
@@ -102,12 +220,24 @@ export function SettingsView(props: {
             value={draft.defaultThinkingLevel}
             onChange={(e) => setDraft({ ...draft, defaultThinkingLevel: e.target.value as ThinkingLevel })}
           >
-            {(['off', 'low', 'medium', 'high'] as ThinkingLevel[]).map((l) => (
+            {THINKING_LEVELS.map((l) => (
               <option key={l} value={l}>
                 {l}
               </option>
             ))}
           </select>
+        </label>
+        <label>
+          Max turns per message
+          <input
+            type="number"
+            min={0}
+            value={draft.maxTurns}
+            onChange={(e) => setDraft({ ...draft, maxTurns: toNumber(e.target.value) })}
+          />
+          <span className="settings-hint">
+            Backstop on the single-agent tool-use loop; 0 leaves the SDK default in place.
+          </span>
         </label>
       </section>
 
@@ -139,6 +269,83 @@ export function SettingsView(props: {
               })
             }
           />
+        </label>
+      </section>
+
+      <section>
+        <h3>Multi-agent orchestrator</h3>
+        <p className="settings-hint">
+          Applies to conversations that select a multi-agent profile. The profile decides which
+          playbooks run; these settings bind each role to a Claude model and cap its budget.
+        </p>
+        <RoleRow
+          label="Orchestrator"
+          hint="Plans the turn, delegates, and writes the final answer."
+          value={orch.orchestrator}
+          models={draft.models}
+          onChange={(v) => updateOrch({ orchestrator: v })}
+        />
+        <RoleRow
+          label="Reviewer"
+          hint="Checks the draft answer and returns an approve/reject verdict."
+          value={orch.reviewer}
+          models={draft.models}
+          onChange={(v) => updateOrch({ reviewer: v })}
+        />
+        <RoleRow
+          label="Specialist"
+          hint="Sub-agents the orchestrator delegates research to."
+          value={orch.specialist}
+          models={draft.models}
+          onChange={(v) => updateOrch({ specialist: v })}
+        />
+        <div className="settings-row">
+          <label>
+            Max review rounds
+            <input
+              type="number"
+              min={0}
+              value={orch.maxReviewRounds}
+              onChange={(e) => updateOrch({ maxReviewRounds: toNumber(e.target.value) })}
+            />
+          </label>
+          <label>
+            Max specialist calls
+            <input
+              type="number"
+              min={0}
+              value={orch.maxSpecialistCalls}
+              onChange={(e) => updateOrch({ maxSpecialistCalls: toNumber(e.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="settings-row">
+          <label>
+            Orchestrator max turns
+            <input
+              type="number"
+              min={0}
+              value={orch.orchestratorMaxTurns}
+              onChange={(e) => updateOrch({ orchestratorMaxTurns: toNumber(e.target.value) })}
+            />
+          </label>
+          <label>
+            Specialist max turns
+            <input
+              type="number"
+              min={0}
+              value={orch.specialistMaxTurns}
+              onChange={(e) => updateOrch({ specialistMaxTurns: toNumber(e.target.value) })}
+            />
+          </label>
+        </div>
+        <label className="inline">
+          <input
+            type="checkbox"
+            checked={orch.requireReview !== false}
+            onChange={(e) => updateOrch({ requireReview: e.target.checked })}
+          />
+          Enforce review (re-prompt for a reviewer pass, and drive revisions on a non-approval)
         </label>
       </section>
 

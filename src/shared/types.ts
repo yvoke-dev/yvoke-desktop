@@ -62,6 +62,21 @@ export interface OrchestratorSettings {
   specialistMaxTurns: number;
 }
 
+/**
+ * Fallback orchestrator config, shared by the main-process defaults and the settings UI so a
+ * settings.json without an `orchestrator` block still renders (and saves) a complete form.
+ */
+export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
+  orchestrator: { model: 'opus', thinkingLevel: 'high' },
+  reviewer: { model: 'opus', thinkingLevel: 'high' },
+  specialist: { model: 'sonnet', thinkingLevel: 'medium' },
+  maxReviewRounds: 2,
+  maxSpecialistCalls: 8,
+  requireReview: true,
+  orchestratorMaxTurns: 60,
+  specialistMaxTurns: 20,
+};
+
 /** A multi-agent profile (knowledge base) as returned by GET /api/chat/v1/orchestrator/profiles. */
 export interface OrchestratorProfile {
   name: string;

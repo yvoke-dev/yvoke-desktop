@@ -33,6 +33,28 @@ import {
 export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
 
 /**
+ * Path to the native Claude Code binary staged for this build target, or null in dev.
+ *
+ * The SDK otherwise locates the binary by interpolating the running host into a package name
+ * (`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude`) and resolving it
+ * from node_modules. That only ever works for the platform the build machine happens to be, so
+ * packaged builds ship a single binary fetched for the target instead — see
+ * scripts/fetch-claude-binary.ts and the `extraResources` entry in electron-builder.yml.
+ *
+ * Resolved by probing resourcesPath rather than `app.isPackaged` so this module stays importable
+ * outside Electron (tests/systemPrompt.test.ts loads it directly). In a dev run resourcesPath
+ * points into node_modules/electron, where no such file exists, and the SDK's own resolution
+ * takes over.
+ */
+function stagedClaudeBinary(): string | null {
+  if (!process.resourcesPath) return null;
+  const staged = path.join(process.resourcesPath, process.platform === 'win32' ? 'claude.exe' : 'claude');
+  return fs.existsSync(staged) ? staged : null;
+}
+
+const claudeBinary = stagedClaudeBinary();
+
+/**
  * Loads the base system prompt from the server, throwing if it cannot be had.
  *
  * There is deliberately NO local fallback. The prompt carries the grounding rules, the citation
@@ -380,6 +402,7 @@ export class AgentService {
       // in a packaged build it stays off unless the user explicitly exports CLAUDE_DEBUG
       // (which survives via sanitizedEnv), so production runs aren't verbose by default.
       env: debugEnv(),
+      ...(claudeBinary ? { pathToClaudeCodeExecutable: claudeBinary } : {}),
       ...(orchestrator ? { agent: ORCHESTRATOR_AGENT, agents: orchestrator.agents, forwardSubagentText: true } : {}),
       ...(thread.sessionId ? { resume: thread.sessionId } : {}),
     };

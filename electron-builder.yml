@@ -1,30 +1,59 @@
-# Unsigned, file-shareable distribution (M20 decision): macOS gets an ad-hoc
-# signature and ships as zip; Windows ships an NSIS installer + portable zip.
-# Auto-update is intentionally absent (it effectively requires code signing).
+# Self-signed, file-shareable distribution: macOS is signed with a locally-created
+# certificate (see docs/signing.md) and ships as zip for arm64 + x64; Windows ships an
+# NSIS installer + portable zip for x64, unsigned.
+# Auto-update is intentionally absent (it effectively requires Developer ID signing).
 appId: de.palsoftware.yvoke.desktop
 productName: Yvoke - Desktop
 directories:
   output: release
 files:
   - out/**
+  # The Agent SDK's platform packages each carry a ~220MB native binary, and npm only ever
+  # installs the build machine's own. The one matching the TARGET is staged into resources by
+  # scripts/fetch-claude-binary.ts instead, so exclude them all from the bundle. Note only `!`
+  # entries in `files` affect node_modules collection — include patterns are ignored there.
+  - '!node_modules/@anthropic-ai/claude-agent-sdk-*-*${/*}'
 # Ship the production defaults alongside the app; loadProjectDefaults() reads this
 # from process.resourcesPath in a packaged (Finder/Explorer-launched) build.
 extraResources:
   - from: settings.json
     to: settings.json
-# The Agent SDK spawns a bundled native Claude Code binary — it cannot run from
-# inside the asar archive, so the SDK and its platform-binary packages are unpacked.
+  # Resolves to build/claude/mac-arm64, build/claude/mac-x64, build/claude/win-x64 — run
+  # `npm run fetch:claude -- <target>` first. AgentService passes the result to the SDK as
+  # `pathToClaudeCodeExecutable`.
+  - from: build/claude/${os}-${arch}
+    to: .
+# The Agent SDK spawns a native Claude Code binary — it cannot run from inside the asar
+# archive, so the SDK package is unpacked. Its own require.resolve must land on an unpacked
+# sibling: an app.asar path satisfies existsSync via Electron's shim but cannot be spawned.
 asarUnpack:
   - 'node_modules/@anthropic-ai/claude-agent-sdk*/**'
 mac:
   target:
-    - zip
-  identity: null
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  # Self-signed identity from the login keychain (docs/signing.md). A stable signature is what
+  # keeps the safeStorage keychain ACL valid across updates — with ad-hoc signing the designated
+  # requirement is the cdhash, so every build looked like a different app and re-prompted.
+  identity: Yvoke Desktop Signing
+  # Defaults to true. Only worth enabling alongside notarization, which needs a Developer ID;
+  # without matching entitlements it breaks Electron's JIT.
+  hardenedRuntime: false
+  # Leave the staged sidecar's existing "Developer ID Application: Anthropic PBC" signature
+  # intact rather than re-signing a 220MB Mach-O on every build.
+  signIgnore:
+    - 'claude$'
   category: public.app-category.productivity
 win:
   target:
-    - nsis
-    - zip
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
 nsis:
   oneClick: true
   perMachine: false

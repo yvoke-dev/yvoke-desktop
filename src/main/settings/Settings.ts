@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { DEFAULT_ORCHESTRATOR_SETTINGS } from '../../shared/types';
 import type { AppSettings } from '../../shared/types';
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -21,16 +22,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     allowedDomains: [],
   },
   maxTurns: 0,
-  orchestrator: {
-    orchestrator: { model: 'opus', thinkingLevel: 'high' },
-    reviewer: { model: 'opus', thinkingLevel: 'high' },
-    specialist: { model: 'sonnet', thinkingLevel: 'medium' },
-    maxReviewRounds: 2,
-    maxSpecialistCalls: 8,
-    requireReview: true,
-    orchestratorMaxTurns: 60,
-    specialistMaxTurns: 20,
-  },
+  orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,
 };
 
 function loadProjectDefaults(): AppSettings {

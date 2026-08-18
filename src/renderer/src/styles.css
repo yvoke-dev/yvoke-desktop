@@ -834,6 +834,36 @@ body {
   margin: 0;
 }
 
+.settings-row {
+  display: flex;
+  gap: 12px;
+}
+
+.settings-row > label {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-role {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-bottom: 4px;
+}
+
+.settings-role-label {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.settings-hint {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  margin-top: 2px;
+}
+
 .settings-note {
   color: var(--muted);
   font-size: 12px;
