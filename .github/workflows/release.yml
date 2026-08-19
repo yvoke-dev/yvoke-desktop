@@ -74,9 +74,12 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 
-          # Trust the self-signed root so it counts as a valid codesigning identity.
-          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -clcerts -nokeys \
-            -passin pass:"$MAC_CSC_KEY_PASSWORD" -out "$RUNNER_TEMP/cert.pem"
+          # Trust the self-signed root so it counts as a valid codesigning identity. Take the PEM
+          # from the keychain rather than re-reading the .p12 with openssl: Keychain Access exports
+          # with legacy RC2-40-CBC, which OpenSSL 3 removed from its default provider, so `openssl
+          # pkcs12` fails with "unsupported ... RC2-40-CBC" on the very file `security import` just
+          # accepted. Reading back what was imported avoids depending on the legacy provider.
+          security find-certificate -c "Yvoke Desktop Signing" -p "$KEYCHAIN" > "$RUNNER_TEMP/cert.pem"
           sudo security add-trusted-cert -d -r trustRoot \
             -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
 

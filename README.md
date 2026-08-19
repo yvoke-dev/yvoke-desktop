@@ -48,7 +48,7 @@ To cut a release:
 npm run release            # patch; or -- minor / -- major
 ```
 
-That runs `scripts/release.sh`, which checks you are on a clean, up-to-date `main`, runs the typecheck and tests that CI does *not* run, then bumps `package.json`, commits, tags, and pushes — behind one confirmation. The tag is a bare version like `1.0.1` (via `tag-version-prefix` in [.npmrc](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.npmrc)), which is what the workflow's tag filter matches. The equivalent by hand is `npm version patch && git push --follow-tags`.
+That runs `scripts/release.sh`, which checks you are on a clean, up-to-date `main`, runs the typecheck and tests locally — [ci.yml](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.github/workflows/ci.yml) runs them too, but `release.yml` does not depend on it, so a red test would not stop a release — then bumps `package.json`, commits, tags, and pushes — behind one confirmation. The tag is a bare version like `1.0.1` (via `tag-version-prefix` in [.npmrc](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.npmrc)), which is what the workflow's tag filter matches. The equivalent by hand is `npm version patch && git push --follow-tags`.
 
 The tag triggers [release.yml](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.github/workflows/release.yml), which builds both platforms and publishes a GitHub release. The workflow refuses to build if the tag and `package.json` version disagree, because electron-builder stamps artifact names and app metadata from `package.json`, not from the tag.
 

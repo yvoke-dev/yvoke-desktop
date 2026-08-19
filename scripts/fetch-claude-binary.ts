@@ -78,12 +78,30 @@ function resolveTarget(name: string): Target {
   };
 }
 
+/**
+ * How to invoke npm. Windows ships `npm` as a .cmd shim, and Node has refused to spawnSync a
+ * .cmd/.bat without `shell: true` since the CVE-2024-27980 fix: bare `npm` fails with ENOENT and
+ * `npm.cmd` fails with EINVAL, which is how the win-x64 CI job failed twice. npm sets
+ * `npm_execpath` to npm-cli.js for every `npm run` script — the documented entry point here, and
+ * what CI uses — so run that with the current Node and skip the shim on every platform. The
+ * fallback only covers a direct `tsx scripts/…` invocation, where on Windows a shell is the sole
+ * way to reach the shim.
+ */
+const NPM: { file: string; prefix: string[]; shell: boolean } = (() => {
+  const cli = process.env.npm_execpath;
+  if (cli && cli.endsWith('.js')) return { file: process.execPath, prefix: [cli], shell: false };
+  return { file: 'npm', prefix: [], shell: process.platform === 'win32' };
+})();
+
 function fetch(target: Target, version: string): void {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-bin-'));
   try {
     const spec = `${target.pkg}@${version}`;
     console.log(`  fetching ${spec} …`);
-    execFileSync('npm', ['pack', spec, '--pack-destination', tmp], { stdio: ['ignore', 'ignore', 'inherit'] });
+    execFileSync(NPM.file, [...NPM.prefix, 'pack', spec, '--pack-destination', tmp], {
+      stdio: ['ignore', 'ignore', 'inherit'],
+      shell: NPM.shell,
+    });
 
     const tgz = fs.readdirSync(tmp).find((f) => f.endsWith('.tgz'));
     if (!tgz) throw new Error(`npm pack produced no tarball for ${spec}`);

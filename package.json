@@ -1,7 +1,7 @@
 {
   "name": "yvoke-desktop",
   "productName": "Yvoke - Desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Yvoke desktop chat client (Claude Agent SDK)",
   "main": "out/main/index.js",
   "private": true,

@@ -7,10 +7,11 @@
 #   npm run release -- minor    # or major
 #
 # Why a script rather than the two raw commands (`npm version patch && git push --follow-tags`):
-# release.yml runs no typecheck and no tests, and its guard job fails the build when the tag and
-# package.json version disagree. Both are cheap to catch here and expensive to catch on a macOS
-# runner that bills at 10x. Everything before the push is local and undoable; the push is the
-# commit point, so it sits behind a confirmation.
+# ci.yml does run the typecheck and tests, but release.yml does not depend on it — the two run in
+# parallel, so a red test does not stop a release from building and publishing. Catching that here
+# is also cheaper than on a macOS runner billing at 10x, as is the guard job's tag/package.json
+# mismatch. Everything before the push is local and undoable; the push is the commit point, so it
+# sits behind a confirmation.
 
 # Exit on error
 set -euo pipefail
@@ -65,7 +66,7 @@ if git rev-parse --verify --quiet "$UPSTREAM" >/dev/null; then
     fi
 fi
 
-# CI builds but never verifies: there is no typecheck or test step in release.yml.
+# ci.yml runs these on the same push, but nothing gates release.yml on it — a red test still ships.
 echo -e "${GREEN}=== Typecheck ===${NC}"
 npm run typecheck
 echo -e "${GREEN}=== Tests ===${NC}"
