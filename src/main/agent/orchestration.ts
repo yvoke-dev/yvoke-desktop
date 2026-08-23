@@ -35,8 +35,18 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
   return [...new Set(out)];
 }
 
-/** The reviewer is a validate-only agent: it may only re-read evidence, never search anew (as on web). */
-const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`, `${MCP_TOOL_PREFIX}get_section`];
+/**
+ * The reviewer is a validate-only agent. `verify_citations` and nothing else — matching
+ * `OrchestrationService.java`, which grants it exactly `List.of("verify_citations")`.
+ *
+ * `get_section` used to be here. The server's reviewer playbook now states outright that it "used
+ * to be offered here and is not any more", with the reason: it returns the whole section around a
+ * passage, so the reviewer ends up judging claims against neighbouring text no specialist ever
+ * retrieved — which defeats cite-scoping, the entire mechanism that makes a citation testable as
+ * the claim it is. Granting a tool the playbook says it does not have also invites the reviewer to
+ * go looking when the playbook tells it that an unsettled claim is a finding to report.
+ */
+const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`];
 
 function orchestratorAdapter(roster: string, maxReviewRounds: number, maxSpecialistCalls: number): string {
   return `
@@ -54,8 +64,10 @@ To have your composed answer validated, call the **Task** tool with \`subagent_t
 and a prompt containing all three of:
 1. \`## Original question\` — the user's question.
 2. \`## Candidate answer\` — your composed answer in full.
-3. \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim, citation markers
-   (\`[chunk_id=…]\`, \`[document_id=…]\`, \`[N]\`) intact.
+3. \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim, citation markers intact: the bare
+   \`[<uuid>]\` ids specialists now write, plus \`[chunk_id=…]\`, \`[document_id=…]\` and \`[N]\` where
+   one still uses the older form. The evidence is filtered down to the sources the answer cites, so
+   an id you drop here takes its source out of the reviewer's view.
 
 The reviewer cannot see this conversation and validates ONLY against what you paste under (3); a review
 request without that section will be rejected for missing evidence.
@@ -155,7 +167,7 @@ export function reviewFlagNote(attempts: number): string {
  */
 export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your turn without having the answer reviewed, which this deployment requires.
 
-Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep the \`[chunk_id=…]\` / \`[document_id=…]\` markers). The reviewer validates only against that section.
+Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
 
 Then deliver the final answer:
 - reviewer says \`APPROVED\` → restate the answer in full;
@@ -184,7 +196,8 @@ export interface ResolvedOrchestrator {
  * each playbook's text (system prompt) and tool metadata; binds Claude models per role from settings.
  *
  * `baseSystemPrompt` is the server's `default-chat` system prompt. It carries the shared grounding &
- * citation contract (the numbered `[1]` / `## References` output format the renderer expects).
+ * citation contract — a bare `[<uuid>]` id inline after each claim, explicitly NO numbering and no
+ * `## References` section.
  * SPECIALISTS and the ORCHESTRATOR both run under it with their playbook layered on top: the
  * orchestrator writes the user-facing answer, so it needs that contract as much as they do.
  *
@@ -228,7 +241,7 @@ export async function buildOrchestrator(
   const agents: Record<string, AgentDefinition> = {};
 
   // The orchestrator writes the user-facing answer, so it needs the base prompt's output contract
-  // (numbered citations + ## References, mermaid/KaTeX delimiters) exactly as the specialists do.
+  // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
   // It previously got the control playbook alone — the one agent that never saw the contract it was
   // expected to honour. Playbook last, so its role-specific rules win on any conflict.
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
@@ -236,12 +249,23 @@ export async function buildOrchestrator(
     ? `${baseSystemPrompt}\n\n---\n\n${orchestratorPlaybookText}`
     : orchestratorPlaybookText;
 
+  const orchestratorTools = [
+    DELEGATE_ALLOW_TOKEN,
+    `${MCP_TOOL_PREFIX}ask_clarifying_question`,
+    `${MCP_TOOL_PREFIX}verify_citations`,
+  ];
+
   agents[ORCHESTRATOR_AGENT] = {
     description: 'Coordinates specialists and composes one grounded, cited answer.',
     prompt:
       orchestratorPrompt +
       orchestratorAdapter(roster, cfg.maxReviewRounds, cfg.maxSpecialistCalls),
-    tools: [DELEGATE_ALLOW_TOKEN, `${MCP_TOOL_PREFIX}ask_clarifying_question`],
+    // `verify_citations` is not optional: the server's orchestrator playbook names it as one of the
+    // three tools it has, and requires it be run on every id before the answer is sent. The web
+    // grants exactly `["ask_clarifying_question", "verify_citations"]`. Without it the orchestrator
+    // — the one agent that writes the user-facing answer — was told to pre-flight its citations
+    // with a tool it had not been given, leaving a fabricated id to cost a whole review round.
+    tools: orchestratorTools,
     model: cfg.orchestrator.model,
     effort: effortFor(cfg.orchestrator.thinkingLevel),
     maxTurns: cfg.orchestratorMaxTurns,
@@ -278,13 +302,11 @@ export async function buildOrchestrator(
     maxTurns: cfg.specialistMaxTurns,
   };
 
+  // Spread the orchestrator's OWN grant rather than re-listing it: `verify_citations` reached this
+  // list only because the reviewer happened to carry it too, so narrowing REVIEWER_TOOLS would have
+  // silently revoked the orchestrator's pre-flight check.
   const allowedTools = [
-    ...new Set([
-      DELEGATE_ALLOW_TOKEN,
-      `${MCP_TOOL_PREFIX}ask_clarifying_question`,
-      ...specialistToolSets.flat(),
-      ...REVIEWER_TOOLS,
-    ]),
+    ...new Set([...orchestratorTools, ...specialistToolSets.flat(), ...REVIEWER_TOOLS]),
   ];
 
   return { agents, allowedTools, specialistNames };

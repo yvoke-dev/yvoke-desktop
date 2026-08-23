@@ -765,6 +765,32 @@ h6 {
   align-self: center;
 }
 
+/* The warning/error strip, between the header and the conversation and outside its scroller, so
+   nothing that needs acting on can be scrolled past. It scrolls internally rather than growing
+   without limit: a long server error must not squeeze the transcript off the screen. */
+.chat-notices {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  padding: 12px var(--main-pad);
+  max-height: 40%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.chat-notices > * {
+  width: 100%;
+  max-width: var(--column);
+}
+
+/* The banners are written for the full-width strip at the top of the app, where their own rule
+   separates them from the next one. In here the strip's border does that. */
+.chat-notices .banner {
+  border-bottom: none;
+}
+
 /* The question, as a quoted block with the accent rule — not a chat bubble. It has to read as
    the thing the answer below is answering. */
 .message.user {
@@ -897,7 +923,6 @@ h6 {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin: 16px 0;
   padding: 12px 14px;
   border: 1px solid var(--warn-line);
   border-left-width: 2px;
@@ -925,10 +950,17 @@ h6 {
   margin-top: 2px;
 }
 
-/* The check runs with the composer locked, so its progress is announced in the thread —
+/* Same card, but a refusal rather than an opinion: nothing was sent, so it reads as an error. */
+.preflight-card.playbook-required {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+}
+
+/* The check runs with the composer locked, so its progress is announced in the notices strip —
    same pulsing dot a running turn uses, since it is the same kind of wait. */
 .preflight-checking {
-  margin: 16px 0;
+  justify-content: flex-start;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -2350,7 +2382,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove) {
+button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.citation-context-toggle) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;
@@ -2559,6 +2591,71 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
   padding: 16px;
   overflow-y: auto;
   background: var(--canvas);
+}
+
+.citation-section-heading {
+  font-family: var(--font-heading);
+  font-weight: 800;
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.citation-section-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+
+/*
+ * One passage of the cited section. Unmarked passages carry only a left rule, so a section reads as
+ * continuous prose rather than a stack of boxes; the cited one is the only thing that gets weight.
+ */
+.citation-passage {
+  border-left: 2px solid var(--rule);
+  padding: 2px 0 2px 12px;
+  margin: 10px 0;
+}
+
+.citation-passage.cited {
+  border-left-color: var(--accent, currentColor);
+  background: color-mix(in srgb, var(--accent, currentColor) 7%, transparent);
+  padding: 8px 12px;
+}
+
+/*
+ * The rest of the section, behind a disclosure. Reads as a footer control rather than a passage, so
+ * nothing about it suggests it is part of the cited source.
+ */
+.citation-context-toggle {
+  display: block;
+  width: 100%;
+  margin-top: 16px;
+  padding: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.citation-context-toggle:hover {
+  color: inherit;
+}
+
+.citation-context {
+  margin-top: 8px;
+  opacity: 0.72;
+}
+
+.citation-context-note {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
 }
 
 .citation-loading {

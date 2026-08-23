@@ -215,6 +215,14 @@ export default function App(): React.JSX.Element {
         if (event.state === 'error') {
           void window.api.authStatus().then(setAuth);
         }
+        // The server names a conversation from its first question but only learns that question
+        // when the turn syncs — which happens *after* turn-complete. Re-reading the list here is
+        // what replaces the placeholder title without waiting for the next unrelated refresh.
+        // Unlike the agent events above, this handler is not filtered to the active thread, so a
+        // turn that finishes off screen refreshes its sidebar row too.
+        if (event.state === 'synced') {
+          void refreshThreads();
+        }
       } else if (event.kind === 'server-ids' && event.threadId === activeThreadIdRef.current) {
         setMessages((msgs) =>
           msgs.map((m) => (event.mapping[m.localId] ? { ...m, serverId: event.mapping[m.localId] } : m)),

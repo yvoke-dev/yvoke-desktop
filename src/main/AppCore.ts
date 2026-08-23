@@ -134,7 +134,7 @@ export class AppCore {
     }
   }
 
-  /** Resolve a `[chunk_id=…]` / `[file=…]` citation marker to its source section markdown. */
+  /** Resolve a `[<uuid>]` / `[chunk_id=…]` / `[file=…]` citation marker to its source section markdown. */
   async getCitation(ref: CitationRef): Promise<string> {
     return this.mcpPrompts.getSection(ref);
   }
@@ -340,7 +340,8 @@ export class AppCore {
     update = sanitized;
     const patched = this.threads.patch(threadId, sanitized);
     if (patched) {
-      const title = update.title ?? null;
+      // Undefined means "this patch is not about the title" — see updateConversation.
+      const title = update.title;
       const settingsPayload: Record<string, unknown> = {};
       if (update.model) settingsPayload.model = update.model;
       if (update.thinkingLevel) {

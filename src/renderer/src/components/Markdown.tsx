@@ -106,6 +106,10 @@ function parseCitationHref(href: string): CitationRef {
   const value = body.slice(sep + 1);
   if (kind === 'file') return { file: value };
   if (kind === 'document') return { documentId: value };
+  // A bare `[<uuid>]` marker — the current server format. Kept distinct from `chunk` rather than
+  // folded into it: which table the uuid names is unknown here, and resolving it is the lookup's
+  // job (McpPrompts.getSection), not the parser's.
+  if (kind === 'id') return { id: value };
   return { chunkId: value };
 }
 

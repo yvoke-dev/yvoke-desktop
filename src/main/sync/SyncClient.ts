@@ -93,8 +93,19 @@ export class SyncClient {
     return this.request('POST', '/conversations', { title, settings });
   }
 
-  updateConversation(conversationId: string, title: string | null, settings?: Record<string, unknown>): Promise<void> {
-    return this.request('PATCH', `/conversations/${conversationId}`, { title, settings });
+  /**
+   * `title` is omitted from the body when undefined — a settings-only PATCH must not carry a title
+   * at all, or it risks clearing the name the server derived from the conversation's first question.
+   */
+  updateConversation(
+    conversationId: string,
+    title: string | null | undefined,
+    settings?: Record<string, unknown>,
+  ): Promise<void> {
+    return this.request('PATCH', `/conversations/${conversationId}`, {
+      ...(title !== undefined ? { title } : {}),
+      settings,
+    });
   }
 
   deleteConversation(conversationId: string): Promise<void> {

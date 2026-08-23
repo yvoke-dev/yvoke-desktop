@@ -60,6 +60,7 @@ interface ChatOpts {
   thread?: ThreadMeta;
   settings?: AppSettings;
   messages?: ChatMessage[];
+  prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
 }
 
@@ -69,7 +70,7 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       thread={opts.thread ?? THREAD}
       settings={opts.settings ?? settings()}
       messages={opts.messages ?? []}
-      prompts={PROMPTS}
+      prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={IDLE}
       onSend={onSend}
@@ -197,10 +198,35 @@ describe('playbook preflight', () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith('How do I onboard?', 'oim-getting-started'));
   });
 
-  it('skips the check when no playbook is attached', () => {
+  // A playbook is what scopes a single-agent answer, so there is nothing to check *and* nothing
+  // to send: the question is refused where the web app refuses it too.
+  it('refuses a single-agent question with no playbook attached', () => {
     const { container } = renderChat();
     ask(container, 'Just asking.');
     expect(validatePlaybook).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByText('Playbook required')).toBeTruthy();
+    // The draft survives the refusal — picking a playbook is all that is left to do.
+    expect(container.querySelector('textarea')!.value).toBe('Just asking.');
+  });
+
+  it('clears the refusal and sends once a playbook is picked', async () => {
+    const { container } = renderChat();
+    ask(container, 'Just asking.');
+    expect(screen.getByText('Playbook required')).toBeTruthy();
+
+    // The picker is still up — it is the remedy — so the same question goes out under a playbook.
+    ask(container, 'Just asking.', 'Getting started');
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Just asking.', 'oim-getting-started'));
+    expect(screen.queryByText('Playbook required')).toBeNull();
+  });
+
+  // Fails open where the gate would otherwise be a dead end: an empty catalogue (an unreachable
+  // server) offers nothing to pick, so refusing would leave the composer unable to send anything.
+  it('sends without a playbook when there are none to pick', () => {
+    const { container } = renderChat({ prompts: [] });
+    ask(container, 'Just asking.');
+    expect(screen.queryByText('Playbook required')).toBeNull();
     expect(onSend).toHaveBeenCalledWith('Just asking.', undefined);
   });
 
@@ -244,6 +270,30 @@ describe('playbook preflight', () => {
     expect(onSend).toHaveBeenCalledWith('the second question', 'oim-getting-started');
   });
 
+  // Picking a playbook used to wipe the composer, so a question typed before the playbook was
+  // chosen had to be typed again. Only the "/token" being completed is the picker's to consume.
+  it('keeps the typed question when a playbook is picked', () => {
+    const { container } = renderChat();
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'How do I onboard?' } });
+
+    const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+      r.textContent?.includes('Getting started'),
+    );
+    fireEvent.click(row!);
+    expect(container.querySelector('textarea')!.value).toBe('How do I onboard?');
+  });
+
+  // The autocomplete's "/token" is not a question — it is the selection gesture, so it goes.
+  it('consumes the slash token when the playbook comes from the autocomplete', () => {
+    const { container } = renderChat();
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/getting' } });
+
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+    expect(container.querySelector('textarea')!.value).toBe('');
+  });
+
   // The verdict is about the playbook that was sent for checking. If the selection could move
   // under it, the message would go out under a playbook nothing checked — so every control that
   // decides what the message IS stands down for the duration, the picker by leaving the pane.
@@ -281,10 +331,27 @@ describe('playbook preflight', () => {
 
     await waitFor(() => expect(container.querySelector('.preflight-card')).toBeTruthy());
     expect(container.querySelectorAll('.picker-row')).toHaveLength(0);
-    // With nothing above it, the card is the first thing in the pane.
-    expect(container.querySelector('.messages')!.firstElementChild).toBe(
-      container.querySelector('.preflight-card'),
+  });
+
+  // The screenful of playbooks used to push every card below the fold, so a refused send looked
+  // like nothing had happened at all. The cards live outside the scroller now.
+  it('shows the cards above the conversation, outside its scroller', () => {
+    const { container } = renderChat();
+    ask(container, 'Just asking.');
+
+    const strip = container.querySelector('.chat-notices')!;
+    expect(strip.contains(screen.getByText('Playbook required'))).toBe(true);
+    expect(container.querySelector('.messages')!.contains(strip)).toBe(false);
+    // Before the transcript in document order, so it is on screen whatever the scroll position.
+    expect(strip.compareDocumentPosition(container.querySelector('.messages')!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
     );
+  });
+
+  // An empty strip would still take a slice of the transcript's height.
+  it('does not render the strip when there is nothing to say', () => {
+    const { container } = renderChat();
+    expect(container.querySelector('.chat-notices')).toBeNull();
   });
 
   // Orchestrator mode drives its own playbooks from the profile, so a message carries none and

@@ -150,6 +150,8 @@ export function ChatView(props: {
   // Playbook preflight: `checking` while the verdict is outstanding, `preflight` once it objects.
   const [checking, setChecking] = useState(false);
   const [preflight, setPreflight] = useState<PreflightCard | null>(null);
+  // Raised when a single-agent question is sent with no playbook attached, which this app refuses.
+  const [playbookRequired, setPlaybookRequired] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const autocompleteRef = useRef<HTMLDivElement>(null);
@@ -169,6 +171,7 @@ export function ChatView(props: {
     runIdRef.current += 1;
     setPreflight(null);
     setChecking(false);
+    setPlaybookRequired(false);
   }, [thread.id]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
@@ -179,11 +182,17 @@ export function ChatView(props: {
   };
 
   const openCitation = useCallback((ref: CitationRef): void => {
-    setCitation({ loading: true });
+    // `id` is a bare `[<uuid>]` marker and `chunkId` the older `[chunk_id=…]` form; both name one
+    // passage, so either lets the panel single it out of the section it comes back in. A document
+    // or file citation names no passage and leaves this unset.
+    const citedId = ref.id ?? ref.chunkId;
+    setCitation({ loading: true, citedId });
     void window.api
       .getCitation(ref)
-      .then((text) => setCitation({ loading: false, text }))
-      .catch((e) => setCitation({ loading: false, error: e instanceof Error ? e.message : String(e) }));
+      .then((text) => setCitation({ loading: false, text, citedId }))
+      .catch((e) =>
+        setCitation({ loading: false, citedId, error: e instanceof Error ? e.message : String(e) }),
+      );
   }, []);
 
   // Autocomplete is open while the draft is a single "/token" (no space yet).
@@ -218,7 +227,7 @@ export function ChatView(props: {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     });
     return () => cancelAnimationFrame(raf);
-  }, [messages, liveTurn, checking, preflight]);
+  }, [messages, liveTurn]);
 
   // Auto-grow the composer with its content, from 3 rows up to a max of 9 (3×).
   useEffect(() => {
@@ -235,7 +244,11 @@ export function ChatView(props: {
 
   const pickPrompt = (prompt: McpPromptInfo): void => {
     setActivePrompt(prompt);
-    setDraft('');
+    // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
+    // refusal card are both reachable with a real question already typed, and that question is
+    // the whole point of the turn — clearing it made the user retype it.
+    setDraft((d) => (/^\/\S*$/.test(d) ? '' : d));
+    setPlaybookRequired(false);
     textareaRef.current?.focus();
   };
 
@@ -244,6 +257,7 @@ export function ChatView(props: {
 
   const send = (text: string, promptName?: string): void => {
     setPreflight(null);
+    setPlaybookRequired(false);
     onSend(text, promptName);
     setDraft('');
     setActivePrompt(null);
@@ -289,6 +303,14 @@ export function ChatView(props: {
     const text = draft.trim();
     if (!text || liveTurn.running || checking) return;
     const prompt = activePrompt;
+    // A single-agent answer runs under a playbook, so a question sent without one is refused
+    // rather than quietly answered with the bare default tool set. Multi-agent conversations take
+    // their playbooks from the profile, and an empty catalogue — an unreachable server — leaves
+    // nothing to pick, so neither is gated: an error the user cannot act on is just a dead end.
+    if (!orchestratorActive && !prompt && prompts.length > 0) {
+      setPlaybookRequired(true);
+      return;
+    }
     // An open card is a question the user has already been shown: sending again with the same
     // playbook is their "send anyway". Changing the playbook first is a new question, so it
     // gets checked again.
@@ -334,6 +356,17 @@ export function ChatView(props: {
       submit();
     }
   };
+
+  /**
+   * Whether anything is standing above the conversation. The strip takes vertical space from the
+   * transcript, so it exists only while it has something in it.
+   */
+  const hasNotice =
+    checking ||
+    !!preflight ||
+    (playbookRequired && !orchestratorActive) ||
+    !!liveTurn.error ||
+    !!liveTurn.notice;
 
   // The picker owns the empty thread until a question is actually on its way. Once a check is
   // running (or its recommendation is standing), that grid is thirty rows of noise between the
@@ -384,6 +417,70 @@ export function ChatView(props: {
           </span>
         </div>
       </header>
+
+      {/* Warnings, errors and the playbook cards sit between the header and the conversation,
+          outside the scroller. They are about the message being sent rather than part of the
+          transcript, and at the foot of a long thread — or under the playbook picker, which is a
+          screenful on its own — they were below the fold: the user saw nothing happen. Here they
+          cannot be scrolled past. */}
+      {hasNotice && (
+        <div className="chat-notices">
+          {checking && (
+            <div className="thinking-indicator preflight-checking">
+              <span className="dot" />
+              Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
+            </div>
+          )}
+          {preflight && (
+            <div className="preflight-card">
+              <div className="preflight-card-head">
+                <AlertIcon size={14} />
+                Playbook recommendation
+              </div>
+              {preflight.reason && <div className="preflight-card-reason">{preflight.reason}</div>}
+              <div className="preflight-card-actions">
+                {preflight.suggestedName && (
+                  <button
+                    className="primary"
+                    disabled={draft.trim().length === 0}
+                    onClick={() => send(draft.trim(), preflight.suggestedName)}
+                  >
+                    Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
+                  </button>
+                )}
+                {/* Sends exactly what the composer shows — normally the playbook the card is
+                    about, but the user is free to have changed it while the card stood. */}
+                <button
+                  disabled={draft.trim().length === 0}
+                  onClick={() => send(draft.trim(), activePrompt?.name)}
+                >
+                  Send anyway
+                </button>
+              </div>
+            </div>
+          )}
+          {playbookRequired && !orchestratorActive && (
+            <div className="preflight-card playbook-required">
+              <div className="preflight-card-head">
+                <AlertIcon size={14} />
+                Playbook required
+              </div>
+              <div className="preflight-card-reason">
+                Pick a playbook before asking a question — press “/” in the composer to choose one.
+              </div>
+            </div>
+          )}
+          {liveTurn.error && (
+            <div className="banner error">
+              <span className="banner-icon">
+                <AlertIcon size={14} />
+              </span>
+              {liveTurn.error}
+            </div>
+          )}
+          {liveTurn.notice && <div className="banner notice">{liveTurn.notice}</div>}
+        </div>
+      )}
 
       <div className="messages" ref={scrollRef}>
         {showPicker && (
@@ -522,52 +619,6 @@ export function ChatView(props: {
             )}
           </div>
         )}
-        {/* Last in the pane, next to the composer: the check is about the message being
-            sent, so it belongs after the conversation, not above it. On an empty thread the
-            picker has stood down by now, which leaves this at the top on its own. */}
-        {checking && (
-          <div className="thinking-indicator preflight-checking">
-            <span className="dot" />
-            Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
-          </div>
-        )}
-        {preflight && (
-          <div className="preflight-card">
-            <div className="preflight-card-head">
-              <AlertIcon size={14} />
-              Playbook recommendation
-            </div>
-            {preflight.reason && <div className="preflight-card-reason">{preflight.reason}</div>}
-            <div className="preflight-card-actions">
-              {preflight.suggestedName && (
-                <button
-                  className="primary"
-                  disabled={draft.trim().length === 0}
-                  onClick={() => send(draft.trim(), preflight.suggestedName)}
-                >
-                  Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
-                </button>
-              )}
-              {/* Sends exactly what the composer shows — normally the playbook the card is
-                  about, but the user is free to have changed it while the card stood. */}
-              <button
-                disabled={draft.trim().length === 0}
-                onClick={() => send(draft.trim(), activePrompt?.name)}
-              >
-                Send anyway
-              </button>
-            </div>
-          </div>
-        )}
-        {liveTurn.error && (
-          <div className="banner error">
-            <span className="banner-icon">
-              <AlertIcon size={14} />
-            </span>
-            {liveTurn.error}
-          </div>
-        )}
-        {liveTurn.notice && <div className="banner notice">{liveTurn.notice}</div>}
       </div>
 
       <footer className="composer">
@@ -604,7 +655,9 @@ export function ChatView(props: {
                       ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer.`
                       : activePrompt
                         ? `Add your question for “${activePrompt.title}” — ↵ to send`
-                        : 'Ask a question — / for playbooks, ↵ to send'
+                        : prompts.length > 0
+                          ? 'Pick a playbook first — / to choose one'
+                          : 'Ask a question — ↵ to send'
               }
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}

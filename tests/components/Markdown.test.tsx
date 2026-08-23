@@ -32,6 +32,63 @@ describe('Markdown citations', () => {
   });
 });
 
+// The format the server's prompts actually mandate now: a bare uuid, no `chunk_id=` prefix, no
+// numbering, no References section. These went unrecognised entirely and rendered as dead text.
+describe('bare id citations', () => {
+  const UUID = '274b9610-9148-4621-a5a1-089e807210c1';
+
+  it('renders a bare uuid as a clickable pill labelled with its first 8 characters', () => {
+    const onCitation = vi.fn();
+    render(<Markdown content={`A mapping groups the rules. [${UUID}]`} onCitation={onCitation} />);
+    const pill = screen.getByRole('button', { name: '[274b9610]' });
+    fireEvent.click(pill);
+    // `id`, not `chunkId`: the marker does not say which table it names.
+    expect(onCitation).toHaveBeenCalledWith({ id: UUID });
+  });
+
+  it('recognises the hyphen-free 32-hex spelling', () => {
+    const onCitation = vi.fn();
+    const bare = UUID.replace(/-/g, '');
+    render(<Markdown content={`Claim [${bare}].`} onCitation={onCitation} />);
+    fireEvent.click(screen.getByRole('button', { name: '[274b9610]' }));
+    expect(onCitation).toHaveBeenCalledWith({ id: bare });
+  });
+
+  it('links the same id twice — a repeat is the same source, not a duplicate to collapse', () => {
+    const onCitation = vi.fn();
+    const md = `First claim [${UUID}]. Second claim [${UUID}].`;
+    const { container } = render(<Markdown content={md} onCitation={onCitation} />);
+    expect(container.querySelectorAll('button.citation-link')).toHaveLength(2);
+  });
+
+  it('leaves a bare id inside a code fence as literal text', () => {
+    const md = `\`\`\`\nget_section(chunk_id="${UUID}")\n\`\`\``;
+    const { container } = render(<Markdown content={md} onCitation={vi.fn()} />);
+    expect(container.querySelector('code')?.textContent).toContain(UUID);
+    expect(container.querySelector('code button')).toBeNull();
+  });
+
+  it('does not linkify a truncated id — 8 hex characters is also ordinary prose', () => {
+    const { container } = render(<Markdown content="Error code [decade00]." onCitation={vi.fn()} />);
+    expect(container.querySelector('button.citation-link')).toBeNull();
+    expect(container.textContent).toContain('[decade00]');
+  });
+
+  it('keeps a bare id and a [N] marker in one sentence apart', () => {
+    const onCitation = vi.fn();
+    const md = `Claim [1] and claim [${UUID}].`;
+    const { container } = render(<Markdown content={md} onCitation={onCitation} />);
+    expect(container.querySelector('sup.ref-marker')?.textContent).toBe('1');
+    expect(container.querySelector('button.citation-link')?.textContent).toBe('[274b9610]');
+  });
+
+  it('leaves markers as plain text when there is no citation handler', () => {
+    const { container } = render(<Markdown content={`Claim [${UUID}].`} />);
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.textContent).toContain(UUID);
+  });
+});
+
 describe('numbered reference markers', () => {
   // [N] markers are typography, not navigation: a plain <sup>, never a link or a button. Anything
   // interactive here was also getting boxed by the generic `button:not(…)` chrome in styles.css.

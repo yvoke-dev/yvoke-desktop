@@ -155,7 +155,7 @@ describe('orchestrator-mode translation', () => {
 });
 
 describe('buildOrchestrator prompt composition', () => {
-  const BASE = 'BASE-PROMPT: cite as [1] and end with ## References.';
+  const BASE = 'BASE-PROMPT: cite the bare id inline, e.g. [8f7c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071].';
 
   const profile = {
     name: 'OIM',
@@ -212,5 +212,76 @@ describe('buildOrchestrator prompt composition', () => {
   it('degrades to the playbook alone when no base prompt is supplied', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, '');
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
+  });
+});
+
+// Each agent's tool grant has to match what its server playbook says it has, because the playbook
+// is written as if the grant were true: the orchestrator's says "run verify_citations on every id
+// before you send the answer", and the reviewer's says get_section "used to be offered here and is
+// not any more". Both had drifted, in opposite directions, with nothing failing.
+describe('buildOrchestrator tool grants', () => {
+  const profile = {
+    name: 'OIM',
+    orchestratorPlaybook: 'oim-orchestrator',
+    reviewerPlaybook: 'oim-orchestrator-reviewer',
+    specialistPlaybooks: ['oim-access-governance'],
+  } as unknown as OrchestratorProfile;
+
+  const settings = {
+    webSearch: { enabled: false, allowedDomains: [] },
+    orchestrator: {
+      maxReviewRounds: 2,
+      maxSpecialistCalls: 8,
+      orchestratorMaxTurns: 20,
+      specialistMaxTurns: 20,
+      orchestrator: { model: 'claude-x', thinkingLevel: 'high' },
+      specialist: { model: 'claude-x', thinkingLevel: 'high' },
+      reviewer: { model: 'claude-x', thinkingLevel: 'high' },
+    },
+  } as unknown as AppSettings;
+
+  const fakePrompts = {
+    list: async () => [] as McpPromptInfo[],
+    getText: async (name: string) => `PLAYBOOK(${name})`,
+  } as unknown as McpPrompts;
+
+  const reviewerOf = (agents: Record<string, { tools?: string[] }>): string[] =>
+    Object.entries(agents).find(([k]) => k.includes('review'))?.[1].tools ?? [];
+
+  it('grants the orchestrator verify_citations — its playbook makes it mandatory', async () => {
+    // Web parity: OrchestrationService grants List.of("ask_clarifying_question",
+    // "verify_citations"). Without it the pre-flight check the playbook requires is impossible,
+    // and a fabricated id costs a full ~50k-token review round to learn what one call answers.
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('verify_citations'));
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
+  });
+
+  it('does not grant the reviewer get_section', async () => {
+    // Its playbook states it cannot open a section any more, with the reason: get_section returns
+    // the whole section around a passage, so the reviewer would judge claims against neighbouring
+    // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
+  });
+
+  it('keeps the orchestrator out of the corpus — it composes, it does not retrieve', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    const tools = built.agents[ORCHESTRATOR_AGENT].tools ?? [];
+    for (const denied of ['search_corpus', 'get_section', 'get_toc', 'list_documents']) {
+      expect(tools).not.toContain(qualifyTool(denied));
+    }
+  });
+
+  it('carries every agent grant into the session allow-list', async () => {
+    // The allow-list is the enforcement layer; a per-agent grant missing from it is denied at
+    // runtime. verify_citations used to reach it only via the reviewer's grant, so narrowing the
+    // reviewer would have silently revoked the orchestrator's.
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    for (const [, agent] of Object.entries(built.agents)) {
+      for (const tool of agent.tools ?? []) {
+        expect(built.allowedTools).toContain(tool);
+      }
+    }
   });
 });

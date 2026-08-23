@@ -16,7 +16,7 @@ export interface McpPromptsDeps {
  *  - prompts/list + prompts/get for the SKILL.md playbooks (the Agent SDK exposes server
  *    *tools* but not server *prompts* as slash commands, so we resolve them ourselves);
  *  - tools/call for on-demand citation lookups (`get_section`) when the user clicks a
- *    `[chunk_id=…]` marker, independent of any agent turn.
+ *    `[<uuid>]` marker (or a legacy `[chunk_id=…]` one), independent of any agent turn.
  */
 /** Per-request timeout (ms). A live call answers in ~tens of ms; this bounds a stale hang. */
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -127,8 +127,27 @@ export class McpPrompts {
   /**
    * Resolve a citation marker to its source section markdown via the `get_section`
    * tool (the same hierarchical retrieval the web "Citation Source" popup uses).
+   *
+   * A bare `[<uuid>]` marker — what the server's prompts now instruct models to write — names a
+   * row without saying which table it is in. It is a CHUNK id in almost every case (`search_corpus`
+   * and `get_section` both hand the model a per-passage `id=`), and a DOCUMENT id in the minority
+   * of cases where the model held no chunk id, e.g. a `search_graph_entities` row. So both are
+   * tried, chunk first. The web backend's `CitationVerifier` already resolves a bare id against
+   * both tables to decide it is real; resolving it against only one to decide what to SHOW is the
+   * inconsistency this avoids (`citation-render.js` hard-codes `data-chunk-id`, which is why a bare
+   * document id reads as "This source is no longer available" in the browser).
    */
   async getSection(ref: CitationRef): Promise<string> {
+    if (ref.id) {
+      const asChunk = await this.callGetSection({ chunk_id: ref.id });
+      if (asChunk.ok) return asChunk.text;
+      const asDocument = await this.callGetSection({ document_id: ref.id });
+      if (asDocument.ok) return asDocument.text;
+      // Neither table has it. Report the chunk attempt: that is the likelier intent, so its
+      // message is the more useful one, and a stale id fails identically either way.
+      throw new Error(asChunk.text || 'Citation lookup failed.');
+    }
+
     // Only the parameters the server's `get_section` tool actually declares (document_id, chunk_id,
     // document, heading_path). The tool schema forbids extra properties, so passing anything else
     // (e.g. max_chars/version) makes the whole call fail validation. The server already returns the
@@ -137,6 +156,26 @@ export class McpPrompts {
     if (ref.chunkId) args.chunk_id = ref.chunkId;
     if (ref.documentId) args.document_id = ref.documentId;
     if (ref.file) args.document = ref.file;
+    const call = await this.callGetSection(args);
+    if (!call.ok) {
+      throw new Error(call.text || 'Citation lookup failed.');
+    }
+    return call.text;
+  }
+
+  /**
+   * One `get_section` call, with failure reported rather than thrown so a caller can try again
+   * under a different parameter.
+   *
+   * `ok` is NOT just `!isError`. `GetSectionTool` catches its own exceptions and returns
+   * `McpToolUtils.toolError(...)` — a plain string beginning `ERROR:` — with no error flag set, so
+   * a missing chunk arrives as a successful call whose body is an error message. Treating that as
+   * content is what rendered `ERROR: the 'get_section' tool failed to complete the request.` inside
+   * the citation dialog as if it were the cited passage.
+   */
+  private async callGetSection(
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; text: string }> {
     const result = await this.run((client) =>
       client.callTool({ name: 'get_section', arguments: args }, undefined, { timeout: REQUEST_TIMEOUT_MS }),
     );
@@ -146,10 +185,8 @@ export class McpPrompts {
       .map((c) => unwrapJsonString(c.text ?? ''))
       .filter(Boolean)
       .join('\n\n');
-    if (result.isError) {
-      throw new Error(text || 'Citation lookup failed.');
-    }
-    return text;
+    const failed = !!result.isError || /^\s*(ERROR|Error):/.test(text);
+    return { ok: !failed, text };
   }
 
   /** Drop the cached connection (e.g. server URL / auth changed). */

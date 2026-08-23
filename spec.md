@@ -132,11 +132,11 @@ behind it, and the work that produced it can be opened and read.
 | Capability | What happens |
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
-| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. |
+| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
 | **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
-| **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited section, fetched live from the server. |
+| **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options, and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
 | **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
@@ -151,12 +151,16 @@ behind it, and the work that produced it can be opened and read.
 
 ### How it behaves
 
-- **A playbook is optional here, and the web is stricter.** Sending without one is allowed, and the
-  assistant then gets the default knowledge-base tool set. The web app refuses the same message.
+- **A playbook is required for a single-agent question**, as it is on the web: a playbook is what
+  scopes the answer, so a message carrying none is refused with a *Playbook required* card and the
+  draft is kept. The refusal stands until a playbook is picked. Two cases are not gated, because in
+  both the error would be one the user could not act on: a multi-agent conversation, which takes its
+  playbooks from the profile, and a server that offers no playbooks at all, where the question is
+  sent as it was and the assistant gets the default knowledge-base tool set.
 - **A playbook attaches to one message, not to the conversation.** It is cleared the moment the
-  message is sent, so every question in a thread can carry a different one — or none. On the web a
-  playbook is sticky for the whole conversation. This is why the desktop checks **every**
-  playbook-carrying message rather than only the first.
+  message is sent, so every question in a thread can carry a different one — but each has to carry
+  one. On the web a playbook is sticky for the whole conversation. This is why the desktop checks
+  **every** playbook-carrying message rather than only the first.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -173,9 +177,15 @@ behind it, and the work that produced it can be opened and read.
 - **Stopping is the same act, for the same reason.** Stopping produces an error result, so the partial
   answer and the question are both discarded. The web app keeps a stopped answer; this one does not.
 - **Failures are shown in full, and sometimes only as a code.** Where the web app shows one generic
-  notice, the desktop puts the underlying message on the failed turn — including the sign-in
-  instructions when the cause is a missing Claude login. A failure the model service reports without
-  a message shows as its bare outcome name, such as `error_max_turns`.
+  notice, the desktop shows the underlying message — including the sign-in instructions when the
+  cause is a missing Claude login. A failure the model service reports without a message shows as its
+  bare outcome name, such as `error_max_turns`.
+- **Anything the user has to act on sits above the conversation, not in it.** Errors, notices, the
+  playbook cards and the check's own progress line occupy a strip between the title bar and the
+  transcript, outside the part that scrolls, so none of them can be scrolled past — under a
+  screenful of playbooks, a refusal at the foot of the pane read as nothing having happened. The
+  strip is there only while it has something to say, and scrolls internally rather than growing, so
+  a long error cannot crowd out the conversation.
 - **The playbook check never blocks a question.** It fails open at every step: switched off, no
   server, a timeout, an unparseable reply, a suggestion naming a playbook that does not exist — all of
   them send the message as selected. It is an assist, not a gate.
@@ -185,6 +195,18 @@ behind it, and the work that produced it can be opened and read.
 - **A recommendation belongs to the composer, not the conversation.** Switching conversations retires
   the check and clears the card, and a verdict that arrives late for a conversation the user has left
   is dropped rather than applied.
+- **A source marker is a bare id, shown short.** The server instructs the assistant to write the
+  source's id in brackets — `[274b9610-9148-4621-a5a1-089e807210c1]` — with no prefix, no numbering
+  and no reference list. The pill is labelled with the first eight characters, so an answer that
+  cites every sentence still reads as prose; the full id goes to the lookup. The same source cited
+  twice is the same id twice, and both occurrences are clickable.
+- **A bare id does not say what it names**, so it is looked up as a passage first and as a whole
+  document second. Almost every cited id is a passage; a document id arrives only when the
+  assistant had no passage to point at.
+- **A truncated id is not a marker.** Eight hex characters on their own are as likely to be ordinary
+  prose, so only a full id becomes a pill.
+- **The older prefixed forms still work.** An answer already in the local history may carry
+  `[chunk_id=…]`, `[document_id=…]` or `[file=…]`; those stay clickable and keep their full label.
 - **Numbered references are not clickable.** `[1]`-style markers render as plain superscripts; only
   markers that name a source open the citation panel. The same number appears in the answer's own
   reference list, so linking it would have made half the markers link to themselves.
@@ -215,14 +237,15 @@ behind it, and the work that produced it can be opened and read.
   The live view belongs to the conversation that was on screen when the turn started; coming back
   shows the transcript as it was, no streaming answer, no *Stop* button, and no way to interrupt the
   run. The answer appears only once it finishes and the conversation is reopened again.
-- **The sidebar is not refreshed when a turn finishes in a conversation that is off screen.** Its
-  title and its relative time stay stale.
+- **The sidebar is refreshed when a turn finishes syncing**, whether or not that conversation is on
+  screen — so a title and a relative time settle by themselves once the turn reaches the server.
 - **The per-conversation sync dot goes stale.** It is set when the app is told a turn is pending or
   failed, and never updated again while the app runs — so a conversation that later drains
   successfully, or later fails on a retry, keeps whatever mark it had.
-- **A new conversation can keep its placeholder title for a long time.** The server names a
-  conversation from its first question, but only learns that question when the turn syncs — and the
-  list is re-read at only a handful of moments.
+- **A new conversation keeps its placeholder title until its first turn reaches the server.** The
+  server names a conversation from its first question and only learns that question when the turn
+  syncs; the list is re-read the moment it does, so the name appears as soon as the server has one —
+  but a conversation whose turns are still queued (offline, or the server down) stays unnamed.
 - **Message-text search only covers conversations opened on this machine.** A conversation never
   opened here is findable by title only.
 - **Search needs at least two characters**, waits about 120 ms after the last keystroke, requires
@@ -240,13 +263,30 @@ behind it, and the work that produced it can be opened and read.
   other mark.** The one-line summary of a tool's argument is cut at 72 characters and a reasoning
   preview at 80; those two do show an ellipsis.
 - **Token counts are abbreviated above 10,000** — `12.3k` rather than the exact figure.
-- **The citation panel shows the section text and nothing else** — no document title, no version, no
-  link to the original page, no way to copy it, and no navigation between citations. The web app's
-  citation panel shows the first three. Citation markers *inside* the fetched source are left as
-  literal text.
+- **The citation panel shows the passage that was cited, and only that.** A citation is the claim
+  "this passage supports this sentence", so the passage it names is what the panel shows. The server
+  answers a passage id with the whole section around it — one real answer cited a passage of 1,357
+  characters that arrived inside 220 passages and 314,000 characters — so the panel picks the cited
+  passage out of that and leaves the rest behind *Show surrounding section*.
+- **The surrounding section is offered as context, never as evidence.** It is collapsed, counted, and
+  labelled as not being part of the cited source, because none of it was in front of the assistant
+  when it wrote the claim — it reads sources one passage at a time. Showing it inline would invite
+  confirming a claim from text the assistant never read.
+- **A passage split across parts is still shown alone.** Such a passage ends mid-content, but the
+  assistant that cited it saw it end there too; padding it out with its sibling parts would hide a
+  real weakness in the citation rather than reveal one.
+- **A document-level citation names no passage**, so the whole section is shown with no context
+  control — there is nothing to single out.
+- **The panel shows the document title and version**, from the section's own header. It still offers
+  no link to the original page, no way to copy the text, and no navigation between citations; the web
+  app's panel has the link. Citation markers *inside* the fetched source are left as literal text.
 - **Only one- and two-digit reference markers are recognised.** A `[100]` stays literal text.
 - **A diagram is not drawn until the answer finishes.** While streaming it is shown as source text.
 - **Stopping is not immediate.** The turn ends at the next point the run can be interrupted.
+- **The *Playbook required* refusal cannot be dismissed either**, and it says nothing about which
+  playbook to pick — it is cleared by picking any one of them, by sending, or by switching
+  conversation. Nothing marks the composer as needing a playbook before the first attempt to send:
+  the only warning is its placeholder.
 - **A playbook recommendation cannot be dismissed.** It is cleared only by sending, by switching
   conversation, or by a newer check — and both of its buttons are disabled while the composer is
   empty. Clearing the composer with a card standing therefore leaves a card that cannot be acted on,
@@ -352,9 +392,9 @@ server.
   leaving the run hanging.
 - **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
   allow-list and instructions take effect. The conversation's memory is resumed, so nothing the user
-  can see is lost — but because a playbook clears on every send, alternating between "with playbook"
-  and "without" rebuilds the session on every message, and each rebuild re-fetches the base
-  instructions from the server.
+  can see is lost — but because a playbook clears on every send, two consecutive questions under
+  different playbooks rebuild the session twice, and each rebuild re-fetches the base instructions
+  from the server.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -468,8 +508,16 @@ profiles and the playbooks; there is no way to build one from the app.
   specialists do. The reviewer emits a plain verdict rather than prose, so those rules would be noise
   in its context. The playbook is layered last, so a role's own rules win any conflict.
 - **The reviewer sees only what the lead pastes.** It is given the original question, the candidate
-  answer, and the specialists' answers verbatim; it may re-check citations and re-read a section it
-  was given, but it cannot search. That is what makes each citation testable as the claim it is.
+  answer, and the specialists' answers verbatim; it may re-check that the cited ids are real, and
+  nothing else. It cannot search, and it can no longer open a section either — that returned the
+  whole section around a passage, which let it judge a claim against neighbouring text no specialist
+  ever retrieved. What it is entitled to see is already in front of it, so a claim the evidence does
+  not settle is a finding to report rather than a reason to go looking. That is what makes each
+  citation testable as the claim it is.
+- **The lead checks its own citations before delivering.** An invented id is the one citation fault a
+  machine can settle on its own, so the lead verifies every id it is about to write rather than
+  spending a whole review round learning the same thing. This says nothing about whether a real
+  source supports the claim it sits on — that stays the reviewer's job.
 - **Review is enforced in code, not requested in a prompt.** A turn that consulted specialists but
   never called the reviewer is re-prompted once to run one. A turn the reviewer rejected — or on which
   it returned no readable verdict — is handed the feedback *and* the evidence again and asked to
@@ -886,9 +934,6 @@ desktop usage.
 - **The app tells the server nothing about itself.** No version, no platform, no build. A report about
   a desktop answer cannot be tied from the server's side to the build that produced it; the version is
   visible only in the app's own sidebar and About pane.
-- **Every settings change also sends an empty title.** Changing the model, the thinking level or the
-  agent mode PATCHes a null title alongside it. Whether that clears the server-assigned conversation
-  title depends entirely on how the server reads a null.
 - **Searches from this app are not rate-limited by anything.** The web app's per-user cap does not
   cover this route.
 - **A dropped turn drops its trace.** If the server rejects a turn as invalid, the multi-agent trace
@@ -1023,7 +1068,7 @@ plain defect rather than a position.
 | 1 | **A stopped or failed turn discards the question too.** Only a turn that ends cleanly is written to the conversation, and the question is written in the same act — so the thread keeps no trace of having been asked. Reaching the turn ceiling counts as a failure, so the longest investigations are the likeliest to vanish. | The user's own memory is the only record of what they asked. It also means the model's session and the stored transcript can disagree about what happened, which is exactly the kind of drift a follow-up question exposes. |
 | 2 | **A conversation continued on a second machine has no memory of itself.** The transcript is restored and shown in full, but the model's session is local, so the next answer is produced as if the visible exchange above it had not happened. | The most confusing possible failure: everything looks right and the answer behaves as though it is not. Nothing on screen distinguishes a conversation the model remembers from one it does not. |
 | 3 | **Past 200 conversations, the oldest are silently deleted from the machine on every refresh.** The rule exists to clean up conversations deleted elsewhere; with no paging behind it, it also fires on everything the server's first page did not mention. | Data loss with no message, on a threshold a regular user reaches within a year. What is lost is only a cache — but with it goes that conversation's searchability and the model's memory of it. |
-| 4 | **There is no way to rename a conversation**, although the whole path works and `yvoke-web`'s specification states that the desktop app is the only place it can be done. Worse, every settings change already sends an empty title alongside it. | Either the capability or the sibling specification is wrong. Two lines of interface would settle it in the app's favour — and would force a decision about what that empty title is currently doing. |
+| 4 | **There is no way to rename a conversation**, although the whole path works and `yvoke-web`'s specification states that the desktop app is the only place it can be done. | Either the capability or the sibling specification is wrong. Two lines of interface would settle it in the app's favour. |
 | 5 | **The playbook check runs on every playbook-carrying message**, where the web runs it once per conversation, and re-sends the entire playbook catalogue each time. | It is a real, billed model call per message, with the largest prompt the app ever assembles for the smallest question it ever asks. Deliberate — a desktop playbook is per message — but nobody has priced it. |
 | 6 | **The specialist-call budget is advisory.** The lead is told a number; nothing counts. Only its 60-turn ceiling actually bounds a run. | The one setting a user would reach for to control the cost of a multi-agent answer does not control it. |
 | 7 | **A reviewer that answers "NOT APPROVED" is recorded as having approved.** The fallback that finds a verdict buried in prose accepts any reply containing the positive word and not the negative one. | The reviewer is the whole justification for multi-agent mode costing what it does. This is the one path where it can fail silently in the direction that ships a bad answer. |

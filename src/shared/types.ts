@@ -259,8 +259,18 @@ export interface ThreadSearchHit {
   snippet: string;
 }
 
-/** Reference to a citation source, parsed from a `[chunk_id=…]` / `[file=…]` marker. */
+/**
+ * Reference to a citation source, parsed from a `[<uuid>]` / `[chunk_id=…]` / `[file=…]` marker.
+ *
+ * `id` is the current server format: a BARE uuid, which says nothing about which table it names.
+ * The web backend resolves such an id against `chunks` and `documents` both (`CitationVerifier`'s
+ * `KIND_BARE_ID`), and so must we — see `McpPrompts.getSection`. The explicit `chunkId` /
+ * `documentId` / `file` kinds remain because older answers still in the local thread cache carry
+ * the `[chunk_id=…]` form, and an archived answer must stay clickable.
+ */
 export interface CitationRef {
+  /** A bare uuid of unstated kind: a chunk id in almost every case, a document id occasionally. */
+  id?: string;
   chunkId?: string;
   file?: string;
   version?: string;
