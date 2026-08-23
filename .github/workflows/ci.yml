@@ -9,9 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # .nvmrc is the single source of truth, shared with release.yml — a test job and a
+      # packaging job on different Node versions is the skew worth designing out. Pinned to 24
+      # because that is what Electron 42 embeds (v24.16.0), so main-process code is checked
+      # against the runtime it actually ships on.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run typecheck

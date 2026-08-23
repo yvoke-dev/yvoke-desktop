@@ -39,6 +39,44 @@ function unwrapJsonString(text: string): string {
   return text;
 }
 
+/** The shape this mapper needs from a prompts/list entry, without depending on the SDK's types. */
+export interface RawPrompt {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: { name: string; description?: string; required?: boolean }[];
+  _meta?: unknown;
+  /** Not a field MCP defines — read only so a server that sends it is not ignored. */
+  meta?: unknown;
+}
+
+/**
+ * Map one prompts/list entry into the app's shape.
+ *
+ * Exported for tests, because this mapping is where the app quietly lost every playbook's
+ * declared constraints: it read `p.meta`, and MCP puts prompt metadata under `p._meta`. `tools`
+ * and `codeExecution` were therefore undefined for all 31 playbooks, buildAllowedTools fell
+ * through to DEFAULT_KB_TOOLS every time, and the compute-tool gate in policy.ts could never
+ * close — the client ran every playbook with broader permissions than the playbook asked for.
+ * Nothing caught it because the policy layer was well tested and this mapping was not.
+ */
+export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
+  const meta = (raw._meta ?? raw.meta ?? {}) as Record<string, unknown>;
+  return {
+    name: raw.name,
+    title: raw.title ?? raw.name,
+    description: raw.description ?? '',
+    arguments: (raw.arguments ?? []).map((a) => ({
+      name: a.name,
+      description: a.description,
+      required: a.required,
+    })),
+    tools: Array.isArray(meta.tools) ? (meta.tools as unknown[]).map(String) : undefined,
+    codeExecution: typeof meta.codeExecution === 'boolean' ? meta.codeExecution : undefined,
+    targetAgent: typeof meta.targetAgent === 'string' ? meta.targetAgent : undefined,
+  };
+}
+
 export class McpPrompts {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
@@ -67,19 +105,7 @@ export class McpPrompts {
       return this.listCache.prompts;
     }
     const result = await this.run((client) => client.listPrompts(undefined, { timeout: REQUEST_TIMEOUT_MS }));
-    const prompts: McpPromptInfo[] = result.prompts.map((p) => ({
-      name: p.name,
-      title: p.title ?? p.name,
-      description: p.description ?? '',
-      arguments: (p.arguments ?? []).map((a) => ({
-        name: a.name,
-        description: a.description,
-        required: a.required,
-      })),
-      tools: Array.isArray((p as any).meta?.tools) ? ((p as any).meta.tools as unknown[]).map(String) : undefined,
-      codeExecution:
-        typeof (p as any).meta?.codeExecution === 'boolean' ? ((p as any).meta.codeExecution as boolean) : undefined,
-    }));
+    const prompts: McpPromptInfo[] = result.prompts.map(toPromptInfo);
     this.listCache = { at: Date.now(), prompts };
     return prompts;
   }

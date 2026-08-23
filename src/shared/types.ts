@@ -5,6 +5,32 @@
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 
+/**
+ * Window appearance. 'system' keeps following the OS for the life of the window (macOS
+ * appearance change / Windows apps-theme flip), it is not read once at launch.
+ */
+export type ThemePreference = 'light' | 'dark' | 'system';
+
+/** Row and padding scale for the sidebar, message list and settings panes. */
+export type Density = 'comfortable' | 'compact';
+
+/** Appearance preferences — presentation only; none of these reach the agent. */
+export interface AppearanceSettings {
+  theme: ThemePreference;
+  density: Density;
+  /** Answer body size in px (13 / 14 / 15). */
+  answerTextSize: number;
+  /** Whether a finished turn's trace starts expanded instead of collapsed to one line. */
+  traceExpanded: boolean;
+}
+
+export const DEFAULT_APPEARANCE: AppearanceSettings = {
+  theme: 'system',
+  density: 'comfortable',
+  answerTextSize: 14,
+  traceExpanded: false,
+};
+
 export interface AppSettings {
   /** Base URL of the Spring server; /mcp and /api/chat/v1 are derived from it. */
   serverBaseUrl: string;
@@ -24,8 +50,16 @@ export interface AppSettings {
     allowedDomains: string[];
   };
   maxTurns: number;
+  /**
+   * Preflight the playbook a message is sent under: before running the turn, ask the model
+   * whether the selected playbook is the right one for the question and offer a better match.
+   * Mirrors the web's `app.chat.playbook-validation-enabled`; like it, absent means on.
+   */
+  playbookValidationEnabled?: boolean;
   /** Multi-agent orchestrator mode: role → Claude model binding + budgets. Optional (Off if absent). */
   orchestrator?: OrchestratorSettings;
+  /** Theme + density + type scale. Optional so an older settings.json still loads. */
+  appearance?: AppearanceSettings;
 }
 
 /** Claude model + thinking level bound to one orchestrator role. */
@@ -213,6 +247,18 @@ export interface ChatMessage {
   feedback?: { rating: 1 | -1; comment?: string };
 }
 
+/** One thread whose message content matched a sidebar search (title matching stays renderer-side). */
+export interface ThreadSearchHit {
+  threadId: string;
+  /** How many messages in the thread matched — the ranking key. */
+  matches: number;
+  /** localId of the first matching message. */
+  messageLocalId: string;
+  role: 'user' | 'assistant';
+  /** Excerpt around the first match, for the sidebar row. */
+  snippet: string;
+}
+
 /** Reference to a citation source, parsed from a `[chunk_id=…]` / `[file=…]` marker. */
 export interface CitationRef {
   chunkId?: string;
@@ -220,6 +266,9 @@ export interface CitationRef {
   version?: string;
   documentId?: string;
 }
+
+/** The role a playbook is written for, from `_meta.targetAgent` in prompts/list. */
+export type PlaybookRole = 'orchestrator' | 'reviewer' | 'specialist';
 
 export interface McpPromptInfo {
   name: string;
@@ -231,6 +280,62 @@ export interface McpPromptInfo {
   tools?: string[];
   /** Whether this playbook may compute (the safe mcp__compute__* tools). Undefined = not declared. */
   codeExecution?: boolean;
+  /** Which agent role the playbook is written for; undefined when the server does not say. */
+  targetAgent?: PlaybookRole | string;
+}
+
+/** The playbooks a profile drives itself, which a user therefore never picks by hand. */
+export function controlPlaybookNames(profiles: OrchestratorProfile[]): Set<string> {
+  const names = new Set<string>();
+  for (const profile of profiles) {
+    names.add(profile.orchestratorPlaybook);
+    names.add(profile.reviewerPlaybook);
+  }
+  return names;
+}
+
+/**
+ * Whether a playbook is something a user may pick for a single-agent conversation.
+ *
+ * Orchestrator and reviewer playbooks are machinery, not knowledge: they are the prompts the
+ * multi-agent runtime drives, and picking one by hand gets you a judge with nothing to judge.
+ * `oim-eval-reviewer` is the case that proves the point — it is the eval harness's judge, no
+ * profile references it, so filtering on profile membership alone left it in the picker.
+ *
+ * Both signals are honoured. `targetAgent` is the reliable one; the profile's own two references
+ * still catch a server that does not send the metadata. An UNLABELLED playbook stays visible on
+ * purpose — an older server sends no targetAgent at all, and failing closed there would leave the
+ * user staring at an empty picker.
+ */
+export function isUserSelectablePlaybook(
+  prompt: McpPromptInfo,
+  controlNames: ReadonlySet<string>,
+): boolean {
+  if (prompt.targetAgent === 'orchestrator' || prompt.targetAgent === 'reviewer') return false;
+  return !controlNames.has(prompt.name);
+}
+
+/** Ask the main process whether `promptName` is the right playbook for `text`. */
+export interface PlaybookValidationRequest {
+  threadId: string;
+  text: string;
+  /** The playbook attached to the message about to be sent. */
+  promptName: string;
+}
+
+/**
+ * The preflight verdict. `plausible: true` is also what every failure resolves to — the check
+ * is an assist, so a model that errors, times out, or answers unusably must not hold a question
+ * back (the web falls back the same way).
+ */
+export interface PlaybookValidation {
+  plausible: boolean;
+  /** Why the selection is wrong / the suggestion is better. Only set when `plausible` is false. */
+  reason?: string;
+  /** A better-matching playbook, guaranteed to exist in the picker's list. */
+  suggestedPlaybookName?: string;
+  /** Display title for `suggestedPlaybookName`, resolved main-side so the card needs no lookup. */
+  suggestedPlaybookTitle?: string;
 }
 
 /** Events streamed from the main process to the renderer while a turn runs. */

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { controlPlaybookNames, DEFAULT_APPEARANCE, isUserSelectablePlaybook } from '../../shared/types';
 import type {
   AgentEvent,
   AppSettings,
@@ -14,6 +15,8 @@ import { ChatView } from './components/ChatView';
 import { SettingsView } from './components/SettingsView';
 import { StatusBanners } from './components/StatusBanners';
 import { ThreadList } from './components/ThreadList';
+import { TooltipLayer } from './components/Tooltip';
+import { PlusIcon } from './components/icons';
 
 /** In-progress turn state for the active thread. */
 export interface LiveTurn {
@@ -50,6 +53,9 @@ export default function App(): React.JSX.Element {
   const activeThreadIdRef = useRef<string | null>(null);
   activeThreadIdRef.current = activeThreadId;
 
+  // Stable identity so the sidebar's debounced search effect doesn't re-fire every render.
+  const searchContent = useCallback((query: string) => window.api.searchThreads(query), []);
+
   const refreshThreads = useCallback(async () => {
     const result = await window.api.listThreads();
     setThreads(result.threads);
@@ -65,17 +71,18 @@ export default function App(): React.JSX.Element {
     void refreshThreads();
   }, [refreshThreads]);
 
-  // A profile's control playbooks (orchestrator / reviewer) make no sense as a standalone single
-  // agent, so hide them from the picker. Specialist playbooks stay pickable — they're useful on
-  // their own for a quick single-agent query even though a profile also drives them.
+  // Orchestrator and reviewer playbooks are the runtime's own machinery, so they never appear in
+  // the picker (see isUserSelectablePlaybook). Specialist playbooks stay pickable — they're useful
+  // on their own for a quick single-agent query even though a profile also drives them.
+  //
+  // Sorted here rather than in each consumer, so the picker grid and the slash-autocomplete list
+  // the same playbooks in the same order. The server returns them in no particular order.
   const visiblePrompts = useMemo(() => {
-    if (profiles.length === 0) return prompts;
-    const control = new Set<string>();
-    for (const p of profiles) {
-      control.add(p.orchestratorPlaybook);
-      control.add(p.reviewerPlaybook);
-    }
-    return prompts.filter((p) => !control.has(p.name));
+    const control = controlPlaybookNames(profiles);
+    return prompts
+      .filter((p) => isUserSelectablePlaybook(p, control))
+      .slice()
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
   }, [prompts, profiles]);
 
   useEffect(() => {
@@ -278,18 +285,48 @@ export default function App(): React.JSX.Element {
     [threads, activeThreadId],
   );
 
+  // Density and answer type size are two CSS variables, so they belong on the document root
+  // rather than threaded through every component that reads them. (Theme is not here: it comes
+  // from nativeTheme via prefers-color-scheme, so the CSS picks it up with no class to set.)
+  const appearance = settings?.appearance ?? DEFAULT_APPEARANCE;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.density = appearance.density;
+    root.style.setProperty('--answer-size', `${appearance.answerTextSize}px`);
+  }, [appearance.density, appearance.answerTextSize]);
+
   if (!settings) {
     return <div className="app-loading">Loading…</div>;
   }
 
+  // The titlebar is the app's own strip: macOS insets the traffic lights into it, Windows draws
+  // its control cluster over the right end, and both need the gutter reserved in CSS.
+  const platformClass =
+    window.api.platform === 'darwin' ? 'mac' : window.api.platform === 'win32' ? 'win' : '';
+
   return (
     <div className="app">
+      <TooltipLayer />
+      <div className={`titlebar ${platformClass}`}>
+        <span className="titlebar-title">{showSettings ? 'Settings' : 'Yvoke'}</span>
+        <span className="titlebar-spacer" />
+      </div>
+      <div className="app-body">
       <ThreadList
         threads={threads}
         appVersion={appVersion}
         activeThreadId={activeThreadId}
-        onOpen={(id) => void openThread(id)}
-        onCreate={() => void createThread()}
+        defaultModel={settings.defaultModel}
+        settingsOpen={showSettings}
+        searchContent={searchContent}
+        onOpen={(id) => {
+          setShowSettings(false);
+          void openThread(id);
+        }}
+        onCreate={() => {
+          setShowSettings(false);
+          void createThread();
+        }}
         onDelete={(id) => void deleteThread(id)}
         onOpenSettings={() => setShowSettings((prev) => !prev)}
         onSignOut={async () => {
@@ -325,6 +362,9 @@ export default function App(): React.JSX.Element {
         {showSettings ? (
           <SettingsView
             settings={settings}
+            appVersion={appVersion}
+            auth={auth}
+            serverReachable={serverReachable}
             onSave={async (update) => {
               setSettings(await window.api.setSettings(update));
               setShowSettings(false);
@@ -352,14 +392,19 @@ export default function App(): React.JSX.Element {
           />
         ) : (
           <div className="empty-state">
-            <h2>Yvoke - Desktop</h2>
-            <p>Select a conversation or start a new one.</p>
+            <h2>Yvoke</h2>
+            <p>
+              Ask the One Identity knowledge base a question and get a cited answer. Select a
+              conversation on the left, or start a new one.
+            </p>
             <button className="primary" onClick={() => void createThread()}>
+              <PlusIcon size={12} />
               New conversation
             </button>
           </div>
         )}
       </main>
+      </div>
     </div>
   );
 }

@@ -1,20 +1,23 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
 import { SubagentCard } from './SubagentCard';
+import { CheckIcon, HelpIcon, SendIcon } from './icons';
+import { shortName } from './toolNames';
 
-function shortName(name: string): string {
-  return name.replace(/^mcp__[^_]+__/, '');
-}
-
-/** Collapsible activity card for one tool invocation within a turn. */
+/**
+ * The two tool calls that stay inline in the transcript rather than folding into the trace.
+ *
+ * Everything else a turn calls is evidence and belongs in TraceBar — but a clarifying question is
+ * a control the user has to answer before the turn can continue, and a delegation is the substance
+ * of an orchestrated turn, not its working-out. Both would be lost inside a collapsed bar.
+ */
 export function ToolCallCard(props: {
   call: ToolCallInfo;
   onClarificationSubmit?: (answer: string) => void;
   activeClarificationId?: string;
   onCitation?: (ref: CitationRef) => void;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const { call, onClarificationSubmit, activeClarificationId, onCitation } = props;
-  const [open, setOpen] = useState(false);
   const [customAnswer, setCustomAnswer] = useState('');
 
   // Orchestrator mode: a delegation (the Agent tool) renders as a specialist/reviewer card.
@@ -22,7 +25,11 @@ export function ToolCallCard(props: {
     return <SubagentCard call={call} onCitation={onCitation} />;
   }
 
-  const isClarifying = shortName(call.name) === 'ask_clarifying_question';
+  if (shortName(call.name) !== 'ask_clarifying_question') {
+    // Not an inline call — ChatView routes these into the trace instead.
+    return null;
+  }
+
   const done = call.result !== undefined;
 
   const getAnswerText = (result: string | undefined): string => {
@@ -37,117 +44,79 @@ export function ToolCallCard(props: {
     return result;
   };
 
-  if (isClarifying) {
-    const inputObj = (call.input ?? {}) as { question?: unknown; options?: unknown };
-    const question = typeof inputObj.question === 'string' ? inputObj.question : '';
-    const options = Array.isArray(inputObj.options) ? inputObj.options.map(String) : [];
-    const isActive = !done && activeClarificationId === call.id;
+  const inputObj = (call.input ?? {}) as { question?: unknown; options?: unknown };
+  const question = typeof inputObj.question === 'string' ? inputObj.question : '';
+  const options = Array.isArray(inputObj.options) ? inputObj.options.map(String) : [];
+  const isActive = !done && activeClarificationId === call.id;
 
-    if (done) {
-      const answerText = getAnswerText(call.result);
-      return (
-        <div className="clarifying-question-card answered">
-          <div className="card-header">
-            <span className="card-icon">❓</span>
-            <span className="card-title">Clarification Provided</span>
-          </div>
-          <div className="card-question">{question}</div>
-          <div className="clarified-badge">
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              style={{ marginRight: 2 }}
-            >
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-            Clarified: "{answerText}"
-          </div>
-        </div>
-      );
-    }
-
+  if (done) {
+    const answerText = getAnswerText(call.result);
     return (
-      <div className="clarifying-question-card">
+      <div className="clarifying-question-card answered">
         <div className="card-header">
-          <span className="card-icon">❓</span>
-          <span className="card-title">Clarification Required</span>
+          <HelpIcon size={13} />
+          <span className="card-title">Clarification provided</span>
         </div>
         <div className="card-question">{question}</div>
-        {isActive && onClarificationSubmit ? (
-          <>
-            {options.length > 0 && (
-              <div className="card-options">
-                {options.map((option, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    className="option-button"
-                    onClick={() => onClarificationSubmit(option)}
-                  >
-                    {option}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="card-custom-input">
-              <input
-                type="text"
-                placeholder={options.length > 0 ? 'Or type a custom answer...' : 'Type your answer...'}
-                value={customAnswer}
-                onChange={(e) => setCustomAnswer(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && customAnswer.trim()) {
-                    onClarificationSubmit(customAnswer);
-                    setCustomAnswer('');
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="custom-send-button"
-                disabled={!customAnswer.trim()}
-                onClick={() => {
-                  onClarificationSubmit(customAnswer);
-                  setCustomAnswer('');
-                }}
-              >
-                Send
-              </button>
-            </div>
-          </>
-        ) : (
-          <div style={{ color: 'var(--muted)', fontSize: 13, fontStyle: 'italic' }}>
-            Awaiting clarification...
-          </div>
-        )}
+        <div className="clarified-badge">
+          <CheckIcon size={12} />“{answerText}”
+        </div>
       </div>
     );
   }
 
   return (
-    <div className={`tool-card ${call.isError ? 'error' : ''}`}>
-      <button className="tool-card-header" onClick={() => setOpen((o) => !o)}>
-        <span className="tool-status">{call.isError ? '⚠' : done ? '✓' : '⏳'}</span>
-        <span className="tool-name">{shortName(call.name)}</span>
-        <span className="tool-toggle">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && (
-        <div className="tool-card-body">
-          <div className="tool-section">
-            <div className="tool-section-label">Input</div>
-            <pre>{JSON.stringify(call.input, null, 2)}</pre>
-          </div>
-          {done && (
-            <div className="tool-section">
-              <div className="tool-section-label">Result</div>
-              <pre>{(call.result ?? '').slice(0, 4000)}</pre>
+    <div className="clarifying-question-card">
+      <div className="card-header">
+        <HelpIcon size={13} />
+        <span className="card-title">Clarification required</span>
+      </div>
+      <div className="card-question">{question}</div>
+      {isActive && onClarificationSubmit ? (
+        <>
+          {options.length > 0 && (
+            <div className="card-options">
+              {options.map((option, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="option-button"
+                  onClick={() => onClarificationSubmit(option)}
+                >
+                  {option}
+                </button>
+              ))}
             </div>
           )}
-        </div>
+          <div className="card-custom-input">
+            <input
+              type="text"
+              placeholder={options.length > 0 ? 'Or type a custom answer…' : 'Type your answer…'}
+              value={customAnswer}
+              onChange={(e) => setCustomAnswer(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && customAnswer.trim()) {
+                  onClarificationSubmit(customAnswer);
+                  setCustomAnswer('');
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={!customAnswer.trim()}
+              onClick={() => {
+                onClarificationSubmit(customAnswer);
+                setCustomAnswer('');
+              }}
+            >
+              Send
+              <SendIcon size={12} />
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="awaiting-note">Awaiting clarification…</div>
       )}
     </div>
   );

@@ -20,5 +20,8 @@
     "src/shared/**/*",
     "scripts/**/*",
     "tests/**/*.ts"
-  ]
+  ],
+  // Test infrastructure that touches the DOM belongs to the web project, which has the lib for
+  // it. Adding "DOM" here instead would let main-process code reference `document` unchallenged.
+  "exclude": ["tests/setup.ts", "tests/setup.test.ts"]
 }

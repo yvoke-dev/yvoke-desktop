@@ -5,6 +5,9 @@
   "description": "Yvoke desktop chat client (Claude Agent SDK)",
   "main": "out/main/index.js",
   "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "postinstall": "install-electron",
     "dev": "electron-vite dev",
@@ -17,6 +20,7 @@
     "spike:mas": "tsx scripts/spike-mas.ts",
     "spike:build": "tsx scripts/spike-orchestrator-build.ts",
     "spike:persist": "tsx scripts/spike-run-persist.ts",
+    "spike:websearch": "tsx scripts/spike-websearch.ts",
     "fetch:claude": "tsx scripts/fetch-claude-binary.ts",
     "dist:mac": "./scripts/check-signing-cert.sh && npm run fetch:claude -- mac-arm64 mac-x64 && electron-vite build && electron-builder --mac",
     "dist:win": "npm run fetch:claude -- win-x64 && electron-vite build && electron-builder --win"
@@ -24,6 +28,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.170",
     "@azure/msal-node": "^5.2.3",
+    "@fontsource/archivo": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "katex": "^0.17.0",
     "mermaid": "^11.16.0",
@@ -38,7 +43,7 @@
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
-    "@types/node": "^25.9.2",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",

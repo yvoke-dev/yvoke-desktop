@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { ChatMessage } from '../../../shared/types';
+import { ThumbsDownIcon, ThumbsUpIcon } from './icons';
 
 /**
  * Thumbs up/down per assistant message (Req. 8). Negative feedback requires a
@@ -44,17 +45,17 @@ export function FeedbackControls(props: {
     <span className="feedback">
       <button
         className={`icon-button ${current?.rating === 1 ? 'active-positive' : ''}`}
-        title="Good answer"
+        data-tip="Good answer"
         onClick={() => openDialog(1)}
       >
-        👍
+        <ThumbsUpIcon size={14} />
       </button>
       <button
         className={`icon-button ${current?.rating === -1 ? 'active-negative' : ''}`}
-        title="Bad answer (comment required)"
+        data-tip="Bad answer (comment required)"
         onClick={() => openDialog(-1)}
       >
-        👎
+        <ThumbsDownIcon size={14} />
       </button>
 
       {dialogRating != null && (

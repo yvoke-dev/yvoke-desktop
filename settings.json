@@ -19,6 +19,7 @@
     "allowedDomains": []
   },
   "maxTurns": 25,
+  "playbookValidationEnabled": true,
   "orchestrator": {
     "orchestrator": { "model": "opus", "thinkingLevel": "high" },
     "reviewer": { "model": "opus", "thinkingLevel": "high" },

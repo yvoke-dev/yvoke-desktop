@@ -6,6 +6,10 @@ appId: de.palsoftware.yvoke.desktop
 productName: Yvoke - Desktop
 directories:
   output: release
+# The app icon, shared with the web client (yvoke-web ships the same artwork as
+# static/images/logo*.png). One 1024px master: electron-builder derives the macOS .icns and the
+# Windows .ico from it, so there is a single file to replace when the brand changes.
+icon: build/icon.png
 files:
   - out/**
   # The Agent SDK's platform packages each carry a ~220MB native binary, and npm only ever

@@ -9,5 +9,7 @@ export default defineConfig({
     // Node by default (main-process logic); component tests opt into jsdom via a
     // `// @vitest-environment jsdom` docblock at the top of the file.
     environment: 'node',
+    // Fills jsdom's missing element scroll methods; see the file for why this is not optional.
+    setupFiles: ['./tests/setup.ts'],
   },
 });

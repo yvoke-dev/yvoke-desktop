@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_ORCHESTRATOR_SETTINGS } from '../../shared/types';
+import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../shared/types';
 import type { AppSettings } from '../../shared/types';
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -22,7 +22,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     allowedDomains: [],
   },
   maxTurns: 0,
+  playbookValidationEnabled: true,
   orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,
+  appearance: DEFAULT_APPEARANCE,
 };
 
 function loadProjectDefaults(): AppSettings {
@@ -46,6 +48,7 @@ function loadProjectDefaults(): AppSettings {
         orchestrator: raw.orchestrator
           ? { ...DEFAULT_SETTINGS.orchestrator, ...raw.orchestrator }
           : DEFAULT_SETTINGS.orchestrator,
+        appearance: { ...DEFAULT_APPEARANCE, ...(raw.appearance ?? {}) },
       };
     }
   } catch {
@@ -65,7 +68,9 @@ const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
   'defaultThinkingLevel',
   'webSearch',
   'maxTurns',
+  'playbookValidationEnabled',
   'orchestrator',
+  'appearance',
 ];
 
 /**
@@ -127,6 +132,7 @@ export class SettingsStore {
         orchestrator: raw.orchestrator
           ? { ...projectDefaults.orchestrator, ...raw.orchestrator }
           : projectDefaults.orchestrator,
+        appearance: { ...DEFAULT_APPEARANCE, ...(projectDefaults.appearance ?? {}), ...(raw.appearance ?? {}) },
       };
     } catch {
       return { ...projectDefaults };
@@ -150,6 +156,7 @@ export class SettingsStore {
       orchestrator: update.orchestrator
         ? { ...this.cache.orchestrator, ...update.orchestrator }
         : this.cache.orchestrator,
+      appearance: { ...DEFAULT_APPEARANCE, ...this.cache.appearance, ...(update.appearance ?? {}) },
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2));

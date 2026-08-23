@@ -7,24 +7,46 @@ import mermaid from 'mermaid';
 import type { CitationRef } from '../../../shared/types';
 import { rehypeCitations } from './citationRehype';
 
-// Initialize mermaid once
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'default',
-  // 'strict' disables raw HTML and click-directives in untrusted diagram source
-  // (defense-in-depth behind the CSP).
-  securityLevel: 'strict',
-});
+/**
+ * Mermaid bakes its palette into the SVG at render time, so it cannot follow a CSS variable —
+ * it has to be re-initialised and re-rendered when the appearance changes. A diagram drawn with
+ * the light palette on a dark canvas is the classic "one component missed the theme" bug.
+ */
+function useDarkAppearance(): boolean {
+  const [dark, setDark] = React.useState(
+    () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches,
+  );
+  React.useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!mq) return;
+    const onChange = (e: MediaQueryListEvent): void => setDark(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return !!dark;
+}
+
+function initMermaid(dark: boolean): void {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: dark ? 'dark' : 'default',
+    // 'strict' disables raw HTML and click-directives in untrusted diagram source
+    // (defense-in-depth behind the CSP).
+    securityLevel: 'strict',
+  });
+}
 
 function Mermaid({ chart }: { chart: string }): React.JSX.Element {
   const [svg, setSvg] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
   const elementId = React.useId().replace(/:/g, '');
+  const dark = useDarkAppearance();
 
   React.useEffect(() => {
     let active = true;
     const renderChart = async () => {
       try {
+        initMermaid(dark);
         const { svg: renderedSvg } = await mermaid.render(`mermaid-${elementId}`, chart);
         if (active) {
           setSvg(renderedSvg);
@@ -44,13 +66,13 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
     return () => {
       active = false;
     };
-  }, [chart, elementId]);
+  }, [chart, elementId, dark]);
 
   if (error) {
     return (
       <div className="mermaid-error">
         <pre className="mermaid-raw">{chart}</pre>
-        <span className="mermaid-error-label">⚠️ Mermaid render error: {error}</span>
+        <span className="mermaid-error-label">Mermaid render error: {error}</span>
       </div>
     );
   }
@@ -73,7 +95,7 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
  */
 function preprocessMarkdown(md: string): string {
   return md.replace(/<code-execution>([\s\S]*?)<\/code-execution>/g, (_m, content) => {
-    return `\n\n> ⚙️ **Code Execution**\n>\n${content.trim().split('\n').map((line: string) => `> ${line}`).join('\n')}\n\n`;
+    return `\n\n> **Code execution**\n>\n${content.trim().split('\n').map((line: string) => `> ${line}`).join('\n')}\n\n`;
   });
 }
 

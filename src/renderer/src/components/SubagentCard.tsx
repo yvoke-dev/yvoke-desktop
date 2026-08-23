@@ -1,15 +1,22 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
 import { Markdown } from './Markdown';
+import {
+  AlertIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  CompassIcon,
+  ReviewerIcon,
+  SpecialistIcon,
+} from './icons';
+import { shortName } from './toolNames';
 
-function shortName(name: string): string {
-  return name.replace(/^mcp__[^_]+__/, '');
-}
-
-function label(subagentType?: string): { icon: string; title: string } {
-  if (subagentType === 'reviewer') return { icon: '🧑‍⚖️', title: 'Reviewer' };
-  if (subagentType === 'orchestrator') return { icon: '🧭', title: 'Orchestrator' };
-  return { icon: '🔬', title: `Specialist · ${subagentType ?? '?'}` };
+function roleLabel(subagentType?: string): { icon: React.JSX.Element; title: string } {
+  if (subagentType === 'reviewer') return { icon: <ReviewerIcon size={14} />, title: 'Reviewer' };
+  if (subagentType === 'orchestrator') return { icon: <CompassIcon size={14} />, title: 'Orchestrator' };
+  return { icon: <SpecialistIcon size={14} />, title: `Specialist · ${subagentType ?? '?'}` };
 }
 
 /**
@@ -26,21 +33,23 @@ export function SubagentCard(props: {
   const [traceOpen, setTraceOpen] = useState(false);
 
   const done = call.result !== undefined;
-  const { icon, title } = label(call.subagentType);
+  const { icon, title } = roleLabel(call.subagentType);
   const input = (call.input ?? {}) as { prompt?: string; description?: string };
   const question = input.prompt ?? input.description ?? '';
   const verdict = call.verdict;
   const isReviewer = call.subagentType === 'reviewer';
 
-  const statusIcon = call.isError
-    ? '⚠'
-    : done
-      ? verdict
-        ? verdict.approved
-          ? '✅'
-          : '⛔'
-        : '✓'
-      : '⏳';
+  const status = call.isError ? (
+    <span className="tool-status error">
+      <AlertIcon size={13} />
+    </span>
+  ) : done ? (
+    <span className={`tool-status ${verdict && !verdict.approved ? 'error' : 'ok'}`}>
+      {verdict && !verdict.approved ? <CloseIcon size={13} /> : <CheckIcon size={12} />}
+    </span>
+  ) : (
+    <span className="tool-status">…</span>
+  );
 
   const innerCalls = (call.subagentBlocks ?? []).flatMap((b) => b.toolCalls ?? []);
 
@@ -54,28 +63,33 @@ export function SubagentCard(props: {
             {verdict.approved ? 'Approved' : 'Rejected'}
           </span>
         )}
-        <span className="tool-status">{statusIcon}</span>
-        <span className="tool-toggle">{open ? '▾' : '▸'}</span>
+        {status}
+        <span className="tool-toggle">
+          {open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+        </span>
       </button>
       {open && (
         <div className="subagent-card-body">
           {question && (
-            <div className="tool-section">
+            <div>
               <div className="tool-section-label">Question</div>
               <div className="subagent-question">{question}</div>
             </div>
           )}
 
           {innerCalls.length > 0 && (
-            <div className="tool-section">
+            <div>
               <button className="subagent-trace-toggle" onClick={() => setTraceOpen((o) => !o)}>
-                {traceOpen ? '▾' : '▸'} Work — {innerCalls.length} tool call{innerCalls.length === 1 ? '' : 's'}
+                {traceOpen ? <ChevronDownIcon size={11} /> : <ChevronRightIcon size={11} />}
+                Work — {innerCalls.length} tool call{innerCalls.length === 1 ? '' : 's'}
               </button>
               {traceOpen && (
                 <ul className="subagent-trace">
                   {innerCalls.map((c) => (
                     <li key={c.id} className={c.isError ? 'error' : ''}>
-                      <span className="tool-status">{c.isError ? '⚠' : c.result !== undefined ? '✓' : '⏳'}</span>
+                      <span className={`tool-status ${c.isError ? 'error' : c.result !== undefined ? 'ok' : ''}`}>
+                        {c.isError ? <AlertIcon size={11} /> : c.result !== undefined ? <CheckIcon size={10} /> : '…'}
+                      </span>
                       {shortName(c.name)}
                     </li>
                   ))}
@@ -85,7 +99,7 @@ export function SubagentCard(props: {
           )}
 
           {done && (
-            <div className="tool-section">
+            <div>
               <div className="tool-section-label">{isReviewer ? 'Verdict' : 'Answer'}</div>
               <Markdown content={call.result ?? ''} onCitation={onCitation} />
             </div>

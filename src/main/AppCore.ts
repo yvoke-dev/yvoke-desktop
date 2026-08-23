@@ -10,19 +10,26 @@ import type {
   McpPromptInfo,
   OrchestratorProfile,
   OrchestratorRunPayload,
+  PlaybookValidation,
+  PlaybookValidationRequest,
   SendMessageRequest,
   SyncEvent,
   ThreadMeta,
+  ThreadSearchHit,
   ThinkingLevel,
   UsageTotals,
 } from '../shared/types';
+import { controlPlaybookNames, isUserSelectablePlaybook } from '../shared/types';
 import { log, logError } from './log';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
 import { McpPrompts } from './agent/McpPrompts';
+import { PASSES } from './agent/playbookValidation';
+import { validatePlaybookSelection } from './agent/PlaybookValidator';
 import { buildRunTrace } from './agent/runTrace';
 import { detectClaudeAccount, detectClaudeCredentials } from './agent/ClaudeAuth';
 import { ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
 import { SettingsStore } from './settings/Settings';
+import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore } from './store/ThreadStore';
 import { parseStoredContent, serializeAssistantContent } from './store/messageCodec';
 import { SyncClient, type MessageDto } from './sync/SyncClient';
@@ -40,6 +47,7 @@ export interface AppCoreDeps {
 export class AppCore {
   readonly settings: SettingsStore;
   readonly threads: ThreadStore;
+  readonly searchIndex: SearchIndex;
   readonly serverAuth: ServerAuth;
   readonly syncClient: SyncClient;
   readonly syncQueue: SyncQueue;
@@ -52,7 +60,9 @@ export class AppCore {
 
   constructor(private readonly deps: AppCoreDeps) {
     this.settings = new SettingsStore(deps.userDataDir);
-    this.threads = new ThreadStore(path.join(deps.userDataDir, 'threads'));
+    const threadsDir = path.join(deps.userDataDir, 'threads');
+    this.threads = new ThreadStore(threadsDir);
+    this.searchIndex = new SearchIndex(threadsDir, path.join(deps.userDataDir, 'search-index.json'));
     this.serverAuth = new ServerAuth(() => this.settings.get(), deps.tokenCache, deps.openBrowser);
     this.syncClient = new SyncClient({
       getBaseUrl: () => this.settings.get().serverBaseUrl,
@@ -85,6 +95,14 @@ export class AppCore {
       mcpPrompts: this.mcpPrompts,
       getOrchestratorProfile: (name) => this.resolveOrchestratorProfile(name),
     });
+    // Local content search. Deliberately not awaited: the sweep only re-reads logs that changed
+    // since last run, and until it lands the sidebar still searches titles.
+    void this.searchIndex
+      .start()
+      .then(({ indexed, skipped, removed }) =>
+        log('search', `content index ready — ${indexed} indexed, ${skipped} unchanged, ${removed} dropped`),
+      )
+      .catch((err) => logError('search', `index sweep failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   /** Multi-agent profiles the server exposes; empty list if unreachable. Cached with a short TTL. */
@@ -121,11 +139,54 @@ export class AppCore {
     return this.mcpPrompts.getSection(ref);
   }
 
+  /**
+   * Preflight the playbook attached to a message — the desktop's side of the web's
+   * `POST /chat/{id}/validate-playbook`.
+   *
+   * Every guard here resolves to "fine": the check is an assist, so a disabled setting, an
+   * unknown thread, an unreachable server, or a playbook the picker does not offer all let the
+   * message through unchallenged rather than stalling it on a check that cannot be made.
+   */
+  async validatePlaybook(request: PlaybookValidationRequest): Promise<PlaybookValidation> {
+    const settings = this.settings.get();
+    if (settings.playbookValidationEnabled === false) return PASSES;
+
+    const thread = this.threads.get(request.threadId);
+    // Orchestrator mode drives its own playbooks from the profile; a message there carries none.
+    if (!thread || thread.orchestratorProfile) return PASSES;
+
+    const question = request.text?.trim() ?? '';
+    if (!question || !request.promptName) return PASSES;
+
+    const [prompts, profiles] = await Promise.all([
+      this.listPrompts(),
+      this.listOrchestratorProfiles(),
+    ]);
+    // The same list the picker shows: suggesting an orchestrator or reviewer playbook would
+    // recommend something the user cannot select (see isUserSelectablePlaybook).
+    const control = controlPlaybookNames(profiles);
+    const candidates = prompts.filter((p) => isUserSelectablePlaybook(p, control));
+    const selected = candidates.find((p) => p.name === request.promptName);
+    // Nothing to compare against: the server was unreachable, or this is the only playbook there is.
+    if (!selected || candidates.length < 2) return PASSES;
+
+    return validatePlaybookSelection({
+      question,
+      selected,
+      playbooks: candidates,
+      // The conversation's own model, as on the web (which reads ConversationSetting.MODEL).
+      model: thread.model,
+      sandboxDir: sandboxDirFor(this.deps.userDataDir),
+    });
+  }
+
   private persistTurn(threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage): void {
     // Best-effort local cache write (the server is the system of record); don't block the turn on it.
     void this.threads
       .appendMessages(threadId, [userMessage, assistantMessage])
       .catch((err) => logError('store', `appendMessages failed: ${err instanceof Error ? err.message : String(err)}`));
+    // Keep search current within the session — no need to wait for the next startup sweep.
+    this.searchIndex.addMessages(threadId, [userMessage, assistantMessage]);
     const usage = assistantMessage.usage;
     const thread = this.threads.get(threadId);
     const isOrchestrator = !!thread?.orchestratorProfile;
@@ -265,6 +326,7 @@ export class AppCore {
     this.agent.closeThread(threadId);
     await this.syncClient.deleteConversation(threadId);
     this.threads.delete(threadId);
+    this.searchIndex.remove(threadId);
   }
 
   patchThread(threadId: string, update: Partial<Pick<ThreadMeta, 'model' | 'thinkingLevel' | 'title' | 'orchestratorProfile'>>): ThreadMeta | undefined {
@@ -305,6 +367,9 @@ export class AppCore {
       const rehydrated = remote.map((m) => this.fromDto(m));
       if (rehydrated.length > 0) {
         await this.threads.replaceMessages(threadId, rehydrated);
+        // A thread pulled back from the server has no local log until now, so this is the
+        // moment its content becomes searchable.
+        this.searchIndex.replaceMessages(threadId, rehydrated);
         // appendMessages accrues totals per turn; a rehydrated log bypasses that,
         // so recompute the thread totals from the synced per-message usage.
         const totals = rehydrated.reduce<UsageTotals>((acc, m) => {
@@ -350,6 +415,11 @@ export class AppCore {
           ? { rating: dto.feedbackRating, comment: dto.feedbackComment ?? undefined }
           : undefined,
     };
+  }
+
+  /** Threads whose message content matches `query`, searched against the local index only. */
+  async searchThreads(query: string): Promise<ThreadSearchHit[]> {
+    return this.searchIndex.search(query);
   }
 
   // --- chat -------------------------------------------------------------------
@@ -405,6 +475,7 @@ export class AppCore {
   dispose(): void {
     this.agent.closeAll();
     this.syncQueue.dispose();
+    this.searchIndex.dispose();
   }
 }
 

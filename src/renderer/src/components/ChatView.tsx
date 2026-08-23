@@ -1,27 +1,85 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppSettings, ChatMessage, CitationRef, McpPromptInfo, OrchestratorProfile, ReviewStatus, ThinkingLevel, ThreadMeta } from '../../../shared/types';
+import type {
+  AppSettings,
+  ChatMessage,
+  CitationRef,
+  McpPromptInfo,
+  MessageBlock,
+  OrchestratorProfile,
+  PlaybookValidation,
+  ReviewStatus,
+  ThinkingLevel,
+  ThreadMeta,
+  ToolCallInfo,
+  UsageTotals,
+} from '../../../shared/types';
+import { DEFAULT_APPEARANCE } from '../../../shared/types';
 import type { LiveTurn } from '../App';
 import { CitationModal, type CitationState } from './CitationModal';
+import { CopyButton } from './CopyButton';
 import { FeedbackControls } from './FeedbackControls';
 import { Markdown } from './Markdown';
 import { ToolCallCard } from './ToolCallCard';
+import { TraceBar, type TraceEntry } from './TraceBar';
+import { AlertIcon, CloseIcon, PlaybookIcon, SearchIcon, SendIcon, StopIcon } from './icons';
+import { shortName } from './toolNames';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
 
 function formatTokens(n: number): string {
-  return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
 }
 
-function ThinkingBlock({ thinking }: { thinking: string }): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="thinking-block">
-      <button type="button" className="thinking-toggle-btn" onClick={() => setOpen(!open)}>
-        🧠 {open ? 'Hide' : 'View'} Thinking Process
-      </button>
-      {open && <pre className="thinking-text">{thinking}</pre>}
-    </div>
-  );
+/**
+ * Two kinds of tool call are NOT evidence and must not be folded into the trace:
+ * a clarifying question is a control the user has to answer, and a delegation is the substance
+ * of an orchestrated turn. Everything else is the run's working-out.
+ */
+function isInlineCall(call: ToolCallInfo): boolean {
+  return call.name === 'Agent' || shortName(call.name) === 'ask_clarifying_question';
+}
+
+/** Normalise a message into blocks, so the old flat shape and the new one read the same. */
+function blocksOf(message: ChatMessage): MessageBlock[] {
+  if (message.blocks && message.blocks.length > 0) return message.blocks;
+  return [{ text: message.content, thinking: message.thinking, toolCalls: message.toolCalls }];
+}
+
+/**
+ * The open playbook recommendation, if the preflight check raised one. `forPlaybook` is what
+ * makes the card an answerable question rather than a loop: sending again with that same
+ * playbook still selected means "send anyway", while picking a different one re-runs the check.
+ */
+interface PreflightCard {
+  reason?: string;
+  suggestedName?: string;
+  suggestedTitle?: string;
+  forPlaybook: string;
+}
+
+interface AssembledTurn {
+  text: string;
+  entries: TraceEntry[];
+  inlineCalls: ToolCallInfo[];
+}
+
+/**
+ * Split one assistant turn into the three things the layout needs: the prose (which goes first,
+ * always), the trace entries (reasoning + tools, collapsed), and the calls that stay inline.
+ */
+function assemble(blocks: MessageBlock[]): AssembledTurn {
+  const texts: string[] = [];
+  const entries: TraceEntry[] = [];
+  const inlineCalls: ToolCallInfo[] = [];
+  for (const block of blocks) {
+    if (block.thinking) entries.push({ kind: 'thinking', text: block.thinking });
+    for (const call of block.toolCalls ?? []) {
+      if (isInlineCall(call)) inlineCalls.push(call);
+      else entries.push({ kind: 'tool', call });
+    }
+    if (block.text) texts.push(block.text);
+  }
+  return { text: texts.join('\n\n'), entries, inlineCalls };
 }
 
 /**
@@ -32,15 +90,28 @@ function ReviewBadge({ review }: { review?: ReviewStatus }): React.JSX.Element |
   if (!review || review.outcome === 'approved') return null;
   const text =
     review.outcome === 'skipped'
-      ? '⚠️ Delivered without review — the orchestrator did not consult the reviewer.'
+      ? 'Delivered without review — the orchestrator did not consult the reviewer.'
       : review.outcome === 'unclear'
-        ? '⚠️ The reviewer ran but returned no clear verdict.'
-        : '⛔ The reviewer rejected this answer.';
+        ? 'The reviewer ran but returned no clear verdict.'
+        : 'The reviewer rejected this answer.';
   return (
     <div className={`review-badge review-${review.outcome}`}>
-      <span>{text}</span>
+      <span className="review-badge-head">
+        <AlertIcon size={14} />
+        {text}
+      </span>
       {review.feedback && <span className="review-feedback">{review.feedback}</span>}
     </div>
+  );
+}
+
+/** Per-message usage, shown here only when the turn had no trace bar to carry it. */
+function UsageLine({ usage }: { usage: UsageTotals }): React.JSX.Element {
+  return (
+    <span className="usage" data-tip="Tokens for this response">
+      {formatTokens(usage.inputTokens)} in · {formatTokens(usage.outputTokens)} out
+      {usage.cacheReadTokens > 0 && ` · ${formatTokens(usage.cacheReadTokens)} cached`}
+    </span>
   );
 }
 
@@ -56,15 +127,49 @@ export function ChatView(props: {
   onPatchThread: (update: Partial<ThreadMeta>) => void;
   onFeedback: (messageLocalId: string, rating: 1 | -1, comment?: string) => Promise<void>;
 }): React.JSX.Element {
-  const { thread, settings, messages, prompts, profiles, liveTurn, onSend, onInterrupt, onPatchThread, onFeedback } = props;
+  const {
+    thread,
+    settings,
+    messages,
+    prompts,
+    profiles,
+    liveTurn,
+    onSend,
+    onInterrupt,
+    onPatchThread,
+    onFeedback,
+  } = props;
   // Orchestrator mode replaces the single-playbook + model/thinking controls with a profile.
   const orchestratorActive = !!thread.orchestratorProfile;
+  const traceExpanded = settings.appearance?.traceExpanded ?? DEFAULT_APPEARANCE.traceExpanded;
   const [draft, setDraft] = useState('');
   const [activePrompt, setActivePrompt] = useState<McpPromptInfo | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [pickerFilter, setPickerFilter] = useState('');
   const [citation, setCitation] = useState<CitationState | null>(null);
+  // Playbook preflight: `checking` while the verdict is outstanding, `preflight` once it objects.
+  const [checking, setChecking] = useState(false);
+  const [preflight, setPreflight] = useState<PreflightCard | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
+  /**
+   * Which preflight run owns the composer. A bare `checking` boolean is not enough: the check is
+   * an unawaited promise that nothing can recall, so a run the user has moved on from would
+   * otherwise still land — clearing the lock while a newer run is live, or sending a draft that
+   * has since been superseded. Every run takes a ticket here and only acts if it still holds it.
+   */
+  const runIdRef = useRef(0);
+
+  // The composer's state lives with the component, not the thread, so a recommendation raised
+  // for one conversation would otherwise still be sitting there after switching to another.
+  // Invalidating the ticket is what actually retires the in-flight run — comparing thread ids
+  // instead would let it come back to life the moment the user navigated back.
+  useEffect(() => {
+    runIdRef.current += 1;
+    setPreflight(null);
+    setChecking(false);
+  }, [thread.id]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -92,6 +197,15 @@ export function ChatView(props: {
 
   useEffect(() => setHighlight(0), [slashQuery]);
 
+  // Arrow keys move `highlight`, but the list caps at 280px and the server serves ~30 playbooks,
+  // so past the eighth one the selection was moving somewhere the user could not see — which
+  // reads as "the arrows do nothing". `block: 'nearest'` scrolls only when it has left the box.
+  useEffect(() => {
+    autocompleteRef.current
+      ?.querySelector('.prompt-option.active')
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [highlight, showAutocomplete]);
+
   // Auto-scroll to the bottom on new content, but only if the user is already near the bottom —
   // don't yank the view if they've scrolled up to read. Scheduled via rAF to coalesce the frequent
   // streaming deltas into at most one scroll per frame.
@@ -104,7 +218,7 @@ export function ChatView(props: {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     });
     return () => cancelAnimationFrame(raf);
-  }, [messages, liveTurn]);
+  }, [messages, liveTurn, checking, preflight]);
 
   // Auto-grow the composer with its content, from 3 rows up to a max of 9 (3×).
   useEffect(() => {
@@ -125,12 +239,65 @@ export function ChatView(props: {
     textareaRef.current?.focus();
   };
 
-  const submit = (): void => {
-    const text = draft.trim();
-    if (!text || liveTurn.running) return;
-    onSend(text, activePrompt?.name);
+  /** Whether the message about to be sent gets its playbook checked first. */
+  const validationEnabled = settings.playbookValidationEnabled !== false;
+
+  const send = (text: string, promptName?: string): void => {
+    setPreflight(null);
+    onSend(text, promptName);
     setDraft('');
     setActivePrompt(null);
+  };
+
+  /**
+   * The web's preflight, in the desktop's terms: ask whether the attached playbook suits the
+   * question before the turn runs. The web checks only a conversation's first message because a
+   * playbook there is sticky for the whole thread; here it is attached per message and cleared
+   * on send, so "a message that carries a playbook" is the same moment.
+   *
+   * Fails open — main-side and again here — because a check that cannot run must never be the
+   * reason a question goes unasked.
+   */
+  const runPreflight = async (text: string, prompt: McpPromptInfo): Promise<void> => {
+    const runId = ++runIdRef.current;
+    setChecking(true);
+    setPreflight(null);
+    let verdict: PlaybookValidation;
+    try {
+      verdict = await window.api.validatePlaybook({ threadId: thread.id, text, promptName: prompt.name });
+    } catch {
+      verdict = { plausible: true };
+    }
+    // Superseded — by a thread switch or by a later run. Returning without touching state is the
+    // point: clearing `checking` here would unlock the composer under a check that is still live,
+    // and sending would post a draft the user has already moved past.
+    if (runIdRef.current !== runId) return;
+    setChecking(false);
+    if (verdict.plausible) {
+      send(text, prompt.name);
+      return;
+    }
+    setPreflight({
+      reason: verdict.reason,
+      suggestedName: verdict.suggestedPlaybookName,
+      suggestedTitle: verdict.suggestedPlaybookTitle,
+      forPlaybook: prompt.name,
+    });
+  };
+
+  const submit = (): void => {
+    const text = draft.trim();
+    if (!text || liveTurn.running || checking) return;
+    const prompt = activePrompt;
+    // An open card is a question the user has already been shown: sending again with the same
+    // playbook is their "send anyway". Changing the playbook first is a new question, so it
+    // gets checked again.
+    const alreadyAnswered = !!preflight && preflight.forPlaybook === prompt?.name;
+    if (prompt && !orchestratorActive && validationEnabled && !alreadyAnswered) {
+      void runPreflight(text, prompt);
+      return;
+    }
+    send(text, prompt?.name);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -168,16 +335,49 @@ export function ChatView(props: {
     }
   };
 
+  // The picker owns the empty thread until a question is actually on its way. Once a check is
+  // running (or its recommendation is standing), that grid is thirty rows of noise between the
+  // user and the one thing they now have to read, so it stands down.
+  const showPicker =
+    messages.length === 0 &&
+    !liveTurn.running &&
+    !orchestratorActive &&
+    !checking &&
+    !preflight &&
+    prompts.length > 0;
+  const filteredPrompts = useMemo(() => {
+    const q = pickerFilter.trim().toLowerCase();
+    if (!q) return prompts;
+    return prompts.filter(
+      (p) =>
+        p.title.toLowerCase().includes(q) ||
+        p.name.toLowerCase().includes(q) ||
+        p.description.toLowerCase().includes(q),
+    );
+  }, [prompts, pickerFilter]);
+
+  const liveTurnParts = useMemo(() => {
+    const assembled = assemble(liveTurn.blocks);
+    if (liveTurn.liveThinking) {
+      assembled.entries.push({ kind: 'thinking', text: liveTurn.liveThinking });
+    }
+    // `liveText` is the block still streaming; `assembled.text` is every block already closed.
+    // Both have to render, or a turn that emitted prose, called a tool, then resumed would drop
+    // its first paragraph the moment the second one started arriving.
+    const text = [assembled.text, liveTurn.liveText].filter(Boolean).join('\n\n');
+    return { ...assembled, text };
+  }, [liveTurn.blocks, liveTurn.liveThinking, liveTurn.liveText]);
+
   return (
     <div className="chat-view">
       <header className="chat-header">
-        <div className="chat-title" title={thread.title}>
+        <div className="chat-title" data-tip={thread.title}>
           {thread.title}
         </div>
         <div className="chat-controls">
           <span
             className="usage-total"
-            title="Total tokens this conversation (input / output / cache-read / cache-write)"
+            data-tip="Total tokens this conversation (input / output / cache-read)"
           >
             Σ {formatTokens(thread.totals.inputTokens)} in · {formatTokens(thread.totals.outputTokens)} out
             {thread.totals.cacheReadTokens > 0 && ` · ${formatTokens(thread.totals.cacheReadTokens)} cached`}
@@ -186,115 +386,200 @@ export function ChatView(props: {
       </header>
 
       <div className="messages" ref={scrollRef}>
-        {messages.length === 0 && !liveTurn.running && !orchestratorActive && prompts.length > 0 && (
-          <div className="prompt-chips">
-            <div className="chips-label">Playbooks from the knowledge base (or type “/”):</div>
-            {prompts.map((prompt) => (
-              <button key={prompt.name} className="chip" title={prompt.description} onClick={() => pickPrompt(prompt)}>
-                {prompt.title}
-              </button>
-            ))}
+        {showPicker && (
+          <div>
+            <div className="picker">
+              <div className="picker-head">
+                <div>
+                  <h2>Pick a playbook</h2>
+                  <p>
+                    Each one scopes the agent to a slice of the knowledge base. {prompts.length}{' '}
+                    available.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="picker-filter">
+              <label className="search-field">
+                <SearchIcon size={14} />
+                <input
+                  type="text"
+                  value={pickerFilter}
+                  placeholder="Filter playbooks"
+                  aria-label="Filter playbooks"
+                  onChange={(e) => setPickerFilter(e.target.value)}
+                />
+              </label>
+              <span className="picker-hint">
+                or type <span className="mono">/</span> in the composer
+              </span>
+            </div>
+            <div className="picker-list">
+              {filteredPrompts.map((prompt) => (
+                <button
+                  key={prompt.name}
+                  type="button"
+                  className="picker-row"
+                  data-tip={prompt.description}
+                  onClick={() => pickPrompt(prompt)}
+                >
+                  <span className="picker-row-main">
+                    <span className="picker-row-title">{prompt.title}</span>
+                    {prompt.description && (
+                      <span className="picker-row-desc">{prompt.description}</span>
+                    )}
+                  </span>
+                  <span className="picker-row-use">Use</span>
+                </button>
+              ))}
+              {filteredPrompts.length === 0 && (
+                <div className="picker-empty">No playbook matches “{pickerFilter.trim()}”.</div>
+              )}
+            </div>
           </div>
         )}
 
-        {messages.map((message) => (
-          <div key={message.localId} className={`message ${message.role}`}>
-            {message.role === 'assistant' ? (
-              <>
-                {message.blocks && message.blocks.length > 0 ? (
-                  message.blocks.map((block, i) => (
-                    <React.Fragment key={i}>
-                      {block.thinking && <ThinkingBlock thinking={block.thinking} />}
-                      {block.text && <Markdown content={block.text} onCitation={openCitation} />}
-                      {block.toolCalls?.map((call) => (
-                        <ToolCallCard
-                          key={call.id}
-                          call={call}
-                          onClarificationSubmit={handleClarificationSubmit}
-                          activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                          onCitation={openCitation}
-                        />
-                      ))}
-                    </React.Fragment>
-                  ))
-                ) : (
-                  <>
-                    {message.thinking && <ThinkingBlock thinking={message.thinking} />}
-                    {message.toolCalls?.map((call) => (
-                      <ToolCallCard
-                        key={call.id}
-                        call={call}
-                        onClarificationSubmit={handleClarificationSubmit}
-                        activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                        onCitation={openCitation}
-                      />
-                    ))}
-                    <Markdown content={message.content} onCitation={openCitation} />
-                  </>
-                )}
-                <ReviewBadge review={message.review} />
-                <div className="message-footer">
-                  {message.usage && (
-                    <span className="usage" title="Tokens for this response (input / output / cache-read / cache-write / thoughts)">
-                      {formatTokens(message.usage.inputTokens)} in · {formatTokens(message.usage.outputTokens)} out
-                      {message.usage.cacheReadTokens > 0 && ` · ${formatTokens(message.usage.cacheReadTokens)} cache-read`}
-                      {message.usage.cacheWriteTokens > 0 && ` · ${formatTokens(message.usage.cacheWriteTokens)} cache-write`}
-                      {message.usage.thoughtTokens && message.usage.thoughtTokens > 0 ? ` · ${formatTokens(message.usage.thoughtTokens)} thoughts` : ''}
-                    </span>
+        {messages.map((message) => {
+          if (message.role === 'user') {
+            return (
+              <div key={message.localId} className="message user">
+                <div className="user-kicker">
+                  You
+                  {message.playbook && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <PlaybookIcon size={11} />
+                      {message.playbook}
+                    </>
                   )}
-                  <FeedbackControls message={message} onFeedback={onFeedback} />
                 </div>
-              </>
-            ) : (
-              <div className="user-bubble">
-                {message.playbook && <span className="playbook-tag">📋 {message.playbook}</span>}
-                {message.content}
+                <div className="user-text">{message.content}</div>
               </div>
-            )}
-          </div>
-        ))}
+            );
+          }
+          const { text, entries, inlineCalls } = assemble(blocksOf(message));
+          return (
+            <div key={message.localId} className="message assistant">
+              {text && (
+                <>
+                  <div className="answer-kicker">Answer</div>
+                  <div className="answer-body">
+                    <Markdown content={text} onCitation={openCitation} />
+                  </div>
+                </>
+              )}
+              {inlineCalls.map((call) => (
+                <ToolCallCard
+                  key={call.id}
+                  call={call}
+                  onClarificationSubmit={handleClarificationSubmit}
+                  activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                  onCitation={openCitation}
+                />
+              ))}
+              <TraceBar entries={entries} usage={message.usage} defaultOpen={traceExpanded} />
+              <ReviewBadge review={message.review} />
+              <div className="message-footer">
+                {/* The trace bar carries the token counts when there is one; without it they
+                    would have nowhere to go, so the footer picks them up. */}
+                {message.usage && entries.length === 0 ? <UsageLine usage={message.usage} /> : <span />}
+                <span className="message-actions">
+                  {text && <CopyButton text={text} />}
+                  <FeedbackControls message={message} onFeedback={onFeedback} />
+                </span>
+              </div>
+            </div>
+          );
+        })}
 
         {liveTurn.running && (
           <div className="message assistant live">
-            {liveTurn.blocks.map((block, i) => (
-              <React.Fragment key={i}>
-                {block.thinking && <ThinkingBlock thinking={block.thinking} />}
-                {block.text && <Markdown content={block.text} onCitation={openCitation} />}
-                {block.toolCalls.map((call) => (
-                  <ToolCallCard
-                    key={call.id}
-                    call={call}
-                    onClarificationSubmit={handleClarificationSubmit}
-                    activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                    onCitation={openCitation}
-                  />
-                ))}
-              </React.Fragment>
-            ))}
-            {liveTurn.liveThinking && (
-              <div className="thinking-block live">
-                <div className="thinking-header">🧠 Thinking...</div>
-                <pre className="thinking-text">{liveTurn.liveThinking}</pre>
-              </div>
+            {liveTurnParts.text && (
+              <>
+                <div className="answer-kicker">Answer</div>
+                <div className="answer-body">
+                  <Markdown content={liveTurnParts.text} onCitation={openCitation} live />
+                </div>
+              </>
             )}
-            {liveTurn.liveText ? (
-              <Markdown content={liveTurn.liveText} onCitation={openCitation} live />
-            ) : (
-              !liveTurn.liveThinking && <div className="thinking-indicator">…</div>
+            {liveTurnParts.inlineCalls.map((call) => (
+              <ToolCallCard
+                key={call.id}
+                call={call}
+                onClarificationSubmit={handleClarificationSubmit}
+                activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                onCitation={openCitation}
+              />
+            ))}
+            {/* Open while the turn runs so the work stays visible; the finished message then
+                renders it collapsed (or per the Appearance setting). */}
+            <TraceBar entries={liveTurnParts.entries} defaultOpen />
+            {!liveTurnParts.text && liveTurnParts.entries.length === 0 && (
+              <div className="thinking-indicator">
+                <span className="dot" />
+                Working…
+              </div>
             )}
           </div>
         )}
-        {liveTurn.error && <div className="banner error">{liveTurn.error}</div>}
+        {/* Last in the pane, next to the composer: the check is about the message being
+            sent, so it belongs after the conversation, not above it. On an empty thread the
+            picker has stood down by now, which leaves this at the top on its own. */}
+        {checking && (
+          <div className="thinking-indicator preflight-checking">
+            <span className="dot" />
+            Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
+          </div>
+        )}
+        {preflight && (
+          <div className="preflight-card">
+            <div className="preflight-card-head">
+              <AlertIcon size={14} />
+              Playbook recommendation
+            </div>
+            {preflight.reason && <div className="preflight-card-reason">{preflight.reason}</div>}
+            <div className="preflight-card-actions">
+              {preflight.suggestedName && (
+                <button
+                  className="primary"
+                  disabled={draft.trim().length === 0}
+                  onClick={() => send(draft.trim(), preflight.suggestedName)}
+                >
+                  Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
+                </button>
+              )}
+              {/* Sends exactly what the composer shows — normally the playbook the card is
+                  about, but the user is free to have changed it while the card stood. */}
+              <button
+                disabled={draft.trim().length === 0}
+                onClick={() => send(draft.trim(), activePrompt?.name)}
+              >
+                Send anyway
+              </button>
+            </div>
+          </div>
+        )}
+        {liveTurn.error && (
+          <div className="banner error">
+            <span className="banner-icon">
+              <AlertIcon size={14} />
+            </span>
+            {liveTurn.error}
+          </div>
+        )}
         {liveTurn.notice && <div className="banner notice">{liveTurn.notice}</div>}
       </div>
 
       <footer className="composer">
         {showAutocomplete && (
-          <div className="prompt-autocomplete">
+          <div className="prompt-autocomplete" ref={autocompleteRef}>
             {suggestions.map((prompt, i) => (
               <button
                 key={prompt.name}
                 className={`prompt-option ${i === highlight ? 'active' : ''}`}
+                // The descriptions run to a paragraph; the row shows one ellipsed line and the
+                // whole thing lives on the tooltip.
+                data-tip={prompt.description}
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => pickPrompt(prompt)}
               >
@@ -304,88 +589,112 @@ export function ChatView(props: {
             ))}
           </div>
         )}
-        {activePrompt && (
-          <div className="active-playbook">
-            <span className="playbook-tag">📋 {activePrompt.title}</span>
-            <span className="active-playbook-hint">applied to your next message</span>
-            <button className="active-playbook-remove" title="Remove playbook" onClick={() => setActivePrompt(null)}>
-              ×
-            </button>
+        <div className="composer-box">
+          <div className="composer-input">
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              disabled={liveTurn.running || checking || !!liveTurn.clarifyingQuestion}
+              placeholder={
+                liveTurn.clarifyingQuestion
+                  ? 'Awaiting clarification…'
+                  : checking
+                    ? 'Checking the playbook…'
+                    : orchestratorActive
+                      ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer.`
+                      : activePrompt
+                        ? `Add your question for “${activePrompt.title}” — ↵ to send`
+                        : 'Ask a question — / for playbooks, ↵ to send'
+              }
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={3}
+            />
           </div>
-        )}
-        <div className="composer-input">
-          <textarea
-            ref={textareaRef}
-            value={draft}
-            disabled={liveTurn.running || !!liveTurn.clarifyingQuestion}
-            placeholder={
-              liveTurn.clarifyingQuestion
-                ? 'Awaiting clarification...'
-                : orchestratorActive
-                ? `Ask ${thread.orchestratorProfile} (multi-agent)… specialists + reviewer will answer.`
-                : activePrompt
-                ? `Add your question for “${activePrompt.title}”…`
-                : 'Ask a question… (type “/” for playbooks, Enter to send)'
-            }
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={3}
-          />
-          {liveTurn.running && (
-            <button className="danger composer-stop" onClick={onInterrupt}>
-              Stop
-            </button>
-          )}
-        </div>
-        <div className="composer-controls">
-          {profiles.length > 0 && (
-            <select
-              className="composer-select"
-              value={thread.orchestratorProfile ?? ''}
-              title="Multi-agent profile (orchestrator mode)"
-              onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
-            >
-              <option value="">Off (single agent)</option>
-              {profiles.map((p) => (
-                <option key={p.name} value={p.name}>
-                  🧭 {p.name}
-                </option>
-              ))}
-            </select>
-          )}
-          {!orchestratorActive && (
-            <>
+          <div className="composer-controls">
+            {activePrompt && (
+              <span className="active-playbook" data-tip={activePrompt.description}>
+                <PlaybookIcon size={11} />
+                {activePrompt.title}
+                <button
+                  className="active-playbook-remove"
+                  data-tip="Remove playbook"
+                  disabled={checking}
+                  onClick={() => setActivePrompt(null)}
+                >
+                  <CloseIcon size={11} />
+                </button>
+              </span>
+            )}
+            {profiles.length > 0 && (
               <select
                 className="composer-select"
-                value={thread.model}
-                title="Model"
-                onChange={(e) => onPatchThread({ model: e.target.value })}
+                value={thread.orchestratorProfile ?? ''}
+                data-tip="Multi-agent profile (orchestrator mode)"
+                aria-label="Agent mode"
+                // Switching to orchestrator mode mid-check would leave the verdict deciding the
+                // playbook for a turn that no longer takes one.
+                disabled={checking}
+                onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
               >
-                {settings.models.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
+                <option value="">Single agent</option>
+                {profiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
                   </option>
                 ))}
               </select>
-              <select
-                className="composer-select"
-                value={thread.thinkingLevel}
-                title="Thinking effort"
-                onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
+            )}
+            {!orchestratorActive ? (
+              <>
+                <select
+                  className="composer-select"
+                  value={thread.model}
+                  data-tip="Model"
+                  aria-label="Model"
+                  onChange={(e) => onPatchThread({ model: e.target.value })}
+                >
+                  {settings.models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="composer-select"
+                  value={thread.thinkingLevel}
+                  data-tip="Thinking effort"
+                  aria-label="Thinking effort"
+                  onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
+                >
+                  {THINKING_LEVELS.map((l) => (
+                    <option key={l} value={l}>
+                      thinking · {l}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : (
+              <span className="orchestrator-hint" data-tip="Models are set per role in Settings → Agents">
+                specialists + reviewer
+              </span>
+            )}
+            {liveTurn.running ? (
+              <button className="danger composer-send" onClick={onInterrupt}>
+                <StopIcon size={10} />
+                Stop
+              </button>
+            ) : (
+              <button
+                className="primary composer-send"
+                disabled={draft.trim().length === 0 || checking || !!liveTurn.clarifyingQuestion}
+                onClick={submit}
               >
-                {THINKING_LEVELS.map((l) => (
-                  <option key={l} value={l}>
-                    {l}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
-          {orchestratorActive && (
-            <span className="orchestrator-hint" title="Models are set per role by the profile">
-              multi-agent · specialists + reviewer
-            </span>
-          )}
+                Send
+                <SendIcon size={12} />
+              </button>
+            )}
+          </div>
         </div>
       </footer>
 

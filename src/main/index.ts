@@ -1,9 +1,17 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeTheme, safeStorage, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
-import type { FeedbackRequest, SendMessageRequest, ThreadMeta } from '../shared/types';
+import { DEFAULT_APPEARANCE } from '../shared/types';
+import type {
+  FeedbackRequest,
+  PlaybookValidationRequest,
+  SendMessageRequest,
+  ThemePreference,
+  ThreadMeta,
+} from '../shared/types';
 import { AppCore } from './AppCore';
 import { fileTokenCache } from './auth/ServerAuth';
 import { log, packageVersion } from './log';
@@ -40,13 +48,97 @@ function openExternalSafe(url: string): Promise<void> {
   return Promise.resolve();
 }
 
+/**
+ * The renderer's `--canvas` token, duplicated here as a plain literal. The window's own
+ * background paints before the first frame of HTML exists, so this is what the user sees on a
+ * cold start — leaving it at the Chromium default is the "white rectangle for ~200ms" bug.
+ * Keep both values in step with :root / prefers-color-scheme in styles.css.
+ */
+const CANVAS_LIGHT = '#f3f2f2';
+const CANVAS_DARK = '#171514';
+const PANE_LIGHT = '#f8f4f4';
+const PANE_DARK = '#1f1c1b';
+const TEXT_LIGHT = '#201e1d';
+const TEXT_DARK = '#f4f1f0';
+
+/** Height of the renderer's custom titlebar; the Windows control overlay has to match it. */
+const TITLEBAR_HEIGHT = 40;
+
+/**
+ * App icon for an UNPACKAGED run only.
+ *
+ * A packaged build takes its icon from the bundle (macOS .app) or the executable (Windows),
+ * both stamped by electron-builder from build/icon.png. `npm run dev` launches Electron's own
+ * binary instead, so without this the dock and taskbar show the generic Electron logo the whole
+ * time anyone is working on the app. Returns undefined when packaged (or when the master is
+ * missing) so the platform's own icon always wins.
+ */
+function devIconPath(): string | undefined {
+  if (app.isPackaged) return undefined;
+  const file = path.join(app.getAppPath(), 'build', 'icon.png');
+  return fs.existsSync(file) ? file : undefined;
+}
+
+function canvasColor(): string {
+  return nativeTheme.shouldUseDarkColors ? CANVAS_DARK : CANVAS_LIGHT;
+}
+
+/**
+ * Native window chrome for the renderer's own titlebar. macOS keeps the traffic lights and
+ * insets them into the 40px bar; Windows draws its control cluster as a themed overlay in the
+ * same strip. Anywhere else the OS frame stays, and the renderer's bar is simply a header.
+ */
+function titleBarOverlayColors(): { color: string; symbolColor: string; height: number } {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return {
+    color: dark ? PANE_DARK : PANE_LIGHT,
+    symbolColor: dark ? TEXT_DARK : TEXT_LIGHT,
+    height: TITLEBAR_HEIGHT,
+  };
+}
+
+/**
+ * Point Chromium at the user's choice. 'system' is the default and stays live: themeSource
+ * 'system' keeps tracking the OS appearance for the life of the process, which is what makes a
+ * 6pm scheduled switch reach an already-open window. Setting it also flips
+ * `prefers-color-scheme` inside the renderer, so the CSS needs no separate channel.
+ */
+function applyTheme(preference: ThemePreference): void {
+  nativeTheme.themeSource = preference;
+}
+
+/** Re-tint the native surfaces after a theme change (the CSS follows on its own). */
+function syncWindowChrome(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBackgroundColor(canvasColor());
+  if (process.platform === 'win32') {
+    try {
+      mainWindow.setTitleBarOverlay(titleBarOverlayColors());
+    } catch {
+      // Only meaningful when the window was created with a titleBarOverlay.
+    }
+  }
+}
+
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
+  const devIcon = devIconPath();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 900,
     minHeight: 600,
     title: 'Yvoke - Desktop',
+    // Windows/Linux read the window icon from here; macOS uses the dock icon set below.
+    ...(devIcon && !isMac ? { icon: devIcon } : {}),
+    // Painted before the renderer's first frame; without it a cold start flashes white.
+    backgroundColor: canvasColor(),
+    ...(isMac
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
+      : isWindows
+        ? { titleBarStyle: 'hidden' as const, titleBarOverlay: titleBarOverlayColors() }
+        : {}),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -122,6 +214,8 @@ function registerIpc(appCore: AppCore): void {
   handle(IpcChannels.settingsSet, (_e, update) => {
     const next = appCore.settings.set(update);
     appCore.mcpPrompts.reset(); // server URL / auth may have changed
+    applyTheme(next.appearance?.theme ?? DEFAULT_APPEARANCE.theme);
+    syncWindowChrome();
     return next;
   });
 
@@ -129,6 +223,9 @@ function registerIpc(appCore: AppCore): void {
 
   handle(IpcChannels.promptsList, () => appCore.listPrompts());
   handle(IpcChannels.orchestratorProfiles, () => appCore.listOrchestratorProfiles());
+  handle(IpcChannels.playbookValidate, (_e, request: PlaybookValidationRequest) =>
+    appCore.validatePlaybook(request),
+  );
   handle(IpcChannels.citationGet, (_e, ref) => appCore.getCitation(ref));
 
   handle(IpcChannels.threadsList, () => appCore.listThreads());
@@ -138,6 +235,7 @@ function registerIpc(appCore: AppCore): void {
     appCore.patchThread(threadId, update),
   );
   handle(IpcChannels.threadsMessages, (_e, threadId: string) => appCore.getMessages(threadId));
+  handle(IpcChannels.threadsSearch, (_e, query: string) => appCore.searchThreads(String(query ?? '')));
 
   handle(IpcChannels.chatSend, (_e, request: SendMessageRequest) => appCore.sendMessage(request));
   handle(IpcChannels.chatInterrupt, (_e, threadId: string) => appCore.agent.interrupt(threadId));
@@ -187,6 +285,14 @@ if (!gotLock) {
         : null,
     });
     registerIpc(core);
+    // Resolve the theme BEFORE the window is constructed so its backgroundColor is already
+    // right; doing it after would reintroduce the cold-start flash this is here to prevent.
+    applyTheme(core.settings.get().appearance?.theme ?? DEFAULT_APPEARANCE.theme);
+    const devIcon = devIconPath();
+    if (devIcon) app.dock?.setIcon(devIcon);
+    // Fires when the OS appearance changes under themeSource 'system' (and on an explicit
+    // switch), which is what keeps the native frame from staying light around a dark app.
+    nativeTheme.on('updated', syncWindowChrome);
     createWindow();
 
     app.on('activate', () => {

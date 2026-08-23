@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { Markdown } from './Markdown';
+import { CloseIcon } from './icons';
 
 export interface CitationState {
   loading: boolean;
@@ -58,9 +59,9 @@ export function CitationModal(props: { state: CitationState; onClose: () => void
     <div className="citation-overlay" onClick={onClose}>
       <div className="citation-modal" onClick={(e) => e.stopPropagation()}>
         <div className="citation-modal-header">
-          <span className="citation-modal-title">Citation Source</span>
-          <button className="icon-button" title="Close" onClick={onClose}>
-            ✕
+          <span className="citation-modal-title">Citation source</span>
+          <button className="icon-button" data-tip="Close" onClick={onClose}>
+            <CloseIcon size={15} />
           </button>
         </div>
         <div className="citation-modal-body">

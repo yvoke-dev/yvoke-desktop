@@ -13,5 +13,14 @@
     "forceConsistentCasingInFileNames": true,
     "useDefineForClassFields": true
   },
-  "include": ["src/renderer/**/*", "src/shared/**/*", "src/preload/index.ts", "tests/components/**/*.tsx"]
+  // tests/setup*.ts sit outside tests/components but are DOM-land all the same (they patch
+  // Element.prototype), so they are checked here and excluded from the node project.
+  "include": [
+    "src/renderer/**/*",
+    "src/shared/**/*",
+    "src/preload/index.ts",
+    "tests/components/**/*.tsx",
+    "tests/setup.ts",
+    "tests/setup.test.ts"
+  ]
 }

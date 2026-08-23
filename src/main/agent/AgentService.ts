@@ -55,6 +55,14 @@ function stagedClaudeBinary(): string | null {
 const claudeBinary = stagedClaudeBinary();
 
 /**
+ * The staged binary path (or null), for other local one-shot SDK calls — the playbook preflight
+ * check runs its own `query()` and needs the same packaged-build resolution this module does.
+ */
+export function claudeBinaryPath(): string | null {
+  return claudeBinary;
+}
+
+/**
  * Loads the base system prompt from the server, throwing if it cannot be had.
  *
  * There is deliberately NO local fallback. The prompt carries the grounding rules, the citation
@@ -690,7 +698,7 @@ export function sandboxDirFor(userDataDir: string): string {
 }
 
 /** Subprocess env: inherit (minus ANTHROPIC_API_KEY), defaulting CLAUDE_DEBUG on only in dev. */
-function debugEnv(): Record<string, string | undefined> {
+export function debugEnv(): Record<string, string | undefined> {
   const env = sanitizedEnv();
   if (env.CLAUDE_DEBUG === undefined && process.env.ELECTRON_RENDERER_URL) {
     env.CLAUDE_DEBUG = '1';
