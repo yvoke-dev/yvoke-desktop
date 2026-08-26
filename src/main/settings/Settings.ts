@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   maxTurns: 0,
   playbookValidationEnabled: true,
+  showPrototypePlaybooks: false,
   orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,
   appearance: DEFAULT_APPEARANCE,
 };
@@ -69,6 +70,7 @@ const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
   'webSearch',
   'maxTurns',
   'playbookValidationEnabled',
+  'showPrototypePlaybooks',
   'orchestrator',
   'appearance',
 ];

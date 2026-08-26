@@ -56,6 +56,11 @@ export interface AppSettings {
    * Mirrors the web's `app.chat.playbook-validation-enabled`; like it, absent means on.
    */
   playbookValidationEnabled?: boolean;
+  /**
+   * Whether prototype playbooks (marked with prototype = true) should be visible and selectable.
+   * False by default.
+   */
+  showPrototypePlaybooks?: boolean;
   /** Multi-agent orchestrator mode: role → Claude model binding + budgets. Optional (Off if absent). */
   orchestrator?: OrchestratorSettings;
   /** Theme + density + type scale. Optional so an older settings.json still loads. */
@@ -290,6 +295,8 @@ export interface McpPromptInfo {
   tools?: string[];
   /** Whether this playbook may compute (the safe mcp__compute__* tools). Undefined = not declared. */
   codeExecution?: boolean;
+  /** Whether this playbook is marked as an experimental/prototype playbook. */
+  prototype?: boolean;
   /** Which agent role the playbook is written for; undefined when the server does not say. */
   targetAgent?: PlaybookRole | string;
 }
@@ -320,8 +327,10 @@ export function controlPlaybookNames(profiles: OrchestratorProfile[]): Set<strin
 export function isUserSelectablePlaybook(
   prompt: McpPromptInfo,
   controlNames: ReadonlySet<string>,
+  showPrototypes = false,
 ): boolean {
   if (prompt.targetAgent === 'orchestrator' || prompt.targetAgent === 'reviewer') return false;
+  if (!showPrototypes && prompt.prototype) return false;
   return !controlNames.has(prompt.name);
 }
 

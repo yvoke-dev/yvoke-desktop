@@ -79,11 +79,12 @@ export default function App(): React.JSX.Element {
   // the same playbooks in the same order. The server returns them in no particular order.
   const visiblePrompts = useMemo(() => {
     const control = controlPlaybookNames(profiles);
+    const showPrototypes = Boolean(settings?.showPrototypePlaybooks);
     return prompts
-      .filter((p) => isUserSelectablePlaybook(p, control))
+      .filter((p) => isUserSelectablePlaybook(p, control, showPrototypes))
       .slice()
       .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
-  }, [prompts, profiles]);
+  }, [prompts, profiles, settings?.showPrototypePlaybooks]);
 
   useEffect(() => {
     // Live text/thinking events arrive per-token, each carrying the full accumulated string. A

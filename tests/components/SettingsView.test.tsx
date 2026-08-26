@@ -209,4 +209,19 @@ describe('SettingsView', () => {
       ),
     );
   });
+
+  it('saves showPrototypePlaybooks toggle in Agents pane', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />);
+    openPane('Agents');
+    fireEvent.click(screen.getByLabelText(/Show prototype playbooks/));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          showPrototypePlaybooks: true,
+        }),
+      ),
+    );
+  });
 });

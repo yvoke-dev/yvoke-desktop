@@ -82,6 +82,58 @@ describe('bare id citations', () => {
     expect(container.querySelector('button.citation-link')?.textContent).toBe('[274b9610]');
   });
 
+  it('renders adjacent separate brackets [uuid1][uuid2] as multiple clickable pills', () => {
+    const onCitation = vi.fn();
+    const UUID2 = '9ab3009d-2057-49db-a03f-27aeb336ff49';
+    render(<Markdown content={`Adjacent [${UUID}][${UUID2}].`} onCitation={onCitation} />);
+    const pill1 = screen.getByRole('button', { name: '[274b9610]' });
+    const pill2 = screen.getByRole('button', { name: '[9ab3009d]' });
+    expect(pill1).toBeTruthy();
+    expect(pill2).toBeTruthy();
+    fireEvent.click(pill1);
+    expect(onCitation).toHaveBeenCalledWith({ id: UUID });
+    fireEvent.click(pill2);
+    expect(onCitation).toHaveBeenCalledWith({ id: UUID2 });
+  });
+
+  it('renders grouped comma-separated bare uuids in a single bracket as multiple clickable pills (with or without space)', () => {
+    const onCitation = vi.fn();
+    const UUID2 = '9ab3009d-2057-49db-a03f-27aeb336ff49';
+    // Test with space: [uuid1, uuid2]
+    const { unmount } = render(<Markdown content={`Multiple sources [${UUID}, ${UUID2}].`} onCitation={onCitation} />);
+    expect(screen.getByRole('button', { name: '[274b9610]' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '[9ab3009d]' })).toBeTruthy();
+    unmount();
+
+    // Test without space: [uuid1,uuid2]
+    render(<Markdown content={`Multiple sources [${UUID},${UUID2}].`} onCitation={onCitation} />);
+    const pill1 = screen.getByRole('button', { name: '[274b9610]' });
+    const pill2 = screen.getByRole('button', { name: '[9ab3009d]' });
+    expect(pill1).toBeTruthy();
+    expect(pill2).toBeTruthy();
+    fireEvent.click(pill2);
+    expect(onCitation).toHaveBeenCalledWith({ id: UUID2 });
+  });
+
+  it('renders grouped chunk_ids in a single bracket as multiple clickable pills', () => {
+    const onCitation = vi.fn();
+    render(<Markdown content="Sources [chunk_id=abc123, chunk_id=def456]." onCitation={onCitation} />);
+    const pill1 = screen.getByRole('button', { name: '[chunk_id=abc123]' });
+    const pill2 = screen.getByRole('button', { name: '[chunk_id=def456]' });
+    expect(pill1).toBeTruthy();
+    expect(pill2).toBeTruthy();
+    fireEvent.click(pill1);
+    expect(onCitation).toHaveBeenCalledWith({ chunkId: 'abc123' });
+  });
+
+  it('renders grouped numbered markers [1, 2] as individual superscripts', () => {
+    const { container } = render(<Markdown content="Claim [1, 2]." onCitation={vi.fn()} />);
+    const markers = container.querySelectorAll('sup.ref-marker');
+    expect(markers).toHaveLength(2);
+    expect(markers[0]?.textContent).toBe('1');
+    expect(markers[1]?.textContent).toBe('2');
+  });
+
   it('leaves markers as plain text when there is no citation handler', () => {
     const { container } = render(<Markdown content={`Claim [${UUID}].`} />);
     expect(container.querySelector('button')).toBeNull();

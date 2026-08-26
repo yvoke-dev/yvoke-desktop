@@ -514,6 +514,20 @@ export function SettingsView(props: {
                   </span>
                 </span>
               </label>
+              <label className="check-field">
+                <input
+                  type="checkbox"
+                  checked={Boolean(draft.showPrototypePlaybooks)}
+                  onChange={(e) => setDraft({ ...draft, showPrototypePlaybooks: e.target.checked })}
+                />
+                <span className="check-field-text">
+                  <span className="check-field-name">Show prototype playbooks</span>
+                  <span className="settings-hint">
+                    Show experimental and prototype playbooks in the playbook picker and slash menu.
+                    Hidden by default.
+                  </span>
+                </span>
+              </label>
 
               <div className="settings-section-label">Multi-agent orchestrator</div>
               <p className="settings-hint settings-section-note">

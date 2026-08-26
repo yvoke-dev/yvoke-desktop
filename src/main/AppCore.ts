@@ -165,7 +165,8 @@ export class AppCore {
     // The same list the picker shows: suggesting an orchestrator or reviewer playbook would
     // recommend something the user cannot select (see isUserSelectablePlaybook).
     const control = controlPlaybookNames(profiles);
-    const candidates = prompts.filter((p) => isUserSelectablePlaybook(p, control));
+    const showPrototypes = Boolean(settings.showPrototypePlaybooks);
+    const candidates = prompts.filter((p) => isUserSelectablePlaybook(p, control, showPrototypes));
     const selected = candidates.find((p) => p.name === request.promptName);
     // Nothing to compare against: the server was unreachable, or this is the only playbook there is.
     if (!selected || candidates.length < 2) return PASSES;

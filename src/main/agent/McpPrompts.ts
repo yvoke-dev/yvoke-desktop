@@ -73,6 +73,7 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     })),
     tools: Array.isArray(meta.tools) ? (meta.tools as unknown[]).map(String) : undefined,
     codeExecution: typeof meta.codeExecution === 'boolean' ? meta.codeExecution : undefined,
+    prototype: typeof meta.prototype === 'boolean' ? meta.prototype : undefined,
     targetAgent: typeof meta.targetAgent === 'string' ? meta.targetAgent : undefined,
   };
 }

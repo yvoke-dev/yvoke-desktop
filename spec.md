@@ -132,7 +132,7 @@ behind it, and the work that produced it can be opened and read.
 | Capability | What happens |
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
-| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
+| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
 | **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
@@ -151,6 +151,9 @@ behind it, and the work that produced it can be opened and read.
 
 ### How it behaves
 
+- **Prototype playbooks are hidden by default.** Playbooks flagged with `prototype: true` on the server are
+  excluded from the picker, slash autocomplete, and preflight recommendations unless *Show prototype playbooks*
+  is enabled in Settings > Agents.
 - **A playbook is required for a single-agent question**, as it is on the web: a playbook is what
   scopes the answer, so a message carrying none is refused with a *Playbook required* card and the
   draft is kept. The refusal stands until a playbook is picked. Two cases are not gated, because in
@@ -821,7 +824,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
 | **Models** | Which models the composer offers, which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
-| **Agents** | Whether a playbook-carrying message is preflighted; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
+| **Agents** | Whether a playbook-carrying message is preflighted; whether to show prototype playbooks in the playbook picker and slash menu; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web at all, and the exact list of domains it may search. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |

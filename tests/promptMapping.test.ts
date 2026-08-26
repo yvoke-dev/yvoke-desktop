@@ -30,12 +30,14 @@ describe('toPromptInfo', () => {
     expect(info.tools).toEqual(SERVED._meta.tools);
     expect(info.codeExecution).toBe(false);
     expect(info.targetAgent).toBe('specialist');
+    expect(info.prototype).toBeUndefined();
   });
 
   it('still reads a server that sends a bare `meta`', () => {
-    const info = toPromptInfo({ name: 'x', meta: { targetAgent: 'reviewer', codeExecution: true, tools: ['a'] } });
+    const info = toPromptInfo({ name: 'x', meta: { targetAgent: 'reviewer', codeExecution: true, prototype: true, tools: ['a'] } });
     expect(info.targetAgent).toBe('reviewer');
     expect(info.codeExecution).toBe(true);
+    expect(info.prototype).toBe(true);
     expect(info.tools).toEqual(['a']);
   });
 
@@ -45,15 +47,17 @@ describe('toPromptInfo', () => {
     const info = toPromptInfo({ name: 'x' });
     expect(info.tools).toBeUndefined();
     expect(info.codeExecution).toBeUndefined();
+    expect(info.prototype).toBeUndefined();
     expect(info.targetAgent).toBeUndefined();
     expect(info.title).toBe('x');
     expect(info.description).toBe('');
   });
 
   it('ignores metadata of the wrong type rather than passing it on', () => {
-    const info = toPromptInfo({ name: 'x', _meta: { tools: 'search_corpus', codeExecution: 'yes', targetAgent: 7 } });
+    const info = toPromptInfo({ name: 'x', _meta: { tools: 'search_corpus', codeExecution: 'yes', prototype: 'true', targetAgent: 7 } });
     expect(info.tools).toBeUndefined();
     expect(info.codeExecution).toBeUndefined();
+    expect(info.prototype).toBeUndefined();
     expect(info.targetAgent).toBeUndefined();
   });
 });

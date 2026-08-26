@@ -37,24 +37,12 @@ type HastNode = HastText | HastElement | { type: string; children?: HastNode[] }
 /** Elements whose text is code or is already a link: never rewrite inside these. */
 const OPAQUE = new Set(['code', 'pre', 'a']);
 
-const CITATION = /\[(chunk_id|document_id|file)=([a-zA-Z0-9_.-]+)\]/g;
+const UUID_HEX =
+  '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32}';
+const CITE_ITEM = `(?:(?:chunk_id|document_id|file)=[a-zA-Z0-9_.-]+|${UUID_HEX})`;
+const CITE_GROUP = new RegExp(`\\[\\s*${CITE_ITEM}(?:\\s*,\\s*${CITE_ITEM})*\\s*\\]`, 'g');
 
-/**
- * A bare id: a hyphenated 36-char uuid, or the same 32 hex digits with the hyphens stripped.
- *
- * Deliberately no looser than that. `CitationVerifier` in the web backend once accepted 6+ hex
- * characters and consequently classified `[facade]`, `[decade]` and `[500123]` as ids; here the
- * cost of over-matching is a dead pill on the user's own prose rather than deleted text, but the
- * same narrow shape keeps the two ends agreeing on what a citation even is.
- *
- * A truncated id (`[274b9610]`) is NOT matched. The server resolves those by prefix, but 8 hex
- * characters is also an ordinary word or number in prose, and this pattern has no `chunk_id=`
- * prefix to lean on the way the kinded form does.
- */
-const BARE_ID =
-  /\[([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})\]/g;
-
-const NUMBERED = /\[(\d{1,2})\]/g;
+const NUMBERED_GROUP = /\[\s*\d{1,2}(?:\s*,\s*\d{1,2})*\s*\]/g;
 
 /**
  * A References entry: `[N]` at the start of its block, followed by a citation token.
@@ -64,7 +52,7 @@ const NUMBERED = /\[(\d{1,2})\]/g;
  * form would superscript the `[1]` labels of a legacy bare-id list.
  */
 const REF_DEF_BLOCK =
-  /^\s*\[\d{1,2}\]\s+\[(?:(?:chunk_id|document_id|file)=|[0-9a-fA-F]{8})/;
+  /^\s*\[\d{1,2}(?:\s*,\s*\d{1,2})*\]\s+\[(?:(?:chunk_id|document_id|file)=|[0-9a-fA-F]{8})/;
 
 function isElement(node: HastNode): node is HastElement {
   return node.type === 'element';
@@ -104,11 +92,9 @@ function splitText(value: string, inRefBlock: boolean): HastNode[] {
   const out: HastNode[] = [];
   let pos = 0;
 
-  // One pass over all three patterns, so the earliest match always wins. BARE_ID precedes
-  // NUMBERED only for readability — the two cannot both match the same run, since a bare id is at
-  // least 32 characters and `[N]` is at most two digits.
+  // One pass over both patterns, so the earliest match always wins.
   const combined = new RegExp(
-    `${CITATION.source}|${BARE_ID.source}|${NUMBERED.source}`,
+    `${CITE_GROUP.source}|${NUMBERED_GROUP.source}`,
     'g',
   );
   let m: RegExpExecArray | null;
@@ -116,20 +102,37 @@ function splitText(value: string, inRefBlock: boolean): HastNode[] {
     if (m.index > pos) {
       out.push({ type: 'text', value: value.slice(pos, m.index) });
     }
-    const [full, kind, id, bareId, num] = m;
-    if (kind && id) {
-      const scheme = kind === 'chunk_id' ? 'chunk' : kind === 'document_id' ? 'document' : 'file';
-      out.push(link(`citation:${scheme}:${id}`, full));
-    } else if (bareId) {
-      // `id`, not `chunk`: the marker itself does not say which table the uuid names, and guessing
-      // is what breaks the document-id case on the web (citation-render.js hard-codes
-      // data-chunk-id, so a bare document id there resolves to "no longer available"). The kind is
-      // resolved once, against both tables, in McpPrompts.getSection.
-      out.push(link(`citation:id:${bareId}`, `[${bareId.slice(0, 8)}]`));
-    } else if (num) {
-      // Every `[N]` labelling a References entry stays as written — a block often holds the whole
-      // list, so scoping this to the first one left `[2]`, `[3]`, … superscripted mid-list.
-      out.push(inRefBlock ? { type: 'text', value: full } : marker(num));
+    const full = m[0];
+    const inner = full.slice(1, -1).trim();
+
+    if (/^\d{1,2}(?:\s*,\s*\d{1,2})*$/.test(inner)) {
+      if (inRefBlock) {
+        out.push({ type: 'text', value: full });
+      } else {
+        const nums = inner.split(',');
+        for (const num of nums) {
+          out.push(marker(num.trim()));
+        }
+      }
+    } else {
+      const items = inner.split(',');
+      for (const item of items) {
+        const s = item.trim();
+        const kindMatch = /^(chunk_id|document_id|file)=([a-zA-Z0-9_.-]+)$/i.exec(s);
+        if (kindMatch) {
+          const kind = kindMatch[1].toLowerCase();
+          const id = kindMatch[2];
+          const scheme = kind === 'chunk_id' ? 'chunk' : kind === 'document_id' ? 'document' : 'file';
+          out.push(link(`citation:${scheme}:${id}`, `[${s}]`));
+          continue;
+        }
+        const uuidMatch = new RegExp(`^(${UUID_HEX})$`).exec(s);
+        if (uuidMatch) {
+          const bareId = uuidMatch[1];
+          out.push(link(`citation:id:${bareId}`, `[${bareId.slice(0, 8)}]`));
+          continue;
+        }
+      }
     }
     pos = m.index + full.length;
   }
