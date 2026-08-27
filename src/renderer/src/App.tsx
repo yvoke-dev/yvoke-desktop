@@ -27,6 +27,12 @@ export interface LiveTurn {
   error?: string;
   /** Neutral status note (e.g. after the user stops a turn). */
   notice?: string;
+  /**
+   * Whether the user has had this error/notice on screen. A failure on a background thread has to
+   * survive the switch back that first shows it; a banner already read must not follow the user
+   * around every time they revisit the conversation.
+   */
+  seen?: boolean;
   clarifyingQuestion?: {
     toolUseId: string;
     question: string;
@@ -44,23 +50,44 @@ export default function App(): React.JSX.Element {
   const [threads, setThreads] = useState<ThreadMeta[]>([]);
   const [serverReachable, setServerReachable] = useState(true);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [liveTurn, setLiveTurn] = useState<LiveTurn>(EMPTY_TURN);
+  const [messagesByThread, setMessagesByThread] = useState<Record<string, ChatMessage[]>>({});
+  const [liveTurnsByThread, setLiveTurnsByThread] = useState<Record<string, LiveTurn>>({});
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [pendingSync, setPendingSync] = useState(0);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const activeThreadIdRef = useRef<string | null>(null);
   activeThreadIdRef.current = activeThreadId;
+  const liveTurnsByThreadRef = useRef<Record<string, LiveTurn>>({});
+  liveTurnsByThreadRef.current = liveTurnsByThread;
+
+  const messages = useMemo(
+    () => (activeThreadId ? messagesByThread[activeThreadId] ?? [] : []),
+    [activeThreadId, messagesByThread],
+  );
+  const liveTurn = useMemo(
+    () => (activeThreadId ? liveTurnsByThread[activeThreadId] ?? EMPTY_TURN : EMPTY_TURN),
+    [activeThreadId, liveTurnsByThread],
+  );
 
   // Stable identity so the sidebar's debounced search effect doesn't re-fire every render.
   const searchContent = useCallback((query: string) => window.api.searchThreads(query), []);
 
+  /** Re-read the conversation list. Returns whether the server answered, for callers that need it. */
   const refreshThreads = useCallback(async () => {
     const result = await window.api.listThreads();
     setThreads(result.threads);
     setServerReachable(result.serverReachable);
+    return result.serverReachable;
   }, []);
+
+  /** The list plus the catalogues only the server can supply — skipped when it is not answering. */
+  const refreshServer = useCallback(async () => {
+    if (!(await refreshThreads())) return;
+    void window.api.authStatus().then(setAuth);
+    void window.api.listPrompts().then(setPrompts);
+    void window.api.listOrchestratorProfiles().then(setProfiles);
+  }, [refreshThreads]);
 
   useEffect(() => {
     void window.api.getAppVersion().then(setAppVersion);
@@ -70,6 +97,16 @@ export default function App(): React.JSX.Element {
     void window.api.listOrchestratorProfiles().then(setProfiles);
     void refreshThreads();
   }, [refreshThreads]);
+
+  // When the server is unreachable, periodically poll so the banner clears and playbooks load
+  // automatically once the backend service starts.
+  useEffect(() => {
+    if (serverReachable) return;
+    const interval = setInterval(() => {
+      void refreshServer();
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [serverReachable, refreshServer]);
 
   // Orchestrator and reviewer playbooks are the runtime's own machinery, so they never appear in
   // the picker (see isUserSelectablePlaybook). Specialist playbooks stay pickable — they're useful
@@ -89,121 +126,171 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     // Live text/thinking events arrive per-token, each carrying the full accumulated string. A
     // setState per token forces a full markdown+KaTeX re-parse (O(n^2)), so we coalesce them:
-    // buffer the latest value and flush to state at most once every ~80ms. Non-delta events
-    // (turn-start / assistant-block / turn-complete) flush any pending value first so the rendered
-    // text is always exact at block/turn boundaries.
-    let pendingLiveText: string | null = null;
-    let pendingLiveThinking: string | null = null;
+    // buffer the latest value per thread and flush to state at most once every ~80ms. Non-delta
+    // events (turn-start / assistant-block / turn-complete) flush any pending value first so the
+    // rendered text is always exact at block/turn boundaries.
+    const pendingLiveByThread = new Map<string, { text?: string; thinking?: string }>();
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
     const flushLive = (): void => {
       flushTimer = null;
-      if (pendingLiveText === null && pendingLiveThinking === null) return;
-      const text = pendingLiveText;
-      const thinking = pendingLiveThinking;
-      pendingLiveText = null;
-      pendingLiveThinking = null;
-      setLiveTurn((t) => ({
-        ...t,
-        ...(text !== null ? { liveText: text } : {}),
-        ...(thinking !== null ? { liveThinking: thinking } : {}),
-      }));
+      if (pendingLiveByThread.size === 0) return;
+      const entries = new Map(pendingLiveByThread);
+      pendingLiveByThread.clear();
+      setLiveTurnsByThread((prev) => {
+        const next = { ...prev };
+        for (const [tId, { text, thinking }] of entries.entries()) {
+          const current = next[tId] ?? EMPTY_TURN;
+          next[tId] = {
+            ...current,
+            ...(text !== undefined ? { liveText: text } : {}),
+            ...(thinking !== undefined ? { liveThinking: thinking } : {}),
+          };
+        }
+        return next;
+      });
     };
 
     const scheduleFlush = (): void => {
       if (flushTimer === null) flushTimer = setTimeout(flushLive, 80);
     };
 
-    const cancelFlush = (): void => {
+    const cancelFlushForThread = (threadId: string): void => {
+      pendingLiveByThread.delete(threadId);
+    };
+
+    const cancelAllFlush = (): void => {
       if (flushTimer !== null) {
         clearTimeout(flushTimer);
         flushTimer = null;
       }
-      pendingLiveText = null;
-      pendingLiveThinking = null;
+      pendingLiveByThread.clear();
     };
 
     const offAgent = window.api.onAgentEvent((event: AgentEvent) => {
-      if ('threadId' in event && event.threadId !== activeThreadIdRef.current) {
-        return;
-      }
       switch (event.kind) {
         case 'turn-start':
-          cancelFlush();
-          setLiveTurn({ running: true, liveText: '', liveThinking: '', blocks: [] });
-          break;
-        case 'live-text':
-          pendingLiveText = event.text;
-          scheduleFlush();
-          break;
-        case 'live-thinking':
-          pendingLiveThinking = event.text;
-          scheduleFlush();
-          break;
-        case 'assistant-block':
-          cancelFlush();
-          setLiveTurn((t) => ({
-            ...t,
-            liveText: '',
-            liveThinking: '',
-            blocks: [...t.blocks, { text: event.text, thinking: event.thinking, toolCalls: event.toolCalls }],
+          cancelFlushForThread(event.threadId);
+          setLiveTurnsByThread((prev) => ({
+            ...prev,
+            [event.threadId]: { running: true, liveText: '', liveThinking: '', blocks: [] },
           }));
+          break;
+        case 'live-text': {
+          const entry = pendingLiveByThread.get(event.threadId) ?? {};
+          entry.text = event.text;
+          pendingLiveByThread.set(event.threadId, entry);
+          scheduleFlush();
+          break;
+        }
+        case 'live-thinking': {
+          const entry = pendingLiveByThread.get(event.threadId) ?? {};
+          entry.thinking = event.text;
+          pendingLiveByThread.set(event.threadId, entry);
+          scheduleFlush();
+          break;
+        }
+        case 'assistant-block':
+          cancelFlushForThread(event.threadId);
+          setLiveTurnsByThread((prev) => {
+            const current = prev[event.threadId] ?? { running: true, liveText: '', liveThinking: '', blocks: [] };
+            return {
+              ...prev,
+              [event.threadId]: {
+                ...current,
+                liveText: '',
+                liveThinking: '',
+                blocks: [...current.blocks, { text: event.text, thinking: event.thinking, toolCalls: event.toolCalls }],
+              },
+            };
+          });
           break;
         case 'tool-result':
-          setLiveTurn((t) => ({
-            ...t,
-            blocks: t.blocks.map((b) => ({
-              ...b,
-              toolCalls: b.toolCalls.map((c) =>
-                c.id === event.toolUseId ? { ...c, result: event.result, isError: event.isError } : c,
-              ),
-            })),
-          }));
+          setLiveTurnsByThread((prev) => {
+            const current = prev[event.threadId] ?? EMPTY_TURN;
+            return {
+              ...prev,
+              [event.threadId]: {
+                ...current,
+                blocks: current.blocks.map((b) => ({
+                  ...b,
+                  toolCalls: b.toolCalls.map((c) =>
+                    c.id === event.toolUseId ? { ...c, result: event.result, isError: event.isError } : c,
+                  ),
+                })),
+              },
+            };
+          });
           break;
-        case 'turn-complete':
-          cancelFlush();
-          setLiveTurn(EMPTY_TURN);
+        case 'turn-complete': {
+          cancelFlushForThread(event.threadId);
+          const onScreen = event.threadId === activeThreadIdRef.current;
+          setLiveTurnsByThread((prev) => ({
+            ...prev,
+            [event.threadId]: !event.isError
+              ? EMPTY_TURN
+              : event.aborted
+                ? { ...EMPTY_TURN, notice: 'Processing stopped.', seen: onScreen }
+                : { ...EMPTY_TURN, error: event.errorMessage ?? 'The turn failed.', seen: onScreen },
+          }));
           if (!event.isError) {
-            setMessages((m) => [...m, event.message]);
-          } else if (event.aborted) {
-            setLiveTurn({ ...EMPTY_TURN, notice: 'Processing stopped.' });
-          } else {
-            setLiveTurn({ ...EMPTY_TURN, error: event.errorMessage ?? 'The turn failed.' });
+            setMessagesByThread((prev) => ({
+              ...prev,
+              [event.threadId]: [...(prev[event.threadId] ?? []), event.message],
+            }));
           }
           void refreshThreads();
           break;
-        case 'error':
-          cancelFlush();
-          setLiveTurn({ ...EMPTY_TURN, error: event.message });
+        }
+        case 'error': {
+          cancelFlushForThread(event.threadId);
+          const onScreen = event.threadId === activeThreadIdRef.current;
+          setLiveTurnsByThread((prev) => ({
+            ...prev,
+            [event.threadId]: { ...EMPTY_TURN, error: event.message, seen: onScreen },
+          }));
           void window.api.authStatus().then(setAuth);
           break;
+        }
         case 'review-enforced': {
           // Mirror the main process: the draft answer was discarded, so drop the prose already
           // streamed into the live view and keep only the delegation trace.
-          cancelFlush();
+          cancelFlushForThread(event.threadId);
           const notice =
             event.reason === 'skipped'
               ? 'No review pass in that answer — asking the reviewer before delivering…'
               : event.reason === 'unclear'
                 ? `The reviewer returned no clear verdict — revising (round ${event.round ?? 1})…`
                 : `The reviewer rejected that draft — revising (round ${event.round ?? 1})…`;
-          setLiveTurn((t) => ({
-            ...t,
-            liveText: '',
-            blocks: t.blocks.map((b) => ({ ...b, text: '' })).filter((b) => b.thinking || b.toolCalls.length > 0),
-            notice,
-          }));
+          setLiveTurnsByThread((prev) => {
+            const current = prev[event.threadId] ?? EMPTY_TURN;
+            return {
+              ...prev,
+              [event.threadId]: {
+                ...current,
+                liveText: '',
+                blocks: current.blocks.map((b) => ({ ...b, text: '' })).filter((b) => b.thinking || b.toolCalls.length > 0),
+                notice,
+              },
+            };
+          });
           break;
         }
         case 'clarifying-question':
-          setLiveTurn((t) => ({
-            ...t,
-            clarifyingQuestion: {
-              toolUseId: event.toolUseId,
-              question: event.question,
-              options: event.options ?? [],
-            },
-          }));
+          setLiveTurnsByThread((prev) => {
+            const current = prev[event.threadId] ?? EMPTY_TURN;
+            return {
+              ...prev,
+              [event.threadId]: {
+                ...current,
+                clarifyingQuestion: {
+                  toolUseId: event.toolUseId,
+                  question: event.question,
+                  options: event.options ?? [],
+                },
+              },
+            };
+          });
           break;
         default:
           break;
@@ -224,14 +311,21 @@ export default function App(): React.JSX.Element {
         if (event.state === 'synced') {
           void refreshThreads();
         }
-      } else if (event.kind === 'server-ids' && event.threadId === activeThreadIdRef.current) {
-        setMessages((msgs) =>
-          msgs.map((m) => (event.mapping[m.localId] ? { ...m, serverId: event.mapping[m.localId] } : m)),
-        );
+      } else if (event.kind === 'server-ids') {
+        setMessagesByThread((prev) => {
+          const msgs = prev[event.threadId];
+          if (!msgs) return prev;
+          return {
+            ...prev,
+            [event.threadId]: msgs.map((m) =>
+              event.mapping[m.localId] ? { ...m, serverId: event.mapping[m.localId] } : m,
+            ),
+          };
+        });
       }
     });
     return () => {
-      cancelFlush();
+      cancelAllFlush();
       offAgent();
       offSync();
     };
@@ -239,8 +333,46 @@ export default function App(): React.JSX.Element {
 
   const openThread = useCallback(async (threadId: string) => {
     setActiveThreadId(threadId);
-    setLiveTurn(EMPTY_TURN);
-    setMessages(await window.api.getMessages(threadId));
+    // A finished turn's live state is only ever a leftover error or stop notice, and it is retired
+    // by having been read rather than by the turn ending: the first open after a background failure
+    // surfaces it and marks it read, the next one clears it. A running turn keeps everything —
+    // surviving a switch is the whole point of per-thread live turns.
+    setLiveTurnsByThread((prev) => {
+      const current = prev[threadId];
+      if (!current || current.running || (!current.error && !current.notice)) return prev;
+      return { ...prev, [threadId]: current.seen ? EMPTY_TURN : { ...current, seen: true } };
+    });
+    const msgs = await window.api.getMessages(threadId);
+    setMessagesByThread((prev) => {
+      // If a turn is currently running for this thread, prev[threadId] contains the in-flight
+      // user message which has not been written to disk yet. Avoid clobbering in-memory messages.
+      if (liveTurnsByThreadRef.current[threadId]?.running && (prev[threadId]?.length ?? 0) > 0) {
+        return prev;
+      }
+      // Every open re-reads from disk, so a cached entry for a conversation nobody is looking at is
+      // never read again — only the open thread and any with a turn still in flight are
+      // load-bearing (the latter hold optimistic messages the store does not have yet). Holding the
+      // rest would keep every transcript opened this session, tool results included, resident.
+      const next: Record<string, ChatMessage[]> = { [threadId]: msgs };
+      for (const [id, cached] of Object.entries(prev)) {
+        if (id !== threadId && liveTurnsByThreadRef.current[id]?.running) next[id] = cached;
+      }
+      return next;
+    });
+    // Drop live turns that carry nothing: a clean turn-complete leaves EMPTY_TURN behind for every
+    // thread that has ever run one. Anything still holding an error or an unread notice stays.
+    setLiveTurnsByThread((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [id, turn] of Object.entries(prev)) {
+        if (id === threadId) continue;
+        if (!turn.running && !turn.error && !turn.notice && !turn.clarifyingQuestion && turn.blocks.length === 0) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
   }, []);
 
   const createThread = useCallback(async () => {
@@ -252,9 +384,18 @@ export default function App(): React.JSX.Element {
   const deleteThread = useCallback(
     async (threadId: string) => {
       await window.api.deleteThread(threadId);
+      setMessagesByThread((prev) => {
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+      setLiveTurnsByThread((prev) => {
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
       if (activeThreadIdRef.current === threadId) {
         setActiveThreadId(null);
-        setMessages([]);
       }
       await refreshThreads();
     },
@@ -264,6 +405,7 @@ export default function App(): React.JSX.Element {
   const sendMessage = useCallback(
     async (text: string, promptName?: string) => {
       if (!activeThreadId) return;
+      const threadId = activeThreadId;
       const userMessage: ChatMessage = {
         localId: `optimistic-${Date.now()}`,
         role: 'user',
@@ -271,11 +413,21 @@ export default function App(): React.JSX.Element {
         playbook: promptName,
         createdAt: new Date().toISOString(),
       };
-      setMessages((m) => [...m, userMessage]);
+      setMessagesByThread((prev) => ({
+        ...prev,
+        [threadId]: [...(prev[threadId] ?? []), userMessage],
+      }));
+      setLiveTurnsByThread((prev) => ({
+        ...prev,
+        [threadId]: { running: true, liveText: '', liveThinking: '', blocks: [] },
+      }));
       try {
-        await window.api.sendMessage({ threadId: activeThreadId, text, promptName });
+        await window.api.sendMessage({ threadId, text, promptName });
       } catch (error) {
-        setLiveTurn({ ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error) });
+        setLiveTurnsByThread((prev) => ({
+          ...prev,
+          [threadId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },
+        }));
       }
     },
     [activeThreadId],
@@ -353,19 +505,17 @@ export default function App(): React.JSX.Element {
           syncError={syncError}
           onServerSignIn={() => {
             void window.api.serverSignIn().then(() => {
-              void window.api.authStatus().then(setAuth);
-              void refreshThreads();
-              void window.api.listPrompts().then(setPrompts);
-              void window.api.listOrchestratorProfiles().then(setProfiles);
+              void refreshServer();
             });
           }}
           onRetryAuth={() => {
             void window.api.authStatus().then((status) => {
               setAuth(status);
-              void refreshThreads();
-              void window.api.listPrompts().then(setPrompts);
-              void window.api.listOrchestratorProfiles().then(setProfiles);
+              void refreshServer();
             });
+          }}
+          onRetryServer={() => {
+            void refreshServer();
           }}
         />
         {showSettings ? (
@@ -377,9 +527,9 @@ export default function App(): React.JSX.Element {
             onSave={async (update) => {
               setSettings(await window.api.setSettings(update));
               setShowSettings(false);
-              void refreshThreads();
-              void window.api.listPrompts().then(setPrompts);
-              void window.api.listOrchestratorProfiles().then(setProfiles);
+              // A save can change the server address or auth mode, so re-check auth too — not just
+              // the list and the catalogues.
+              void refreshServer();
             }}
             onClose={() => setShowSettings(false)}
           />
@@ -396,7 +546,8 @@ export default function App(): React.JSX.Element {
             onPatchThread={(update) => void patchThread(activeThread.id, update)}
             onFeedback={async (messageLocalId, rating, comment) => {
               await window.api.submitFeedback({ threadId: activeThread.id, messageLocalId, rating, comment });
-              setMessages(await window.api.getMessages(activeThread.id));
+              const updated = await window.api.getMessages(activeThread.id);
+              setMessagesByThread((prev) => ({ ...prev, [activeThread.id]: updated }));
             }}
           />
         ) : (

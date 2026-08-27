@@ -157,6 +157,8 @@ interface ThreadSession {
   orchestratorProfile?: string;
   /** The user message for the in-flight turn, persisted once the turn completes. */
   pendingUser?: ChatMessage;
+  /** The playbook whose instructions are in this session's context, if any. */
+  injectedPlaybook?: string;
 }
 
 export interface AgentServiceDeps {
@@ -245,12 +247,20 @@ export class AgentService {
     session.busy = true;
     session.interrupted = false;
     session.lastActiveAt = Date.now();
-    session.turn = newTurnContext(thread.id);
+    session.turn = newTurnContext(thread.id, Boolean(thread.orchestratorProfile));
     session.turn.sessionId = thread.sessionId;
     this.deps.emit({ kind: 'turn-start', threadId: thread.id });
 
-    // The model sees the playbook (if any) prepended; we persist/show only the user's text.
-    const modelText = opts.injectBefore ? `${opts.injectBefore}\n\n---\n\n${text}` : text;
+    // The model sees the playbook (if any) prepended the first time that playbook is used in this
+    // session; follow-up turns under the same playbook omit it to preserve context. Tracking the
+    // name rather than a flag is what makes the two switch paths safe: a session rebuilt for a
+    // different playbook (the restart below) and a session resumed from disk have both not seen
+    // the selected playbook's text, and neither can be relied on to reset a boolean.
+    const shouldInjectPlaybook = Boolean(opts.injectBefore) && session.injectedPlaybook !== opts.playbookName;
+    const modelText = shouldInjectPlaybook ? `${opts.injectBefore}\n\n---\n\n${text}` : text;
+    if (shouldInjectPlaybook) {
+      session.injectedPlaybook = opts.playbookName;
+    }
     const userMessage: ChatMessage = {
       localId: randomUUID(),
       role: 'user',
@@ -429,7 +439,7 @@ export class AgentService {
       thinkingLevel: effectiveThinking,
       busy: false,
       interrupted: false,
-      turn: newTurnContext(thread.id),
+      turn: newTurnContext(thread.id, Boolean(thread.orchestratorProfile)),
       lastActiveAt: Date.now(),
       playbookName,
       orchestratorProfile: thread.orchestratorProfile,
@@ -635,7 +645,9 @@ export class AgentService {
     }
 
     const usage = session.turn.carriedUsage ? addUsage(session.turn.carriedUsage, resultUsage) : resultUsage;
-    const review = reviewStatusOf(session.turn.toolCalls, session.turn.reviewEnforced);
+    const review = session.orchestratorProfile
+      ? reviewStatusOf(session.turn.toolCalls, session.turn.reviewEnforced)
+      : undefined;
     let content = session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
     // Out of revision rounds with the reviewer still unsatisfied: the warning ships inside the
     // content (what gets synced and copied), not just as a renderer badge.
@@ -689,7 +701,7 @@ export class AgentService {
     session.busy = false;
     session.interrupted = false;
     session.lastActiveAt = Date.now();
-    session.turn = newTurnContext(threadId);
+    session.turn = newTurnContext(threadId, Boolean(session.orchestratorProfile));
   }
 }
 

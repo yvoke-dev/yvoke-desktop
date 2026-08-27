@@ -12,10 +12,11 @@ function formatTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
 }
 
-/** `12 in · 1,296 out · 112.7k cached` — moved off the window header and onto the trace. */
+/** `12 in · 1,296 out · 112.7k cache read · 10k cache write` — moved off the window header and onto the trace. */
 function usageLabel(usage: UsageTotals): string {
   const parts = [`${formatTokens(usage.inputTokens)} in`, `${formatTokens(usage.outputTokens)} out`];
-  if (usage.cacheReadTokens > 0) parts.push(`${formatTokens(usage.cacheReadTokens)} cached`);
+  if (usage.cacheReadTokens > 0) parts.push(`${formatTokens(usage.cacheReadTokens)} cache read`);
+  if (usage.cacheWriteTokens > 0) parts.push(`${formatTokens(usage.cacheWriteTokens)} cache write`);
   return parts.join(' · ');
 }
 

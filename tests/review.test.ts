@@ -72,6 +72,23 @@ describe('nextReviewAction', () => {
     delegation('reviewer', { verdict: { approved: false, feedback } }),
   ];
 
+  // Outside orchestrator mode the guard belongs to the caller, not to this classifier: a
+  // single-agent session is never offered the delegation tool, so an Agent call there is not a
+  // delegation to review. `nextReviewAction` is where that decision is made.
+  it('is never consulted for a single-agent turn — nextReviewAction short-circuits first', () => {
+    const calls = [delegation('oim-customers')];
+    expect(nextReviewAction({ ...base, orchestratorMode: false, toolCalls: calls })).toEqual({ kind: 'deliver' });
+    expect(
+      nextReviewAction({
+        ...base,
+        orchestratorMode: false,
+        toolCalls: [delegation('reviewer', { verdict: { approved: false } })],
+      }),
+    ).toEqual({ kind: 'deliver' });
+    // The same calls in orchestrator mode do reach the classifier and are acted on.
+    expect(nextReviewAction({ ...base, orchestratorMode: true, toolCalls: calls })).toEqual({ kind: 'enforce' });
+  });
+
   it('enforces a review when an orchestrated turn skipped the reviewer', () => {
     expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
     expect(nextReviewAction({ ...base, requireReview: true })).toEqual({ kind: 'enforce' });

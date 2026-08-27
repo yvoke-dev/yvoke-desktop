@@ -55,6 +55,8 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
 
 let validatePlaybook: Mock<(request: PlaybookValidationRequest) => Promise<PlaybookValidation>>;
 let onSend: Mock<(text: string, promptName?: string) => void>;
+let writeText: Mock<(text: string) => Promise<void>>;
+let originalClipboard: PropertyDescriptor | undefined;
 
 interface ChatOpts {
   thread?: ThreadMeta;
@@ -115,9 +117,19 @@ beforeEach(() => {
   validatePlaybook = vi.fn(async () => ({ plausible: true }) as PlaybookValidation);
   onSend = vi.fn<(text: string, promptName?: string) => void>();
   (window as unknown as { api: unknown }).api = { validatePlaybook };
+
+  // Stubbed per test and restored below: a leaked always-succeeding clipboard would stop a later
+  // test from ever reaching CopyButton's execCommand fallback.
+  writeText = vi.fn(async () => undefined);
+  originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+  else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+});
 
 describe('playbook preflight', () => {
   it('checks the selected playbook and sends when it fits', async () => {
@@ -362,4 +374,210 @@ describe('playbook preflight', () => {
     expect(validatePlaybook).not.toHaveBeenCalled();
     expect(onSend).toHaveBeenCalledWith('How do I onboard?', undefined);
   });
+
+  it('keeps the active playbook across messages so follow-ups send immediately without repeating preflight', async () => {
+    const { container, rerender } = renderChat();
+    ask(container, 'First question', 'Getting started');
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('First question', 'oim-getting-started'));
+    expect(validatePlaybook).toHaveBeenCalledTimes(1);
+
+    // Simulate assistant reply landed
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'First question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
+    ];
+    rerender(chat({ messages: existingMessages }));
+
+    // Send follow-up question
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(onSend).toHaveBeenCalledWith('Follow up question', 'oim-getting-started');
+    // Preflight was not re-run for the follow-up under the same playbook
+    expect(validatePlaybook).toHaveBeenCalledTimes(1);
+  });
+
+  it('initializes active playbook from the last user message when opening an existing thread', () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow up' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(onSend).toHaveBeenCalledWith('Follow up', 'oim-schema');
+  });
+
+  it('runs preflight when the user switches to a different playbook for a follow-up question', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    // Switch playbook via autocomplete
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+
+    // Type new question and submit
+    fireEvent.change(textarea, { target: { value: 'Different area question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    await waitFor(() =>
+      expect(validatePlaybook).toHaveBeenCalledWith({
+        threadId: 't1',
+        text: 'Different area question',
+        promptName: 'oim-schema',
+      }),
+    );
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Different area question', 'oim-schema'));
+  });
+
+  it('renders a copy button on user messages that copies the question text', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Which database table stores IT Shop requests?', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const userMessage = container.querySelector('.message.user');
+    expect(userMessage).toBeTruthy();
+
+    const copyBtn = userMessage?.querySelector('.icon-button');
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.getAttribute('data-tip')).toBe('Copy question');
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Which database table stores IT Shop requests?'));
+    await waitFor(() => expect(copyBtn?.getAttribute('data-tip')).toBe('Copied'));
+  });
+
+  it('does not auto-select any playbook when starting a new conversation', () => {
+    const { container } = renderChat({ messages: [] });
+    expect(container.querySelector('.active-playbook')).toBeNull();
+    expect(container.querySelector('.picker')).toBeTruthy();
+  });
+
+  it('clears active playbook when switching from an existing thread to a new empty thread', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container, rerender } = renderChat({ messages: existingMessages });
+    await waitFor(() => expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema'));
+
+    // Switch to a new empty conversation
+    rerender(chat({ thread: { ...THREAD, id: 't-new', title: 'New chat' }, messages: [] }));
+    expect(container.querySelector('.active-playbook')).toBeNull();
+    expect(container.querySelector('.picker')).toBeTruthy();
+  });
+
+  /**
+   * Regression: the playbook was mirrored into state by an effect that read `activePrompt` without
+   * depending on it, so the render that switched conversations still saw the PREVIOUS one's pick and
+   * skipped — leaving the new conversation with no playbook at all. Both conversations have to carry
+   * one for the bug to show: with none selected on the way out the stale read is harmlessly null.
+   */
+  it('adopts the new conversation\u2019s playbook when switching between two that both have one', async () => {
+    const inSchema: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Which table?', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'That one.', createdAt: '' },
+    ];
+    const inGettingStarted: ChatMessage[] = [
+      { localId: 'u2', role: 'user', content: 'How do I start?', playbook: 'oim-getting-started', createdAt: '' },
+    ];
+    const { container, rerender } = renderChat({ messages: inSchema });
+    await waitFor(() => expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema'));
+
+    rerender(chat({ thread: { ...THREAD, id: 't2', title: 'Other' }, messages: inGettingStarted }));
+    await waitFor(() =>
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started'),
+    );
+  });
+
+  /**
+   * Regression: clearing the playbook only stuck until the message list next changed identity —
+   * which a `server-ids` sync event does after every synced turn — and then it was re-selected from
+   * the history it had just been cleared against. Backspace and the remove button are the two ways
+   * to clear, and they used to disagree about recording it.
+   */
+  it.each([
+    ['Backspace on an empty composer', (c: HTMLElement) => fireEvent.keyDown(c.querySelector('textarea')!, { key: 'Backspace' })],
+    ['the remove button', (c: HTMLElement) => fireEvent.click(c.querySelector('.active-playbook-remove')!)],
+  ])('keeps the playbook cleared via %s when the message list is replaced', async (_label, clear) => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container, rerender } = renderChat({ messages: existingMessages });
+    await waitFor(() => expect(container.querySelector('.active-playbook')).toBeTruthy());
+
+    clear(container);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    // Same content, new array identity — what App does when server ids come back for the turn.
+    rerender(chat({ messages: existingMessages.map((m) => ({ ...m })) }));
+    await waitFor(() => expect(container.querySelector('.active-playbook')).toBeNull());
+
+    // Still reachable afterwards: a clear is not a lock.
+    fireEvent.change(container.querySelector('textarea')!, { target: { value: '/getting' } });
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+  });
 });
+
+describe('the multi-agent profile selector', () => {
+  const ORDINARY: OrchestratorProfile = {
+    name: 'OIM',
+    orchestratorPlaybook: 'oim-orchestrator',
+    reviewerPlaybook: 'oim-orchestrator-reviewer',
+    specialistPlaybooks: [],
+  };
+  const PROTOTYPE: OrchestratorProfile = { ...ORDINARY, name: 'OIM Browsing', prototype: true };
+
+  /** The agent-mode select's option labels, in order. '' when the selector is not rendered. */
+  function options(container: HTMLElement): string[] {
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]');
+    return select ? Array.from(select.options).map((o) => o.textContent ?? '') : [];
+  }
+
+  it('omits a prototype profile while the setting is off', () => {
+    const { container } = renderChat({ profiles: [ORDINARY, PROTOTYPE] });
+    expect(options(container)).toEqual(['Single agent', 'OIM']);
+  });
+
+  it('offers it, badged, once the setting is on', () => {
+    const { container } = renderChat({
+      profiles: [ORDINARY, PROTOTYPE],
+      settings: settings({ showPrototypePlaybooks: true }),
+    });
+    expect(options(container)).toEqual(['Single agent', 'OIM', '🧪 OIM Browsing']);
+  });
+
+  // A select whose value matches no option falls back to the first one, so the composer would read
+  // "Single agent" over a thread that is still running the profile — and picking anything else
+  // would be the only way to make it agree with itself again.
+  it('keeps the profile the thread is bound to, setting off', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, orchestratorProfile: 'OIM Browsing' },
+      profiles: [ORDINARY, PROTOTYPE],
+    });
+    expect(options(container)).toEqual(['Single agent', 'OIM', '🧪 OIM Browsing']);
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!.value)
+      .toBe('OIM Browsing');
+  });
+
+  // Otherwise the composer offers a dropdown whose only entry means "no profile", which is what
+  // its absence already means.
+  it('renders no selector when every profile is a hidden prototype', () => {
+    const { container } = renderChat({ profiles: [PROTOTYPE] });
+    expect(options(container)).toEqual([]);
+  });
+});
+

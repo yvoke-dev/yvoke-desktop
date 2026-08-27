@@ -13,7 +13,7 @@ import type {
   ToolCallInfo,
   UsageTotals,
 } from '../../../shared/types';
-import { DEFAULT_APPEARANCE } from '../../../shared/types';
+import { DEFAULT_APPEARANCE, isUserSelectableProfile } from '../../../shared/types';
 import type { LiveTurn } from '../App';
 import { CitationModal, type CitationState } from './CitationModal';
 import { CopyButton } from './CopyButton';
@@ -36,7 +36,14 @@ function formatTokens(n: number): string {
  * of an orchestrated turn. Everything else is the run's working-out.
  */
 function isInlineCall(call: ToolCallInfo): boolean {
-  return call.name === 'Agent' || shortName(call.name) === 'ask_clarifying_question';
+  // A delegation is identified by the runtime having attributed a sub-agent to it — translate.ts
+  // sets `subagentType` only in orchestrator mode — rather than by the thread's mode as it stands
+  // now. A conversation can be moved off its profile mid-thread, and stored orchestrated turns
+  // have to keep their cards when it is.
+  return (
+    (call.name === 'Agent' && call.subagentType !== undefined) ||
+    shortName(call.name) === 'ask_clarifying_question'
+  );
 }
 
 /** Normalise a message into blocks, so the old flat shape and the new one read the same. */
@@ -110,7 +117,8 @@ function UsageLine({ usage }: { usage: UsageTotals }): React.JSX.Element {
   return (
     <span className="usage" data-tip="Tokens for this response">
       {formatTokens(usage.inputTokens)} in · {formatTokens(usage.outputTokens)} out
-      {usage.cacheReadTokens > 0 && ` · ${formatTokens(usage.cacheReadTokens)} cached`}
+      {usage.cacheReadTokens > 0 && ` · ${formatTokens(usage.cacheReadTokens)} cache read`}
+      {usage.cacheWriteTokens > 0 && ` · ${formatTokens(usage.cacheWriteTokens)} cache write`}
     </span>
   );
 }
@@ -141,9 +149,29 @@ export function ChatView(props: {
   } = props;
   // Orchestrator mode replaces the single-playbook + model/thinking controls with a profile.
   const orchestratorActive = !!thread.orchestratorProfile;
+  // Prototype profiles are hidden under the same setting as prototype playbooks. `profiles` stays
+  // unfiltered upstream — App derives the control-playbook names from it, and hiding a profile
+  // there would let a hidden profile's orchestrator/reviewer playbooks back into the picker.
+  const visibleProfiles = useMemo(
+    () =>
+      profiles.filter((p) =>
+        isUserSelectableProfile(
+          p,
+          Boolean(settings.showPrototypePlaybooks),
+          thread.orchestratorProfile,
+        ),
+      ),
+    [profiles, settings.showPrototypePlaybooks, thread.orchestratorProfile],
+  );
   const traceExpanded = settings.appearance?.traceExpanded ?? DEFAULT_APPEARANCE.traceExpanded;
   const [draft, setDraft] = useState('');
-  const [activePrompt, setActivePrompt] = useState<McpPromptInfo | null>(null);
+  // The active playbook follows the conversation's history unless the user has said otherwise for
+  // THIS thread (see `activePrompt` below). Keying the override to the thread is what retires it on
+  // a switch, so no render can show a previous conversation's pick.
+  const [promptOverride, setPromptOverride] = useState<{
+    threadId: string;
+    prompt: McpPromptInfo | null;
+  } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [pickerFilter, setPickerFilter] = useState('');
   const [citation, setCitation] = useState<CitationState | null>(null);
@@ -163,16 +191,40 @@ export function ChatView(props: {
    */
   const runIdRef = useRef(0);
 
-  // The composer's state lives with the component, not the thread, so a recommendation raised
-  // for one conversation would otherwise still be sitting there after switching to another.
-  // Invalidating the ticket is what actually retires the in-flight run — comparing thread ids
-  // instead would let it come back to life the moment the user navigated back.
+  // When switching conversations, retire the transient cards. The active playbook needs nothing
+  // here: it is derived, and its override is keyed to the thread it was made on.
   useEffect(() => {
     runIdRef.current += 1;
     setPreflight(null);
     setChecking(false);
     setPlaybookRequired(false);
   }, [thread.id]);
+
+  /**
+   * The playbook this message will be sent under. A playbook is sticky for the conversation, so the
+   * default is whichever one its last question carried — which is also what restores it after a
+   * restart, with nothing to persist. An override (a pick, a send under a different playbook, or an
+   * explicit clear, which is `prompt: null`) wins for the thread it was made on.
+   *
+   * Derived rather than mirrored into state on purpose: an effect that copies this into a `useState`
+   * has to name every input in a dependency array and race the thread-switch reset for the same
+   * variable, and both of those went wrong.
+   */
+  /**
+   * The playbook the conversation's most recent question carried, if any. Derived once: it decides
+   * both what the composer shows and whether the next send is preflighted, and those two must never
+   * disagree about which playbook the conversation is already under.
+   */
+  const lastUserPlaybook = useMemo(
+    () => messages.findLast((m) => m.role === 'user' && m.playbook)?.playbook,
+    [messages],
+  );
+
+  const activePrompt = useMemo<McpPromptInfo | null>(() => {
+    if (promptOverride?.threadId === thread.id) return promptOverride.prompt;
+    if (orchestratorActive) return null;
+    return prompts.find((p) => p.name === lastUserPlaybook) ?? null;
+  }, [promptOverride, thread.id, orchestratorActive, lastUserPlaybook, prompts]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -243,7 +295,7 @@ export function ChatView(props: {
   }, [draft]);
 
   const pickPrompt = (prompt: McpPromptInfo): void => {
-    setActivePrompt(prompt);
+    setPromptOverride({ threadId: thread.id, prompt });
     // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
     // refusal card are both reachable with a real question already typed, and that question is
     // the whole point of the turn — clearing it made the user retype it.
@@ -258,19 +310,19 @@ export function ChatView(props: {
   const send = (text: string, promptName?: string): void => {
     setPreflight(null);
     setPlaybookRequired(false);
+    // The recommendation card's "Switch to …" sends under a playbook that is not the active one;
+    // make it the active one so the composer agrees with what was just asked.
+    if (promptName && promptName !== activePrompt?.name) {
+      const matching = prompts.find((p) => p.name === promptName);
+      if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
+    }
     onSend(text, promptName);
     setDraft('');
-    setActivePrompt(null);
   };
 
   /**
-   * The web's preflight, in the desktop's terms: ask whether the attached playbook suits the
-   * question before the turn runs. The web checks only a conversation's first message because a
-   * playbook there is sticky for the whole thread; here it is attached per message and cleared
-   * on send, so "a message that carries a playbook" is the same moment.
-   *
-   * Fails open — main-side and again here — because a check that cannot run must never be the
-   * reason a question goes unasked.
+   * Preflight playbook check: runs on the conversation's first message or when switching to a
+   * different playbook. Fails open at every step so a check that cannot run never blocks a question.
    */
   const runPreflight = async (text: string, prompt: McpPromptInfo): Promise<void> => {
     const runId = ++runIdRef.current;
@@ -282,9 +334,7 @@ export function ChatView(props: {
     } catch {
       verdict = { plausible: true };
     }
-    // Superseded — by a thread switch or by a later run. Returning without touching state is the
-    // point: clearing `checking` here would unlock the composer under a check that is still live,
-    // and sending would post a draft the user has already moved past.
+    // Superseded — by a thread switch or by a later run.
     if (runIdRef.current !== runId) return;
     setChecking(false);
     if (verdict.plausible) {
@@ -315,7 +365,13 @@ export function ChatView(props: {
     // playbook is their "send anyway". Changing the playbook first is a new question, so it
     // gets checked again.
     const alreadyAnswered = !!preflight && preflight.forPlaybook === prompt?.name;
-    if (prompt && !orchestratorActive && validationEnabled && !alreadyAnswered) {
+
+    // Run preflight only on the conversation's first message or when the user switched playbooks.
+    const isFirstMessage = messages.length === 0;
+    const isPlaybookChanged = !isFirstMessage && prompt?.name !== lastUserPlaybook;
+    const needsPreflight = isFirstMessage || isPlaybookChanged;
+
+    if (prompt && !orchestratorActive && validationEnabled && needsPreflight && !alreadyAnswered) {
       void runPreflight(text, prompt);
       return;
     }
@@ -348,7 +404,7 @@ export function ChatView(props: {
     // Backspace on an empty draft clears the active playbook.
     if (e.key === 'Backspace' && draft === '' && activePrompt) {
       e.preventDefault();
-      setActivePrompt(null);
+      setPromptOverride({ threadId: thread.id, prompt: null });
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -410,10 +466,11 @@ export function ChatView(props: {
         <div className="chat-controls">
           <span
             className="usage-total"
-            data-tip="Total tokens this conversation (input / output / cache-read)"
+            data-tip="Total tokens this conversation (input / output / cache-read / cache-write)"
           >
             Σ {formatTokens(thread.totals.inputTokens)} in · {formatTokens(thread.totals.outputTokens)} out
-            {thread.totals.cacheReadTokens > 0 && ` · ${formatTokens(thread.totals.cacheReadTokens)} cached`}
+            {thread.totals.cacheReadTokens > 0 && ` · ${formatTokens(thread.totals.cacheReadTokens)} cache read`}
+            {thread.totals.cacheWriteTokens > 0 && ` · ${formatTokens(thread.totals.cacheWriteTokens)} cache write`}
           </span>
         </div>
       </header>
@@ -551,6 +608,12 @@ export function ChatView(props: {
                   )}
                 </div>
                 <div className="user-text">{message.content}</div>
+                <div className="message-footer">
+                  <span />
+                  <span className="message-actions">
+                    {message.content && <CopyButton text={message.content} tip="Copy question" />}
+                  </span>
+                </div>
               </div>
             );
           }
@@ -673,13 +736,15 @@ export function ChatView(props: {
                   className="active-playbook-remove"
                   data-tip="Remove playbook"
                   disabled={checking}
-                  onClick={() => setActivePrompt(null)}
+                  onClick={() => {
+                    setPromptOverride({ threadId: thread.id, prompt: null });
+                  }}
                 >
                   <CloseIcon size={11} />
                 </button>
               </span>
             )}
-            {profiles.length > 0 && (
+            {visibleProfiles.length > 0 && (
               <select
                 className="composer-select"
                 value={thread.orchestratorProfile ?? ''}
@@ -691,9 +756,9 @@ export function ChatView(props: {
                 onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
               >
                 <option value="">Single agent</option>
-                {profiles.map((p) => (
+                {visibleProfiles.map((p) => (
                   <option key={p.name} value={p.name}>
-                    {p.name}
+                    {p.prototype ? `🧪 ${p.name}` : p.name}
                   </option>
                 ))}
               </select>

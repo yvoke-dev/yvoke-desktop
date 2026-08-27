@@ -9,8 +9,9 @@ export function StatusBanners(props: {
   syncError: string | null;
   onServerSignIn: () => void;
   onRetryAuth: () => void;
+  onRetryServer: () => void;
 }): React.JSX.Element | null {
-  const { auth, serverReachable, pendingSync, syncError, onServerSignIn, onRetryAuth } = props;
+  const { auth, serverReachable, pendingSync, syncError, onServerSignIn, onRetryAuth, onRetryServer } = props;
   return (
     <div className="banners">
       {auth?.claude === 'missing' && (
@@ -23,7 +24,7 @@ export function StatusBanners(props: {
             terminal (your Claude Pro/Max account — the same login as Claude Desktop), then retry.
           </span>
           <button className="small banner-action" onClick={onRetryAuth}>
-            Retry
+            Retry sign-in
           </button>
         </div>
       )}
@@ -50,6 +51,9 @@ export function StatusBanners(props: {
             <strong>Server unreachable:</strong> showing cached conversations. Chat needs the Yvoke server for its
             knowledge-base tools.
           </span>
+          <button className="small banner-action" onClick={onRetryServer}>
+            Retry connection
+          </button>
         </div>
       )}
       {pendingSync > 0 && (

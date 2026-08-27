@@ -77,4 +77,47 @@ describe('SDK message translation', () => {
     ).toEqual({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 5, thoughtTokens: 15 });
     expect(usageFromSdk(undefined)).toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, thoughtTokens: 0 });
   });
+
+  it('handles Agent tool calls as delegations only when orchestratorMode is true', () => {
+    const orchCtx = newTurnContext('t1', true);
+    const orchEvents = translateMessage(
+      msg({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'tu1', name: 'Agent', input: { subagent_type: 'oim-customers', prompt: 'hi' } }],
+        },
+      }),
+      orchCtx,
+    );
+    expect(orchEvents).toEqual([
+      { kind: 'subagent-start', threadId: 't1', toolUseId: 'tu1', subagentType: 'oim-customers', question: 'hi' },
+      {
+        kind: 'assistant-block',
+        threadId: 't1',
+        text: '',
+        thinking: undefined,
+        toolCalls: [{ id: 'tu1', name: 'Agent', input: { subagent_type: 'oim-customers', prompt: 'hi' }, subagentType: 'oim-customers', subagentBlocks: [] }],
+      },
+    ]);
+
+    const singleCtx = newTurnContext('t2', false);
+    const singleEvents = translateMessage(
+      msg({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'tu2', name: 'Agent', input: { prompt: 'hi' } }],
+        },
+      }),
+      singleCtx,
+    );
+    expect(singleEvents).toEqual([
+      {
+        kind: 'assistant-block',
+        threadId: 't2',
+        text: '',
+        thinking: undefined,
+        toolCalls: [{ id: 'tu2', name: 'Agent', input: { prompt: 'hi' } }],
+      },
+    ]);
+  });
 });

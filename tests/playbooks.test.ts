@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { controlPlaybookNames, isUserSelectablePlaybook } from '../src/shared/types';
+import {
+  controlPlaybookNames,
+  isUserSelectablePlaybook,
+  isUserSelectableProfile,
+} from '../src/shared/types';
 import type { McpPromptInfo, OrchestratorProfile } from '../src/shared/types';
 
 function playbook(name: string, targetAgent?: string, prototype?: boolean): McpPromptInfo {
@@ -79,5 +83,49 @@ describe('playbook visibility', () => {
     const protoRev = playbook('oim-orchestrator-reviewer', 'reviewer', true);
     expect(isUserSelectablePlaybook(protoOrch, control, true)).toBe(false);
     expect(isUserSelectablePlaybook(protoRev, control, true)).toBe(false);
+  });
+});
+
+describe('isUserSelectableProfile', () => {
+  function profile(name: string, prototype?: boolean): OrchestratorProfile {
+    return {
+      name,
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: [],
+      prototype,
+    };
+  }
+
+  it('offers an ordinary profile whatever the setting says', () => {
+    expect(isUserSelectableProfile(profile('OIM'))).toBe(true);
+    expect(isUserSelectableProfile(profile('OIM'), false)).toBe(true);
+    expect(isUserSelectableProfile(profile('OIM'), true)).toBe(true);
+  });
+
+  it('hides a prototype profile by default and when showPrototypes is false', () => {
+    expect(isUserSelectableProfile(profile('OIM Browsing', true))).toBe(false);
+    expect(isUserSelectableProfile(profile('OIM Browsing', true), false)).toBe(false);
+  });
+
+  it('shows a prototype profile when showPrototypes is true', () => {
+    expect(isUserSelectableProfile(profile('OIM Browsing', true), true)).toBe(true);
+  });
+
+  // Dropping the value the picker is currently displaying makes the select fall back to
+  // "Single agent" while the thread is still in orchestrator mode — the control would then
+  // misreport how the next question is answered, and nothing but re-picking would fix it.
+  it('never hides the profile the thread is already bound to', () => {
+    expect(isUserSelectableProfile(profile('OIM Browsing', true), false, 'OIM Browsing')).toBe(true);
+  });
+
+  it('withdraws that exemption once the thread selects something else', () => {
+    expect(isUserSelectableProfile(profile('OIM Browsing', true), false, 'OIM')).toBe(false);
+  });
+
+  // An older server sends no flag at all. Reading absent as "prototype" would empty the picker
+  // against every deployment that has not shipped the field yet.
+  it('treats an absent flag as not a prototype', () => {
+    expect(isUserSelectableProfile(profile('OIM', undefined), false)).toBe(true);
   });
 });

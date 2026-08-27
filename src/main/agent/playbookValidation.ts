@@ -45,14 +45,17 @@ Decide:
 2. If not, which playbook name from the list of available playbooks is the best match? (Return null if the selected one is appropriate).
 3. Provide a concise explanation (1-2 sentences) of why the selected playbook is wrong and why the recommended one is better.
 
-Be conservative: only answer false when the selected playbook is clearly a poor fit and a listed playbook is clearly better. A playbook that merely overlaps with a better one is still appropriate.
+Rules:
+- Be conservative: only answer false when the selected playbook is clearly a poor fit and a DIFFERENT listed playbook is clearly better. A playbook that merely overlaps with a better one is still appropriate.
+- If the selected playbook is appropriate or the best match, you MUST set "plausible": true, "suggestedPlaybookName": null, and "reason": "".
+- Never suggest the currently selected playbook in "suggestedPlaybookName". Only set "plausible": false if a DIFFERENT playbook from the available list is clearly a better fit.
 
 You MUST respond ONLY with a raw JSON object matching the schema below. Do not wrap the JSON in markdown fences.
 JSON Schema:
 {
   "plausible": boolean (true if the selected playbook is correct, false if incorrect),
   "reason": string (explanation if incorrect, otherwise an empty string),
-  "suggestedPlaybookName": string (the name of the suggested playbook from the available list if incorrect, otherwise null)
+  "suggestedPlaybookName": string (the name of the suggested DIFFERENT playbook from the available list if incorrect, otherwise null)
 }`;
 }
 
@@ -81,11 +84,10 @@ function extractJsonObject(raw: string): unknown {
  * Turn a model reply into a verdict the UI can act on, keeping only what the playbook list
  * actually backs:
  *  - a non-boolean `plausible` is not a verdict, so the selection passes;
- *  - a suggestion naming a playbook that isn't on the list is dropped (the model invented it),
- *    exactly as the web controller drops it;
- *  - a suggestion naming the playbook already selected is dropped — it contradicts the verdict;
- *  - a rejection with neither a reason nor a usable suggestion has nothing to show the user, so
- *    it passes rather than raising a card that says nothing.
+ *  - a suggestion matching the playbook already selected (by name or title) means the model
+ *    considers the current playbook appropriate, so it passes;
+ *  - a rejection without a valid, different alternative playbook from the available list has
+ *    nothing actionable to offer the user, so it passes rather than raising a dead-end refusal.
  */
 export function parseValidation(
   raw: string,
@@ -101,19 +103,31 @@ export function parseValidation(
 
   let suggested: McpPromptInfo | undefined;
   if (typeof obj.suggestedPlaybookName === 'string' && obj.suggestedPlaybookName.trim()) {
-    const name = obj.suggestedPlaybookName.trim();
+    const name = obj.suggestedPlaybookName.trim().toLowerCase();
     suggested =
-      playbooks.find((p) => p.name === name) ??
-      playbooks.find((p) => p.name.toLowerCase() === name.toLowerCase());
-    if (suggested && suggested.name === selectedName) suggested = undefined;
+      playbooks.find((p) => p.name.toLowerCase() === name) ??
+      playbooks.find((p) => p.title.toLowerCase() === name);
   }
 
-  if (!reason && !suggested) return PASSES;
+  // If the suggested playbook matches the selected one (by name or title), the model agrees with
+  // the user's selection despite a negative `plausible` flag — treat it as passing.
+  const selected = playbooks.find(
+    (p) =>
+      p.name.toLowerCase() === selectedName.toLowerCase() ||
+      p.title.toLowerCase() === selectedName.toLowerCase(),
+  );
+  if (suggested && selected && suggested.name === selected.name) {
+    return PASSES;
+  }
+
+  // Preflight is an assist, not a gate: if no valid alternative playbook was found on the
+  // available list, let the question through.
+  if (!suggested) return PASSES;
 
   return {
     plausible: false,
     reason: reason || undefined,
-    suggestedPlaybookName: suggested?.name,
-    suggestedPlaybookTitle: suggested?.title,
+    suggestedPlaybookName: suggested.name,
+    suggestedPlaybookTitle: suggested.title,
   };
 }

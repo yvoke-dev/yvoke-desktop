@@ -521,10 +521,11 @@ export function SettingsView(props: {
                   onChange={(e) => setDraft({ ...draft, showPrototypePlaybooks: e.target.checked })}
                 />
                 <span className="check-field-text">
-                  <span className="check-field-name">Show prototype playbooks</span>
+                  <span className="check-field-name">Show prototypes</span>
                   <span className="settings-hint">
-                    Show experimental and prototype playbooks in the playbook picker and slash menu.
-                    Hidden by default.
+                    Show experimental and prototype playbooks in the playbook picker and slash menu,
+                    and experimental multi-agent profiles in the profile picker. Hidden by default;
+                    a profile a conversation already uses stays listed either way.
                   </span>
                 </span>
               </label>

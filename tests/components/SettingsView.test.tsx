@@ -210,11 +210,16 @@ describe('SettingsView', () => {
     );
   });
 
-  it('saves showPrototypePlaybooks toggle in Agents pane', async () => {
+  // One checkbox governs prototype playbooks AND prototype multi-agent profiles, so its copy has
+  // to say both — a label naming only playbooks is why the profile half of the feature reads as
+  // broken rather than as off.
+  it('saves showPrototypePlaybooks toggle in Agents pane, and says it covers profiles too', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />);
     openPane('Agents');
-    fireEvent.click(screen.getByLabelText(/Show prototype playbooks/));
+    const toggle = screen.getByLabelText(/Show prototypes/);
+    expect(toggle.closest('label')?.textContent).toMatch(/profile/i);
+    fireEvent.click(toggle);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith(

@@ -11,6 +11,7 @@ const REVIEWER_SUBAGENT = 'reviewer';
  */
 export interface TurnContext {
   threadId: string;
+  orchestratorMode?: boolean;
   liveText: string;
   liveThinking: string;
   /** Concatenated final text of the turn (across assistant blocks between tool calls). */
@@ -33,9 +34,10 @@ export interface TurnContext {
   carriedCostUsd?: number;
 }
 
-export function newTurnContext(threadId: string): TurnContext {
+export function newTurnContext(threadId: string, orchestratorMode = false): TurnContext {
   return {
     threadId,
+    orchestratorMode,
     liveText: '',
     liveThinking: '',
     turnText: '',
@@ -114,6 +116,10 @@ export function addUsage(a: UsageTotals, b: UsageTotals): UsageTotals {
 /**
  * Classify a finished turn's review state from its delegations. Returns undefined when the turn
  * delegated to nobody — that is a plain (non-orchestrated) answer with nothing to review.
+ *
+ * Whether the turn ran in orchestrator mode at all is the caller's to establish, and both callers
+ * do (see `nextReviewAction` below and AgentService.completeTurn); a third copy of that check in
+ * here could only ever agree with them.
  *
  * The LAST reviewer delegation wins: with maxReviewRounds > 1 the orchestrator may be REJECTED,
  * revise, and be APPROVED on the next round, and it is the final verdict that ships.
@@ -246,7 +252,7 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
           blockText += block.text;
         } else if (block.type === 'tool_use') {
           const call: ToolCallInfo = { id: String(block.id), name: String(block.name), input: block.input };
-          if (call.name === DELEGATE_TOOL_NAME) {
+          if (ctx.orchestratorMode && call.name === DELEGATE_TOOL_NAME) {
             const input = (block.input ?? {}) as { subagent_type?: string; prompt?: string; description?: string };
             call.subagentType = input.subagent_type;
             call.subagentBlocks = [];
@@ -323,8 +329,8 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
         }
         events.push({ kind: 'tool-result', threadId: ctx.threadId, toolUseId, result, isError });
 
-        // A completed delegation: surface a specialist-complete / reviewer-verdict event.
-        if (call?.name === DELEGATE_TOOL_NAME) {
+        // A completed delegation: surface a specialist-complete / reviewer-verdict event in orchestrator mode.
+        if (ctx.orchestratorMode && call?.name === DELEGATE_TOOL_NAME) {
           const subagentType = call.subagentType ?? '?';
           events.push({ kind: 'subagent-complete', threadId: ctx.threadId, toolUseId, subagentType, result, isError });
           if (subagentType === REVIEWER_SUBAGENT && !isError) {

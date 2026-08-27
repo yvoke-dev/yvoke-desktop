@@ -66,10 +66,10 @@ describe('TraceBar', () => {
     render(
       <TraceBar
         entries={entries}
-        usage={{ inputTokens: 12, outputTokens: 1296, cacheReadTokens: 112_700, cacheWriteTokens: 0 }}
+        usage={{ inputTokens: 12, outputTokens: 1296, cacheReadTokens: 112_700, cacheWriteTokens: 10_500 }}
       />,
     );
-    expect(screen.getByText('12 in · 1,296 out · 112.7k cached')).toBeTruthy();
+    expect(screen.getByText('12 in · 1,296 out · 112.7k cache read · 10.5k cache write')).toBeTruthy();
   });
 });
 

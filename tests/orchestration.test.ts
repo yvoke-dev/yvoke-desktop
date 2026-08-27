@@ -63,7 +63,7 @@ describe('mapSpecialistTools', () => {
 
 describe('orchestrator-mode translation', () => {
   it('records a delegation and emits subagent-start; keeps it out of turn text', () => {
-    const ctx = newTurnContext('t1');
+    const ctx = newTurnContext('t1', true);
     const events = translateMessage(
       msg({
         type: 'assistant',
@@ -88,7 +88,7 @@ describe('orchestrator-mode translation', () => {
   });
 
   it('nests forwarded sub-agent messages and never pollutes the orchestrator answer', () => {
-    const ctx = newTurnContext('t1');
+    const ctx = newTurnContext('t1', true);
     translateMessage(
       msg({
         type: 'assistant',
@@ -114,7 +114,7 @@ describe('orchestrator-mode translation', () => {
   });
 
   it('parses a reviewer verdict from the delegation result', () => {
-    const ctx = newTurnContext('t1');
+    const ctx = newTurnContext('t1', true);
     translateMessage(
       msg({
         type: 'assistant',
@@ -140,7 +140,7 @@ describe('orchestrator-mode translation', () => {
   });
 
   it('ignores stream deltas that belong to a sub-agent', () => {
-    const ctx = newTurnContext('t1');
+    const ctx = newTurnContext('t1', true);
     const events = translateMessage(
       msg({
         type: 'stream_event',

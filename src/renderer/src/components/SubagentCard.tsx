@@ -16,7 +16,7 @@ import { shortName } from './toolNames';
 function roleLabel(subagentType?: string): { icon: React.JSX.Element; title: string } {
   if (subagentType === 'reviewer') return { icon: <ReviewerIcon size={14} />, title: 'Reviewer' };
   if (subagentType === 'orchestrator') return { icon: <CompassIcon size={14} />, title: 'Orchestrator' };
-  return { icon: <SpecialistIcon size={14} />, title: `Specialist · ${subagentType ?? '?'}` };
+  return { icon: <SpecialistIcon size={14} />, title: subagentType ? `Specialist · ${subagentType}` : 'Specialist' };
 }
 
 /**

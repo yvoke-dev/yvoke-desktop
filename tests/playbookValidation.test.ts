@@ -55,33 +55,51 @@ describe('parseValidation', () => {
   it('reads a verdict wrapped in a markdown fence or trailing prose', () => {
     const fenced = '```json\n{"plausible": false, "reason": "Wrong area.", "suggestedPlaybookName": "oim-schema"}\n```';
     expect(parseValidation(fenced, PLAYBOOKS, SELECTED).suggestedPlaybookName).toBe('oim-schema');
-    const chatty = 'Here is my verdict:\n{"plausible": false, "reason": "Wrong area."}\nHope that helps.';
+    const chatty = 'Here is my verdict:\n{"plausible": false, "reason": "Wrong area.", "suggestedPlaybookName": "oim-schema"}\nHope that helps.';
     expect(parseValidation(chatty, PLAYBOOKS, SELECTED).reason).toBe('Wrong area.');
   });
 
-  // The hallucination guard the web controller applies: the name must be one that was offered.
-  it('drops a suggestion naming a playbook that is not on the list, keeping the reason', () => {
+  // The hallucination guard: if the model suggests a playbook not on the list, fail open.
+  it('passes when a suggestion names a playbook that is not on the list', () => {
     const raw = JSON.stringify({
       plausible: false,
       reason: 'Try something else.',
       suggestedPlaybookName: 'oim-invented',
     });
-    expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({
-      plausible: false,
-      reason: 'Try something else.',
-      suggestedPlaybookName: undefined,
-      suggestedPlaybookTitle: undefined,
-    });
+    expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
   });
 
-  // "This is wrong — pick the one you already picked" is not an actionable recommendation.
-  it('drops a suggestion that names the already-selected playbook', () => {
+  // If the model suggests the already-selected playbook (by name or title), treat it as passing.
+  it('passes when a suggestion names the already-selected playbook by name', () => {
     const raw = JSON.stringify({
       plausible: false,
-      reason: 'Hmm.',
+      reason: 'This is actually fine.',
       suggestedPlaybookName: SELECTED,
     });
-    expect(parseValidation(raw, PLAYBOOKS, SELECTED).suggestedPlaybookName).toBeUndefined();
+    expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
+  });
+
+  it('passes when a suggestion names the already-selected playbook by title', () => {
+    const raw = JSON.stringify({
+      plausible: false,
+      reason: 'This is actually fine.',
+      suggestedPlaybookName: 'Getting started',
+    });
+    expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
+  });
+
+  it('accepts a suggestion matching by title', () => {
+    const raw = JSON.stringify({
+      plausible: false,
+      reason: 'Table question.',
+      suggestedPlaybookName: 'Schema',
+    });
+    expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({
+      plausible: false,
+      reason: 'Table question.',
+      suggestedPlaybookName: 'oim-schema',
+      suggestedPlaybookTitle: 'Schema',
+    });
   });
 
   it('accepts a suggestion whose case does not match the list', () => {
@@ -89,8 +107,7 @@ describe('parseValidation', () => {
     expect(parseValidation(raw, PLAYBOOKS, SELECTED).suggestedPlaybookName).toBe('oim-schema');
   });
 
-  // Fail open, in every shape the model can fail in. The web's client showed a card reading
-  // "undefined" for the last of these; a check with nothing to say must simply stand aside.
+  // Fail open, in every shape the model can fail in.
   it.each([
     ['prose instead of JSON', 'I think the playbook is fine, honestly.'],
     ['an empty reply', ''],

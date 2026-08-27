@@ -132,7 +132,7 @@ behind it, and the work that produced it can be opened and read.
 | Capability | What happens |
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
-| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
+| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
 | **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
@@ -151,19 +151,23 @@ behind it, and the work that produced it can be opened and read.
 
 ### How it behaves
 
-- **Prototype playbooks are hidden by default.** Playbooks flagged with `prototype: true` on the server are
-  excluded from the picker, slash autocomplete, and preflight recommendations unless *Show prototype playbooks*
-  is enabled in Settings > Agents.
+- **Prototypes are hidden by default.** Playbooks flagged with `prototype: true` on the server are
+  excluded from the picker, slash autocomplete, and preflight recommendations, and profiles flagged the same
+  way are excluded from the profile selector, unless *Show prototypes* is enabled in Settings > Agents. One
+  setting governs both. The profile a conversation is already set to always stays listed and keeps running,
+  whatever the setting says — hiding it would leave the selector reading *Single agent* over a conversation
+  that is still multi-agent.
 - **A playbook is required for a single-agent question**, as it is on the web: a playbook is what
   scopes the answer, so a message carrying none is refused with a *Playbook required* card and the
   draft is kept. The refusal stands until a playbook is picked. Two cases are not gated, because in
   both the error would be one the user could not act on: a multi-agent conversation, which takes its
   playbooks from the profile, and a server that offers no playbooks at all, where the question is
   sent as it was and the assistant gets the default knowledge-base tool set.
-- **A playbook attaches to one message, not to the conversation.** It is cleared the moment the
-  message is sent, so every question in a thread can carry a different one — but each has to carry
-  one. On the web a playbook is sticky for the whole conversation. This is why the desktop checks
-  **every** playbook-carrying message rather than only the first.
+- **A playbook stays selected across messages in a conversation**, matching the web model. Once
+  chosen, follow-up questions continue under the same playbook without re-prompting or repeating
+  preflight checks. The user can switch playbooks at any time with `/` autocomplete or clear it with
+  the remove button. Preflight validation runs on the conversation's first message or when switching
+  to a different playbook.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -394,10 +398,9 @@ server.
   answered: …*. Stopping a turn resolves any question still waiting with an empty answer rather than
   leaving the run hanging.
 - **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
-  allow-list and instructions take effect. The conversation's memory is resumed, so nothing the user
-  can see is lost — but because a playbook clears on every send, two consecutive questions under
-  different playbooks rebuild the session twice, and each rebuild re-fetches the base instructions
-  from the server.
+  allow-list and instructions take effect. When continuing under the same playbook, the session
+  remains warm and playbook instructions are not redundantly re-injected. When switching playbooks,
+  a fresh session is initialized with the new playbook's tools and instructions.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -488,7 +491,7 @@ profiles and the playbooks; there is no way to build one from the app.
 
 | Capability | What happens |
 | --- | --- |
-| **Switch a conversation to a profile** | A selector beside the composer offers *Single agent* plus every profile the server defines. Choosing one takes over the conversation. |
+| **Switch a conversation to a profile** | A selector beside the composer offers *Single agent* plus every profile the server defines, minus any marked as a prototype while *Show prototypes* is off (marked 🧪 when shown). Choosing one takes over the conversation. |
 | **Ask once, get one answer** | The lead plans the turn, delegates self-contained sub-questions to specialists, and composes a single cited answer from what they bring back. |
 | **See the team's work** | Each delegation is its own card: which specialist was consulted, the sub-question it was given, the tools it called inside its own turn, and the answer it returned. |
 | **See the reviewer's verdict** | The reviewer's card carries an *Approved* or *Rejected* badge and its notes. |
@@ -824,7 +827,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
 | **Models** | Which models the composer offers, which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
-| **Agents** | Whether a playbook-carrying message is preflighted; whether to show prototype playbooks in the playbook picker and slash menu; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
+| **Agents** | Whether a playbook-carrying message is preflighted; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web at all, and the exact list of domains it may search. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
@@ -1072,7 +1075,7 @@ plain defect rather than a position.
 | 2 | **A conversation continued on a second machine has no memory of itself.** The transcript is restored and shown in full, but the model's session is local, so the next answer is produced as if the visible exchange above it had not happened. | The most confusing possible failure: everything looks right and the answer behaves as though it is not. Nothing on screen distinguishes a conversation the model remembers from one it does not. |
 | 3 | **Past 200 conversations, the oldest are silently deleted from the machine on every refresh.** The rule exists to clean up conversations deleted elsewhere; with no paging behind it, it also fires on everything the server's first page did not mention. | Data loss with no message, on a threshold a regular user reaches within a year. What is lost is only a cache — but with it goes that conversation's searchability and the model's memory of it. |
 | 4 | **There is no way to rename a conversation**, although the whole path works and `yvoke-web`'s specification states that the desktop app is the only place it can be done. | Either the capability or the sibling specification is wrong. Two lines of interface would settle it in the app's favour. |
-| 5 | **The playbook check runs on every playbook-carrying message**, where the web runs it once per conversation, and re-sends the entire playbook catalogue each time. | It is a real, billed model call per message, with the largest prompt the app ever assembles for the smallest question it ever asks. Deliberate — a desktop playbook is per message — but nobody has priced it. |
+| 5 | **The playbook check re-sends the entire playbook catalogue on every check it runs** — the conversation's first message, and again each time the user switches playbooks. | It is a real, billed model call carrying the largest prompt the app ever assembles for the smallest question it ever asks. Now bounded per conversation rather than per message, but still nobody has priced it, and a user who switches playbooks a few times pays it a few times. |
 | 6 | **The specialist-call budget is advisory.** The lead is told a number; nothing counts. Only its 60-turn ceiling actually bounds a run. | The one setting a user would reach for to control the cost of a multi-agent answer does not control it. |
 | 7 | **A reviewer that answers "NOT APPROVED" is recorded as having approved.** The fallback that finds a verdict buried in prose accepts any reply containing the positive word and not the negative one. | The reviewer is the whole justification for multi-agent mode costing what it does. This is the one path where it can fail silently in the direction that ships a bad answer. |
 | 8 | **The first Save freezes the deployment's defaults for that user, permanently.** Everything the build ships — server address, identity registration, model list, agent budgets — is copied into the user's profile and shadows the build's file from then on. | A future release cannot change a default for anyone who has ever opened Settings and saved. Migrating a server address would mean asking every user to edit a file. |

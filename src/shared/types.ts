@@ -57,8 +57,9 @@ export interface AppSettings {
    */
   playbookValidationEnabled?: boolean;
   /**
-   * Whether prototype playbooks (marked with prototype = true) should be visible and selectable.
-   * False by default.
+   * Whether prototypes (playbooks AND multi-agent profiles marked with prototype = true) should be
+   * visible and selectable. False by default. The key keeps its original name so an existing
+   * settings.json still loads; it governs both catalogues.
    */
   showPrototypePlaybooks?: boolean;
   /** Multi-agent orchestrator mode: role → Claude model binding + budgets. Optional (Off if absent). */
@@ -122,6 +123,12 @@ export interface OrchestratorProfile {
   orchestratorPlaybook: string;
   reviewerPlaybook: string;
   specialistPlaybooks: string[];
+  /**
+   * Whether this profile is marked experimental. Optional: a server that predates the flag sends
+   * nothing, and an absent flag must read as "not a prototype" — failing the other way would empty
+   * the profile picker against every older server.
+   */
+  prototype?: boolean;
 }
 
 /** One agent invocation in a completed run, reported to the server for the admin trace viewer. */
@@ -332,6 +339,27 @@ export function isUserSelectablePlaybook(
   if (prompt.targetAgent === 'orchestrator' || prompt.targetAgent === 'reviewer') return false;
   if (!showPrototypes && prompt.prototype) return false;
   return !controlNames.has(prompt.name);
+}
+
+/**
+ * Whether a multi-agent profile may be offered in the picker.
+ *
+ * The prototype half of the rule is `isUserSelectablePlaybook`'s, governed by the same one setting
+ * — a user who has asked to see experimental playbooks has asked to see experimental profiles too.
+ *
+ * `selected` is the profile the thread is already bound to, and it is always offerable. A picker
+ * that drops the value it is currently displaying falls back to "Single agent" while the thread is
+ * still in orchestrator mode, so the control would misreport how the next question gets answered —
+ * and `AppCore.resolveOrchestratorProfile` deliberately reads the UNFILTERED list for the same
+ * reason: hiding a profile must never stop a thread already using it from running.
+ */
+export function isUserSelectableProfile(
+  profile: OrchestratorProfile,
+  showPrototypes = false,
+  selected?: string,
+): boolean {
+  if (profile.name === selected) return true;
+  return !profile.prototype || showPrototypes;
 }
 
 /** Ask the main process whether `promptName` is the right playbook for `text`. */
