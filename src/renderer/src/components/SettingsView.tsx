@@ -49,6 +49,21 @@ function parseDomains(text: string): string[] {
 }
 
 /**
+ * Entries that will not behave the way an operator expects. This warns rather than rejects: the
+ * allow-list is per-deployment and an intranet host really can be a single label, so the editor
+ * should not refuse a save. It flags the two shapes that quietly do the wrong thing — a bare TLD,
+ * which matches every site under it, and an entry carrying a path or query, whose extra parts are
+ * discarded so the whole domain is allowed rather than just that page.
+ */
+function suspectDomains(domains: string[]): string[] {
+  return domains.filter((d) => {
+    const host = d.replace(/^https?:\/\//, '').replace(/^\*\./, '').replace(/^\./, '');
+    if (/[/?#\s]/.test(host.replace(/\/$/, ''))) return true;
+    return !host.replace(/\.$/, '').includes('.');
+  });
+}
+
+/**
  * A set of mutually exclusive choices rendered as one object rather than a dropdown. Used
  * wherever the options are few and worth comparing at a glance — models, thinking levels,
  * density — which is most of this screen.
@@ -652,8 +667,9 @@ export function SettingsView(props: {
               <div className="settings-pane-head">
                 <h2>Web search</h2>
                 <p>
-                  Off by default. When enabled, the agent may search only the domains listed here —
-                  everything else stays inside the knowledge base.
+                  Off by default. When enabled, the agent may search the web and open whole pages
+                  from it — but only within the domains listed here. Everything else stays inside
+                  the knowledge base.
                 </p>
               </div>
               <label className="check-field">
@@ -665,8 +681,12 @@ export function SettingsView(props: {
                   }
                 />
                 <span className="check-field-text">
-                  <span className="check-field-name">Allow web search</span>
-                  <span className="settings-hint">Restricted to the allow-list below.</span>
+                  <span className="check-field-name">Allow web search and page fetching</span>
+                  <span className="settings-hint">
+                    Both are restricted to the allow-list below; with the list empty, both are
+                    refused. A permitted page is read in full, so its text reaches the assistant the
+                    same way the knowledge base does.
+                  </span>
                 </span>
               </label>
               <label className="settings-field">
@@ -683,7 +703,21 @@ export function SettingsView(props: {
                     });
                   }}
                 />
+                <span className="settings-hint">
+                  Subdomains are included: <code>example.com</code> also permits{' '}
+                  <code>docs.example.com</code>. A protocol, port, path or leading <code>*.</code> is
+                  ignored.
+                </span>
               </label>
+              {suspectDomains(draft.webSearch.allowedDomains).length > 0 && (
+                <p className="settings-hint settings-domain-warning" role="status">
+                  Check these entries — they may be broader than they look:{' '}
+                  {suspectDomains(draft.webSearch.allowedDomains).join(', ')}. An entry with no dot
+                  covers that host and everything under it, so a bare top-level domain such as{' '}
+                  <code>com</code> permits every site under it; a path is discarded, so the whole
+                  domain is permitted rather than the one page.
+                </p>
+              )}
             </>
           )}
 

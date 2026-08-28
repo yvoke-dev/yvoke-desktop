@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import mermaid from 'mermaid';
 import type { CitationRef } from '../../../shared/types';
 import { rehypeCitations } from './citationRehype';
+import { sanitizeMermaidStages } from './mermaidSanitizer';
 
 /**
  * Mermaid bakes its palette into the SVG at render time, so it cannot follow a CSS variable —
@@ -39,27 +40,60 @@ function initMermaid(dark: boolean): void {
 function Mermaid({ chart }: { chart: string }): React.JSX.Element {
   const [svg, setSvg] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
+  const [appliedFixes, setAppliedFixes] = React.useState<string[]>([]);
   const elementId = React.useId().replace(/:/g, '');
   const dark = useDarkAppearance();
 
   React.useEffect(() => {
     let active = true;
-    const renderChart = async () => {
+
+    /** Mermaid leaves the half-built node behind when it throws; it would otherwise accumulate. */
+    const dropFailedNode = (id: string): void => {
       try {
-        initMermaid(dark);
+        document.getElementById(id)?.remove();
+      } catch { /* ignore */ }
+    };
+
+    const renderChart = async () => {
+      initMermaid(dark);
+
+      // Attempt 1: the chart exactly as the model emitted it.
+      try {
         const { svg: renderedSvg } = await mermaid.render(`mermaid-${elementId}`, chart);
         if (active) {
           setSvg(renderedSvg);
           setError(null);
+          setAppliedFixes([]);
         }
-      } catch (err) {
+        return;
+      } catch (firstErr) {
+        dropFailedNode(`mermaid-${elementId}`);
+
+        // Attempts 2..n: repaired variants, safest first, so a lossy repair is only reached once
+        // the harmless ones have been shown not to help. Each variant needs its own element id —
+        // reusing one would collide with the node a previous failed attempt just left behind.
+        const stages = sanitizeMermaidStages(chart);
+        for (const [index, stage] of stages.entries()) {
+          if (!active) return;
+          const stageId = `mermaid-repaired-${index}-${elementId}`;
+          try {
+            const { svg: sanitizedSvg } = await mermaid.render(stageId, stage.sanitized);
+            if (active) {
+              setSvg(sanitizedSvg);
+              setError(null);
+              setAppliedFixes(stage.appliedFixes);
+            }
+            return;
+          } catch {
+            dropFailedNode(stageId);
+          }
+        }
+
+        // Nothing parsed: report the failure against the chart as written, not against a repair.
         if (active) {
-          setError(err instanceof Error ? err.message : String(err));
+          setError(firstErr instanceof Error ? firstErr.message : String(firstErr));
+          setAppliedFixes([]);
         }
-        try {
-          const badEl = document.getElementById(`mermaid-${elementId}`);
-          if (badEl) badEl.remove();
-        } catch { /* ignore */ }
       }
     };
     renderChart();
@@ -81,7 +115,21 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
     return <div className="mermaid-loading">Rendering diagram...</div>;
   }
 
-  return <div className="mermaid-diagram-container" dangerouslySetInnerHTML={{ __html: svg }} />;
+  return (
+    <div className="mermaid-wrapper">
+      {appliedFixes.length > 0 && (
+        <div
+          className="mermaid-repaired-marker"
+          title={`Auto-repaired diagram syntax:\n• ${appliedFixes.join('\n• ')}`}
+          aria-label="Auto-repaired diagram syntax"
+        >
+          <span className="mermaid-repaired-icon" aria-hidden="true">✨</span>
+          <span>Auto-repaired syntax</span>
+        </div>
+      )}
+      <div className="mermaid-diagram-container" dangerouslySetInnerHTML={{ __html: svg }} />
+    </div>
+  );
 }
 
 /**

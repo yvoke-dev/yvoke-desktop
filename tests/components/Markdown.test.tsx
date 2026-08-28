@@ -3,13 +3,36 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 // Mermaid is heavy and only used for diagram fences; stub it so these tests stay fast.
+//
+// The stub rejects one construct the sanitizer exists to repair — a semicolon inside a sequence
+// message, where it is a statement delimiter — rather than a magic token. A stub keyed on the
+// repaired output would pass no matter what the sanitizer produced, which is the failure mode this
+// replaced. Tests that need a different failure add one with `mockImplementationOnce`, so each
+// says out loud which attempts it is failing instead of hiding it in a shared heuristic.
+const mockRender = vi.fn(async (_id: string, code: string) => {
+  const lines = code.split('\n');
+  const isSequence = lines.some((l) => /^\s*sequenceDiagram\b/.test(l));
+  if (isSequence && lines.some((l) => /^\s*\S+\s*-{1,2}>>?\s*\S+\s*:[^\n]*;/.test(l))) {
+    throw new Error('Parse error on line 3: unexpected ";"');
+  }
+  return { svg: '<svg class="rendered-diagram"></svg>' };
+});
+
 vi.mock('mermaid', () => ({
-  default: { initialize: () => undefined, render: async () => ({ svg: '<svg></svg>' }) },
+  default: {
+    initialize: () => undefined,
+    render: (id: string, code: string) => mockRender(id, code),
+  },
 }));
 
 import { Markdown } from '../../src/renderer/src/components/Markdown';
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  // Call history is asserted per-test ("the last chart mermaid accepted"), and any unconsumed
+  // `mockImplementationOnce` would otherwise leak into the next test's first render.
+  mockRender.mockReset();
+});
 
 describe('Markdown citations', () => {
   it('renders a chunk_id marker as a clickable pill that reports the ref', () => {
@@ -258,3 +281,83 @@ describe('citation rewriting never corrupts real content', () => {
     expect(container.textContent).toContain('[chunk_id=abc123]');
   });
 });
+
+describe('Mermaid diagram rendering and auto-repair', () => {
+  it('renders a valid diagram inside mermaid-diagram-container', async () => {
+    const md = '```mermaid\nflowchart TD\n  A --> B\n```';
+    const { container } = render(<Markdown content={md} />);
+    const diagram = await screen.findByText((_content, el) => el?.classList.contains('mermaid-diagram-container') || false);
+    expect(diagram).toBeTruthy();
+    expect(container.querySelector('.mermaid-repaired-marker')).toBeNull();
+  });
+
+  it('renders a preformatted placeholder while live streaming', () => {
+    const md = '```mermaid\nflowchart TD\n  A --> B\n```';
+    const { container } = render(<Markdown content={md} live={true} />);
+    expect(container.querySelector('.mermaid-streaming')).toBeTruthy();
+    expect(container.querySelector('.mermaid-diagram-container')).toBeNull();
+  });
+
+  it('auto-repairs broken sequence diagram syntax and displays the marker badge', async () => {
+    const brokenMd = '```mermaid\nsequenceDiagram\nU->>DB: Request; Policy\\nInherit\n```';
+    const { container } = render(<Markdown content={brokenMd} />);
+
+    const marker = await screen.findByText(/Auto-repaired syntax/);
+    expect(marker).toBeTruthy();
+    expect(container.querySelector('.mermaid-repaired-marker')).toBeTruthy();
+    expect(container.querySelector('.mermaid-diagram-container')).toBeTruthy();
+  });
+
+  it('names the repairs it applied in the badge tooltip', async () => {
+    const brokenMd = '```mermaid\nsequenceDiagram\nU->>DB: Request; Policy\n```';
+    const { container } = render(<Markdown content={brokenMd} />);
+
+    await screen.findByText(/Auto-repaired syntax/);
+    const title = container.querySelector('.mermaid-repaired-marker')?.getAttribute('title') ?? '';
+    expect(title).toContain('Replaced semicolons with commas in sequence message label');
+  });
+
+  it('stops at the first repair that parses, leaving a backslash path intact', async () => {
+    // The semicolon is the only parse error; `C:\new` is ordinary content that the escape rewrite
+    // would mangle into `C:<br/>ew`. The staged retry must stop at the repair that works.
+    const md = '```mermaid\nsequenceDiagram\nU->>DB: Load C:\\new\\config; then run\n```';
+    const { container } = render(<Markdown content={md} />);
+
+    await screen.findByText(/Auto-repaired syntax/);
+    const accepted = mockRender.mock.calls[mockRender.mock.calls.length - 1][1];
+    expect(accepted).toContain('Load C:\\new\\config, then run');
+    expect(accepted).not.toContain('<br/>');
+
+    const title = container.querySelector('.mermaid-repaired-marker')?.getAttribute('title') ?? '';
+    expect(title).not.toContain('<br/>');
+  });
+
+  it('falls through to the escape rewrite when the safe repairs still do not parse', async () => {
+    // Fail the raw chart and the text-level repair; only the escape stage is left.
+    mockRender
+      .mockImplementationOnce(async () => { throw new Error('Parse error: raw'); })
+      .mockImplementationOnce(async () => { throw new Error('Parse error: still broken'); });
+
+    const md = '```mermaid\nsequenceDiagram\nU->>DB: Assign product; then\\ninherit\n```';
+    const { container } = render(<Markdown content={md} />);
+
+    await screen.findByText(/Auto-repaired syntax/);
+    const accepted = mockRender.mock.calls[mockRender.mock.calls.length - 1][1];
+    expect(accepted).toContain('then<br/>inherit');
+
+    const title = container.querySelector('.mermaid-repaired-marker')?.getAttribute('title') ?? '';
+    expect(title).toContain('Replaced literal \\n with <br/>');
+  });
+
+  it('shows the raw source and the original error when no repair parses', async () => {
+    mockRender.mockImplementationOnce(async () => { throw new Error('Parse error: totally broken'); });
+    const md = '```mermaid\nsequenceDiagram\n  !!! not a diagram\n```';
+    const { container } = render(<Markdown content={md} />);
+
+    const label = await screen.findByText(/Mermaid render error: Parse error: totally broken/);
+    expect(label).toBeTruthy();
+    expect(container.querySelector('.mermaid-raw')?.textContent).toContain('!!! not a diagram');
+    expect(container.querySelector('.mermaid-repaired-marker')).toBeNull();
+  });
+});
+

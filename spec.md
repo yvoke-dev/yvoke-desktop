@@ -355,7 +355,7 @@ server.
 | **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name is stored. |
 | **Playbook preflight** | Before a playbook-carrying message runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
 | **Arithmetic without a shell** | Three in-app tools — a calculator, a summary-statistics tool and a date-difference tool — let the assistant do numeric work. They run inside the app with no shell, no file access and no network. |
-| **Domain-restricted web search** | When an operator enables it and lists domains, the assistant may search the web — but only within those domains. |
+| **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
 | **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options, and continue from the answer. |
 | **Choose how hard it thinks** | Four thinking levels per conversation. |
 | **Follow-ups remember the conversation** | The model keeps its own memory of a conversation between questions, so a follow-up does not restate what came before. |
@@ -372,15 +372,20 @@ server.
   hard-coded copy would drift from the server's and quietly contradict the playbooks; running with
   none at all is worse still.
 - **Deny by default.** The assistant is granted the knowledge-base tools, a tool-discovery helper, the
-  three compute tools and (when enabled) web search. Every other tool the runtime knows about is
+  three compute tools and (when enabled) web search and page fetch. Every other tool the runtime knows about is
   refused the moment it is called, with a message telling the assistant to use the knowledge-base
   tools instead.
+- **Being granted a tool and being pre-approved for it are two different things.** Pre-approval makes
+  the runtime grant a call without asking, which means the app's own permission check never sees it.
+  So the two tools whose rules live entirely in that check — web access, and the clarifying question —
+  are granted but deliberately never pre-approved. They are still offered to the assistant; each call
+  simply has to be answered rather than waved through.
 - **The shell is blocked outright**, so it is never even offered — absent rather than withheld by a
   policy that could be misconfigured. This is what makes it safe for the assistant to read a corpus
   that anybody could have written into.
 - **A playbook's tool list replaces the default one, and three things are added regardless.** Declare
   tools and the assistant gets exactly those; declare none and it gets the nine defaults. Either way
-  the tool-discovery helper, the compute tools and — when the setting is on — web search are appended.
+  the tool-discovery helper, the compute tools and — when the setting is on — web search and fetch are appended.
   A playbook cannot opt out of any of the three, except by declaring that it may not compute.
 - **A playbook can withhold computation.** A playbook that declares no code execution loses the compute
   tools, checked in two independent places. A playbook that declares nothing at all keeps them: the
@@ -388,10 +393,21 @@ server.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.
-- **Web search is force-restricted, not asked to restrict itself.** Whatever domains the model asks for
-  are replaced by the configured list before the search runs, and the list is re-read on every call —
-  so a change in Settings takes effect immediately. Switched on with no domains listed, every search
-  is refused rather than run against the open web.
+- **Web search and page fetch are force-restricted, not asked to restrict themselves.** Whatever domains the model asks for
+  in searches are replaced by the configured list before the search runs, and page fetch strictly verifies
+  target URLs against the same list. Both re-read it on every call — so a change in Settings takes effect
+  immediately. Switched on with no domains listed, every search or fetch is refused rather than run against the open web.
+  This rests on neither tool being pre-approved; pre-approve either and none of it runs.
+- **The domain list is read generously and matched strictly.** An entry may be written as a bare
+  domain, with a protocol, with a port, with a path, with a leading dot or as `*.example.com`; all of
+  them mean the same host, and each one covers that host and everything under it. What is left after
+  that reading is what must match — an entry that reduces to nothing counts as nothing, so a list of
+  only such entries refuses every call rather than passing an empty restriction along.
+- **A fetched page is corpus the operator did not curate.** The allow-list decides which sites may be
+  read, not what those sites say, and a permitted page arrives in full rather than as a search-result
+  snippet. A domain that hosts anything reader-supplied is therefore a route for text that will be
+  read as instructions, and it is the operator's judgement — not a check in the app — that keeps such
+  domains off the list.
 - **A failing tool does not fail the answer.** The failure is handed back to the assistant as that
   tool's result and shown as a failed step in the trace; the run continues.
 - **A clarifying question reaches the model as a refused tool call** whose message reads *User
@@ -436,9 +452,10 @@ server.
   code-execution restriction.** Nothing is logged when the playbook is simply absent from the server's
   list, and nothing is shown either way — a playbook that meant to narrow the assistant silently
   widens it.
-- **Declaring `ask_clarifying_question` in a playbook switches clarifying questions off.** Naming the
-  tool pre-approves it, and pre-approval bypasses the only place the question is intercepted and shown
-  to the user — so under such a playbook the assistant asks and nobody is ever asked.
+- **A playbook may declare `ask_clarifying_question` without switching clarifying questions off.**
+  Naming the tool used to pre-approve it, and pre-approval bypassed the only place the question is
+  intercepted and shown to the user, so under such a playbook the assistant asked and nobody was ever
+  asked. The tool is now withheld from pre-approval however it was granted.
 - **The playbook list is cached for a minute and has no stale fallback.** A playbook added on the
   server can take that long to appear, and a request that fails takes the whole call down with it.
 - **A hung server costs about 24 seconds, not 12.** Each request has a 12-second ceiling and is retried
@@ -828,7 +845,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
 | **Models** | Which models the composer offers, which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
 | **Agents** | Whether a playbook-carrying message is preflighted; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
-| **Web search** | Whether the assistant may search the web at all, and the exact list of domains it may search. |
+| **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
 | **About** | Version, server address, both sign-in states. |
@@ -845,7 +862,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 - **Removing a model re-points the default** rather than leaving it pointing at something that is gone.
 - **Web search ships off with an empty domain list.** Which domains are worth searching belongs to
   whichever knowledge base is loaded, so it is a per-deployment decision rather than a product one —
-  and enabling the feature means listing domains in the same act, because it refuses to run otherwise.
+  and enabling the feature means listing domains in the same act, because searches and page fetches refuse to run otherwise.
   The domain list is the one setting that reaches a running conversation immediately.
 - **The theme's *System* setting stays live.** It keeps following the operating system for as long as
   the window is open — including a scheduled evening switch — and takes the native window frame with

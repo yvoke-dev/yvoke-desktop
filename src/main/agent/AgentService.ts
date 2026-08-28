@@ -7,7 +7,7 @@ import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
 import { isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
-import { buildAllowedTools, buildCanUseTool } from './policy';
+import { buildAllowedTools, buildAutoApproveTools, buildCanUseTool } from './policy';
 import { thinkingBudget } from './thinking';
 import {
   addUsage,
@@ -403,10 +403,14 @@ export class AgentService {
     const options: Options = {
       systemPrompt: orchestrator ? '' : systemPrompt,
       mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider),
-      allowedTools: allowedToolsList,
+      // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
+      // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
+      // callback, so they are withheld here and answered there instead — see policy.ts.
+      allowedTools: buildAutoApproveTools(allowedToolsList),
       // Hard-block the shell everywhere: the safe mcp__compute__* tools replace it, and this
       // ensures the model is never even offered Bash regardless of the allow-list.
       disallowedTools: ['Bash'],
+      // The FULL grant, which is what the playbook gate inside the callback compares against.
       canUseTool: buildCanUseTool(this.deps.getSettings, thread.id, onClarifyingQuestion, allowedToolsList,
         playbookCodeExecution, Boolean(orchestrator)),
       settingSources: [],

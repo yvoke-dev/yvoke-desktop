@@ -48,16 +48,18 @@ describe('mapSpecialistTools', () => {
     for (const t of COMPUTE_TOOLS) expect(tools).toContain(t);
     expect(tools).not.toContain('Bash');
     expect(tools).not.toContain('WebSearch');
+    expect(tools).not.toContain('WebFetch');
   });
   it('never gives a specialist Bash (code execution is unavailable)', () => {
     const info = { tools: ['search_corpus'] } as McpPromptInfo;
     expect(mapSpecialistTools(info, baseSettings)).not.toContain('Bash');
     expect(mapSpecialistTools(undefined, baseSettings)).not.toContain('Bash');
   });
-  it('includes WebSearch only when enabled in settings', () => {
+  it('includes WebSearch and WebFetch only when enabled in settings', () => {
     const info = { tools: ['search_corpus'] } as McpPromptInfo;
     const withWeb = { webSearch: { enabled: true, allowedDomains: [] } } as unknown as AppSettings;
     expect(mapSpecialistTools(info, withWeb)).toContain('WebSearch');
+    expect(mapSpecialistTools(info, withWeb)).toContain('WebFetch');
   });
 });
 

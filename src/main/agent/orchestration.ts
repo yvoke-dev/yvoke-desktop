@@ -31,7 +31,7 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
   // code execution — same rule as the single-agent path in policy.ts.
   const out = [...tools, 'ToolSearch'];
   if (info?.codeExecution !== false) out.push(...COMPUTE_TOOLS);
-  if (settings.webSearch.enabled) out.push('WebSearch');
+  if (settings.webSearch.enabled) out.push('WebSearch', 'WebFetch');
   return [...new Set(out)];
 }
 

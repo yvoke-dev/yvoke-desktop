@@ -1846,6 +1846,12 @@ h6 {
   line-height: 1.45;
 }
 
+.settings-domain-warning {
+  max-width: 58ch;
+  margin: 2px 0 0;
+  color: var(--warn-ink);
+}
+
 .settings-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2801,6 +2807,32 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
 }
 
 /* ── mermaid ── */
+.mermaid-wrapper {
+  margin: 12px 0;
+  position: relative;
+}
+
+.mermaid-repaired-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 8px;
+  margin-bottom: 6px;
+  cursor: help;
+  user-select: none;
+}
+
+.mermaid-repaired-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
 .mermaid-diagram-container {
   background: var(--pane);
   border: 1px solid var(--line);
@@ -2809,6 +2841,10 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
   display: flex;
   justify-content: center;
   overflow-x: auto;
+}
+
+.mermaid-wrapper .mermaid-diagram-container {
+  margin: 0;
 }
 
 .mermaid-diagram-container svg {

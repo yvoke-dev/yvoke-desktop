@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildAllowedTools, buildCanUseTool, isToolAllowed } from '../src/main/agent/policy';
+import {
+  buildAllowedTools,
+  buildCanUseTool,
+  isToolAllowed,
+  isUrlDomainAllowed,
+  normalizeDomain,
+  buildAutoApproveTools,
+} from '../src/main/agent/policy';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import { mapSpecialistTools } from '../src/main/agent/orchestration';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
@@ -93,6 +100,108 @@ describe('sub-agent delegation', () => {
   }
 });
 
+describe('isUrlDomainAllowed', () => {
+  const allowed = ['docs.oneidentity.com', 'microsoft.com'];
+
+  it('allows exact hostname matches', () => {
+    expect(isUrlDomainAllowed('https://docs.oneidentity.com/page.html', allowed)).toBe(true);
+    expect(isUrlDomainAllowed('http://microsoft.com', allowed)).toBe(true);
+  });
+
+  it('allows subdomains of allowed domains', () => {
+    expect(isUrlDomainAllowed('https://learn.microsoft.com/en-us/docs', allowed)).toBe(true);
+    expect(isUrlDomainAllowed('https://api.docs.oneidentity.com/v1', allowed)).toBe(true);
+  });
+
+  it('denies domains not on the allowlist', () => {
+    expect(isUrlDomainAllowed('https://evil.com/payload', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('https://notmicrosoft.com', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('https://oneidentity.com', allowed)).toBe(false);
+  });
+
+  it('denies non-http/https protocols', () => {
+    expect(isUrlDomainAllowed('file:///etc/passwd', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('ftp://microsoft.com/file', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('javascript:alert(1)', allowed)).toBe(false);
+  });
+
+  it('handles malformed URLs or non-string inputs safely', () => {
+    expect(isUrlDomainAllowed('not-a-valid-url', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('', allowed)).toBe(false);
+    expect(isUrlDomainAllowed(null, allowed)).toBe(false);
+    expect(isUrlDomainAllowed(undefined, allowed)).toBe(false);
+    expect(isUrlDomainAllowed(123, allowed)).toBe(false);
+  });
+
+  it('fails closed when allowedDomains is empty', () => {
+    expect(isUrlDomainAllowed('https://docs.oneidentity.com', [])).toBe(false);
+    expect(isUrlDomainAllowed('https://docs.oneidentity.com', ['   ', 'https://'])).toBe(false);
+  });
+
+  it('matches a fully-qualified hostname carrying the root-label dot', () => {
+    // `new URL('https://microsoft.com./x').hostname` is `microsoft.com.` — the same host, which
+    // used to miss the exact match and be refused.
+    expect(isUrlDomainAllowed('https://microsoft.com./x', allowed)).toBe(true);
+    expect(isUrlDomainAllowed('https://learn.microsoft.com./x', allowed)).toBe(true);
+  });
+
+  it('is not fooled by a hostname that merely contains an allowed domain', () => {
+    expect(isUrlDomainAllowed('https://microsoft.com.evil.com', allowed)).toBe(false);
+    expect(isUrlDomainAllowed('https://microsoft.com@evil.com/', allowed)).toBe(false);
+  });
+});
+
+describe('auto-approval is withheld from anything canUseTool has to see', () => {
+  // The SDK's `allowedTools` grants without asking, and canUseTool is only consulted on the ask
+  // path — so a tool whose enforcement lives in that callback is disarmed by being pre-approved.
+  // This is the same mechanism that switched clarifying questions off for any playbook that named
+  // the tool. If these ever go back on the auto-approval list, the domain allow-list stops being
+  // enforced and README/spec start lying.
+  it('keeps WebSearch and WebFetch out of the SDK auto-approval list', () => {
+    const granted = buildAllowedTools(withSearch);
+    expect(granted).toContain('WebSearch');
+    expect(granted).toContain('WebFetch');
+
+    const autoApproved = buildAutoApproveTools(granted);
+    expect(autoApproved).not.toContain('WebSearch');
+    expect(autoApproved).not.toContain('WebFetch');
+  });
+
+  it('keeps a playbook-declared ask_clarifying_question out of it, however it is qualified', () => {
+    const granted = buildAllowedTools(base, ['search_corpus', 'ask_clarifying_question']);
+    expect(granted).toContain(qualifyTool('ask_clarifying_question'));
+    expect(buildAutoApproveTools(granted)).not.toContain(qualifyTool('ask_clarifying_question'));
+    expect(buildAutoApproveTools(['ask_clarifying_question'])).toEqual([]);
+  });
+
+  it('withholds nothing else — every other granted tool is still auto-approved', () => {
+    const granted = buildAllowedTools(base);
+    expect(buildAutoApproveTools(granted)).toEqual(granted);
+    for (const t of COMPUTE_TOOLS) expect(buildAutoApproveTools(granted)).toContain(t);
+    expect(buildAutoApproveTools(granted)).toContain('ToolSearch');
+  });
+});
+
+describe('normalizeDomain', () => {
+  it('reduces an entry to a bare hostname', () => {
+    expect(normalizeDomain('https://Docs.Example.com:8443/r/guide?x=1')).toBe('docs.example.com');
+    expect(normalizeDomain('  example.com  ')).toBe('example.com');
+  });
+
+  it('accepts the wildcard and leading-dot spellings an operator is likely to paste', () => {
+    expect(normalizeDomain('*.example.com')).toBe('example.com');
+    expect(normalizeDomain('.example.com')).toBe('example.com');
+    expect(normalizeDomain('example.com.')).toBe('example.com');
+  });
+
+  it('returns empty for an entry with no hostname left, which callers treat as matching nothing', () => {
+    expect(normalizeDomain('')).toBe('');
+    expect(normalizeDomain('   ')).toBe('');
+    expect(normalizeDomain('/')).toBe('');
+    expect(normalizeDomain('https://')).toBe('');
+  });
+});
+
 describe('tool confinement (Correctness Property 1)', () => {
   it('allows only mcp__<server>__*, compute tools, and ToolSearch by default; Bash is denied', () => {
     expect(isToolAllowed(qualifyTool('search_corpus'), base)).toBe(true);
@@ -103,8 +212,11 @@ describe('tool confinement (Correctness Property 1)', () => {
     }
   });
 
-  it('allows WebSearch only when enabled in settings', () => {
+  it('allows WebSearch and WebFetch only when enabled in settings', () => {
     expect(isToolAllowed('WebSearch', withSearch)).toBe(true);
+    expect(isToolAllowed('WebFetch', withSearch)).toBe(true);
+    expect(isToolAllowed('WebSearch', base)).toBe(false);
+    expect(isToolAllowed('WebFetch', base)).toBe(false);
     // Derived from the single source of truth: a hand-copied list here is how the production copy
     // drifted in the first place, and the test would have pinned the drift rather than caught it.
     const baseAllowed = [
@@ -114,7 +226,10 @@ describe('tool confinement (Correctness Property 1)', () => {
     ];
     // Bash is never in the set — code execution is unavailable.
     expect(buildAllowedTools(base)).toEqual(baseAllowed);
-    expect(buildAllowedTools(withSearch)).toEqual([...baseAllowed, 'WebSearch']);
+    expect(buildAllowedTools(withSearch)).toEqual([...baseAllowed, 'WebSearch', 'WebFetch']);
+    // Granted, but never pre-approved: the domain check runs in canUseTool, which the SDK skips
+    // for anything on `allowedTools`.
+    expect(buildAutoApproveTools(buildAllowedTools(withSearch))).toEqual(baseAllowed);
   });
 
   it('never allow-lists Bash (code execution is unavailable)', () => {
@@ -207,5 +322,65 @@ describe('tool confinement (Correctness Property 1)', () => {
     expect((await canUse('WebSearch', {}, callOptions)).behavior).toBe('allow');
     current = base;
     expect((await canUse('WebSearch', {}, callOptions)).behavior).toBe('deny');
+  });
+
+  it('denies WebFetch when it is enabled but no domains are configured', async () => {
+    const noDomains: AppSettings = { ...base, webSearch: { enabled: true, allowedDomains: [] } };
+    const canUse = buildCanUseTool(() => noDomains);
+    const result = await canUse('WebFetch', { url: 'https://docs.oneidentity.com/page' }, callOptions);
+    expect(result.behavior).toBe('deny');
+  });
+
+  it('denies WebFetch when target URL is not in the allowed domain list', async () => {
+    const canUse = buildCanUseTool(() => withSearch);
+    const result = await canUse('WebFetch', { url: 'https://evil.com/exfiltrate' }, callOptions);
+    expect(result.behavior).toBe('deny');
+  });
+
+  it('allows WebFetch when target URL is in the allowed domain list or its subdomain', async () => {
+    const canUse = buildCanUseTool(() => withSearch);
+    const result1 = await canUse('WebFetch', { url: 'https://docs.oneidentity.com/r/Identity-Manager' }, callOptions);
+    expect(result1).toEqual({ behavior: 'allow' });
+
+    const result2 = await canUse('WebFetch', { url: 'https://learn.microsoft.com/en-us/entra' }, callOptions);
+    expect(result2).toEqual({ behavior: 'allow' });
+  });
+
+  it('injects the NORMALISED domain list into WebSearch, not the raw entries', async () => {
+    const messy: AppSettings = {
+      ...base,
+      webSearch: { enabled: true, allowedDomains: ['https://docs.oneidentity.com/r/guide', '*.microsoft.com'] },
+    };
+    const canUse = buildCanUseTool(() => messy);
+    const result = await canUse('WebSearch', { query: 'x' }, callOptions);
+    expect(result).toEqual({
+      behavior: 'allow',
+      updatedInput: { query: 'x', allowed_domains: ['docs.oneidentity.com', 'microsoft.com'] },
+    });
+  });
+
+  it('refuses both web tools when every configured entry normalises away to nothing', async () => {
+    // A list of pure punctuation is not configuration. Counting it as such would hand WebSearch an
+    // empty `allowed_domains`, which the API reads as no restriction at all.
+    const junk: AppSettings = { ...base, webSearch: { enabled: true, allowedDomains: ['https://', '  ', '/'] } };
+    const canUse = buildCanUseTool(() => junk);
+    expect((await canUse('WebSearch', { query: 'x' }, callOptions)).behavior).toBe('deny');
+    expect((await canUse('WebFetch', { url: 'https://evil.com' }, callOptions)).behavior).toBe('deny');
+  });
+
+  it('honours a wildcard entry for WebFetch instead of silently matching nothing', async () => {
+    const wildcard: AppSettings = { ...base, webSearch: { enabled: true, allowedDomains: ['*.microsoft.com'] } };
+    const canUse = buildCanUseTool(() => wildcard);
+    expect((await canUse('WebFetch', { url: 'https://learn.microsoft.com/x' }, callOptions)).behavior).toBe('allow');
+    expect((await canUse('WebFetch', { url: 'https://microsoft.com' }, callOptions)).behavior).toBe('allow');
+    expect((await canUse('WebFetch', { url: 'https://evil.com' }, callOptions)).behavior).toBe('deny');
+  });
+
+  it('respects settings changes between calls for WebFetch', async () => {
+    let current = withSearch;
+    const canUse = buildCanUseTool(() => current);
+    expect((await canUse('WebFetch', { url: 'https://docs.oneidentity.com' }, callOptions)).behavior).toBe('allow');
+    current = base;
+    expect((await canUse('WebFetch', { url: 'https://docs.oneidentity.com' }, callOptions)).behavior).toBe('deny');
   });
 });

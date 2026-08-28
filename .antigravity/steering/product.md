@@ -12,7 +12,7 @@ Yvoke - Desktop is a desktop chat client for Yvoke. The agent loop runs locally 
 - **Conversation Sync**:
   - Conversations are backed up on the Spring Boot Postgres database.
   - Local `userData` directory holds local thread metadata/history cache, sync queue files, and SDK session states to support session resume and offline capabilities.
-- **MCP Tool Confinement**: Restricts tool usage exclusively to `mcp__yvoke__*` tools and domain-restricted web search when configured.
+- **MCP Tool Confinement**: Restricts tool usage exclusively to `mcp__yvoke__*` tools, safe compute tools, and domain-restricted web search / fetch when configured.
 
 ## Domain Context
 
