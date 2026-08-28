@@ -24,6 +24,7 @@ export const IpcChannels = {
   authStatus: 'auth:status',
   authSignin: 'auth:signin',
   authSignout: 'auth:signout',
+  clipboardWriteImage: 'clipboard:write-image',
 
   // main -> renderer event channels
   agentEvent: 'agent-event',

@@ -245,6 +245,24 @@ describe('App conversation switching with in-progress turn', () => {
     });
   });
 
+  it('takes the posted question back down when the send is rejected', async () => {
+    sendMessageMock.mockRejectedValueOnce(new Error('Image attachment "huge.png" exceeds the 5MB size limit.'));
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+    fireEvent.click(screen.getByText('Getting started').closest('button')!);
+
+    const textarea = await screen.findByPlaceholderText(/Add your question/);
+    fireEvent.change(textarea, { target: { value: 'Look at this screenshot' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+
+    // The failure is reported, and the message that will never be answered is gone with it.
+    await waitFor(() => expect(screen.getByText(/exceeds the 5MB size limit/)).toBeTruthy());
+    expect(screen.queryByText('Look at this screenshot')).toBeNull();
+  });
+
   it('updates background thread when turn-complete arrives while viewing a different thread', async () => {
     render(<App />);
 

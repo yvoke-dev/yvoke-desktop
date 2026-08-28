@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 // Mermaid is heavy and only used for diagram fences; stub it so these tests stay fast.
 //
@@ -18,9 +18,11 @@ const mockRender = vi.fn(async (_id: string, code: string) => {
   return { svg: '<svg class="rendered-diagram"></svg>' };
 });
 
+const mockInitialize = vi.fn();
+
 vi.mock('mermaid', () => ({
   default: {
-    initialize: () => undefined,
+    initialize: (config: unknown) => mockInitialize(config),
     render: (id: string, code: string) => mockRender(id, code),
   },
 }));
@@ -32,6 +34,7 @@ afterEach(() => {
   // Call history is asserted per-test ("the last chart mermaid accepted"), and any unconsumed
   // `mockImplementationOnce` would otherwise leak into the next test's first render.
   mockRender.mockReset();
+  mockInitialize.mockReset();
 });
 
 describe('Markdown citations', () => {
@@ -283,6 +286,19 @@ describe('citation rewriting never corrupts real content', () => {
 });
 
 describe('Mermaid diagram rendering and auto-repair', () => {
+  it('configures mermaid with compact typography and disabled useMaxWidth', async () => {
+    const md = '```mermaid\nflowchart TD\n  A --> B\n```';
+    render(<Markdown content={md} />);
+    await screen.findByText((_content, el) => el?.classList.contains('mermaid-diagram-container') || false);
+    expect(mockInitialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fontSize: 13,
+        flowchart: expect.objectContaining({ useMaxWidth: false }),
+        sequence: expect.objectContaining({ useMaxWidth: false }),
+      }),
+    );
+  });
+
   it('renders a valid diagram inside mermaid-diagram-container', async () => {
     const md = '```mermaid\nflowchart TD\n  A --> B\n```';
     const { container } = render(<Markdown content={md} />);
@@ -358,6 +374,57 @@ describe('Mermaid diagram rendering and auto-repair', () => {
     expect(label).toBeTruthy();
     expect(container.querySelector('.mermaid-raw')?.textContent).toContain('!!! not a diagram');
     expect(container.querySelector('.mermaid-repaired-marker')).toBeNull();
+  });
+});
+
+describe('Code block copy button', () => {
+  it('renders a copy button on code blocks and copies code content', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    const md = '```python\ndef hello():\n    return "world"\n```';
+    render(<Markdown content={md} />);
+
+    const copyBtn = screen.getByRole('button', { name: 'Copy code' });
+    expect(copyBtn).toBeTruthy();
+    fireEvent.click(copyBtn);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('def hello():\n    return "world"'));
+  });
+});
+
+describe('Mermaid diagram copy and zoom buttons', () => {
+  it('renders copy source, copy image, and zoom buttons for diagrams', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    const md = '```mermaid\nflowchart TD\n  A --> B\n```';
+    render(<Markdown content={md} />);
+
+    const sourceBtn = await screen.findByRole('button', { name: 'Copy Mermaid source' });
+    const imageBtn = screen.getByRole('button', { name: 'Copy diagram as image' });
+    const zoomBtn = screen.getByRole('button', { name: 'Zoom and inspect diagram' });
+    expect(sourceBtn).toBeTruthy();
+    expect(imageBtn).toBeTruthy();
+    expect(zoomBtn).toBeTruthy();
+
+    fireEvent.click(sourceBtn);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('flowchart TD\n  A --> B'));
+  });
+
+  it('opens zoom modal when zoom button is clicked and closes on Escape', async () => {
+    const md = '```mermaid\nflowchart TD\n  A --> B\n```';
+    render(<Markdown content={md} />);
+
+    const zoomBtn = await screen.findByRole('button', { name: 'Zoom and inspect diagram' });
+    fireEvent.click(zoomBtn);
+
+    expect(screen.getByRole('dialog', { name: 'Diagram preview' })).toBeTruthy();
+    expect(screen.getByText('Diagram Preview')).toBeTruthy();
+
+    // Close via Escape
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Diagram preview' })).toBeNull();
   });
 });
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { CopyButton } from '../../src/renderer/src/components/CopyButton';
+import { CopyButton, CopyImageButton } from '../../src/renderer/src/components/CopyButton';
 
 /** The copy control next to the feedback buttons: it copies the raw Markdown, and says so. */
 
@@ -47,5 +47,25 @@ describe('CopyButton', () => {
     fireEvent.click(screen.getByRole('button'));
 
     await waitFor(() => expect(screen.getByRole('button').getAttribute('data-tip')).toBe('Copy as Markdown'));
+  });
+});
+
+describe('CopyImageButton', () => {
+  it('calls onCopy handler and confirms', async () => {
+    const onCopy = vi.fn().mockResolvedValue(undefined);
+    render(<CopyImageButton onCopy={onCopy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy diagram as image' }));
+
+    await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button').getAttribute('data-tip')).toBe('Copied image'));
+  });
+
+  it('stays uncopied when onCopy rejects', async () => {
+    const onCopy = vi.fn().mockRejectedValue(new Error('fail'));
+    render(<CopyImageButton onCopy={onCopy} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy diagram as image' }));
+
+    await waitFor(() => expect(onCopy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button').getAttribute('data-tip')).toBe('Copy diagram as image'));
   });
 });

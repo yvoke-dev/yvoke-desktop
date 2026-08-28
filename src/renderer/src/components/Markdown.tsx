@@ -6,7 +6,21 @@ import rehypeKatex from 'rehype-katex';
 import mermaid from 'mermaid';
 import type { CitationRef } from '../../../shared/types';
 import { rehypeCitations } from './citationRehype';
+import { CopyButton, CopyImageButton, copySvgAsPng } from './CopyButton';
+import { MaximizeIcon } from './icons';
+import { DiagramModal } from './DiagramModal';
 import { sanitizeMermaidStages } from './mermaidSanitizer';
+
+/** Recursively extracts plain text from React nodes inside code blocks. */
+function extractCodeText(node: React.ReactNode): string {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(extractCodeText).join('');
+  if (React.isValidElement(node)) {
+    return extractCodeText((node.props as { children?: React.ReactNode }).children);
+  }
+  return '';
+}
 
 /**
  * Mermaid bakes its palette into the SVG at render time, so it cannot follow a CSS variable —
@@ -31,6 +45,34 @@ function initMermaid(dark: boolean): void {
   mermaid.initialize({
     startOnLoad: false,
     theme: dark ? 'dark' : 'default',
+    fontFamily: "'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+    fontSize: 13,
+    themeVariables: {
+      fontFamily: "'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+      fontSize: '13px',
+    },
+    flowchart: {
+      useMaxWidth: false,
+      nodeSpacing: 30,
+      rankSpacing: 35,
+      padding: 8,
+    },
+    sequence: { useMaxWidth: false },
+    gantt: { useMaxWidth: false },
+    journey: { useMaxWidth: false },
+    class: { useMaxWidth: false },
+    state: { useMaxWidth: false },
+    er: { useMaxWidth: false },
+    pie: { useMaxWidth: false },
+    quadrantChart: { useMaxWidth: false },
+    xyChart: { useMaxWidth: false },
+    requirement: { useMaxWidth: false },
+    mindmap: { useMaxWidth: false },
+    timeline: { useMaxWidth: false },
+    gitGraph: { useMaxWidth: false },
+    c4: { useMaxWidth: false },
+    sankey: { useMaxWidth: false },
+    block: { useMaxWidth: false },
     // 'strict' disables raw HTML and click-directives in untrusted diagram source
     // (defense-in-depth behind the CSP).
     securityLevel: 'strict',
@@ -41,6 +83,8 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
   const [svg, setSvg] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
   const [appliedFixes, setAppliedFixes] = React.useState<string[]>([]);
+  const [isZoomOpen, setIsZoomOpen] = React.useState<boolean>(false);
+  const containerRef = React.useRef<HTMLDivElement>(null);
   const elementId = React.useId().replace(/:/g, '');
   const dark = useDarkAppearance();
 
@@ -105,6 +149,9 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
   if (error) {
     return (
       <div className="mermaid-error">
+        <div className="mermaid-error-actions">
+          <CopyButton text={chart} tip="Copy Mermaid source" />
+        </div>
         <pre className="mermaid-raw">{chart}</pre>
         <span className="mermaid-error-label">Mermaid render error: {error}</span>
       </div>
@@ -127,7 +174,33 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
           <span>Auto-repaired syntax</span>
         </div>
       )}
-      <div className="mermaid-diagram-container" dangerouslySetInnerHTML={{ __html: svg }} />
+      <div className="mermaid-diagram-box">
+        <div className="mermaid-actions">
+          <CopyButton text={chart} tip="Copy Mermaid source" />
+          <CopyImageButton onCopy={() => copySvgAsPng(containerRef.current, svg)} tip="Copy diagram as image" />
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => setIsZoomOpen(true)}
+            data-tip="Zoom and inspect diagram"
+            aria-label="Zoom and inspect diagram"
+          >
+            <MaximizeIcon size={14} />
+          </button>
+        </div>
+        <div
+          ref={containerRef}
+          className="mermaid-diagram-container"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      </div>
+      {isZoomOpen && (
+        <DiagramModal
+          svg={svg}
+          chart={chart}
+          onClose={() => setIsZoomOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -189,11 +262,26 @@ export const Markdown = React.memo(function Markdown(props: {
         const chart = String(codeChild.props.children || '').replace(/\n$/, '');
         // While streaming, defer diagram rendering — show the raw source as a placeholder.
         if (live) {
-          return <pre className="mermaid-raw mermaid-streaming">{chart}</pre>;
+          return (
+            <div className="code-block-wrapper">
+              <div className="code-block-actions">
+                <CopyButton text={chart} tip="Copy Mermaid source" />
+              </div>
+              <pre className="mermaid-raw mermaid-streaming">{chart}</pre>
+            </div>
+          );
         }
         return <Mermaid chart={chart} />;
       }
-      return <pre {...rest}>{children}</pre>;
+      const codeText = extractCodeText(children).replace(/\n$/, '');
+      return (
+        <div className="code-block-wrapper">
+          <div className="code-block-actions">
+            <CopyButton text={codeText} tip="Copy code" />
+          </div>
+          <pre {...rest}>{children}</pre>
+        </div>
+      );
     },
     a({ href, children, ...rest }: any) {
       if (onCitation && href && href.startsWith('citation:')) {

@@ -707,6 +707,9 @@ h6 {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  /* Containing block for .chat-drop-overlay — without it the drop target's tint and dashed
+     border resolve against the viewport and spill over the sidebar. */
+  position: relative;
 }
 
 .chat-header {
@@ -815,6 +818,54 @@ h6 {
   line-height: 1.45;
   font-weight: 500;
   white-space: pre-wrap;
+}
+
+.user-images-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.user-image-card {
+  position: relative;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--raised);
+  border-radius: 4px;
+  overflow: hidden;
+  max-width: 220px;
+  max-height: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.user-image-card:hover {
+  border-color: var(--accent-ink);
+  transform: translateY(-1px);
+}
+
+.user-image-card img {
+  max-width: 100%;
+  max-height: 125px;
+  object-fit: cover;
+  display: block;
+}
+
+.user-image-name {
+  padding: 3px 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--pane);
+  border-top: 1px solid var(--hairline);
 }
 
 .message.assistant {
@@ -1506,11 +1557,113 @@ h6 {
   position: relative;
 }
 
+/* Drag and drop overlay */
+.chat-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: color-mix(in srgb, var(--accent-tint) 92%, transparent);
+  border: 3px dashed var(--accent-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.drop-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--accent-ink);
+  font-size: 16px;
+  font-weight: 700;
+  font-family: var(--font-heading);
+}
+
 .composer-box {
   max-width: var(--column);
   margin-inline: auto;
   border: 2px solid var(--rule);
   background: var(--canvas);
+}
+
+/* Composer attachment preview strip */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--pane);
+}
+
+.attachment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  max-width: 220px;
+}
+
+.attachment-pill-thumb {
+  width: 22px;
+  height: 22px;
+  border: none;
+  padding: 0;
+  background: none;
+  border-radius: 2px;
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.attachment-pill-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 2px;
+}
+
+.attachment-pill-thumb:hover {
+  opacity: 0.85;
+}
+
+.attachment-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.attachment-pill-size {
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.attachment-pill-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+.attachment-pill-remove:hover {
+  opacity: 1;
+  color: var(--danger-ink);
 }
 
 .composer-input {
@@ -1549,6 +1702,31 @@ h6 {
   gap: 8px;
   border-top: 1px solid var(--hairline);
   padding: 8px 10px;
+}
+
+.composer-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.composer-attach-btn:hover:not(:disabled) {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.composer-attach-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* The active playbook, model and thinking level as a row of chips instead of three
@@ -2388,7 +2566,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.citation-context-toggle) {
+button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.citation-context-toggle):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;
@@ -2669,6 +2847,254 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
   color: var(--text-dim);
 }
 
+/* ── image lightbox modal ── */
+.image-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 70%, transparent);
+  backdrop-filter: blur(4px);
+}
+
+.image-lightbox-modal {
+  display: flex;
+  flex-direction: column;
+  max-width: 90vw;
+  max-height: 90vh;
+  background: var(--pane);
+  border: 2px solid var(--rule);
+  overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas);
+}
+
+.lightbox-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lightbox-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: normal;
+}
+
+.lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lightbox-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  text-decoration: none;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.lightbox-action-btn:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent-ink);
+}
+
+.lightbox-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 4px;
+}
+
+.lightbox-close-btn:hover {
+  color: var(--text);
+}
+
+.lightbox-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  overflow: auto;
+  background: var(--canvas);
+  max-height: calc(90vh - 56px);
+}
+
+.lightbox-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 2px;
+}
+
+/* ── diagram zoom lightbox modal ── */
+.diagram-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 75%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.diagram-lightbox-modal {
+  display: flex;
+  flex-direction: column;
+  width: 92vw;
+  height: 88vh;
+  background: var(--pane);
+  border: 2px solid var(--rule);
+  overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.diagram-lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas);
+  gap: 16px;
+  user-select: none;
+}
+
+.diagram-lightbox-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+
+.diagram-lightbox-hint {
+  font-size: 11px;
+  font-weight: normal;
+  color: var(--text-dim);
+  background: var(--raised);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+.diagram-lightbox-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.diagram-zoom-cluster,
+.diagram-action-cluster {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.diagram-lightbox-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.diagram-lightbox-btn:hover:not(:disabled) {
+  background: var(--canvas);
+  border-color: var(--text-dim);
+}
+
+.diagram-lightbox-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.diagram-zoom-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  min-width: 42px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.diagram-lightbox-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--canvas);
+  background-image: radial-gradient(var(--hairline) 1px, transparent 1px);
+  background-size: 24px 24px;
+  cursor: grab;
+  user-select: none;
+}
+
+.diagram-lightbox-body.is-dragging {
+  cursor: grabbing;
+}
+
+.diagram-lightbox-viewport {
+  will-change: transform;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.diagram-lightbox-viewport svg {
+  max-width: none !important;
+  max-height: none !important;
+  height: auto;
+  pointer-events: auto;
+}
+
+
 /* ══════════════════════════════════════════════════════════════════════════
    Markdown
    ══════════════════════════════════════════════════════════════════════════ */
@@ -2723,6 +3149,46 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
   padding: 10px 12px;
   overflow-x: auto;
   margin: 0 0 12px;
+}
+
+.code-block-wrapper {
+  position: relative;
+  margin: 0 0 12px;
+}
+
+.code-block-wrapper pre {
+  margin: 0;
+  padding-right: 44px;
+}
+
+.code-block-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 2;
+}
+
+.code-block-actions .icon-button {
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-dim);
+  padding: 4px;
+  transition: opacity 120ms ease-out, background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.code-block-actions .icon-button:hover {
+  background: var(--raised);
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.code-block-actions .icon-button.copied {
+  color: var(--ok-ink);
+  border-color: var(--ok-ink);
 }
 
 .markdown pre code {
@@ -2812,6 +3278,39 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
   position: relative;
 }
 
+.mermaid-diagram-box {
+  position: relative;
+}
+
+.mermaid-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 2;
+}
+
+.mermaid-actions .icon-button {
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-dim);
+  padding: 4px;
+}
+
+.mermaid-actions .icon-button:hover {
+  background: var(--canvas);
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.mermaid-actions .icon-button.copied {
+  color: var(--ok-ink);
+  border-color: var(--ok-ink);
+}
+
 .mermaid-repaired-marker {
   display: inline-flex;
   align-items: center;
@@ -2853,10 +3352,34 @@ button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg
 }
 
 .mermaid-error {
+  position: relative;
   background: var(--danger-bg);
   border-left: 2px solid var(--danger);
   padding: 12px;
   margin: 12px 0;
+}
+
+.mermaid-error-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 2;
+}
+
+.mermaid-error-actions .icon-button {
+  background: var(--pane);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-dim);
+  padding: 4px;
+}
+
+.mermaid-error-actions .icon-button:hover {
+  background: var(--raised);
+  color: var(--text);
 }
 
 .mermaid-raw {

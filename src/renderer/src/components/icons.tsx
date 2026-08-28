@@ -260,3 +260,69 @@ export const MonitorIcon = (p: IconProps): React.JSX.Element =>
 
 export const StopIcon = (p: IconProps): React.JSX.Element =>
   svg(<rect x="6" y="6" width="12" height="12" />, p, { fill: 'currentColor' });
+
+export const PaperclipIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />,
+    p,
+  );
+
+export const DownloadIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </>,
+    p,
+  );
+
+export const ImageIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+    </>,
+    p,
+  );
+
+export const MaximizeIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+    </>,
+    p,
+  );
+
+export const ZoomInIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <line x1="11" y1="8" x2="11" y2="14" />
+      <line x1="8" y1="11" x2="14" y2="11" />
+    </>,
+    p,
+  );
+
+export const ZoomOutIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <line x1="8" y1="11" x2="14" y2="11" />
+    </>,
+    p,
+  );
+
+export const RotateCcwIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </>,
+    p,
+  );
+
+

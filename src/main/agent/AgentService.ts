@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent, AppSettings, ChatMessage, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
+import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
 import { isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { log, logError } from '../log';
@@ -140,6 +140,8 @@ export interface SendOptions {
   /** Display label for the injected playbook, stored on the user message. */
   playbook?: string;
   playbookName?: string;
+  /** Attached images for multimodal prompt context. */
+  images?: ImageAttachment[];
 }
 
 interface ThreadSession {
@@ -267,14 +269,39 @@ export class AgentService {
       content: text,
       playbook: opts.playbook,
       createdAt: new Date().toISOString(),
+      images: opts.images && opts.images.length > 0 ? opts.images : undefined,
     };
     session.pendingUser = userMessage;
 
-    session.queue.push({
-      type: 'user',
-      message: { role: 'user', content: modelText },
-      parent_tool_use_id: null,
-    });
+    if (opts.images && opts.images.length > 0) {
+      const blocks: Array<
+        | { type: 'image'; source: { type: 'base64'; media_type: ImageMediaType; data: string } }
+        | { type: 'text'; text: string }
+      > = [
+        ...opts.images.map((img) => ({
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: img.mediaType,
+            data: img.data,
+          },
+        })),
+      ];
+      if (modelText.trim().length > 0) {
+        blocks.push({ type: 'text', text: modelText });
+      }
+      session.queue.push({
+        type: 'user',
+        message: { role: 'user', content: blocks },
+        parent_tool_use_id: null,
+      });
+    } else {
+      session.queue.push({
+        type: 'user',
+        message: { role: 'user', content: modelText },
+        parent_tool_use_id: null,
+      });
+    }
   }
 
   async interrupt(threadId: string): Promise<void> {

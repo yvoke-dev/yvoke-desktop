@@ -5,6 +5,7 @@ import type {
   AppSettings,
   AuthStatus,
   ChatMessage,
+  ImageAttachment,
   McpPromptInfo,
   OrchestratorProfile,
   SyncEvent,
@@ -403,7 +404,7 @@ export default function App(): React.JSX.Element {
   );
 
   const sendMessage = useCallback(
-    async (text: string, promptName?: string) => {
+    async (text: string, promptName?: string, images?: ImageAttachment[]) => {
       if (!activeThreadId) return;
       const threadId = activeThreadId;
       const userMessage: ChatMessage = {
@@ -411,6 +412,7 @@ export default function App(): React.JSX.Element {
         role: 'user',
         content: text,
         playbook: promptName,
+        images: images && images.length > 0 ? images : undefined,
         createdAt: new Date().toISOString(),
       };
       setMessagesByThread((prev) => ({
@@ -422,8 +424,15 @@ export default function App(): React.JSX.Element {
         [threadId]: { running: true, liveText: '', liveThinking: '', blocks: [] },
       }));
       try {
-        await window.api.sendMessage({ threadId, text, promptName });
+        await window.api.sendMessage({ threadId, text, promptName, images });
       } catch (error) {
+        // The question never reached the agent, so the card that was posted ahead of it has to go
+        // with it — otherwise a rejected send (an attachment the main-process validator refuses,
+        // say) leaves a message standing in the transcript that nothing will ever answer.
+        setMessagesByThread((prev) => ({
+          ...prev,
+          [threadId]: (prev[threadId] ?? []).filter((m) => m.localId !== userMessage.localId),
+        }));
         setLiveTurnsByThread((prev) => ({
           ...prev,
           [threadId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },

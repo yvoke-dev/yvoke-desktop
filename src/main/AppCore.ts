@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   CitationRef,
   FeedbackRequest,
+  ImageAttachment,
   McpPromptInfo,
   OrchestratorProfile,
   OrchestratorRunPayload,
@@ -19,7 +20,14 @@ import type {
   ThinkingLevel,
   UsageTotals,
 } from '../shared/types';
-import { controlPlaybookNames, isUserSelectablePlaybook } from '../shared/types';
+import {
+  ALLOWED_IMAGE_MEDIA_TYPES,
+  controlPlaybookNames,
+  isUserSelectablePlaybook,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_COUNT,
+  MAX_TOTAL_IMAGE_BYTES,
+} from '../shared/types';
 import { log, logError } from './log';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
 import { McpPrompts } from './agent/McpPrompts';
@@ -41,6 +49,51 @@ export interface AppCoreDeps {
   emitSyncEvent: (event: SyncEvent) => void;
   openBrowser: (url: string) => Promise<void>;
   tokenCache: TokenCachePersistence | null;
+}
+
+const ALLOWED_IMAGE_TYPES = new Set<string>(ALLOWED_IMAGE_MEDIA_TYPES);
+const MB = 1024 * 1024;
+
+export function validateAndSanitizeImages(images?: ImageAttachment[]): ImageAttachment[] | undefined {
+  if (!images || images.length === 0) return undefined;
+  if (images.length > MAX_IMAGE_COUNT) {
+    throw new Error(`Maximum ${MAX_IMAGE_COUNT} image attachments allowed.`);
+  }
+
+  const sizeLimitMb = Math.round(MAX_IMAGE_BYTES / MB);
+  const sanitized = images.map((img, idx) => {
+    if (!img.mediaType || !ALLOWED_IMAGE_TYPES.has(img.mediaType)) {
+      throw new Error(`Unsupported image type "${img.mediaType}". Allowed: ${ALLOWED_IMAGE_MEDIA_TYPES.join(', ')}.`);
+    }
+    if (!img.data || typeof img.data !== 'string' || img.data.trim().length === 0) {
+      throw new Error(`Image attachment ${idx + 1} has empty data; non-empty base64 string required.`);
+    }
+    const cleanData = img.data.trim();
+    if (img.size !== undefined && img.size > MAX_IMAGE_BYTES) {
+      throw new Error(`Image attachment "${img.name || idx + 1}" exceeds the ${sizeLimitMb}MB size limit.`);
+    }
+    const byteLength = Buffer.byteLength(cleanData, 'base64');
+    if (byteLength > MAX_IMAGE_BYTES) {
+      throw new Error(`Image attachment "${img.name || idx + 1}" exceeds the ${sizeLimitMb}MB size limit.`);
+    }
+    return {
+      id: img.id || randomUUID(),
+      mediaType: img.mediaType,
+      data: cleanData,
+      name: img.name,
+      size: img.size ?? byteLength,
+    };
+  });
+
+  // Each attachment can be under the per-image limit while the batch still overflows the API's
+  // per-request ceiling (base64 inflates by ~4/3), so the total is checked as well.
+  const totalBytes = sanitized.reduce((sum, img) => sum + Buffer.byteLength(img.data, 'base64'), 0);
+  if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+    throw new Error(
+      `Image attachments total ${(totalBytes / MB).toFixed(1)}MB, over the ${Math.round(MAX_TOTAL_IMAGE_BYTES / MB)}MB limit for one message.`,
+    );
+  }
+  return sanitized;
 }
 
 /** Wires settings, server auth, sync, local store, and the agent service together. */
@@ -194,11 +247,21 @@ export class AppCore {
 
     const syncedContent = serializeAssistantContent(assistantMessage, isOrchestrator);
 
+    let userSyncedContent = userMessage.content;
+    if (userMessage.images && userMessage.images.length > 0) {
+      const imageNotes = userMessage.images
+        .map((img, idx) => `[Attached Image: ${img.name || `image-${idx + 1}`}]`)
+        .join('\n');
+      userSyncedContent = userSyncedContent
+        ? `${userSyncedContent}\n\n${imageNotes}`
+        : imageNotes;
+    }
+
     this.syncQueue.enqueue({
       threadId,
       localIds: [userMessage.localId, assistantMessage.localId],
       messages: [
-        { role: 'user', content: userMessage.content },
+        { role: 'user', content: userSyncedContent },
         {
           role: 'assistant',
           content: syncedContent,
@@ -431,6 +494,7 @@ export class AppCore {
     if (!thread) {
       throw new Error(`Unknown thread: ${request.threadId}`);
     }
+    const sanitizedImages = validateAndSanitizeImages(request.images);
     let injectBefore: string | undefined;
     let playbook: string | undefined;
     // Orchestrator mode drives everything from the orchestrator's system prompt — never prepend a playbook.
@@ -444,6 +508,7 @@ export class AppCore {
       injectBefore,
       playbook,
       playbookName: request.promptName,
+      images: sanitizedImages,
     });
   }
 

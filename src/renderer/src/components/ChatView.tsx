@@ -3,6 +3,8 @@ import type {
   AppSettings,
   ChatMessage,
   CitationRef,
+  ImageAttachment,
+  ImageMediaType,
   McpPromptInfo,
   MessageBlock,
   OrchestratorProfile,
@@ -13,7 +15,13 @@ import type {
   ToolCallInfo,
   UsageTotals,
 } from '../../../shared/types';
-import { DEFAULT_APPEARANCE, isUserSelectableProfile } from '../../../shared/types';
+import {
+  ALLOWED_IMAGE_MEDIA_TYPES,
+  DEFAULT_APPEARANCE,
+  isUserSelectableProfile,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_COUNT,
+} from '../../../shared/types';
 import type { LiveTurn } from '../App';
 import { CitationModal, type CitationState } from './CitationModal';
 import { CopyButton } from './CopyButton';
@@ -21,10 +29,19 @@ import { FeedbackControls } from './FeedbackControls';
 import { Markdown } from './Markdown';
 import { ToolCallCard } from './ToolCallCard';
 import { TraceBar, type TraceEntry } from './TraceBar';
-import { AlertIcon, CloseIcon, PlaybookIcon, SearchIcon, SendIcon, StopIcon } from './icons';
+import { AlertIcon, CloseIcon, DownloadIcon, PaperclipIcon, PlaybookIcon, SearchIcon, SendIcon, StopIcon } from './icons';
 import { shortName } from './toolNames';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
+
+const IMAGE_SIZE_LIMIT_MB = Math.round(MAX_IMAGE_BYTES / (1024 * 1024));
+
+function formatBytes(bytes?: number): string {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function formatTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
@@ -130,7 +147,7 @@ export function ChatView(props: {
   prompts: McpPromptInfo[];
   profiles: OrchestratorProfile[];
   liveTurn: LiveTurn;
-  onSend: (text: string, promptName?: string) => void;
+  onSend: (text: string, promptName?: string, images?: ImageAttachment[]) => void;
   onInterrupt: () => void;
   onPatchThread: (update: Partial<ThreadMeta>) => void;
   onFeedback: (messageLocalId: string, rating: 1 | -1, comment?: string) => Promise<void>;
@@ -165,6 +182,12 @@ export function ChatView(props: {
   );
   const traceExpanded = settings.appearance?.traceExpanded ?? DEFAULT_APPEARANCE.traceExpanded;
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<ImageAttachment | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragCounterRef = useRef(0);
   // The active playbook follows the conversation's history unless the user has said otherwise for
   // THIS thread (see `activePrompt` below). Keying the override to the thread is what retires it on
   // a switch, so no render can show a previous conversation's pick.
@@ -191,14 +214,30 @@ export function ChatView(props: {
    */
   const runIdRef = useRef(0);
 
-  // When switching conversations, retire the transient cards. The active playbook needs nothing
-  // here: it is derived, and its override is keyed to the thread it was made on.
+  // When switching conversations, retire the transient cards and composer attachments.
   useEffect(() => {
     runIdRef.current += 1;
     setPreflight(null);
     setChecking(false);
     setPlaybookRequired(false);
+    setAttachments([]);
+    setAttachmentError(null);
+    setLightboxImage(null);
+    setIsDraggingOver(false);
+    dragCounterRef.current = 0;
   }, [thread.id]);
+
+  // Close image lightbox on Escape key.
+  useEffect(() => {
+    if (!lightboxImage) return;
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        setLightboxImage(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxImage]);
 
   /**
    * The playbook this message will be sent under. A playbook is sticky for the conversation, so the
@@ -294,6 +333,123 @@ export function ChatView(props: {
     el.style.height = `${Math.min(Math.max(el.scrollHeight, minHeight), maxHeight)}px`;
   }, [draft]);
 
+  const processFiles = useCallback(
+    async (files: FileList | File[]) => {
+      setAttachmentError(null);
+      const fileList = Array.from(files);
+      if (fileList.length === 0) return;
+
+      const currentCount = attachments.length;
+      if (currentCount >= MAX_IMAGE_COUNT) {
+        setAttachmentError(`Maximum ${MAX_IMAGE_COUNT} image attachments allowed per message.`);
+        return;
+      }
+
+      const availableSlots = MAX_IMAGE_COUNT - currentCount;
+      if (fileList.length > availableSlots) {
+        setAttachmentError(`Can only add ${availableSlots} more image${availableSlots > 1 ? 's' : ''} (max ${MAX_IMAGE_COUNT}).`);
+      }
+
+      const filesToProcess = fileList.slice(0, availableSlots);
+      const newAttachments: ImageAttachment[] = [];
+
+      for (const file of filesToProcess) {
+        if (!ALLOWED_IMAGE_MEDIA_TYPES.includes(file.type as ImageMediaType)) {
+          setAttachmentError(`Unsupported image type "${file.name}". Please use PNG, JPEG, GIF, or WebP.`);
+          continue;
+        }
+        if (file.size > MAX_IMAGE_BYTES) {
+          setAttachmentError(`Image "${file.name}" exceeds the ${IMAGE_SIZE_LIMIT_MB}MB size limit.`);
+          continue;
+        }
+
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          const commaIdx = dataUrl.indexOf(',');
+          const base64Data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+
+          newAttachments.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+            mediaType: file.type as ImageMediaType,
+            data: base64Data,
+            name: file.name,
+            size: file.size,
+          });
+        } catch {
+          setAttachmentError(`Failed to read image "${file.name}".`);
+        }
+      }
+
+      if (newAttachments.length > 0) {
+        setAttachments((prev) => [...prev, ...newAttachments].slice(0, MAX_IMAGE_COUNT));
+      }
+    },
+    [attachments.length],
+  );
+
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const imageFiles: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) imageFiles.push(file);
+        }
+      }
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        void processFiles(imageFiles);
+      }
+    },
+    [processFiles],
+  );
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current += 1;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDraggingOver(true);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        void processFiles(e.dataTransfer.files);
+      }
+    },
+    [processFiles],
+  );
+
   const pickPrompt = (prompt: McpPromptInfo): void => {
     setPromptOverride({ threadId: thread.id, prompt });
     // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
@@ -307,24 +463,31 @@ export function ChatView(props: {
   /** Whether the message about to be sent gets its playbook checked first. */
   const validationEnabled = settings.playbookValidationEnabled !== false;
 
-  const send = (text: string, promptName?: string): void => {
+  const send = (text: string, promptName?: string, imagesToSend?: ImageAttachment[]): void => {
     setPreflight(null);
     setPlaybookRequired(false);
+    setAttachmentError(null);
+    const toSend = imagesToSend ?? (attachments.length > 0 ? attachments : undefined);
     // The recommendation card's "Switch to …" sends under a playbook that is not the active one;
     // make it the active one so the composer agrees with what was just asked.
     if (promptName && promptName !== activePrompt?.name) {
       const matching = prompts.find((p) => p.name === promptName);
       if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
-    onSend(text, promptName);
+    if (toSend && toSend.length > 0) {
+      onSend(text, promptName, toSend);
+    } else {
+      onSend(text, promptName);
+    }
     setDraft('');
+    setAttachments([]);
   };
 
   /**
    * Preflight playbook check: runs on the conversation's first message or when switching to a
    * different playbook. Fails open at every step so a check that cannot run never blocks a question.
    */
-  const runPreflight = async (text: string, prompt: McpPromptInfo): Promise<void> => {
+  const runPreflight = async (text: string, prompt: McpPromptInfo, imagesToSend?: ImageAttachment[]): Promise<void> => {
     const runId = ++runIdRef.current;
     setChecking(true);
     setPreflight(null);
@@ -338,7 +501,7 @@ export function ChatView(props: {
     if (runIdRef.current !== runId) return;
     setChecking(false);
     if (verdict.plausible) {
-      send(text, prompt.name);
+      send(text, prompt.name, imagesToSend);
       return;
     }
     setPreflight({
@@ -351,7 +514,7 @@ export function ChatView(props: {
 
   const submit = (): void => {
     const text = draft.trim();
-    if (!text || liveTurn.running || checking) return;
+    if ((!text && attachments.length === 0) || liveTurn.running || checking) return;
     const prompt = activePrompt;
     // A single-agent answer runs under a playbook, so a question sent without one is refused
     // rather than quietly answered with the bare default tool set. Multi-agent conversations take
@@ -372,10 +535,10 @@ export function ChatView(props: {
     const needsPreflight = isFirstMessage || isPlaybookChanged;
 
     if (prompt && !orchestratorActive && validationEnabled && needsPreflight && !alreadyAnswered) {
-      void runPreflight(text, prompt);
+      void runPreflight(text, prompt, attachments.length > 0 ? attachments : undefined);
       return;
     }
-    send(text, prompt?.name);
+    send(text, prompt?.name, attachments.length > 0 ? attachments : undefined);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -421,6 +584,7 @@ export function ChatView(props: {
     checking ||
     !!preflight ||
     (playbookRequired && !orchestratorActive) ||
+    !!attachmentError ||
     !!liveTurn.error ||
     !!liveTurn.notice;
 
@@ -458,7 +622,21 @@ export function ChatView(props: {
   }, [liveTurn.blocks, liveTurn.liveThinking, liveTurn.liveText]);
 
   return (
-    <div className="chat-view">
+    <div
+      className="chat-view"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDraggingOver && (
+        <div className="chat-drop-overlay">
+          <div className="drop-overlay-content">
+            <PaperclipIcon size={32} />
+            <span>Drop images here to attach</span>
+          </div>
+        </div>
+      )}
       <header className="chat-header">
         <div className="chat-title" data-tip={thread.title}>
           {thread.title}
@@ -488,6 +666,22 @@ export function ChatView(props: {
               Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
             </div>
           )}
+          {attachmentError && (
+            <div className="banner error">
+              <span className="banner-icon">
+                <AlertIcon size={14} />
+              </span>
+              {attachmentError}
+              <button
+                type="button"
+                className="banner-dismiss"
+                onClick={() => setAttachmentError(null)}
+                title="Dismiss"
+              >
+                <CloseIcon size={12} />
+              </button>
+            </div>
+          )}
           {preflight && (
             <div className="preflight-card">
               <div className="preflight-card-head">
@@ -499,7 +693,7 @@ export function ChatView(props: {
                 {preflight.suggestedName && (
                   <button
                     className="primary"
-                    disabled={draft.trim().length === 0}
+                    disabled={draft.trim().length === 0 && attachments.length === 0}
                     onClick={() => send(draft.trim(), preflight.suggestedName)}
                   >
                     Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
@@ -508,7 +702,7 @@ export function ChatView(props: {
                 {/* Sends exactly what the composer shows — normally the playbook the card is
                     about, but the user is free to have changed it while the card stood. */}
                 <button
-                  disabled={draft.trim().length === 0}
+                  disabled={draft.trim().length === 0 && attachments.length === 0}
                   onClick={() => send(draft.trim(), activePrompt?.name)}
                 >
                   Send anyway
@@ -607,7 +801,27 @@ export function ChatView(props: {
                     </>
                   )}
                 </div>
-                <div className="user-text">{message.content}</div>
+                {message.images && message.images.length > 0 && (
+                  <div className="user-images-grid">
+                    {message.images.map((img) => (
+                      <button
+                        key={img.id}
+                        type="button"
+                        className="user-image-card"
+                        onClick={() => setLightboxImage(img)}
+                        data-tip="View full image"
+                        aria-label={`View ${img.name || 'attached image'} full size`}
+                      >
+                        <img
+                          src={`data:${img.mediaType};base64,${img.data}`}
+                          alt={img.name || 'Attached image'}
+                        />
+                        {img.name && <span className="user-image-name">{img.name}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {message.content && <div className="user-text">{message.content}</div>}
                 <div className="message-footer">
                   <span />
                   <span className="message-actions">
@@ -704,6 +918,35 @@ export function ChatView(props: {
           </div>
         )}
         <div className="composer-box">
+          {attachments.length > 0 && (
+            <div className="composer-attachments">
+              {attachments.map((att) => (
+                <div key={att.id} className="attachment-pill" title={att.name || 'Attachment'}>
+                  <button
+                    type="button"
+                    className="attachment-pill-thumb"
+                    onClick={() => setLightboxImage(att)}
+                    aria-label={`Preview ${att.name || 'attachment'}`}
+                  >
+                    <img src={`data:${att.mediaType};base64,${att.data}`} alt="" />
+                  </button>
+                  <span className="attachment-pill-name">{att.name || 'Image'}</span>
+                  {att.size !== undefined && (
+                    <span className="attachment-pill-size">{formatBytes(att.size)}</span>
+                  )}
+                  <button
+                    type="button"
+                    className="attachment-pill-remove"
+                    data-tip="Remove attachment"
+                    aria-label="Remove attachment"
+                    onClick={() => setAttachments((prev) => prev.filter((a) => a.id !== att.id))}
+                  >
+                    <CloseIcon size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="composer-input">
             <textarea
               ref={textareaRef}
@@ -720,14 +963,38 @@ export function ChatView(props: {
                         ? `Add your question for “${activePrompt.title}” — ↵ to send`
                         : prompts.length > 0
                           ? 'Pick a playbook first — / to choose one'
-                          : 'Ask a question — ↵ to send'
+                          : 'Ask a question or paste/drop images — ↵ to send'
               }
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={handlePaste}
               rows={3}
             />
           </div>
           <div className="composer-controls">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ALLOWED_IMAGE_MEDIA_TYPES.join(',')}
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  void processFiles(e.target.files);
+                  e.target.value = '';
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="composer-attach-btn"
+              data-tip="Attach images"
+              aria-label="Attach images"
+              disabled={liveTurn.running || checking || attachments.length >= MAX_IMAGE_COUNT}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon size={14} />
+            </button>
             {activePrompt && (
               <span className="active-playbook" data-tip={activePrompt.description}>
                 <PlaybookIcon size={11} />
@@ -805,7 +1072,7 @@ export function ChatView(props: {
             ) : (
               <button
                 className="primary composer-send"
-                disabled={draft.trim().length === 0 || checking || !!liveTurn.clarifyingQuestion}
+                disabled={(draft.trim().length === 0 && attachments.length === 0) || checking || !!liveTurn.clarifyingQuestion}
                 onClick={submit}
               >
                 Send
@@ -815,6 +1082,48 @@ export function ChatView(props: {
           </div>
         </div>
       </footer>
+
+      {lightboxImage && (
+        <div className="image-lightbox-overlay" onClick={() => setLightboxImage(null)}>
+          <div className="image-lightbox-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="lightbox-header">
+              <div className="lightbox-title">
+                <span className="lightbox-name">{lightboxImage.name || 'Image'}</span>
+                {lightboxImage.size !== undefined && (
+                  <span className="lightbox-meta">({formatBytes(lightboxImage.size)})</span>
+                )}
+              </div>
+              <div className="lightbox-actions">
+                <a
+                  className="lightbox-action-btn"
+                  href={`data:${lightboxImage.mediaType};base64,${lightboxImage.data}`}
+                  download={lightboxImage.name || 'image.png'}
+                  title="Download image"
+                >
+                  <DownloadIcon size={14} />
+                  Download
+                </a>
+                <button
+                  type="button"
+                  className="lightbox-close-btn"
+                  onClick={() => setLightboxImage(null)}
+                  title="Close (Esc)"
+                  aria-label="Close"
+                >
+                  <CloseIcon size={14} />
+                </button>
+              </div>
+            </div>
+            <div className="lightbox-body">
+              <img
+                className="lightbox-image"
+                src={`data:${lightboxImage.mediaType};base64,${lightboxImage.data}`}
+                alt={lightboxImage.name || 'Full image view'}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {citation && <CitationModal state={citation} onClose={() => setCitation(null)} />}
     </div>

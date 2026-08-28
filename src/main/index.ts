@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, ipcMain, nativeTheme, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
 import { DEFAULT_APPEARANCE } from '../shared/types';
@@ -248,6 +248,20 @@ function registerIpc(appCore: AppCore): void {
   handle(IpcChannels.authStatus, () => appCore.authStatus());
   handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
   handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
+  handle(IpcChannels.clipboardWriteImage, (_e, dataUrl: string) => {
+    // createFromDataURL yields an *empty* NativeImage for anything it cannot decode rather than
+    // throwing, and writeImage would then hand the OS a blank — silently replacing whatever the
+    // user had on their clipboard while the caller sees a success. Refuse instead, so the copy
+    // button reports the failure.
+    if (typeof dataUrl !== 'string' || !/^data:image\/(png|jpeg|gif|webp);base64,/.test(dataUrl)) {
+      throw new Error('Clipboard image must be a base64 PNG, JPEG, GIF or WebP data URL.');
+    }
+    const image = nativeImage.createFromDataURL(dataUrl);
+    if (image.isEmpty()) {
+      throw new Error('Clipboard image could not be decoded.');
+    }
+    clipboard.writeImage(image);
+  });
 }
 
 const gotLock = app.requestSingleInstanceLock();

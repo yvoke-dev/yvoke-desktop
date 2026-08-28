@@ -1,7 +1,40 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { EMPTY_USAGE, type ChatMessage, type SyncState, type ThreadMeta, type UsageTotals } from '../../shared/types';
+import {
+  EMPTY_USAGE,
+  type ChatMessage,
+  type ImageAttachment,
+  type SyncState,
+  type ThreadMeta,
+  type UsageTotals,
+} from '../../shared/types';
+
+/** Blob file extension per attachment media type; the name is otherwise opaque. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
+/**
+ * On-disk form of an attachment. One screenshot's base64 dwarfs a whole conversation's prose, so
+ * the payload goes to a sibling blob file and the JSONL line keeps only the reference — otherwise
+ * every thread open and every search-index sweep would re-parse megabytes of base64 to reach the
+ * few kilobytes of text around it. Reading a log restores `data` and hides `file` again, so the
+ * split is invisible to callers; `data` still parses on logs written before this existed.
+ */
+interface StoredImage extends Omit<ImageAttachment, 'data'> {
+  data?: string;
+  /** Blob file name inside the thread's image directory. */
+  file?: string;
+}
+
+interface StoredChatMessage extends Omit<ChatMessage, 'images'> {
+  images?: StoredImage[];
+}
 
 /**
  * Local cache + SDK session map — the server is the system of record (Req. 7).
@@ -93,7 +126,10 @@ export class ThreadStore {
     this.persistIndex();
     // Remove the log through the per-thread chain so it runs AFTER any in-flight append —
     // otherwise a fire-and-forget write could recreate the file post-delete and orphan it.
-    void this.runExclusive(threadId, () => fsp.rm(this.messagesFile(threadId), { force: true })).catch(
+    void this.runExclusive(threadId, async () => {
+      await fsp.rm(this.messagesFile(threadId), { force: true });
+      await fsp.rm(this.imageDir(threadId), { recursive: true, force: true });
+    }).catch(
       (err) => console.warn(`ThreadStore: failed to remove log for ${threadId}: ${err instanceof Error ? err.message : String(err)}`),
     );
   }
@@ -115,7 +151,7 @@ export class ThreadStore {
     return result;
   }
 
-  private async readRaw(threadId: string): Promise<ChatMessage[]> {
+  private async readRaw(threadId: string): Promise<StoredChatMessage[]> {
     let raw: string;
     try {
       raw = await fsp.readFile(this.messagesFile(threadId), 'utf8');
@@ -124,11 +160,11 @@ export class ThreadStore {
     }
     // Parse line-by-line so a single malformed (or truncated trailing) line
     // never discards the whole thread — return every line that parses.
-    const messages: ChatMessage[] = [];
+    const messages: StoredChatMessage[] = [];
     for (const line of raw.split('\n')) {
       if (line.trim().length === 0) continue;
       try {
-        messages.push(JSON.parse(line) as ChatMessage);
+        messages.push(JSON.parse(line) as StoredChatMessage);
       } catch {
         console.warn(`ThreadStore: skipping unparseable message line in thread ${threadId}`);
       }
@@ -136,22 +172,108 @@ export class ThreadStore {
     return messages;
   }
 
-  private async writeRaw(threadId: string, messages: ChatMessage[]): Promise<void> {
+  private async writeRaw(threadId: string, messages: StoredChatMessage[]): Promise<void> {
     await fsp.mkdir(this.dir, { recursive: true });
     const contents = messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length > 0 ? '\n' : '');
     await atomicWriteFile(this.messagesFile(threadId), contents);
   }
 
+  private imageDir(threadId: string): string {
+    this.validateThreadId(threadId);
+    return path.join(this.dir, 'images', threadId);
+  }
+
+  /** Moves each attachment's base64 out to a blob file, leaving only a reference on the message. */
+  private async dehydrateImages(threadId: string, messages: ChatMessage[]): Promise<StoredChatMessage[]> {
+    const out: StoredChatMessage[] = [];
+    for (const message of messages) {
+      if (!message.images || message.images.length === 0) {
+        out.push(message);
+        continue;
+      }
+      const dir = this.imageDir(threadId);
+      await fsp.mkdir(dir, { recursive: true });
+      const images: StoredImage[] = [];
+      for (const image of message.images) {
+        const { data, ...rest } = image;
+        const file = `${randomUUID()}.${IMAGE_EXTENSIONS[image.mediaType] ?? 'bin'}`;
+        try {
+          await fsp.writeFile(path.join(dir, file), Buffer.from(data, 'base64'));
+          images.push({ ...rest, file });
+        } catch (err) {
+          // A blob that will not write must not cost us the attachment: keep the payload inline
+          // rather than logging a reference to a file that is not there.
+          console.warn(`ThreadStore: keeping image ${image.id} inline: ${err instanceof Error ? err.message : String(err)}`);
+          images.push(image);
+        }
+      }
+      out.push({ ...message, images });
+    }
+    return out;
+  }
+
+  /** Reads referenced blobs back onto their attachments, restoring the in-memory shape. */
+  private async hydrateImages(threadId: string, messages: StoredChatMessage[]): Promise<ChatMessage[]> {
+    const out: ChatMessage[] = [];
+    for (const message of messages) {
+      if (!message.images || message.images.length === 0) {
+        out.push(message as ChatMessage);
+        continue;
+      }
+      const images: ImageAttachment[] = [];
+      for (const image of message.images) {
+        const { file, data, ...rest } = image;
+        // Logs written before the blob split (or by the inline fallback above) carry `data`.
+        if (typeof data === 'string' && data.length > 0) {
+          images.push({ ...rest, data });
+          continue;
+        }
+        if (!file) continue;
+        try {
+          const buf = await fsp.readFile(path.join(this.imageDir(threadId), file));
+          images.push({ ...rest, data: buf.toString('base64') });
+        } catch (err) {
+          // The turn's prose is worth more than the attachment — drop the one image whose blob
+          // is gone rather than failing the whole log read.
+          console.warn(`ThreadStore: dropping unreadable image ${image.id} in ${threadId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      out.push({ ...message, images: images.length > 0 ? images : undefined });
+    }
+    return out;
+  }
+
+  /** Deletes blobs no surviving message references — a server rehydrate replaces the whole log. */
+  private async collectImageGarbage(threadId: string, messages: StoredChatMessage[]): Promise<void> {
+    const dir = this.imageDir(threadId);
+    let existing: string[];
+    try {
+      existing = await fsp.readdir(dir);
+    } catch {
+      return;
+    }
+    const referenced = new Set<string>();
+    for (const message of messages) {
+      for (const image of message.images ?? []) {
+        if (image.file) referenced.add(image.file);
+      }
+    }
+    await Promise.all(
+      existing.filter((file) => !referenced.has(file)).map((file) => fsp.rm(path.join(dir, file), { force: true })),
+    );
+  }
+
   async readMessages(threadId: string): Promise<ChatMessage[]> {
     this.validateThreadId(threadId);
-    return this.runExclusive(threadId, () => this.readRaw(threadId));
+    return this.runExclusive(threadId, async () => this.hydrateImages(threadId, await this.readRaw(threadId)));
   }
 
   async appendMessages(threadId: string, messages: ChatMessage[]): Promise<void> {
     this.validateThreadId(threadId);
     return this.runExclusive(threadId, async () => {
       await fsp.mkdir(this.dir, { recursive: true });
-      const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+      const stored = await this.dehydrateImages(threadId, messages);
+      const lines = stored.map((m) => JSON.stringify(m)).join('\n') + '\n';
       await fsp.appendFile(this.messagesFile(threadId), lines);
 
       const assistantUsage = messages.find((m) => m.role === 'assistant')?.usage;
@@ -173,7 +295,11 @@ export class ThreadStore {
   /** Replaces the whole log (rehydration from the server). */
   async replaceMessages(threadId: string, messages: ChatMessage[]): Promise<void> {
     this.validateThreadId(threadId);
-    return this.runExclusive(threadId, () => this.writeRaw(threadId, messages));
+    return this.runExclusive(threadId, async () => {
+      const stored = await this.dehydrateImages(threadId, messages);
+      await this.writeRaw(threadId, stored);
+      await this.collectImageGarbage(threadId, stored);
+    });
   }
 
   /** Writes server ids back onto locally-logged messages after a sync ack (atomic read-modify-write). */

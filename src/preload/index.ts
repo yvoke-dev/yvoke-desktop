@@ -46,6 +46,7 @@ export interface DesktopApi {
   authStatus(): Promise<AuthStatus>;
   serverSignIn(): Promise<string | undefined>;
   serverSignOut(): Promise<void>;
+  writeClipboardImage(dataUrl: string): Promise<void>;
   onAgentEvent(listener: (event: AgentEvent) => void): () => void;
   onSyncEvent(listener: (event: SyncEvent) => void): () => void;
 }
@@ -73,6 +74,7 @@ const api: DesktopApi = {
   authStatus: () => ipcRenderer.invoke(IpcChannels.authStatus),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
   serverSignOut: () => ipcRenderer.invoke(IpcChannels.authSignout),
+  writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke(IpcChannels.clipboardWriteImage, dataUrl),
   onAgentEvent: (listener) => {
     const handler = (_event: unknown, payload: AgentEvent) => listener(payload);
     ipcRenderer.on(IpcChannels.agentEvent, handler);

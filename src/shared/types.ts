@@ -241,6 +241,37 @@ export interface MessageBlock {
   toolCalls?: ToolCallInfo[];
 }
 
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+
+/**
+ * Attachment limits live here rather than beside each check, so the composer, the file picker's
+ * `accept` filter and the main-process validator cannot drift apart — the renderer's copy is a
+ * courtesy that keeps the error in the composer; the main-process one is the enforcement.
+ */
+export const ALLOWED_IMAGE_MEDIA_TYPES: readonly ImageMediaType[] = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+];
+export const MAX_IMAGE_COUNT = 5;
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/**
+ * Decoded bytes summed across one message's attachments. The API caps a request at 32MB and
+ * base64 inflates by ~4/3, so five images at the per-image limit would be refused on the wire —
+ * this budget makes that a composer error instead.
+ */
+export const MAX_TOTAL_IMAGE_BYTES = 15 * 1024 * 1024;
+
+export interface ImageAttachment {
+  id: string;
+  mediaType: ImageMediaType;
+  /** Raw base64 data */
+  data: string;
+  name?: string;
+  size?: number;
+}
+
 export interface ChatMessage {
   /** Local id assigned by the app; serverId arrives once the sync queue is acked. */
   localId: string;
@@ -257,6 +288,8 @@ export interface ChatMessage {
   usage?: UsageTotals;
   createdAt: string;
   feedback?: { rating: 1 | -1; comment?: string };
+  /** Attached images for multimodal prompt context. */
+  images?: ImageAttachment[];
 }
 
 /** One thread whose message content matched a sidebar search (title matching stays renderer-side). */
@@ -428,6 +461,8 @@ export interface SendMessageRequest {
   thinkingOverride?: ThinkingLevel;
   /** Name of an MCP prompt to inject ahead of `text` for this turn (prompts/get). */
   promptName?: string;
+  /** Attached images for multimodal prompt context. */
+  images?: ImageAttachment[];
 }
 
 export interface FeedbackRequest {
