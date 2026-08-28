@@ -1,8 +1,9 @@
 import fs from 'node:fs';
-import { AbortError, query, type CanUseTool, type Options, type Query } from '@anthropic-ai/claude-agent-sdk';
+import { AbortError, query, type CanUseTool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import type { McpPromptInfo, PlaybookValidation } from '../../shared/types';
 import { log, logError } from '../log';
 import { claudeBinaryPath, debugEnv } from './AgentService';
+import { readSingleReply } from './singleTurn';
 import {
   buildValidatorSystemPrompt,
   parseValidation,
@@ -102,7 +103,7 @@ export async function validatePlaybookSelection(
   // in single-turn mode: it closes the subprocess's stdin as soon as the first result lands.
   const q = query({ prompt: opts.question, options });
   try {
-    const raw = await readReply(q);
+    const raw = await readSingleReply(q, 'the check');
     const verdict = parseValidation(raw, opts.playbooks, opts.selected.name);
     log(
       'agent',
@@ -135,23 +136,4 @@ export async function validatePlaybookSelection(
       /* already torn down */
     }
   }
-}
-
-/**
- * The model's reply text.
- *
- * Stops at the result message rather than draining the iterator: on a non-success result the SDK
- * re-raises the failure as an exception *after* yielding it, so a full drain turns an ordinary
- * "max turns" outcome into a thrown error. Leaving the loop early runs the generator's own
- * teardown and lets the subtype be read as data.
- */
-async function readReply(q: Query): Promise<string> {
-  for await (const message of q) {
-    if (message.type !== 'result') continue;
-    if (message.subtype !== 'success') {
-      throw new Error(message.errors.join('; ') || message.subtype);
-    }
-    return message.result ?? '';
-  }
-  throw new Error('the check ended without a result');
 }

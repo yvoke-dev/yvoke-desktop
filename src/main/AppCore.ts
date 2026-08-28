@@ -27,12 +27,14 @@ import {
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
   MAX_TOTAL_IMAGE_BYTES,
+  normalizeImageDescription,
 } from '../shared/types';
 import { log, logError } from './log';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
 import { McpPrompts } from './agent/McpPrompts';
 import { PASSES } from './agent/playbookValidation';
 import { validatePlaybookSelection } from './agent/PlaybookValidator';
+import { describeImages } from './agent/ImageDescriptor';
 import { buildRunTrace } from './agent/runTrace';
 import { detectClaudeAccount, detectClaudeCredentials } from './agent/ClaudeAuth';
 import { ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
@@ -52,6 +54,9 @@ export interface AppCoreDeps {
 }
 
 const ALLOWED_IMAGE_TYPES = new Set<string>(ALLOWED_IMAGE_MEDIA_TYPES);
+
+/** How long persisting a turn will wait on descriptions still running — see `awaitDescriptions`. */
+export const DESCRIPTION_PERSIST_GRACE_MS = 2_000;
 const MB = 1024 * 1024;
 
 export function validateAndSanitizeImages(images?: ImageAttachment[]): ImageAttachment[] | undefined {
@@ -82,6 +87,9 @@ export function validateAndSanitizeImages(images?: ImageAttachment[]): ImageAtta
       data: cleanData,
       name: img.name,
       size: img.size ?? byteLength,
+      // A renderer-supplied description gets the same fold as a generated one — this is the only
+      // attachment field the composer can put free text in, and it ends up in the synced body.
+      description: normalizeImageDescription(img.description),
     };
   });
 
@@ -94,6 +102,22 @@ export function validateAndSanitizeImages(images?: ImageAttachment[]): ImageAtta
     );
   }
   return sanitized;
+}
+
+/**
+ * Format user content for syncing to the server, appending concise image references and descriptions.
+ */
+export function formatSyncedUserContent(content: string, images?: ImageAttachment[]): string {
+  if (!images || images.length === 0) {
+    return content;
+  }
+  const imageNotes = images
+    .map(
+      (img, i) =>
+        `[Attached Image ${i + 1} (${img.name || 'image.png'})${img.description ? `: ${img.description}` : ''}]`,
+    )
+    .join('\n');
+  return content ? `${content}\n\n${imageNotes}` : imageNotes;
 }
 
 /** Wires settings, server auth, sync, local store, and the agent service together. */
@@ -110,6 +134,17 @@ export class AppCore {
   private profilesCache: { at: number; profiles: OrchestratorProfile[] } | null = null;
   /** Completed orchestrator runs awaiting their assistant message's server id (to link on POST). */
   private readonly pendingRuns = new Map<string, OrchestratorRunPayload>();
+  /**
+   * Image descriptions in flight, keyed by the attachment array they describe.
+   *
+   * Started in `sendMessage` so they run alongside the agent turn — which nearly always outlasts
+   * them — instead of adding their latency to persistence. The key is the very array `AgentService`
+   * hangs off the user message, which is what lets `persistTurn` find them again without an id the
+   * renderer never sees; being weak, an entry goes away with the message that owned it.
+   */
+  private readonly pendingDescriptions = new WeakMap<ImageAttachment[], Promise<ImageAttachment[]>>();
+  /** Per-thread tail of the persist chain — see `chainPersist`. */
+  private readonly persistTails = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: AppCoreDeps) {
     this.settings = new SettingsStore(deps.userDataDir);
@@ -235,36 +270,95 @@ export class AppCore {
   }
 
   private persistTurn(threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage): void {
+    // Resolved before anything is written, so the local log, the search index and the sync payload
+    // all carry the same attachments. `sendMessage` started this alongside the turn, so by now it
+    // is almost always settled; `describeImages` caps its own wait either way.
+    const pending = userMessage.images ? this.pendingDescriptions.get(userMessage.images) : undefined;
+    this.chainPersist(threadId, async () => {
+      const images = pending ? await this.awaitDescriptions(pending, userMessage.images) : userMessage.images;
+      // Never write through to the caller's message: `AgentService` still holds it as the session's
+      // pendingUser, and the renderer is already showing it.
+      const user = images === userMessage.images ? userMessage : { ...userMessage, images };
+      this.writeTurn(threadId, user, assistantMessage);
+    });
+  }
+
+  /**
+   * The descriptions for a turn, or the undescribed attachments if they are still running well
+   * after the turn ended.
+   *
+   * They start when the message is sent, so a real turn nearly always outlasts them and the grace
+   * period is never reached. It exists because until this resolves the exchange is written nowhere
+   * — not the local log, not the sync queue — and a quit in that window would lose it; a batch of
+   * five attachments could otherwise hold it open for the descriptor's timeout several times over.
+   * The losing batch keeps running and is simply discarded.
+   */
+  private async awaitDescriptions(
+    pending: Promise<ImageAttachment[]>,
+    fallback: ImageAttachment[] | undefined,
+  ): Promise<ImageAttachment[] | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), DESCRIPTION_PERSIST_GRACE_MS);
+    });
+    try {
+      const described = await Promise.race([pending, grace]);
+      if (described) return described;
+      logError(
+        'agent',
+        `image descriptions outran the turn by ${DESCRIPTION_PERSIST_GRACE_MS}ms — ` +
+          'persisting with the attachment filenames alone',
+      );
+      return fallback;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Run each turn's persistence after the previous turn's for the same thread.
+   *
+   * `SyncQueue` posts in enqueue order and `ThreadStore.appendMessages` appends in call order, so
+   * without this a turn that waits on image descriptions would be overtaken by the short text turn
+   * the user sent straight after it, and both the local log and the server transcript would carry
+   * the two turns swapped.
+   */
+  private chainPersist(threadId: string, work: () => Promise<void>): void {
+    const previous = this.persistTails.get(threadId) ?? Promise.resolve();
+    const next = previous
+      .then(work)
+      .catch((err) =>
+        logError('store', `persisting a turn failed: ${err instanceof Error ? err.message : String(err)}`),
+      )
+      .finally(() => {
+        // Only the newest link clears the entry; an older one finishing must not drop a tail that
+        // a later turn is already queued behind.
+        if (this.persistTails.get(threadId) === next) this.persistTails.delete(threadId);
+      });
+    this.persistTails.set(threadId, next);
+  }
+
+  /** The write itself: local log, search index, sync queue, orchestrator trace. */
+  private writeTurn(threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage): void {
+    const usage = assistantMessage.usage;
+    const thread = this.threads.get(threadId);
+    const isOrchestrator = !!thread?.orchestratorProfile;
+
     // Best-effort local cache write (the server is the system of record); don't block the turn on it.
     void this.threads
       .appendMessages(threadId, [userMessage, assistantMessage])
       .catch((err) => logError('store', `appendMessages failed: ${err instanceof Error ? err.message : String(err)}`));
     // Keep search current within the session — no need to wait for the next startup sweep.
     this.searchIndex.addMessages(threadId, [userMessage, assistantMessage]);
-    const usage = assistantMessage.usage;
-    const thread = this.threads.get(threadId);
-    const isOrchestrator = !!thread?.orchestratorProfile;
-
-    const syncedContent = serializeAssistantContent(assistantMessage, isOrchestrator);
-
-    let userSyncedContent = userMessage.content;
-    if (userMessage.images && userMessage.images.length > 0) {
-      const imageNotes = userMessage.images
-        .map((img, idx) => `[Attached Image: ${img.name || `image-${idx + 1}`}]`)
-        .join('\n');
-      userSyncedContent = userSyncedContent
-        ? `${userSyncedContent}\n\n${imageNotes}`
-        : imageNotes;
-    }
 
     this.syncQueue.enqueue({
       threadId,
       localIds: [userMessage.localId, assistantMessage.localId],
       messages: [
-        { role: 'user', content: userSyncedContent },
+        { role: 'user', content: formatSyncedUserContent(userMessage.content, userMessage.images) },
         {
           role: 'assistant',
-          content: syncedContent,
+          content: serializeAssistantContent(assistantMessage, isOrchestrator),
           promptTokens: usage?.inputTokens ?? null,
           completionTokens: usage?.outputTokens ?? null,
           totalTokens: usage ? usage.inputTokens + usage.outputTokens : null,
@@ -495,6 +589,7 @@ export class AppCore {
       throw new Error(`Unknown thread: ${request.threadId}`);
     }
     const sanitizedImages = validateAndSanitizeImages(request.images);
+    this.startImageDescriptions(sanitizedImages);
     let injectBefore: string | undefined;
     let playbook: string | undefined;
     // Orchestrator mode drives everything from the orchestrator's system prompt — never prepend a playbook.
@@ -510,6 +605,25 @@ export class AppCore {
       playbookName: request.promptName,
       images: sanitizedImages,
     });
+  }
+
+  /**
+   * Begin describing a message's attachments, to be awaited when the turn is persisted.
+   *
+   * Fire-and-forget on purpose: the turn must not wait on it, and `describeImages` already resolves
+   * to the undescribed attachments on any failure. Skipped entirely when the setting is off, in
+   * which case the sync payload carries the filename note alone.
+   */
+  private startImageDescriptions(images?: ImageAttachment[]): void {
+    if (!images || images.length === 0) return;
+    if (this.settings.get().imageDescriptionsEnabled === false) return;
+    const described = describeImages(images, {
+      sandboxDir: sandboxDirFor(this.deps.userDataDir),
+    }).catch((err) => {
+      logError('agent', `describeImages failed: ${err instanceof Error ? err.message : String(err)}`);
+      return images;
+    });
+    this.pendingDescriptions.set(images, described);
   }
 
   // --- feedback ----------------------------------------------------------------

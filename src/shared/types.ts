@@ -62,6 +62,14 @@ export interface AppSettings {
    * settings.json still loads; it governs both catalogues.
    */
   showPrototypePlaybooks?: boolean;
+  /**
+   * Describe image attachments before syncing them. The sync payload is text-only, so with this on
+   * the server transcript carries what a screenshot *showed* rather than just its filename — which
+   * is the point, and also the reason it is a switch: a screenshot of a credential or a customer
+   * record would otherwise have its contents transcribed server-side. Off leaves the filename note
+   * alone and skips the extra model call. Like `playbookValidationEnabled`, absent means on.
+   */
+  imageDescriptionsEnabled?: boolean;
   /** Multi-agent orchestrator mode: role → Claude model binding + budgets. Optional (Off if absent). */
   orchestrator?: OrchestratorSettings;
   /** Theme + density + type scale. Optional so an older settings.json still loads. */
@@ -263,6 +271,32 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
  */
 export const MAX_TOTAL_IMAGE_BYTES = 15 * 1024 * 1024;
 
+/**
+ * Ceiling on a stored/synced image description. The descriptor is asked for one or two sentences
+ * but nothing on the wire enforces that, and the description is pasted into the synced message
+ * body — an unbounded reply would bloat every turn it rides along with.
+ */
+export const MAX_IMAGE_DESCRIPTION_LENGTH = 500;
+
+/**
+ * Fold a description into the single line `formatSyncedUserContent` assumes.
+ *
+ * The synced body puts one bracketed note per attachment per line, so an embedded newline would
+ * silently split one attachment into two. Collapsing every whitespace run (and the bracket
+ * characters that delimit the note) keeps the format intact whether the text came from the model
+ * or from the renderer. Returns undefined for anything that normalizes to nothing.
+ */
+export function normalizeImageDescription(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const flat = raw.replace(/[\[\]]/g, '').replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return undefined;
+  if (flat.length <= MAX_IMAGE_DESCRIPTION_LENGTH) return flat;
+  // Cut at the last word boundary inside the budget so the tail is not a half word.
+  const clipped = flat.slice(0, MAX_IMAGE_DESCRIPTION_LENGTH);
+  const lastSpace = clipped.lastIndexOf(' ');
+  return `${(lastSpace > MAX_IMAGE_DESCRIPTION_LENGTH / 2 ? clipped.slice(0, lastSpace) : clipped).trimEnd()}\u2026`;
+}
+
 export interface ImageAttachment {
   id: string;
   mediaType: ImageMediaType;
@@ -270,6 +304,12 @@ export interface ImageAttachment {
   data: string;
   name?: string;
   size?: number;
+  /**
+   * One-line summary of what the image shows, generated locally by `ImageDescriptor` (or supplied
+   * by the renderer). The sync payload is text-only, so this is what the server transcript carries
+   * in place of the attachment itself. Always passed through `normalizeImageDescription`.
+   */
+  description?: string;
 }
 
 export interface ChatMessage {

@@ -545,6 +545,24 @@ export function SettingsView(props: {
                 </span>
               </label>
 
+              <div className="settings-section-label">Attachments</div>
+              <label className="check-field">
+                <input
+                  type="checkbox"
+                  checked={draft.imageDescriptionsEnabled !== false}
+                  onChange={(e) => setDraft({ ...draft, imageDescriptionsEnabled: e.target.checked })}
+                />
+                <span className="check-field-text">
+                  <span className="check-field-name">Describe images before syncing</span>
+                  <span className="settings-hint">
+                    A synced conversation is text only, so an attachment reaches the server as a
+                    filename. With this on, each image is described locally in a sentence and that
+                    description is synced with the message — which also means the contents of a
+                    screenshot are recorded on the server. Off syncs the filename alone.
+                  </span>
+                </span>
+              </label>
+
               <div className="settings-section-label">Multi-agent orchestrator</div>
               <p className="settings-hint settings-section-note">
                 Applies to conversations that select a multi-agent profile. The profile decides
