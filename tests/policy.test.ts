@@ -272,7 +272,7 @@ describe('tool confinement (Correctness Property 1)', () => {
   it('canUseTool allows knowledge-base tools untouched', async () => {
     const canUse = buildCanUseTool(() => base);
     const result = await canUse(qualifyTool('search_corpus'), { query: 'x' }, callOptions);
-    expect(result).toEqual({ behavior: 'allow' });
+    expect(result).toEqual({ behavior: 'allow', updatedInput: { query: 'x' } });
   });
 
   it('canUseTool intercepts ask_clarifying_question and calls onClarifyingQuestion', async () => {
@@ -340,10 +340,16 @@ describe('tool confinement (Correctness Property 1)', () => {
   it('allows WebFetch when target URL is in the allowed domain list or its subdomain', async () => {
     const canUse = buildCanUseTool(() => withSearch);
     const result1 = await canUse('WebFetch', { url: 'https://docs.oneidentity.com/r/Identity-Manager' }, callOptions);
-    expect(result1).toEqual({ behavior: 'allow' });
+    expect(result1).toEqual({
+      behavior: 'allow',
+      updatedInput: { url: 'https://docs.oneidentity.com/r/Identity-Manager' },
+    });
 
     const result2 = await canUse('WebFetch', { url: 'https://learn.microsoft.com/en-us/entra' }, callOptions);
-    expect(result2).toEqual({ behavior: 'allow' });
+    expect(result2).toEqual({
+      behavior: 'allow',
+      updatedInput: { url: 'https://learn.microsoft.com/en-us/entra' },
+    });
   });
 
   it('injects the NORMALISED domain list into WebSearch, not the raw entries', async () => {
@@ -382,5 +388,32 @@ describe('tool confinement (Correctness Property 1)', () => {
     expect((await canUse('WebFetch', { url: 'https://docs.oneidentity.com' }, callOptions)).behavior).toBe('allow');
     current = base;
     expect((await canUse('WebFetch', { url: 'https://docs.oneidentity.com' }, callOptions)).behavior).toBe('deny');
+  });
+
+  /**
+   * Asserting only `.behavior` is what let WebFetch ship broken: the CLI validates this reply
+   * against a zod union whose `allow` branch requires `updatedInput`, so a bare allow is rejected
+   * and the call dies with a ZodError. Every allow the policy can emit is checked here, because a
+   * `.behavior`-only assertion cannot tell a working allow from an unusable one.
+   */
+  it('every allow decision carries updatedInput, which the SDK requires at runtime', async () => {
+    const orchestrated = buildCanUseTool(() => withSearch, undefined, undefined, undefined, undefined, true);
+    const canUse = buildCanUseTool(() => withSearch);
+    const cases: Array<[string, Record<string, unknown>, ReturnType<typeof buildCanUseTool>]> = [
+      [qualifyTool('search_corpus'), { query: 'x' }, canUse],
+      ['ToolSearch', { query: 'x' }, canUse],
+      ['WebSearch', { query: 'x' }, canUse],
+      ['WebFetch', { url: 'https://docs.oneidentity.com/r/x' }, canUse],
+      ['Agent', { prompt: 'x' }, orchestrated],
+    ];
+    for (const [tool, input, policy] of cases) {
+      const result = await policy(tool, input, callOptions);
+      expect(result.behavior, `${tool} should be allowed`).toBe('allow');
+      // A record, not merely present: the schema rejects null/undefined on this branch.
+      expect(
+        result.behavior === 'allow' && typeof result.updatedInput === 'object' && result.updatedInput !== null,
+        `${tool} allow is missing updatedInput and would fail the SDK's schema`,
+      ).toBe(true);
+    }
   });
 });

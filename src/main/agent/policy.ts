@@ -189,6 +189,16 @@ export function buildCanUseTool(
   codeExecution?: boolean,
   delegation?: boolean
 ): CanUseTool {
+  /**
+   * Every `allow` carries `updatedInput`, even where nothing is rewritten.
+   *
+   * The SDK's TypeScript type marks the field optional, but the CLI validates this reply against a
+   * zod union whose `allow` branch requires it — a bare `{ behavior: 'allow' }` is rejected as
+   * malformed and the call fails with a ZodError instead of running. That is not hypothetical: it
+   * is why WebFetch never worked between 1.1.4 and this fix, while WebSearch did, purely because
+   * WebSearch happens to pass `updatedInput` for the domain injection. Passing `input` back
+   * unchanged is the no-op form of the same reply.
+   */
   return async (toolName, input, options) => {
     const settings = getSettings();
     if (!isToolAllowed(toolName, settings, codeExecution, delegation)) {
@@ -213,7 +223,7 @@ export function buildCanUseTool(
     // from the in-stream tool name 'Agent'. isToolAllowed has already refused it outside orchestrator
     // mode, so reaching here means delegation is part of the configured design.
     if (toolName === 'Task' || toolName === 'Agent') {
-      return { behavior: 'allow' };
+      return { behavior: 'allow', updatedInput: input };
     }
 
     // Playbook-specific tools gating
@@ -249,9 +259,9 @@ export function buildCanUseTool(
           message: `WebFetch is restricted to configured domains (${domains.join(', ')}). The URL "${String(url ?? '')}" is not permitted.`,
         };
       }
-      return { behavior: 'allow' };
+      return { behavior: 'allow', updatedInput: input };
     }
 
-    return { behavior: 'allow' };
+    return { behavior: 'allow', updatedInput: input };
   };
 }

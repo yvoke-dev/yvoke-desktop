@@ -408,6 +408,11 @@ server.
   snippet. A domain that hosts anything reader-supplied is therefore a route for text that will be
   read as instructions, and it is the operator's judgement — not a check in the app — that keeps such
   domains off the list.
+- **A permitted domain is not necessarily a readable one.** A site that answers non-browser clients
+  with a bot-challenge returns an empty document, so the fetch succeeds and the assistant is handed
+  a blank page rather than a failure. Nothing in the app can tell the two apart — the permission
+  check sees the request, never the response — so whether a domain's pages can actually be read is
+  something to verify once, not to assume from the allow-list.
 - **A failing tool does not fail the answer.** The failure is handed back to the assistant as that
   tool's result and shown as a failed step in the trace; the run continues.
 - **A clarifying question reaches the model as a refused tool call** whose message reads *User

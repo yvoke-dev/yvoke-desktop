@@ -726,6 +726,13 @@ export function SettingsView(props: {
                   <code>docs.example.com</code>. A protocol, port, path or leading <code>*.</code> is
                   ignored.
                 </span>
+                <span className="settings-hint">
+                  Listing a domain does not guarantee its pages can be read. A site behind a
+                  bot-challenge (Cloudflare, AWS WAF and the like) serves an empty document to
+                  anything that is not a browser, so a fetch there succeeds and returns nothing —
+                  the assistant sees a blank page rather than an error. Worth checking a real
+                  article on a domain before relying on it.
+                </span>
               </label>
               {suspectDomains(draft.webSearch.allowedDomains).length > 0 && (
                 <p className="settings-hint settings-domain-warning" role="status">
