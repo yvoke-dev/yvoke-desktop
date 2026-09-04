@@ -2,6 +2,7 @@ import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
 import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool } from '../../shared/types';
 import { COMPUTE_TOOLS } from './computeTools';
+import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
 
 
@@ -23,15 +24,25 @@ function effortFor(level: ThinkingLevel): 'low' | 'medium' | 'high' {
 /** Map a playbook's declared tool names to the SDK's fully-qualified allow-list for a specialist. */
 export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: AppSettings): string[] {
   const declared = info?.tools;
+  // Web tools stripped here and re-added below under the settings gate — same reason as policy.ts:
+  // `qualifyTool` passes built-ins through, so a declaration would otherwise be its own grant.
   const tools =
     declared && declared.length > 0
-      ? declared.map(qualifyTool)
+      ? declared.filter((tool) => !isWebTool(tool)).map(qualifyTool)
       : DEFAULT_KB_TOOLS.map(qualifyTool);
   // Specialists get the safe compute tools instead of Bash, and only when their playbook declares
   // code execution — same rule as the single-agent path in policy.ts.
   const out = [...tools, 'ToolSearch'];
   if (info?.codeExecution !== false) out.push(...COMPUTE_TOOLS);
-  if (settings.webSearch.enabled) out.push('WebSearch', 'WebFetch');
+  // Per-playbook, exactly as in policy.ts: a specialist gets the web tools it declares and no
+  // others. `declared` rather than `info?.tools` so a specialist with no declared tool set falls
+  // back to DEFAULT_KB_TOOLS and therefore gets no web — the safe direction for a sub-agent whose
+  // retrieval the user never sees in a tool picker.
+  if (settings.webSearch.enabled) {
+    for (const tool of ['WebSearch', 'WebFetch']) {
+      if (webToolDeclared(tool, declared ?? [])) out.push(tool);
+    }
+  }
   return [...new Set(out)];
 }
 
@@ -178,11 +189,27 @@ Your earlier draft has been discarded, so whatever you write now is exactly what
 const REVIEWER_ADAPTER = `
 
 ---
-## Desktop runtime adapter
+## Desktop runtime adapter — read this over the playbook's "## Verdict" section
 
-There is no \`submit_review\` tool here. End your turn with your verdict as plain text: the FIRST line
-must be exactly \`APPROVED\` or \`REJECTED\`, followed by concise, actionable feedback (name any
-unsupported or fabricated claims the orchestrator must fix).`;
+**This runtime has no \`submit_review\` tool.** The playbook's "## Verdict" section is written around
+one: ignore that call, and its claim that ending the turn without it "is read as a rejection". Use the
+plain-text form below. Everything else in the playbook stands unchanged — what you check, and what
+counts as approvable, are exactly as written there.
+
+Your reply must BEGIN with the verdict word, alone on the first line, before any prose, heading or
+table:
+
+\`APPROVED\`  or  \`REJECTED\`
+
+Then, as ordinary prose beneath it, the feedback the playbook asks for: concise, actionable, naming
+every unsupported or fabricated claim the orchestrator must fix. What the playbook itemises as
+\`feedback\`, \`unsupported_claims\` and \`citation_fixes\` all simply go there, in that order, with the
+same care about which category a defect belongs to.
+
+Do **not** open with a summary of what you checked ("All N citation ids were checked and are REAL…")
+or with a citation table. A verdict that arrives after other text cannot be read, and an unreadable
+verdict is treated as a rejection with no feedback — which costs the run a whole round and repairs
+nothing. If you want to tabulate the ids you verified, put the table below the feedback.`;
 
 export interface ResolvedOrchestrator {
   agents: Record<string, AgentDefinition>;
@@ -208,6 +235,26 @@ export interface ResolvedOrchestrator {
  * The REVIEWER still runs on its playbook alone, deliberately: it emits a plain-text verdict rather
  * than prose, so answer-formatting rules are noise in its context.
  */
+/**
+ * Delegation must be SYNCHRONOUS. The orchestrator needs a specialist's answer in hand to compose,
+ * and the reviewer's verdict in hand to ship — a backgrounded delegation returns a launch receipt
+ * instead ("Async agent launched successfully… agentId: …").
+ *
+ * This is a guard against an SDK upgrade, not a fix for a live defect. The Task tool's DEFAULT
+ * flipped between versions: the pinned 0.3.170 says `run_in_background: true runs the agent
+ * asynchronously` (opt-in, so we are safe today), while 0.3.218 says `Subagents run in the
+ * background by default`. Measured on 0.3.218 in yvoke-eval on 3 Sep 2026: specialists returned
+ * 802-character receipts, the orchestrator re-delegated blind, the reviewer's own verdict became
+ * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
+ * in the same breath that they had been given no evidence. Nothing failed loudly — the answers
+ * still looked well-formed.
+ *
+ * So a plain `npm update` of the SDK would have degraded grounding in production with no code
+ * change and no failing test. Declaring it per agent costs nothing and removes that dependency on
+ * a default we do not control.
+ */
+const BACKGROUND_DELEGATION = false;
+
 export async function buildOrchestrator(
   profile: OrchestratorProfile,
   settings: AppSettings,
@@ -266,6 +313,7 @@ export async function buildOrchestrator(
     // — the one agent that writes the user-facing answer — was told to pre-flight its citations
     // with a tool it had not been given, leaving a fabricated id to cost a whole review round.
     tools: orchestratorTools,
+    background: BACKGROUND_DELEGATION,
     model: cfg.orchestrator.model,
     effort: effortFor(cfg.orchestrator.thinkingLevel),
     maxTurns: cfg.orchestratorMaxTurns,
@@ -287,6 +335,7 @@ export async function buildOrchestrator(
       description: info?.description || info?.title || name,
       prompt: specialistPrompt,
       tools,
+      background: BACKGROUND_DELEGATION,
       model: cfg.specialist.model,
       effort: effortFor(cfg.specialist.thinkingLevel),
       maxTurns: cfg.specialistMaxTurns,
@@ -297,6 +346,7 @@ export async function buildOrchestrator(
     description: 'Validates the composed answer against the gathered evidence. Never searches anew.',
     prompt: (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
     tools: REVIEWER_TOOLS,
+    background: BACKGROUND_DELEGATION,
     model: cfg.reviewer.model,
     effort: effortFor(cfg.reviewer.thinkingLevel),
     maxTurns: cfg.specialistMaxTurns,

@@ -47,8 +47,28 @@ export interface AppSettings {
   defaultThinkingLevel: ThinkingLevel;
   webSearch: {
     enabled: boolean;
+    /**
+     * Where the assistant may search and fetch. **Deployment configuration, not a user
+     * preference**: always taken from the bundled settings.json, never from the user's profile —
+     * see `SettingsStore.load`. That is what lets a release add a domain without a migration.
+     */
     allowedDomains: string[];
   };
+  /**
+   * Which generation of defaults this profile has already been reconciled with.
+   *
+   * The store merges the user's file OVER the bundled defaults, and `set()` writes the whole merged
+   * object — so the first Save freezes every value then current, and a later release that changes a
+   * default never reaches anyone who has pressed Save. This stamp is how a changed default is
+   * applied exactly once: a profile below `CURRENT_SETTINGS_VERSION` has the affected keys re-taken
+   * from the bundle on load, and is then stamped. Absent means "never reconciled" (version 0),
+   * which is correct for every profile written before this existed.
+   *
+   * There is no registry of versioned keys, deliberately. Version 1 reconciles exactly one —
+   * `webSearch.enabled`, in `reconcileWebSearch` — so what a bump means stays written beside the
+   * code that applies it. A later bump adds its own reconciliation there.
+   */
+  settingsVersion?: number;
   maxTurns: number;
   /**
    * Preflight the playbook a message is sent under: before running the turn, ask the model
@@ -532,6 +552,26 @@ export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const QUALIFIED = /^mcp__[^_]+__/;
 
 /**
+ * Harness tools a playbook may name that are NOT served by the MCP server, so they must reach the
+ * runtime unprefixed.
+ *
+ * Without this, `qualifyTool` turned a declared `WebSearch` into `mcp__yvoke__WebSearch` — a tool
+ * that does not exist on any server, so the declaration was silently inert while the real
+ * `WebSearch` arrived from the global settings toggle instead. That is what made per-playbook web
+ * access inexpressible: the only way to grant it was to grant it to *every* playbook at once.
+ *
+ * Compared case-insensitively against the bare name, because a playbook author writing frontmatter
+ * by hand has no reason to know the runtime's exact casing.
+ */
+const BUILTIN_TOOLS = ['WebSearch', 'WebFetch', 'ToolSearch'];
+
+/** The canonical spelling of a built-in, or undefined when `tool` is not one. */
+export function builtinTool(tool: string): string | undefined {
+  const bare = tool.replace(QUALIFIED, '').trim();
+  return BUILTIN_TOOLS.find((known) => known.toLowerCase() === bare.toLowerCase());
+}
+
+/**
  * Qualify a playbook-declared tool name with the current server prefix.
  *
  * Playbooks are stored server-side and may name tools bare (`search_corpus`) or already qualified
@@ -539,9 +579,11 @@ const QUALIFIED = /^mcp__[^_]+__/;
  * rather than testing for the current prefix only: a stale prefix would otherwise fail that test,
  * get prefixed a second time into `mcp__yvoke__mcp__oim__search_corpus`, and be silently denied —
  * which is exactly what renaming this constant would have caused for every playbook in the database.
+ *
+ * Built-ins are returned as-is: they are the runtime's own tools, not the server's.
  */
 export function qualifyTool(tool: string): string {
-  return `${MCP_TOOL_PREFIX}${tool.replace(QUALIFIED, '')}`;
+  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(QUALIFIED, '')}`;
 }
 
 /**

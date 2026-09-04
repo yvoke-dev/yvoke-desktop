@@ -168,46 +168,35 @@ describe('SettingsView', () => {
   });
   // Parsing the textarea on every keystroke used to strip the empty trailing line as soon as
   // Enter was pressed, so the newline never survived and only one domain could ever be typed.
-  it('lets a second allowed domain be typed on a new line', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />);
+  it('shows the allow-list as read-only deployment configuration', () => {
+    // The list ships with the app, so there is nothing to type. It is displayed rather than
+    // edited, and the editor that used to be here is deliberately gone: a Save that froze a copy
+    // of the list into the user's profile is what stopped a release from ever adding a domain.
+    const configured = {
+      ...settings,
+      webSearch: { enabled: true, allowedDomains: ['support.example.com', 'www.example.com/community/'] },
+    };
+    render(<SettingsView settings={configured} onSave={vi.fn()} onClose={vi.fn()} />);
     openPane('Web search');
-    const box = screen.getByLabelText('Allowed domains') as HTMLTextAreaElement;
-
-    fireEvent.change(box, { target: { value: 'docs.example.com' } });
-    fireEvent.change(box, { target: { value: 'docs.example.com\n' } });
-    expect(box.value).toBe('docs.example.com\n');
-
-    fireEvent.change(box, { target: { value: 'docs.example.com\nlearn.example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() =>
-      expect(onSave).toHaveBeenCalledWith(
-        expect.objectContaining({
-          webSearch: expect.objectContaining({
-            allowedDomains: ['docs.example.com', 'learn.example.com'],
-          }),
-        }),
-      ),
-    );
+    expect(screen.queryByLabelText('Allowed domains')).toBeNull();
+    expect(screen.getByText('support.example.com')).toBeTruthy();
+    // A path-scoped entry is shown as written, since the path is what makes it narrower.
+    expect(screen.getByText('www.example.com/community/')).toBeTruthy();
   });
 
-  it('drops blank and whitespace-only lines when saving', async () => {
+  it('keeps the enable switch a real preference', async () => {
+    // `enabled` is the one thing in this pane the user owns. The draft it saves still CARRIES the
+    // domain list — the editor cannot help that, it sends the whole settings object — so the
+    // guarantee that a Save never freezes a copy of the list into the profile belongs to
+    // `SettingsStore.set`, and is asserted in tests/settings.test.ts, not here.
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />);
     openPane('Web search');
-    fireEvent.change(screen.getByLabelText('Allowed domains'), {
-      target: { value: '  docs.example.com  \n\n   \nlearn.example.com\n' },
-    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Allow web search/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() =>
-      expect(onSave).toHaveBeenCalledWith(
-        expect.objectContaining({
-          webSearch: expect.objectContaining({
-            allowedDomains: ['docs.example.com', 'learn.example.com'],
-          }),
-        }),
-      ),
-    );
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const sent = onSave.mock.calls[0][0] as { webSearch: { enabled: boolean } };
+    expect(sent.webSearch.enabled).toBe(!settings.webSearch.enabled);
   });
 
   // One checkbox governs prototype playbooks AND prototype multi-agent profiles, so its copy has

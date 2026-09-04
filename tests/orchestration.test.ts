@@ -55,11 +55,37 @@ describe('mapSpecialistTools', () => {
     expect(mapSpecialistTools(info, baseSettings)).not.toContain('Bash');
     expect(mapSpecialistTools(undefined, baseSettings)).not.toContain('Bash');
   });
-  it('includes WebSearch and WebFetch only when enabled in settings', () => {
+  it('withholds the web tools from a specialist that does not declare them, even when enabled', () => {
+    // The settings toggle is a deployment ceiling, not the grant. Before this, enabling web search
+    // handed WebSearch and WebFetch to every specialist in the profile at once.
     const info = { tools: ['search_corpus'] } as McpPromptInfo;
     const withWeb = { webSearch: { enabled: true, allowedDomains: [] } } as unknown as AppSettings;
-    expect(mapSpecialistTools(info, withWeb)).toContain('WebSearch');
-    expect(mapSpecialistTools(info, withWeb)).toContain('WebFetch');
+    expect(mapSpecialistTools(info, withWeb)).not.toContain('WebSearch');
+    expect(mapSpecialistTools(info, withWeb)).not.toContain('WebFetch');
+  });
+
+  it('grants exactly the web tools a specialist declares', () => {
+    // Declaring search alone is the useful shape for a source whose pages cannot be fetched at all.
+    const searchOnly = { tools: ['search_corpus', 'WebSearch'] } as McpPromptInfo;
+    const withWeb = { webSearch: { enabled: true, allowedDomains: [] } } as unknown as AppSettings;
+    const tools = mapSpecialistTools(searchOnly, withWeb);
+    expect(tools).toContain('WebSearch');
+    expect(tools).not.toContain('WebFetch');
+    // Declared bare, it must NOT be prefixed into a server tool that does not exist.
+    expect(tools).not.toContain('mcp__yvoke__WebSearch');
+  });
+
+  it('withholds the web tools when the setting is off however they are declared', () => {
+    const declared = { tools: ['search_corpus', 'WebSearch', 'WebFetch'] } as McpPromptInfo;
+    expect(mapSpecialistTools(declared, baseSettings)).not.toContain('WebSearch');
+    expect(mapSpecialistTools(declared, baseSettings)).not.toContain('WebFetch');
+  });
+
+  it('gives a specialist with no declared tools no web access at all', () => {
+    // It falls back to DEFAULT_KB_TOOLS, which names no web tool — the safe direction for a
+    // sub-agent whose retrieval never passes through a user-facing tool picker.
+    const withWeb = { webSearch: { enabled: true, allowedDomains: [] } } as unknown as AppSettings;
+    expect(mapSpecialistTools(undefined, withWeb)).not.toContain('WebSearch');
   });
 });
 
@@ -215,12 +241,33 @@ describe('buildOrchestrator prompt composition', () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, '');
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
   });
+  /**
+   * SDK-upgrade guard. The client is safe on the pinned 0.3.170, where the Task tool documents
+   * `run_in_background: true runs the agent asynchronously` — backgrounding is opt-in. It is NOT safe
+   * by design: 0.3.218 flipped that to `Subagents run in the background by default`, and running
+   * yvoke-eval on 0.3.218 on 3 Sep 2026 produced 802-character launch receipts in place of every
+   * specialist answer. The orchestrator re-delegated blind, the reviewer's own verdict became
+   * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
+   * they had been handed no evidence. Nothing errored; the answers still read well.
+   *
+   * A plain `npm update` would therefore have degraded grounding in production with no code change.
+   * This test is the tripwire: it fails here rather than in front of a user.
+   */
+  it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const names = Object.keys(built.agents);
+    expect(names.length).toBeGreaterThan(2);
+    for (const name of names) {
+      expect(built.agents[name].background, `${name} must not be backgrounded`).toBe(false);
+    }
+  });
 });
 
 // Each agent's tool grant has to match what its server playbook says it has, because the playbook
 // is written as if the grant were true: the orchestrator's says "run verify_citations on every id
 // before you send the answer", and the reviewer's says get_section "used to be offered here and is
 // not any more". Both had drifted, in opposite directions, with nothing failing.
+
 describe('buildOrchestrator tool grants', () => {
   const profile = {
     name: 'OIM',

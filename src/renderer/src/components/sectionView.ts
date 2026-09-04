@@ -26,6 +26,7 @@ export interface ParsedSection {
   heading?: string;
   /** The `_(document: …  ·  tag: …)_` line, stripped of any agent-facing directive. */
   meta?: string;
+  documentTitle?: string;
   passages: SectionPassage[];
 }
 
@@ -143,6 +144,10 @@ export function parseSection(md: string): ParsedSection {
     }
     const meta = META.exec(line.trim());
     if (meta && result.meta === undefined) {
+      const docTitleMatch = /\bdocument:\s*([^·]+)/i.exec(meta[1]);
+      if (docTitleMatch) {
+        result.documentTitle = docTitleMatch[1].trim();
+      }
       const text = meta[1].replace(AGENT_DIRECTIVE, '').trim();
       if (text) result.meta = text;
       continue;

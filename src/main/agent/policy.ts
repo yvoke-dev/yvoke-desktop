@@ -1,6 +1,6 @@
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings } from '../../shared/types';
-import { DEFAULT_KB_TOOLS, MCP_SERVER_NAME, MCP_TOOL_PREFIX, qualifyTool } from '../../shared/types';
+import { builtinTool, DEFAULT_KB_TOOLS, MCP_SERVER_NAME, MCP_TOOL_PREFIX, qualifyTool } from '../../shared/types';
 import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX } from './computeTools';
 
 
@@ -33,6 +33,135 @@ export function normalizeDomains(allowedDomains: string[]): string[] {
 }
 
 /**
+ * One allow-list entry split into the host it names and, when it carries one, the path prefix that
+ * narrows it: `www.example.com/community/` becomes `{ host: 'www.example.com', path: '/community/' }`.
+ *
+ * The reason this exists is a host that serves two very different things. The One Identity community
+ * forum lives on the same host as that company's marketing site, so a host-only entry has to grant
+ * both or neither. A path prefix lets the entry mean what it says.
+ *
+ * **It constrains fetching, not searching.** The WebSearch API's `allowed_domains` takes bare
+ * domains and cannot express a path, so a search still sees the whole host — see
+ * `buildCanUseTool`, which injects `hostsOf` for exactly that reason. Narrowing what may be
+ * *retrieved in full* is still worth having, and it is the half an allow-list can actually enforce.
+ */
+export interface AllowEntry {
+  host: string;
+  /** Lower-cased, leading-slash path prefix; '' when the entry names the whole host. */
+  path: string;
+}
+
+export function parseAllowEntry(entry: string): AllowEntry | undefined {
+  const host = normalizeDomain(entry);
+  if (!host) return undefined;
+  // Take the path from the entry as written, after stripping scheme and any wildcard/leading dot,
+  // so the slash that separates host from path is the first one left.
+  const withoutScheme = entry.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^\*\./, '').replace(/^\./, '');
+  const slash = withoutScheme.indexOf('/');
+  const raw = slash === -1 ? '' : withoutScheme.slice(slash);
+  // A bare '/' narrows nothing; treat it as the whole host rather than a prefix every path matches.
+  const path = raw === '/' ? '' : raw;
+  return { host, path };
+}
+
+/** The configured entries parsed, with everything that normalised away dropped. */
+export function parseAllowEntries(allowedDomains: string[]): AllowEntry[] {
+  return allowedDomains
+    .map(parseAllowEntry)
+    .filter((e): e is AllowEntry => e !== undefined);
+}
+
+/** Just the hosts, for the WebSearch API — which cannot take a path. */
+export function hostsOf(entries: AllowEntry[]): string[] {
+  return [...new Set(entries.map((e) => e.host))];
+}
+
+/**
+ * Hosts that answer a non-browser client with an empty HTTP 202 and `x-amzn-waf-action: challenge`,
+ * so WebFetch returns a page with no content rather than an error.
+ *
+ * That failure is silent, which is what makes it worth a rule: the model is handed an empty
+ * document, not a refusal, and the tempting next move is to fill the gap from memory while
+ * attributing it to a URL it never read. Denying the call with a message that says what to do
+ * instead turns a silent nothing into an instruction.
+ *
+ * Matched on the exact host, never by suffix: `docs.oneidentity.com` on the same registrable domain
+ * serves 200 and is perfectly fetchable.
+ */
+const WAF_CHALLENGED_HOSTS = ['support.oneidentity.com', 'www.oneidentity.com', 'oneidentity.com'];
+
+/** The same rule against a bare hostname, for judging allow-list entries rather than URLs. */
+function isWafChallengedHostname(hostname: string): boolean {
+  return WAF_CHALLENGED_HOSTS.includes(hostname);
+}
+
+export function isWafChallengedHost(rawUrl: unknown): boolean {
+  if (typeof rawUrl !== 'string') return false;
+  try {
+    const host = new URL(rawUrl.trim()).hostname.toLowerCase().replace(/\.$/, '');
+    return isWafChallengedHostname(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What this configuration actually buys, described once at startup for the log.
+ *
+ * Worth emitting because the two lists it compares are maintained independently and can drift into
+ * a combination that is silently useless: `WAF_CHALLENGED_HOSTS` denies a fetch BEFORE the
+ * allow-list is consulted, so an allow-list whose entries all name challenged hosts grants WebFetch
+ * nothing at all. Nothing surfaces that at runtime — every call simply denies, one wasted turn at a
+ * time — so it is named here instead, where an operator reading the log can see it.
+ *
+ * Only an entry's OWN host is judged. A challenged entry still permits its subdomains and those may
+ * be perfectly fetchable (`docs.oneidentity.com` under `oneidentity.com` is), which is why the
+ * empty case reads "no entry names a fetchable host" rather than "WebFetch cannot work".
+ */
+export function webAccessDiagnostics(settings: AppSettings): string[] {
+  if (!settings.webSearch.enabled) return ['web access is off'];
+  const entries = parseAllowEntries(settings.webSearch.allowedDomains);
+  if (entries.length === 0) {
+    return ['web access is ON but no allowed domain survives parsing, so every search and fetch is refused'];
+  }
+  const show = (list: AllowEntry[]): string => list.map((e) => `${e.host}${e.path}`).join(', ');
+  const challenged = entries.filter((e) => isWafChallengedHostname(e.host));
+  const fetchable = entries.filter((e) => !isWafChallengedHostname(e.host));
+  const lines = [`web access is ON — WebSearch domains: ${hostsOf(entries).join(', ')}`];
+  if (challenged.length > 0) {
+    lines.push(`WebFetch refuses these bot-challenged hosts outright: ${show(challenged)}`);
+  }
+  lines.push(
+    fetchable.length > 0
+      ? `WebFetch may reach: ${show(fetchable)}`
+      : 'no configured entry names a fetchable host, so WebFetch denies every URL except one on a ' +
+        'subdomain of the entries above — grant playbooks WebSearch rather than WebFetch here',
+  );
+  return lines;
+}
+
+/**
+ * Whether a URL's path falls inside a path-scoped entry's subtree.
+ *
+ * Compared on segment boundaries rather than as raw text. A bare `startsWith` let
+ * `example.com/community` permit `/community-blog/secret` and `/communityXYZ` — the opposite of
+ * what an operator adding a path is asking for, and invisible unless they happened to write the
+ * trailing slash. Normalising that slash away makes both spellings of an entry mean the same thing,
+ * and neither reaches a sibling whose name merely begins the same way.
+ *
+ * `URL` does NOT percent-decode `pathname`, so `/%63ommunity/x` fails to match `/community/`. That
+ * is the fail-closed direction and is left as is. The case-insensitivity comes from both sides
+ * being lower-cased, not from any decoding, and a query string never reaches here at all.
+ */
+function isPathInScope(urlPath: string, entryPath: string): boolean {
+  if (entryPath === '') return true;
+  const base = entryPath.replace(/\/+$/, '');
+  // An entry of '/' or '//' narrows nothing; `parseAllowEntry` already folds the first away.
+  if (base === '') return true;
+  return urlPath === base || urlPath.startsWith(`${base}/`);
+}
+
+/**
  * Test whether a URL belongs to one of the allowed domains.
  * Matches exact hostname or subdomains of allowed domains (e.g. `docs.example.com` matches `example.com`).
  * Rejects non-HTTP(S) protocols and malformed URLs.
@@ -41,8 +170,8 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
     return false;
   }
-  const clean = normalizeDomains(allowedDomains);
-  if (clean.length === 0) {
+  const entries = parseAllowEntries(allowedDomains);
+  if (entries.length === 0) {
     return false;
   }
   try {
@@ -54,7 +183,12 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
     // hostname `example.com.`, which would otherwise fail an exact match against `example.com`.
     const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
     if (!hostname) return false;
-    return clean.some((allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`));
+    const urlPath = parsed.pathname.toLowerCase();
+    return entries.some(
+      (entry) =>
+        (hostname === entry.host || hostname.endsWith(`.${entry.host}`)) &&
+        isPathInScope(urlPath, entry.path),
+    );
   } catch {
     return false;
   }
@@ -109,8 +243,10 @@ export function buildAllowedTools(
 ): string[] {
   // If the playbook defines allowed tools, we ONLY allow those tools!
   // If not, we allow the standard knowledge-base tools.
+  // Web tools are stripped here and re-added below under the settings gate, so a declaration alone
+  // can never grant them.
   const tools = playbookTools !== undefined
-    ? playbookTools.map(qualifyTool)
+    ? playbookTools.filter((tool) => !isWebTool(tool)).map(qualifyTool)
     : DEFAULT_KB_TOOLS.map(qualifyTool);
 
   const allowed = [...tools];
@@ -130,10 +266,46 @@ export function buildAllowedTools(
     allowed.push(...COMPUTE_TOOLS);
   }
 
+  // Web access is granted per playbook, and only for the tools the playbook actually names. The
+  // settings toggle is a deployment-wide ceiling, not the grant itself: it used to be both, which
+  // meant enabling it handed the open-ish web to every playbook and every specialist at once —
+  // fourteen of them in the OIM profile — with no way to give it to one.
   if (settings.webSearch.enabled) {
-    allowed.push('WebSearch', 'WebFetch');
+    for (const tool of WEB_TOOLS) {
+      if (webToolDeclared(tool, playbookTools)) allowed.push(tool);
+    }
   }
   return [...new Set(allowed)];
+}
+
+const WEB_TOOLS = ['WebSearch', 'WebFetch'] as const;
+
+/**
+ * Whether a declared tool name is one of the web tools, however it was spelled.
+ *
+ * Needed because the declared list is mapped through `qualifyTool`, which now passes built-ins
+ * through unchanged — so a declared `WebSearch` would land in the allow-list directly, ahead of
+ * and independent of the settings gate below. That is the same silent grant this change exists to
+ * remove, arriving by the other door: caught by the test that asserts the toggle still wins.
+ */
+export function isWebTool(tool: string): boolean {
+  return WEB_TOOLS.some((known) => known === builtinTool(tool));
+}
+
+/**
+ * Whether this run may use `tool`.
+ *
+ * A playbook must name it — declaring `WebSearch` alone therefore yields search without fetch,
+ * which is the useful shape for a source whose pages cannot be fetched at all.
+ *
+ * With NO playbook selected there is nothing to read a declaration from, so the operator's setting
+ * is the only signal available and it governs. That keeps plain chat behaving as the setting and
+ * the README describe, while the per-playbook rule does its work where the fan-out risk actually
+ * is: the specialists.
+ */
+export function webToolDeclared(tool: string, playbookTools?: string[]): boolean {
+  if (playbookTools === undefined) return true;
+  return playbookTools.some((declared) => builtinTool(declared) === tool);
 }
 
 export function isToolAllowed(
@@ -236,12 +408,12 @@ export function buildCanUseTool(
 
     if (toolName === 'WebSearch' || toolName === 'WebFetch') {
       // Never run unrestricted web access: if the feature is on but no usable domain survives
-      // normalisation, refuse rather than let the model reach the open web (exfil channel, and for
-      // WebFetch an SSRF one). Checked on the NORMALISED list, not the raw one: entries that are
+      // parsing, refuse rather than let the model reach the open web (exfil channel, and for
+      // WebFetch an SSRF one). Checked on the PARSED list, not the raw one: entries that are
       // pure punctuation would otherwise count as configuration and hand WebSearch an empty
       // `allowed_domains`, which the API reads as "no restriction".
-      const domains = normalizeDomains(settings.webSearch.allowedDomains);
-      if (domains.length === 0) {
+      const entries = parseAllowEntries(settings.webSearch.allowedDomains);
+      if (entries.length === 0) {
         return {
           behavior: 'deny',
           message: `Web search is enabled but no allowed domains are configured; refusing an unrestricted ${toolName === 'WebSearch' ? 'search' : 'fetch'}.`,
@@ -249,14 +421,31 @@ export function buildCanUseTool(
       }
 
       if (toolName === 'WebSearch') {
-        return { behavior: 'allow', updatedInput: { ...input, allowed_domains: domains } };
+        // Bare hosts, because the API takes domains and has no way to express a path prefix. A
+        // path-scoped entry therefore narrows what may be FETCHED, not what may be found.
+        return { behavior: 'allow', updatedInput: { ...input, allowed_domains: hostsOf(entries) } };
       }
 
       const url = (input as Record<string, unknown>)?.url;
-      if (!isUrlDomainAllowed(url, domains)) {
+
+      // Checked before the allow-list, so the message the model gets is the one it can act on: a
+      // permitted-but-unreadable host would otherwise be allowed and hand back an empty page.
+      if (isWafChallengedHost(url)) {
         return {
           behavior: 'deny',
-          message: `WebFetch is restricted to configured domains (${domains.join(', ')}). The URL "${String(url ?? '')}" is not permitted.`,
+          message:
+            `This host answers automated clients with a bot challenge and an empty page, so ` +
+            `fetching "${String(url ?? '')}" would return no content. Use WebSearch for this ` +
+            `source instead, cite the URL the search result gave you, and describe what the ` +
+            `search result indicates — do not state or imply that you read the page.`,
+        };
+      }
+
+      if (!isUrlDomainAllowed(url, settings.webSearch.allowedDomains)) {
+        const shown = entries.map((e) => `${e.host}${e.path}`).join(', ');
+        return {
+          behavior: 'deny',
+          message: `WebFetch is restricted to configured domains (${shown}). The URL "${String(url ?? '')}" is not permitted.`,
         };
       }
       return { behavior: 'allow', updatedInput: input };

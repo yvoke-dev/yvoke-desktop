@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 
 vi.mock('mermaid', () => ({
   default: { initialize: () => undefined, render: async () => ({ svg: '<svg></svg>' }) },
@@ -56,48 +56,15 @@ describe('CitationModal', () => {
     expect(shown).not.toContain('cite a passage');
   });
 
-  it('offers the rest of the section as context, counted and collapsed', () => {
+  it('does not offer a link or button to load the rest of the passages', () => {
     const { container } = open(CITED);
-    const toggle = screen.getByRole('button', { name: /Show surrounding section \(2 more passages\)/ });
-    expect(toggle).toBeTruthy();
-    expect(container.querySelector('.citation-context')).toBeNull();
-  });
-
-  it('reveals the context on request, labelled as not being the source', () => {
-    const { container } = open(CITED);
-    fireEvent.click(screen.getByRole('button', { name: /Show surrounding section/ }));
-    expect(container.textContent).toContain(OTHER_TEXT);
-    expect(container.textContent).toContain(THIRD_TEXT);
-    expect(container.querySelector('.citation-context-note')?.textContent).toMatch(/not part of the cited source/i);
-    // The cited passage stays outside the context block, so evidence and context never merge.
-    expect(container.querySelector('.citation-context .citation-passage.cited')).toBeNull();
-  });
-
-  it('collapses again on a second click', () => {
-    const { container } = open(CITED);
-    const toggle = screen.getByRole('button', { name: /surrounding section/ });
-    fireEvent.click(toggle);
-    expect(container.querySelector('.citation-context')).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /Hide surrounding section/ }));
-    expect(container.querySelector('.citation-context')).toBeNull();
-  });
-
-  it('singularises a one-passage remainder', () => {
-    const two = [
-      `_(id=${CITED}  doc_id=${DOC})_`, CITED_TEXT, '',
-      `_(id=${OTHER}  doc_id=${DOC})_`, OTHER_TEXT,
-    ].join('\n');
-    render(<CitationModal state={{ loading: false, text: two, citedId: CITED }} onClose={noop} />);
-    expect(screen.getByRole('button', { name: /\(1 more passage\)/ })).toBeTruthy();
-  });
-
-  it('offers no toggle when the cited passage is the whole section', () => {
-    const one = `_(id=${CITED}  doc_id=${DOC})_\n${CITED_TEXT}`;
-    const { container } = render(
-      <CitationModal state={{ loading: false, text: one, citedId: CITED }} onClose={noop} />,
-    );
-    expect(container.querySelector('.citation-context-toggle')).toBeNull();
+    // Asserted on the rendered controls rather than on the old toggle's class name, which no
+    // longer exists and so could never fail for the right reason again.
+    expect(container.querySelectorAll('.citation-modal-body button')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /surrounding section/i })).toBeNull();
     expect(container.textContent).toContain(CITED_TEXT);
+    expect(container.textContent).not.toContain(OTHER_TEXT);
+    expect(container.textContent).not.toContain(THIRD_TEXT);
   });
 
   it('falls back to the whole section when the citation names no passage', () => {
@@ -105,7 +72,6 @@ describe('CitationModal', () => {
     // rather than nothing.
     const { container } = open(undefined);
     expect(container.querySelectorAll('.citation-passage')).toHaveLength(3);
-    expect(container.querySelector('.citation-context-toggle')).toBeNull();
     expect(container.textContent).toContain(OTHER_TEXT);
   });
 
@@ -134,5 +100,56 @@ describe('CitationModal', () => {
       <CitationModal state={{ loading: false, text: md, citedId: CITED }} onClose={noop} />,
     );
     expect(container.querySelector('.citation-passage table')).not.toBeNull();
+  });
+
+  it('preserves heading when it represents a distinct sub-section', () => {
+    // SERVED has heading "How are schemas mapped" and document "Basics of target system synchronization"
+    const { container } = open(CITED);
+    const heading = container.querySelector('.citation-section-heading');
+    expect(heading).not.toBeNull();
+    expect(heading?.textContent).toBe('How are schemas mapped');
+  });
+
+  it('suppresses heading when it equals "Full Document"', () => {
+    const servedFullDoc = [
+      '# Section: Full Document',
+      '_(document: API Specs  ·  tag: 1.0)_',
+      '',
+      `_(id=${CITED}  doc_id=${DOC})_`,
+      'Spec details.',
+    ].join('\n');
+    const { container } = render(
+      <CitationModal state={{ loading: false, text: servedFullDoc, citedId: CITED }} onClose={noop} />,
+    );
+    expect(container.querySelector('.citation-section-heading')).toBeNull();
+  });
+
+  it('suppresses heading when it matches documentTitle', () => {
+    const servedMatchingDoc = [
+      '# Section: User Guide',
+      '_(document: User Guide  ·  tag: 1.0)_',
+      '',
+      `_(id=${CITED}  doc_id=${DOC})_`,
+      'Guide content.',
+    ].join('\n');
+    const { container } = render(
+      <CitationModal state={{ loading: false, text: servedMatchingDoc, citedId: CITED }} onClose={noop} />,
+    );
+    expect(container.querySelector('.citation-section-heading')).toBeNull();
+  });
+
+  it('suppresses heading when the first shown passage starts with # Heading', () => {
+    const servedWithPassageHeading = [
+      '# Section: Getting Started',
+      '_(document: Documentation  ·  tag: 1.0)_',
+      '',
+      `_(id=${CITED}  doc_id=${DOC})_`,
+      '# Getting Started\n\nWelcome to the documentation.',
+    ].join('\n');
+    const { container } = render(
+      <CitationModal state={{ loading: false, text: servedWithPassageHeading, citedId: CITED }} onClose={noop} />,
+    );
+    expect(container.querySelector('.citation-section-heading')).toBeNull();
+    expect(container.textContent).toContain('Getting Started');
   });
 });

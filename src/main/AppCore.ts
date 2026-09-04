@@ -30,6 +30,7 @@ import {
   normalizeImageDescription,
 } from '../shared/types';
 import { log, logError } from './log';
+import { webAccessDiagnostics } from './agent/policy';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
 import { McpPrompts } from './agent/McpPrompts';
 import { PASSES } from './agent/playbookValidation';
@@ -148,6 +149,10 @@ export class AppCore {
 
   constructor(private readonly deps: AppCoreDeps) {
     this.settings = new SettingsStore(deps.userDataDir);
+    // The allow-list and the bot-challenged-host list are maintained apart and can drift into a
+    // combination that grants WebFetch nothing. That never surfaces at runtime — the calls just
+    // deny, one turn at a time — so the effective grant is stated here where it can be read.
+    for (const line of webAccessDiagnostics(this.settings.get())) log('web', line);
     const threadsDir = path.join(deps.userDataDir, 'threads');
     this.threads = new ThreadStore(threadsDir);
     this.searchIndex = new SearchIndex(threadsDir, path.join(deps.userDataDir, 'search-index.json'));

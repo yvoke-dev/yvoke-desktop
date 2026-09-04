@@ -40,25 +40,19 @@ function toNumber(value: string): number {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
-/** One domain per line, blanks and stray whitespace dropped. */
-function parseDomains(text: string): string[] {
-  return text
-    .split('\n')
-    .map((d) => d.trim())
-    .filter(Boolean);
-}
-
 /**
  * Entries that will not behave the way an operator expects. This warns rather than rejects: the
  * allow-list is per-deployment and an intranet host really can be a single label, so the editor
- * should not refuse a save. It flags the two shapes that quietly do the wrong thing — a bare TLD,
- * which matches every site under it, and an entry carrying a path or query, whose extra parts are
- * discarded so the whole domain is allowed rather than just that page.
+ * should not refuse a save. A bare TLD is the shape that quietly does the wrong thing: it matches
+ * every site under it. A path is no longer suspect — it narrows the entry, which is the point.
  */
 function suspectDomains(domains: string[]): string[] {
   return domains.filter((d) => {
-    const host = d.replace(/^https?:\/\//, '').replace(/^\*\./, '').replace(/^\./, '');
-    if (/[/?#\s]/.test(host.replace(/\/$/, ''))) return true;
+    const entry = d.replace(/^https?:\/\//, '').replace(/^\*\./, '').replace(/^\./, '');
+    // A query or fragment is meaningless in an entry and silently ignored; a path is not, so the
+    // host is everything up to the first slash and only that part is checked for a missing dot.
+    if (/[?#\s]/.test(entry)) return true;
+    const host = entry.split('/')[0];
     return !host.replace(/\.$/, '').includes('.');
   });
 }
@@ -311,14 +305,6 @@ export function SettingsView(props: {
   const [pane, setPane] = useState<Pane>('Server');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  /**
-   * The allowed-domains editor renders raw text rather than `draft.webSearch.allowedDomains`
-   * joined back together: parsing on every keystroke drops the empty trailing line the moment
-   * Enter is pressed, so the newline never survives the round trip and a second domain cannot
-   * be typed. The parsed list is kept in `draft` alongside it, so save is unaffected.
-   */
-  const [domainsText, setDomainsText] = useState(props.settings.webSearch.allowedDomains.join('\n'));
-
   const orch: OrchestratorSettings = draft.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
   const updateOrch = (patch: Partial<OrchestratorSettings>): void =>
     setDraft({ ...draft, orchestrator: { ...orch, ...patch } });
@@ -707,40 +693,49 @@ export function SettingsView(props: {
                   </span>
                 </span>
               </label>
-              <label className="settings-field">
-                <span className="settings-field-label">Allowed domains (one per line)</span>
-                <textarea
-                  aria-label="Allowed domains"
-                  rows={6}
-                  value={domainsText}
-                  onChange={(e) => {
-                    setDomainsText(e.target.value);
-                    setDraft({
-                      ...draft,
-                      webSearch: { ...draft.webSearch, allowedDomains: parseDomains(e.target.value) },
-                    });
-                  }}
-                />
+              <div className="settings-field">
+                <span className="settings-field-label">Allowed domains</span>
+                {draft.webSearch.allowedDomains.length === 0 ? (
+                  <p className="settings-hint" role="status">
+                    None configured, so search and fetch are both refused even with the switch on.
+                  </p>
+                ) : (
+                  <ul className="settings-domain-list">
+                    {draft.webSearch.allowedDomains.map((domain, i) => (
+                      <li key={`${domain}-${i}`}>
+                        <code>{domain}</code>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <span className="settings-hint">
+                  Set per deployment and shipped with the app, because which domains are worth
+                  searching depends on the knowledge base that is loaded — so this list is shown
+                  rather than edited, and an update arrives with the next release.
+                </span>
                 <span className="settings-hint">
                   Subdomains are included: <code>example.com</code> also permits{' '}
-                  <code>docs.example.com</code>. A protocol, port, path or leading <code>*.</code> is
-                  ignored.
+                  <code>docs.example.com</code>. An entry may add a path to narrow it —{' '}
+                  <code>example.com/community/</code> permits only that subtree for fetching, though
+                  a search still sees the whole host, since the search API takes domains and cannot
+                  express a path.
                 </span>
                 <span className="settings-hint">
                   Listing a domain does not guarantee its pages can be read. A site behind a
                   bot-challenge (Cloudflare, AWS WAF and the like) serves an empty document to
-                  anything that is not a browser, so a fetch there succeeds and returns nothing —
-                  the assistant sees a blank page rather than an error. Worth checking a real
-                  article on a domain before relying on it.
+                  anything that is not a browser. Fetching is refused outright for the hosts known
+                  to do this, with a message telling the assistant to search instead — so it reports
+                  what the result indicates rather than claiming to have read the page.
                 </span>
-              </label>
+              </div>
               {suspectDomains(draft.webSearch.allowedDomains).length > 0 && (
                 <p className="settings-hint settings-domain-warning" role="status">
-                  Check these entries — they may be broader than they look:{' '}
+                  These entries may not mean what they look like:{' '}
                   {suspectDomains(draft.webSearch.allowedDomains).join(', ')}. An entry with no dot
                   covers that host and everything under it, so a bare top-level domain such as{' '}
-                  <code>com</code> permits every site under it; a path is discarded, so the whole
-                  domain is permitted rather than the one page.
+                  <code>com</code> permits every site under it; a query or fragment is ignored, so
+                  an entry carrying one permits its whole path prefix rather than the single page
+                  it appears to name.
                 </p>
               )}
             </>

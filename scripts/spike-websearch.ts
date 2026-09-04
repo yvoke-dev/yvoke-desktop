@@ -3,9 +3,17 @@
  *   npm run spike:websearch -- "your question"
  *   npm run spike:websearch -- --domains en.wikipedia.org "your question"
  *
- * It drives the REAL policy code (buildAllowedTools + buildCanUseTool from src/main/agent/policy.ts),
- * so a pass here means the shipped gate works, not a reimplementation of it. Every permission
- * decision is printed, including the allowed_domains the gate injects into the tool input.
+ * It drives the REAL policy code (buildAllowedTools + buildAutoApproveTools + buildCanUseTool from
+ * src/main/agent/policy.ts), wired the way AgentService wires it, so a pass here means the shipped
+ * gate works rather than a reimplementation of it. Every permission decision is printed, including
+ * the allowed_domains the gate injects into the tool input.
+ *
+ * The `buildAutoApproveTools` step is load-bearing and was missing here until it was noticed that
+ * cases 1 and 2 "passed" by never consulting the gate at all. `allowedTools` is an AUTO-APPROVAL
+ * list: a tool on it is granted without a permission request, so `canUseTool` never runs for it and
+ * the domain allow-list — which lives entirely inside `canUseTool` — is silently disarmed. Passing
+ * the full grant to the SDK made this spike demonstrate exactly the defect that
+ * `NEVER_AUTO_APPROVE` exists to prevent, while reporting it as working.
  *
  * Also runs two control cases that must FAIL to search: feature off, and feature on with an
  * empty allow-list. A green run shows all three.
@@ -14,7 +22,7 @@
  * configured, so the KB tools simply do not exist for this run.
  */
 import { query, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { buildAllowedTools, buildCanUseTool } from '../src/main/agent/policy';
+import { buildAllowedTools, buildAutoApproveTools, buildCanUseTool } from '../src/main/agent/policy';
 import type { AppSettings } from '../src/shared/types';
 
 const argv = process.argv.slice(2);
@@ -50,9 +58,14 @@ async function* once(text: string): AsyncGenerator<SDKUserMessage> {
 
 async function run(label: string, settings: AppSettings): Promise<{ searched: boolean; decisions: string[] }> {
   const decisions: string[] = [];
-  const allowedTools = buildAllowedTools(settings);
+  const grant = buildAllowedTools(settings);
+  // Exactly as AgentService does it: the FULL grant goes to canUseTool (it is the list the gate
+  // compares against), and the REDUCED one goes to the SDK, so the web tools raise a permission
+  // request instead of being waved through.
+  const autoApprove = buildAutoApproveTools(grant);
   console.log(`\n━━ ${label}`);
-  console.log(`   allowedTools includes WebSearch: ${allowedTools.includes('WebSearch')}`);
+  console.log(`   granted to canUseTool includes WebSearch: ${grant.includes('WebSearch')}`);
+  console.log(`   auto-approved by the SDK includes WebSearch: ${autoApprove.includes('WebSearch')} (must be false)`);
 
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY; // subscription auth only, as the app does
@@ -63,9 +76,9 @@ async function run(label: string, settings: AppSettings): Promise<{ searched: bo
       systemPrompt:
         'You are a test harness. If a WebSearch tool is available, you MUST use it to answer. ' +
         'If it is not available or is denied, say so plainly and stop.',
-      allowedTools,
+      allowedTools: autoApprove,
       disallowedTools: ['Bash'],
-      canUseTool: tracing(buildCanUseTool(() => settings), decisions),
+      canUseTool: tracing(buildCanUseTool(() => settings, undefined, undefined, grant), decisions),
       settingSources: [],
       includePartialMessages: false,
       model: 'sonnet',

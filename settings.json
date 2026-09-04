@@ -15,15 +15,27 @@
   "defaultModel": "sonnet",
   "defaultThinkingLevel": "medium",
   "webSearch": {
-    "enabled": false,
-    "allowedDomains": []
+    "enabled": true,
+    "allowedDomains": [
+      "support.oneidentity.com",
+      "www.oneidentity.com/community/"
+    ]
   },
   "maxTurns": 25,
   "playbookValidationEnabled": true,
   "orchestrator": {
-    "orchestrator": { "model": "opus", "thinkingLevel": "high" },
-    "reviewer": { "model": "opus", "thinkingLevel": "high" },
-    "specialist": { "model": "sonnet", "thinkingLevel": "high" },
+    "orchestrator": {
+      "model": "sonnet",
+      "thinkingLevel": "medium"
+    },
+    "reviewer": {
+      "model": "sonnet",
+      "thinkingLevel": "medium"
+    },
+    "specialist": {
+      "model": "sonnet",
+      "thinkingLevel": "medium"
+    },
     "maxReviewRounds": 2,
     "maxSpecialistCalls": 8,
     "requireReview": true,

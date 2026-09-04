@@ -48,6 +48,7 @@ describe('parseSection', () => {
     expect(parsed.heading).toBe('How are schemas mapped');
     expect(parsed.meta).toContain('Basics of target system synchronization');
     expect(parsed.meta).toContain('tag: 9.3.1');
+    expect(parsed.documentTitle).toBe('Basics of target system synchronization');
   });
 
   it('drops the directive aimed at the model, not the reader', () => {

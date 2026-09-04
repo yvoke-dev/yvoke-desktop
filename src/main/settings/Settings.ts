@@ -3,7 +3,17 @@ import path from 'node:path';
 import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../shared/types';
 import type { AppSettings } from '../../shared/types';
 
+/**
+ * Bumped whenever a *changed default* must reach profiles that already exist.
+ *
+ * Version 1 exists because turning web search on by default reaches nobody otherwise: the store
+ * merges the user's file over the bundled defaults and `set()` writes the whole merged object, so
+ * the first time anyone pressed Save their then-current `webSearch.enabled: false` was frozen in.
+ */
+export const CURRENT_SETTINGS_VERSION = 1;
+
 export const DEFAULT_SETTINGS: AppSettings = {
+  settingsVersion: CURRENT_SETTINGS_VERSION,
   serverBaseUrl: '',
   mcpTransport: 'http',
   // Fail closed: an unconfigured build defaults to Entra so it never silently emits
@@ -59,7 +69,42 @@ function loadProjectDefaults(): AppSettings {
   return DEFAULT_SETTINGS;
 }
 
-/** Top-level keys a renderer is allowed to persist; anything else is dropped. */
+/**
+ * Merge the stored `webSearch` block over the bundled one, with two deliberate overrides.
+ *
+ * `allowedDomains` is **deployment configuration, not a user preference** — the domains worth
+ * searching belong to whichever knowledge base is loaded, so they ship with the app. Always taking
+ * the bundle's list is what lets a release add a domain without a migration, and it is safe to do
+ * retroactively because an empty list is refused at runtime anyway: `[]` was never a working user
+ * choice, only an unconfigured state.
+ *
+ * `enabled` is a real preference and stays the user's, except once — when their profile predates
+ * `CURRENT_SETTINGS_VERSION`, the bundle's value is applied so a changed default lands. After
+ * their next Save the stamp is persisted and their choice is final in both directions.
+ */
+function reconcileWebSearch(
+  projectDefaults: AppSettings,
+  raw: { webSearch?: Partial<AppSettings['webSearch']>; settingsVersion?: unknown },
+): AppSettings['webSearch'] {
+  const stored = Number(raw.settingsVersion ?? 0);
+  const merged = {
+    ...projectDefaults.webSearch,
+    ...(raw.webSearch ?? {}),
+    allowedDomains: projectDefaults.webSearch.allowedDomains,
+  };
+  if (!Number.isFinite(stored) || stored < CURRENT_SETTINGS_VERSION) {
+    merged.enabled = projectDefaults.webSearch.enabled;
+  }
+  return merged;
+}
+
+/**
+ * Top-level keys a renderer is allowed to persist; anything else is dropped.
+ *
+ * `settingsVersion` is deliberately absent: `set()` stamps it from `CURRENT_SETTINGS_VERSION` after
+ * the update is merged, so a renderer-supplied value could never survive anyway — listing it would
+ * imply a control that does not exist.
+ */
 const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
   'serverBaseUrl',
   'mcpTransport',
@@ -131,8 +176,11 @@ export class SettingsStore {
       return {
         ...projectDefaults,
         ...raw,
+        // Stamped current in memory whether or not the stored file said so, so a profile that is
+        // reconciled here is not reconciled again after the next Save persists it.
+        settingsVersion: CURRENT_SETTINGS_VERSION,
         entra: { ...projectDefaults.entra, ...(raw.entra ?? {}) },
-        webSearch: { ...projectDefaults.webSearch, ...(raw.webSearch ?? {}) },
+        webSearch: reconcileWebSearch(projectDefaults, raw),
         orchestrator: raw.orchestrator
           ? { ...projectDefaults.orchestrator, ...raw.orchestrator }
           : projectDefaults.orchestrator,
@@ -155,8 +203,15 @@ export class SettingsStore {
     this.cache = {
       ...this.cache,
       ...update,
+      settingsVersion: CURRENT_SETTINGS_VERSION,
       entra: { ...this.cache.entra, ...(update.entra ?? {}) },
-      webSearch: { ...this.cache.webSearch, ...(update.webSearch ?? {}) },
+      webSearch: {
+        ...this.cache.webSearch,
+        ...(update.webSearch ?? {}),
+        // Never persisted from the renderer: the list is deployment config, and letting a Save
+        // freeze a copy of it into the profile is the exact mechanism this change removes.
+        allowedDomains: this.cache.webSearch.allowedDomains,
+      },
       orchestrator: update.orchestrator
         ? { ...this.cache.orchestrator, ...update.orchestrator }
         : this.cache.orchestrator,

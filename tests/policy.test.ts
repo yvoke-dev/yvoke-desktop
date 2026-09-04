@@ -6,6 +6,7 @@ import {
   isUrlDomainAllowed,
   normalizeDomain,
   buildAutoApproveTools,
+  webAccessDiagnostics,
 } from '../src/main/agent/policy';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import { mapSpecialistTools } from '../src/main/agent/orchestration';
@@ -415,5 +416,203 @@ describe('tool confinement (Correctness Property 1)', () => {
         `${tool} allow is missing updatedInput and would fail the SDK's schema`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * `qualifyTool` used to prefix everything, which quietly made per-playbook web access
+ * inexpressible: a declared `WebSearch` became `mcp__yvoke__WebSearch`, a tool no server serves,
+ * while the real one arrived from the global settings toggle instead. The only way to grant web
+ * access was therefore to grant it to every playbook and every specialist at once.
+ */
+describe('qualifyTool — built-ins', () => {
+  it('leaves harness tools unprefixed', () => {
+    expect(qualifyTool('WebSearch')).toBe('WebSearch');
+    expect(qualifyTool('WebFetch')).toBe('WebFetch');
+    expect(qualifyTool('ToolSearch')).toBe('ToolSearch');
+  });
+
+  it('accepts the casing a playbook author is likely to write', () => {
+    expect(qualifyTool('websearch')).toBe('WebSearch');
+    expect(qualifyTool('webfetch')).toBe('WebFetch');
+  });
+
+  it('still prefixes a server tool whose name merely resembles one', () => {
+    expect(qualifyTool('web_search_corpus')).toBe(`${MCP_TOOL_PREFIX}web_search_corpus`);
+  });
+});
+
+describe('buildAllowedTools — per-playbook web access', () => {
+  const on: AppSettings = { ...base, webSearch: { enabled: true, allowedDomains: ['example.com'] } };
+
+  it('withholds the web tools from a playbook that does not declare them', () => {
+    const granted = buildAllowedTools(on, ['search_corpus']);
+    expect(granted).not.toContain('WebSearch');
+    expect(granted).not.toContain('WebFetch');
+  });
+
+  it('grants exactly what the playbook declares', () => {
+    const granted = buildAllowedTools(on, ['search_corpus', 'WebSearch']);
+    expect(granted).toContain('WebSearch');
+    expect(granted).not.toContain('WebFetch');
+  });
+
+  it('never lets a declaration outrank the settings toggle', () => {
+    // The declared name now survives qualifyTool unchanged, so without stripping it before the
+    // gate it would land in the allow-list on its own. That is the bug this asserts against.
+    const granted = buildAllowedTools(base, ['search_corpus', 'WebSearch', 'WebFetch']);
+    expect(granted).not.toContain('WebSearch');
+    expect(granted).not.toContain('WebFetch');
+    expect(granted).not.toContain(`${MCP_TOOL_PREFIX}WebSearch`);
+  });
+
+  it('keeps plain chat governed by the setting alone', () => {
+    // No playbook means no declaration to read, so the operator's switch is the only signal there
+    // is. The per-playbook rule exists for the specialists, where the fan-out risk lives.
+    expect(buildAllowedTools(on)).toContain('WebSearch');
+    expect(buildAllowedTools(base)).not.toContain('WebSearch');
+  });
+});
+
+describe('isUrlDomainAllowed — path-scoped entries', () => {
+  const scoped = ['www.example.com/community/'];
+
+  it('permits the named subtree', () => {
+    expect(isUrlDomainAllowed('https://www.example.com/community/f/forum/1/x', scoped)).toBe(true);
+  });
+
+  it('refuses the rest of the same host', () => {
+    expect(isUrlDomainAllowed('https://www.example.com/', scoped)).toBe(false);
+    expect(isUrlDomainAllowed('https://www.example.com/products/pricing', scoped)).toBe(false);
+  });
+
+  it('ignores case and query string', () => {
+    expect(isUrlDomainAllowed('https://www.example.com/Community/x?y=1', scoped)).toBe(true);
+  });
+
+  it('treats a bare trailing slash as the whole host, not a prefix', () => {
+    expect(isUrlDomainAllowed('https://www.example.com/anything', ['www.example.com/'])).toBe(true);
+  });
+
+  it('leaves a host-only entry unrestricted, as before', () => {
+    expect(isUrlDomainAllowed('https://docs.example.com/a/b', ['example.com'])).toBe(true);
+  });
+
+  /*
+   * The prefix is matched on segment boundaries, not as raw text. A bare `startsWith` let an entry
+   * written without its trailing slash reach every sibling whose name merely began the same way —
+   * the opposite of what adding a path asks for, and silent: nothing in the editor flags a missing
+   * slash, because a missing slash is not what is wrong with the entry.
+   */
+  it('does not leak into a sibling whose name merely starts the same way', () => {
+    const noSlash = ['www.example.com/community'];
+    expect(isUrlDomainAllowed('https://www.example.com/community-blog/secret', noSlash)).toBe(false);
+    expect(isUrlDomainAllowed('https://www.example.com/communityXYZ', noSlash)).toBe(false);
+  });
+
+  it('means the same thing written with or without the trailing slash', () => {
+    for (const entry of ['www.example.com/community', 'www.example.com/community/']) {
+      expect(isUrlDomainAllowed('https://www.example.com/community', [entry])).toBe(true);
+      expect(isUrlDomainAllowed('https://www.example.com/community/f/1', [entry])).toBe(true);
+      expect(isUrlDomainAllowed('https://www.example.com/products', [entry])).toBe(false);
+    }
+  });
+
+  it('refuses a percent-encoded path rather than decoding it — the fail-closed direction', () => {
+    // `URL` does not decode `pathname`, and nothing here pretends otherwise.
+    expect(isUrlDomainAllowed('https://www.example.com/%63ommunity/x', ['www.example.com/community/'])).toBe(false);
+  });
+});
+
+/**
+ * The allow-list and `WAF_CHALLENGED_HOSTS` are maintained independently, and the fetch gate
+ * consults the second one FIRST — so a configuration whose every entry names a challenged host
+ * grants WebFetch nothing at all. Runtime says nothing about that: the calls simply deny, one
+ * wasted turn at a time. These assert that the startup log names the state instead.
+ */
+describe('webAccessDiagnostics', () => {
+  const on = (allowedDomains: string[]): AppSettings => ({
+    ...base,
+    webSearch: { enabled: true, allowedDomains },
+  });
+
+  it('says nothing is fetchable when every entry names a bot-challenged host', () => {
+    const lines = webAccessDiagnostics(on(['support.oneidentity.com', 'www.oneidentity.com/community/']));
+    expect(lines.join('\n')).toMatch(/no configured entry names a fetchable host/);
+    expect(lines.join('\n')).toMatch(/support\.oneidentity\.com/);
+  });
+
+  it('reports what a fetch can actually reach when something can', () => {
+    const lines = webAccessDiagnostics(on(['docs.oneidentity.com', 'support.oneidentity.com'])).join('\n');
+    expect(lines).toMatch(/WebFetch may reach: docs\.oneidentity\.com/);
+    expect(lines).toMatch(/refuses these bot-challenged hosts outright: support\.oneidentity\.com/);
+    expect(lines).not.toMatch(/no configured entry names a fetchable host/);
+  });
+
+  it('reports the fail-closed states plainly', () => {
+    expect(webAccessDiagnostics(base).join('\n')).toMatch(/off/);
+    expect(webAccessDiagnostics(on([' . '])).join('\n')).toMatch(/every search and fetch is refused/);
+  });
+});
+
+/**
+ * These hosts answer a non-browser client with an empty HTTP 202 and `x-amzn-waf-action: challenge`.
+ * WebFetch therefore returns a page with no content rather than an error — a silent nothing, which
+ * is the shape that invites the model to fill the gap from memory and attribute it to a URL it
+ * never read. Denying with a message that names the alternative is the point of the rule.
+ */
+describe('canUseTool — WebFetch on a bot-challenged host', () => {
+  const on: AppSettings = {
+    ...base,
+    webSearch: {
+      enabled: true,
+      allowedDomains: ['support.oneidentity.com', 'www.oneidentity.com/community/'],
+    },
+  };
+  const canUse = buildCanUseTool(() => on, 't', undefined, buildAllowedTools(on));
+
+  it('refuses even though the host is on the allow-list, and says what to do instead', async () => {
+    const result = await canUse(
+      'WebFetch',
+      { url: 'https://support.oneidentity.com/kb/4380945/x' },
+      callOptions,
+    );
+    expect(result.behavior).toBe('deny');
+    const message = (result as { message: string }).message;
+    expect(message).toMatch(/WebSearch/);
+    expect(message).toMatch(/do not state or imply that you read the page/i);
+  });
+
+  it('refuses the community host too', async () => {
+    const result = await canUse(
+      'WebFetch',
+      { url: 'https://www.oneidentity.com/community/identity-manager/f/forum' },
+      callOptions,
+    );
+    expect(result.behavior).toBe('deny');
+  });
+
+  it('leaves the fetchable sibling host alone — matched exactly, never by suffix', async () => {
+    const docs: AppSettings = {
+      ...base,
+      webSearch: { enabled: true, allowedDomains: ['docs.oneidentity.com'] },
+    };
+    const canUseDocs = buildCanUseTool(() => docs, 't', undefined, buildAllowedTools(docs));
+    const result = await canUseDocs(
+      'WebFetch',
+      { url: 'https://docs.oneidentity.com/identity-manager/9.3.1/x' },
+      callOptions,
+    );
+    expect(result.behavior).toBe('allow');
+  });
+
+  it('still allows WebSearch against those hosts — the index is reachable, the page is not', async () => {
+    const result = await canUse('WebSearch', { query: 'defect 4380945' }, callOptions);
+    expect(result.behavior).toBe('allow');
+    // The API takes bare domains, so a path-scoped entry contributes its host and the path is lost.
+    expect(
+      (result as unknown as { updatedInput: { allowed_domains: string[] } }).updatedInput
+        .allowed_domains,
+    ).toEqual(['support.oneidentity.com', 'www.oneidentity.com']);
   });
 });
