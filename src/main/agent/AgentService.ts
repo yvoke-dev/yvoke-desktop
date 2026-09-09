@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
+import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
-import { isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
+import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
+import { readSingleReply } from './singleTurn';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
 import { buildAllowedTools, buildAutoApproveTools, buildCanUseTool } from './policy';
@@ -378,6 +379,80 @@ export class AgentService {
       this.sessions.delete(threadId);
     }
     this.cancelClarifications(threadId);
+  }
+
+  async verifyClaudeCredentials(
+    sandboxDir: string = this.deps.sandboxDir,
+    model?: string,
+  ): Promise<LoginVerificationResult> {
+    if (detectClaudeCredentials() === 'missing') {
+      return { status: 'missing', message: LOGIN_INSTRUCTIONS };
+    }
+
+    try {
+      fs.mkdirSync(sandboxDir, { recursive: true });
+    } catch {
+      // ignore failure, caught on spawn
+    }
+
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), 5000);
+
+    const binary = claudeBinaryPath();
+    const options: Options = {
+      tools: [],
+      disallowedTools: ['Bash'],
+      canUseTool: async () => ({ behavior: 'deny', message: 'No tools for verification' }),
+      mcpServers: {},
+      strictMcpConfig: true,
+      settingSources: [],
+      persistSession: false,
+      thinking: { type: 'disabled' },
+      effort: 'low',
+      maxTurns: 1,
+      abortController,
+      cwd: sandboxDir,
+      env: sanitizedEnv(debugEnv()),
+      pathToClaudeCodeExecutable: binary ?? undefined,
+      ...(model ? { model } : {}),
+    };
+
+    let q: Query | undefined;
+    try {
+      q = query({ prompt: 'ping', options });
+      await readSingleReply(q, 'credential verification');
+      return { status: 'ok', account: detectClaudeAccount() };
+    } catch (err) {
+      if (
+        err instanceof AbortError ||
+        (err instanceof Error && (err.name === 'AbortError' || /aborted|timeout/i.test(err.message)))
+      ) {
+        return { status: 'unreachable', message: 'Claude verification timed out' };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isAuthError(msg)) {
+        return {
+          status: 'expired',
+          message: 'Session expired or not logged in. Run claude /login in a terminal.',
+        };
+      }
+      if (/rate limit|allowance|usage limit|429/i.test(msg)) {
+        return {
+          status: 'rate_limited',
+          message: 'Claude subscription allowance or rate limit reached.',
+        };
+      }
+      return { status: 'error', message: `Claude verification failed: ${msg}` };
+    } finally {
+      clearTimeout(timer);
+      if (q) {
+        try {
+          q.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
   closeAll(): void {

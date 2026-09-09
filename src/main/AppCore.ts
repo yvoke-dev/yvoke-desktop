@@ -4,10 +4,12 @@ import type {
   AgentEvent,
   AppSettings,
   AuthStatus,
+  AuthVerificationResponse,
   ChatMessage,
   CitationRef,
   FeedbackRequest,
   ImageAttachment,
+  LoginVerificationResult,
   McpPromptInfo,
   OrchestratorProfile,
   OrchestratorRunPayload,
@@ -146,6 +148,7 @@ export class AppCore {
   private readonly pendingDescriptions = new WeakMap<ImageAttachment[], Promise<ImageAttachment[]>>();
   /** Per-thread tail of the persist chain — see `chainPersist`. */
   private readonly persistTails = new Map<string, Promise<void>>();
+  private activeVerification: Promise<AuthVerificationResponse> | null = null;
 
   constructor(private readonly deps: AppCoreDeps) {
     this.settings = new SettingsStore(deps.userDataDir);
@@ -656,6 +659,44 @@ export class AppCore {
       claudeAccount: detectClaudeAccount(),
       server: await this.serverAuth.status(),
     };
+  }
+
+  verifyAuth(): Promise<AuthVerificationResponse> {
+    if (this.activeVerification) {
+      return this.activeVerification;
+    }
+
+    this.activeVerification = (async (): Promise<AuthVerificationResponse> => {
+      try {
+        const serverCheck = (async (): Promise<LoginVerificationResult> => {
+          const baseUrl = this.settings.get().serverBaseUrl;
+          if (!baseUrl?.trim()) {
+            return { status: 'unreachable', message: 'Server URL not configured' };
+          }
+          const tokenResult = await this.serverAuth.verifyToken(false);
+          if (tokenResult.status !== 'ok') {
+            return tokenResult;
+          }
+          const connResult = await this.syncClient.verifyConnection(tokenResult.token);
+          if (connResult.status === 'ok' && tokenResult.account) {
+            return { ...connResult, account: tokenResult.account };
+          }
+          return connResult;
+        })();
+
+        const claudeCheck = this.agent.verifyClaudeCredentials(
+          sandboxDirFor(this.deps.userDataDir),
+          this.settings.get().defaultModel,
+        );
+
+        const [server, claude] = await Promise.all([serverCheck, claudeCheck]);
+        return { server, claude };
+      } finally {
+        this.activeVerification = null;
+      }
+    })();
+
+    return this.activeVerification;
   }
 
   dispose(): void {
