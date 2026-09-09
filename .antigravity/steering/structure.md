@@ -4,15 +4,47 @@
 
 ```
 yvoke-desktop/
-├── .antigravity/           # Steering files, subagents, and guidelines
+├── .agents/                # Antigravity & multi-platform instructions, hooks, and skills
+│   ├── AGENTS.md           # Authoritative agent project rules
+│   ├── hooks.json          # Antigravity lifecycle hooks (PreToolUse signing guard, Stop steering reminder)
+│   └── skills/             # On-demand agent skills
+│       └── asdd/
+│           └── SKILL.md    # Antigravity Spec-Driven Development workflow skill
+├── .antigravity/           # Steering files, ASDD protocol, subagents, and scripts
 │   ├── steering/           # AI behavior, product, structure, and tech guidelines
 │   │   ├── behavior.md
 │   │   ├── product.md
 │   │   ├── structure.md
 │   │   └── tech.md
-│   └── agents/             # Subagent roles (desktop_implementer, desktop_reviewer)
-│       ├── desktop_implementer.md
-│       └── desktop_reviewer.md
+│   ├── agents/             # Subagent roles
+│   │   ├── desktop_implementer.md
+│   │   ├── desktop_reviewer.md
+│   │   ├── sdd_auditor.md
+│   │   ├── sdd_plan_critic.md
+│   │   ├── sdd_planner.md
+│   │   ├── sdd_task_architect.md
+│   │   └── sdd_task_critic.md
+│   ├── scripts/            # Boundary, steering, and hook verification scripts
+│   │   ├── check_steering.py
+│   │   ├── protect_signing_hook.py
+│   │   └── steering_reminder_hook.py
+│   └── sdd_protocol.md     # Normative 6-phase Spec-Driven Development protocol
+├── .claude/                # Claude Code CLI configuration, commands, hooks, and agents
+│   ├── agents/             # desktop-implementer, desktop-reviewer
+│   ├── commands/           # /sdd command
+│   ├── hooks/              # PreToolUse and Stop hooks (protect-signing, steering-reminder)
+│   └── settings.local.json # Tool permissions and hooks registry
+├── spec/                   # Modular functional specification
+│   ├── README.md           # Specification catalog, glossary, and index
+│   ├── 01_asking_questions.md
+│   ├── 02_how_an_answer_is_produced.md
+│   ├── 03_multi_agent_investigations.md
+│   ├── 04_where_conversations_live.md
+│   ├── 05_signing_in.md
+│   ├── 06_settings_and_what_they_change.md
+│   ├── 07_what_the_app_tells_the_server.md
+│   └── 08_installing_updating_and_diagnosing.md
+├── CLAUDE.md               # Claude Code authoritative project rules
 ├── src/                    # Source code
 │   ├── main/               # Electron main process (Node.js runtime)
 │   │   ├── agent/          # Claude Agent SDK runner, credentials, prompts, policy
@@ -54,6 +86,8 @@ yvoke-desktop/
 │   └── shared/             # TypeScript types shared between main and renderer
 │       └── types.ts
 ├── tests/                  # Vitest unit and integration test suites
+│   ├── AgentRuleFilesParity.test.ts # Enforces parity between CLAUDE.md and AGENTS.md
+│   ├── spec.test.ts        # Enforces modular spec/ structure and sections
 │   ├── SyncQueue.test.ts
 │   ├── ThreadStore.test.ts
 │   ├── policy.test.ts

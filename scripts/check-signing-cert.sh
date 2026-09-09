@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails the mac build early when the code-signing identity is missing, rather than letting
-# electron-builder quietly emit an unsigned app. See docs/signing.md.
+# electron-builder quietly emit an unsigned app. See spec/signing.md.
 #
 # CI passes the certificate through CSC_LINK/CSC_KEY_PASSWORD instead of the login keychain,
 # so this check is skipped there — the workflow asserts the resulting signature after the build.
@@ -34,7 +34,7 @@ cat >&2 <<EOF
 
   If a colleague already made it, import their .p12 instead of creating a second one — a
   different certificate changes the app's designated requirement and re-prompts every user
-  for keychain access. Full details in docs/signing.md.
+  for keychain access. Full details in spec/signing.md.
 
 EOF
 exit 1

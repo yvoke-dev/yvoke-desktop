@@ -1,0 +1,25 @@
+{
+  "protect-signing": {
+    "PreToolUse": [
+      {
+        "matcher": "replace_file_content|write_to_file|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ../.antigravity/scripts/protect_signing_hook.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "steering-reminder": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ../.antigravity/scripts/steering_reminder_hook.py",
+        "timeout": 15
+      }
+    ]
+  }
+}

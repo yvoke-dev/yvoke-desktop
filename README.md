@@ -26,6 +26,12 @@ npm run spike        # headless end-to-end probe: query() + MCP over SSE + usage
 
 The spike script needs the Spring app running (`APP_SECURITY_MOCK=true` recommended) and a logged-in Claude Code. Run `YVOKE_SERVER=http://host:8080 npm run spike -- "your question"` to override.
 
+## Specification & AI Development
+
+- **Functional specification**: Modular capability documentation lives under [`spec/`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/spec/README.md) (`01_` through `08_`), enforced by `tests/spec.test.ts`.
+- **AI rules & parity**: Project rules live in [`CLAUDE.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/CLAUDE.md) and [`.agents/AGENTS.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.agents/AGENTS.md), kept in word-for-word parity via `tests/AgentRuleFilesParity.test.ts`.
+- **Spec-Driven Development (ASDD)**: Follow [`.antigravity/sdd_protocol.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.antigravity/sdd_protocol.md) (or `/sdd` in Claude Code) for feature development in isolated worktrees (`.worktrees/sdd-<feature>`).
+
 ## Packaging (self-signed, shared as plain files)
 
 Configure packaging options in [electron-builder.yml](file:///Users/eduardpal/work/yvoke/yvoke-desktop/electron-builder.yml). To build:
@@ -35,7 +41,7 @@ npm run dist:mac     # release/*.zip for arm64 + x64, signed
 npm run dist:win     # release/*.exe (NSIS) + release/*.zip (portable), x64, unsigned
 ```
 
-macOS builds are signed with a self-signed certificate you create once per machine — `dist:mac` fails with instructions if it's missing. See [docs/signing.md](file:///Users/eduardpal/work/yvoke/yvoke-desktop/docs/signing.md) for that, for why signing matters even though it doesn't satisfy Gatekeeper, and for the in-progress Azure Artifact Signing setup for Windows.
+macOS builds are signed with a self-signed certificate you create once per machine — `dist:mac` fails with instructions if it's missing. See [spec/signing.md](file:///Users/eduardpal/work/yvoke/yvoke-desktop/spec/signing.md) for that, for why signing matters even though it doesn't satisfy Gatekeeper, and for the in-progress Azure Artifact Signing setup for Windows.
 
 There is no Apple Developer ID and no notarization, so recipients still do one extra step on first launch:
 
@@ -60,7 +66,7 @@ npm run release:retag      # or -- 1.0.1 for an explicit tag
 
 That deletes the tag locally and on the remote, then offers to re-tag `HEAD` and push. A GitHub release that was already published must be deleted in the web UI first — removing the tag leaves the release behind.
 
-The macOS job needs the signing certificate as two repository secrets, `MAC_CSC_LINK` (base64 of the `.p12`) and `MAC_CSC_KEY_PASSWORD`; see [docs/signing.md](file:///Users/eduardpal/work/yvoke/yvoke-desktop/docs/signing.md). To prove them without spending a tag, run the workflow manually (Actions → Release → Run workflow) — it builds both platforms and publishes nothing.
+The macOS job needs the signing certificate as two repository secrets, `MAC_CSC_LINK` (base64 of the `.p12`) and `MAC_CSC_KEY_PASSWORD`; see [spec/signing.md](file:///Users/eduardpal/work/yvoke/yvoke-desktop/spec/signing.md). To prove them without spending a tag, run the workflow manually (Actions → Release → Run workflow) — it builds both platforms and publishes nothing.
 
 Auto-update is intentionally not included (it effectively requires Developer ID signing). To update, send a new zip.
 
