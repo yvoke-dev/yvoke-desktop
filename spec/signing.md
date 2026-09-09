@@ -85,8 +85,8 @@ D-U-N-S number), this becomes config-only:
 - `mac.notarize: true` with `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`
 
 Keep `signIgnore` — the sidecar is already Developer-ID signed and hardened by Anthropic, and a
-nested binary signed by another team notarizes fine. That also unblocks auto-update, which is
-parked in `docs/plans/desktop-mas.md` for exactly this reason.
+nested binary signed by another team notarizes fine. That also unblocks auto-update (see
+[08_installing_updating_and_diagnosing.md](08_installing_updating_and_diagnosing.md)).
 
 ## Windows
 

@@ -14,38 +14,39 @@
 
 ## ASDD Flow Protocols
 
-### 0. Discovery & Research Phase
-- **Take Time to Understand**: Before creating any design documents or writing code, the parent agent must take its time to fully understand what needs to be done.
-- **Grill the User**: Ask clarifying questions to resolve any ambiguity, underspecified requirements, or design intent. Do not proceed with assumptions if requirements are unclear; instead, interview/grill the user to align on details.
-- **Alternative Strategies**: Perform research to identify and document 2 to 3 different ways of achieving the feature.
-- **Pros/Cons & Recommendation**: For each proposed strategy, list concrete pros and cons, and conclude with a clear recommended path. Only transition to the next phase after the user approves/aligns on the recommendation.
+For features, architectural enhancements, and refactors, follow the strict 6-phase protocol defined in `.antigravity/sdd_protocol.md`:
 
-### 1. Planning Mode
-- The parent agent enters Planning Mode natively to create and manage the feature design (`implementation_plan.md`) and task checklist (`task.md`) inside the native brain directory (`<appDataDir>/brain/<conversation-id>/`).
-- Do NOT create any design plans, checklists, or spec files inside the workspace root or the `.antigravity/` folder.
+### Phase 1: Discovery & Architectural Sparring
+- **Spec Investigation**: Invoke `sdd_planner` to read the relevant capability chapters in `spec/` (e.g. `spec/01_asking_questions.md`) to understand current behavior, limits, and deliberate absences ("Not supported").
+- **Implications & Trade-offs**: Identify side effects across Electron processes (Main, Preload, Renderer, Shared), Claude Agent SDK policies, and offline sync. Formulate sharp trade-off questions.
+- **Clarifications**: Send questions back via parent agent to present to user via interactive `ask_question`.
 
-### 2. Subagent Definition Protocol
-- Before invoking a specialized subagent (e.g., `desktop_implementer`, `desktop_reviewer`), the parent agent MUST read the corresponding markdown template file in `.antigravity/agents/` (e.g., `desktop_implementer.md`).
-- Define the subagent first using the `define_subagent` tool, passing the exact name, description, and system prompt found in that template file. Configure the tool permissions as specified.
-- Always run subagents with `Workspace: inherit` to modify the active local repository directly.
+### Phase 2: Planning Mode & Adversarial Plan Critique (Gate 1)
+- **Adversarial Plan Attack**: Invoke `sdd_plan_critic` to attack the draft plan against the Desktop Known Pitfalls in `CLAUDE.md` / `.agents/AGENTS.md` § 6, IPC security, CSP, listener leaks, and unrepresentability.
+- **Harden Plan**: Planner incorporates critic feedback.
+- **Design Plan Artifact**: Parent agent writes `implementation_plan.md` in native brain folder (`RequestFeedback: true`) and waits for explicit user approval.
 
-### 3. Sequential Subagent Execution & Checklist Update
-- Only one code-writing subagent (`desktop_implementer`) may be active at any given time.
-- The implementer performs changes in-place on the local workspace without creating git branches or committing.
-- The implementer reports task completion to the parent agent. The parent agent updates its native task checklist (`task.md`) in its brain folder directly.
+### Phase 3: Worktree Setup & Adversarial Test Critique (Gate 2)
+- **Worktree Creation**: Invoke `sdd_task_architect` to create an isolated git worktree:
+  `git worktree add -b sdd/<feature-name> .worktrees/sdd-<feature-name> HEAD`
+- **Adversarial Task Critique**: Invoke `sdd_task_critic` to eliminate Happy-Path Test Syndrome, mandating negative/failure tests for boundary conditions and errors in every wave.
+- **Task Artifact**: Emit `task.md` with Mandatory Wave N-1 (Update spec chapter) and Wave N (Holistic audit & PR).
 
-### 4. Code Review & Remediation Loop
-- Once the implementer finishes, the parent agent invokes `desktop_reviewer` (`Workspace: inherit`) to review the uncommitted changes.
-- **Remediation Loop**: If the reviewer finds material issues (High/Medium severity):
-  1. Present findings and a proposed fix to the user.
-  2. Upon user approval, invoke `desktop_implementer` to remediate the issues.
-  3. Re-run `desktop_reviewer` to verify.
-- Once clean, the parent agent checks off the reviewer audit task natively in `task.md`.
+### Phase 4: Wave Execution Loop & Resilience Review (Gate 3)
+Execute each wave sequentially inside the worktree:
+1. **Implementer (Strict TDD)**: Invoke `desktop_implementer` inside `.worktrees/sdd-<feature>`. Write test first (Red), implement minimal code (Green), refactor and verify with `npm run typecheck`. Confirm test mutation proof (break minimal production code, observe RED, restore).
+2. **Reviewer (Gate 3 Diff Audit)**: Invoke `desktop_reviewer` to audit git diff for IPC parameter validation, memory leaks, CSP, and type safety. Remediate if issues found.
+3. **Wave Commit**: Commit wave on feature branch: `git commit -m "feat(<domain>): [Wave N] <description>"`.
 
-### 5. Steering Maintenance, User Review, & Ship
-- At the end of implementation, the parent agent runs the steering check script:
-  `python3 .antigravity/scripts/check_steering.py`
-- If structural changes occurred, the parent agent updates the corresponding steering files under `.antigravity/steering/` (`structure.md`, `tech.md`, `product.md`).
-- The parent agent writes `walkthrough.md` in its native brain folder (never in the workspace).
-- Present the final summary, uncommitted git diff, and review findings to the user.
-- **Do NOT commit or merge changes.** Present the final summary and ask the user to review the files in their IDE and commit manually when ready.
+### Phase 5: Holistic Audit & Quality Gates
+Invoke `sdd_auditor` inside worktree to run release gates:
+1. Spec update verified: `npm test -- tests/spec.test.ts`.
+2. Steering check: `python3 .antigravity/scripts/check_steering.py`.
+3. Typecheck and rule parity: `npm run typecheck` and `npm test -- tests/AgentRuleFilesParity.test.ts`.
+4. Full test suite: `npm test`.
+
+### Phase 6: Branch Push, PR Creation & Handoff
+- `sdd_auditor` pushes feature branch to origin and opens Pull Request via `gh pr create --base main --head sdd/<feature-name>`.
+- Parent agent compiles `walkthrough.md` in brain folder with PR link, wave commit summary, and test logs.
+- Instruct user to review and squash-merge the PR on GitHub.
+

@@ -29,6 +29,19 @@ def get_git_changes():
     res_diff = subprocess.run(["git", "diff", "--name-only", "HEAD"], capture_output=True, text=True)
     tracked_changes = [line.strip() for line in res_diff.stdout.splitlines() if line]
 
+    # If on a feature branch (e.g. sdd/* or anything not main), also include committed changes on this branch vs main
+    branch_res = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
+    current_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else ""
+    if current_branch and current_branch != "main" and current_branch != "HEAD":
+        mb_res = subprocess.run(["git", "merge-base", "HEAD", "main"], capture_output=True, text=True)
+        if mb_res.returncode != 0:
+            mb_res = subprocess.run(["git", "merge-base", "HEAD", "origin/main"], capture_output=True, text=True)
+        if mb_res.returncode == 0 and mb_res.stdout.strip():
+            merge_base = mb_res.stdout.strip()
+            branch_diff = subprocess.run(["git", "diff", "--name-only", merge_base, "HEAD"], capture_output=True, text=True)
+            if branch_diff.returncode == 0:
+                tracked_changes.extend([line.strip() for line in branch_diff.stdout.splitlines() if line])
+
     # Get untracked files
     res_untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"], capture_output=True, text=True)
     untracked_changes = [line.strip() for line in res_untracked.stdout.splitlines() if line]
@@ -172,9 +185,16 @@ def check_import_boundaries(file_path, repo_root):
 def main():
     print("🔍 Checking for structural changes and boundary violations...")
     
-    # Normalize working directory to repo root
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
+    # Normalize working directory to repo or worktree root
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        repo_root = os.path.abspath(sys.argv[1])
+    else:
+        git_root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        if git_root.returncode == 0 and git_root.stdout.strip():
+            repo_root = git_root.stdout.strip()
+        else:
+            script_dir = os.path.dirname(os.path.realpath(__file__))
+            repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
     os.chdir(repo_root)
     
     try:

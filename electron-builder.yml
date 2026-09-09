@@ -1,5 +1,5 @@
 # Self-signed, file-shareable distribution: macOS is signed with a locally-created
-# certificate (see docs/signing.md) and ships as zip for arm64 + x64; Windows ships an
+# certificate (see spec/signing.md) and ships as zip for arm64 + x64; Windows ships an
 # NSIS installer + portable zip for x64, unsigned.
 # Auto-update is intentionally absent (it effectively requires Developer ID signing).
 appId: de.palsoftware.yvoke.desktop
@@ -38,7 +38,7 @@ mac:
       arch:
         - arm64
         - x64
-  # Self-signed identity from the login keychain (docs/signing.md). A stable signature is what
+  # Self-signed identity from the login keychain (spec/signing.md). A stable signature is what
   # keeps the safeStorage keychain ACL valid across updates — with ad-hoc signing the designated
   # requirement is the cdhash, so every build looked like a different app and re-prompted.
   identity: Yvoke Desktop Signing

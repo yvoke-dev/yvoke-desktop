@@ -87,7 +87,7 @@ if [ -z "$(git tag)" ]; then
 
   Add them under Settings -> Secrets and variables -> Actions. To prove them without
   spending a tag, run the workflow manually first (Actions -> Release -> Run workflow):
-  it builds both platforms and publishes nothing. See docs/signing.md.
+  it builds both platforms and publishes nothing. See spec/signing.md.
 
 EOF
 fi

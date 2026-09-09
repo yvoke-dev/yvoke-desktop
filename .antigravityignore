@@ -34,7 +34,4 @@ Thumbs.db
 # ── Docker / CI / Git internals ─────────────────────────────
 .git/
 .github/
-Dockerfile
-docker-compose*.yml
-docker/
-.antigravity/
+.worktrees/

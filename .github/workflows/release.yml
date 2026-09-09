@@ -141,7 +141,7 @@ jobs:
 
       # Unsigned for now. Azure Artifact Signing plugs in here once Identity Validation is
       # approved — this runner is the reason the job exists, since electron-builder's
-      # Invoke-TrustedSigning path cannot run from macOS. See docs/signing.md.
+      # Invoke-TrustedSigning path cannot run from macOS. See spec/signing.md.
       - name: Build
         run: |
           npx electron-vite build
