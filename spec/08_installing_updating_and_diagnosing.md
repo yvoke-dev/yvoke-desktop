@@ -41,7 +41,7 @@ something goes wrong.
 - **The window itself is hardened.** The page it runs is locked to its own files with no outside
   connections, no frames and no plug-ins, and the interface has no direct access to the system: the
   whole surface between the two is twenty-odd named calls.
-- **Application logs are written to a persistent file.** Standard output, agent lifecycle events, MCP operations, sync progress and errors are written to `logs/app.log` in the application's user data directory with ISO timestamps and scope tags. Secret credentials such as Bearer tokens and Anthropic API keys are scrubbed automatically before being persisted. When `app.log` crosses 5 MB, it rotates to `app.log.1`, keeping at most one archive file to bound disk space to 10 MB total.
+- **Application logs are written to a persistent file.** Standard output, agent lifecycle events, MCP operations, sync progress and errors are written to `logs/app.log` in the application's user data directory with ISO timestamps and scope tags. Secret credentials such as Bearer tokens and Anthropic API keys are scrubbed automatically before being persisted. When `app.log` crosses 5 MB, it rotates to `app.log.1`, keeping at most one archive file to bound disk space to 10 MB total. Quitting waits for the log to reach disk, so the lines written during shutdown are in the file rather than lost with the process — bounded, so a stuck disk delays closing the app briefly instead of preventing it.
 
 ## Limits
 

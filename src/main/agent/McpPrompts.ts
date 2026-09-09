@@ -3,7 +3,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { AppSettings, CitationRef, McpPromptInfo } from '../../shared/types';
-import { tagAttributedError } from '../../shared/error';
+import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 import { log, logError } from '../log';
 import type { McpAuthProvider } from './McpConnection';
 
@@ -96,7 +96,7 @@ export class McpPrompts {
       return await op(await this.connect());
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;
       }
       logError('mcp', `request failed (${msg}); reconnecting and retrying once`);
@@ -117,7 +117,7 @@ export class McpPrompts {
       return prompts;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;
       }
       throw new Error(tagAttributedError('Yvoke Backend', err));
@@ -139,7 +139,7 @@ export class McpPrompts {
         .join('\n\n');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;
       }
       throw new Error(tagAttributedError('Yvoke Backend', err));
@@ -186,7 +186,7 @@ export class McpPrompts {
       return call.text;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;
       }
       throw new Error(tagAttributedError('Yvoke Backend', err));

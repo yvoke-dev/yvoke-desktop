@@ -3,6 +3,22 @@ export type ErrorSource = 'Claude' | 'Entra' | 'Yvoke Backend';
 export const ERROR_SOURCES: readonly ErrorSource[] = ['Claude', 'Entra', 'Yvoke Backend'] as const;
 
 /**
+ * Whether `message` is already attributed to `source`.
+ *
+ * `<source>:` is the whole test: the space that normally follows the colon is part of the
+ * message, not part of the prefix, so testing for `'<source>: '` as well can only ever
+ * re-match what this already matched.
+ */
+export function hasErrorSourcePrefix(message: string, source: ErrorSource): boolean {
+  return typeof message === 'string' && message.startsWith(`${source}:`);
+}
+
+/** Whether `message` is already attributed to any known source. */
+export function isAttributedError(message: string): boolean {
+  return ERROR_SOURCES.some((source) => hasErrorSourcePrefix(message, source));
+}
+
+/**
  * Strips leading known error source prefixes (e.g. 'Claude: ', 'Entra: ', 'Yvoke Backend: ')
  * from an error message while preserving any internal colons (e.g. HTTP status, URLs).
  */
@@ -17,14 +33,9 @@ export function stripErrorPrefix(message: string): string {
   while (changed) {
     changed = false;
     for (const source of ERROR_SOURCES) {
-      const withSpace = `${source}: `;
-      const withoutSpace = `${source}:`;
-
-      if (stripped.startsWith(withSpace)) {
-        stripped = stripped.slice(withSpace.length).trim();
-        changed = true;
-      } else if (stripped.startsWith(withoutSpace)) {
-        stripped = stripped.slice(withoutSpace.length).trim();
+      if (hasErrorSourcePrefix(stripped, source)) {
+        // +1 for the colon; any following space is trimmed off with the rest.
+        stripped = stripped.slice(source.length + 1).trim();
         changed = true;
       }
     }
@@ -57,11 +68,14 @@ function extractErrorMessage(error: unknown): string {
 
   if (typeof error === 'object') {
     if ('message' in error) {
-      if (typeof (error as { message: unknown }).message === 'string') {
-        const msg = (error as { message: string }).message.trim();
+      const raw = (error as { message: unknown }).message;
+      if (typeof raw === 'string') {
+        const msg = raw.trim();
         return msg.length > 0 ? msg : 'Unknown error';
       }
-      return 'Unknown error';
+      // A non-string `message` says nothing by itself, but the object around it usually
+      // does. Fall through to serialization rather than reporting less than an object with
+      // no `message` property at all would.
     }
 
     try {

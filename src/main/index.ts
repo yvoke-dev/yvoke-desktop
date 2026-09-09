@@ -15,6 +15,7 @@ import type {
 import { AppCore } from './AppCore';
 import { fileTokenCache } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
+import { createBeforeQuitHandler } from './lifecycle';
 
 let core: AppCore | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -287,9 +288,9 @@ if (!gotLock) {
     }
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     const userDataDir = app.getPath('userData');
-    initFileLogging(userDataDir);
+    await initFileLogging(userDataDir);
     const canEncrypt = safeStorage.isEncryptionAvailable();
     log(
       'startup',
@@ -331,8 +332,12 @@ if (!gotLock) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', async () => {
-    core?.dispose();
-    await closeFileLogging();
-  });
+  app.on(
+    'before-quit',
+    createBeforeQuitHandler({
+      dispose: () => core?.dispose(),
+      flushLogs: closeFileLogging,
+      quit: () => app.quit(),
+    }),
+  );
 }

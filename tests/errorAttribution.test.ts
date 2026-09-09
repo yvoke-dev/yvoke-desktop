@@ -3,6 +3,8 @@ import {
   tagAttributedError,
   stripErrorPrefix,
   sanitizeLogContent,
+  hasErrorSourcePrefix,
+  isAttributedError,
   type ErrorSource,
 } from '../src/shared/error';
 
@@ -89,6 +91,26 @@ describe('errorAttribution', () => {
       it('handles Error with empty message', () => {
         expect(tagAttributedError('Claude', new Error(''))).toBe('Claude: Error');
       });
+
+      it('serializes an object whose message property is not a string', () => {
+        // An object carrying a non-string `message` must not fare worse than one carrying
+        // no `message` at all — the details are the whole point of reporting the error.
+        expect(tagAttributedError('Yvoke Backend', { message: { code: 500, details: 'Timeout' } })).toBe(
+          'Yvoke Backend: {"message":{"code":500,"details":"Timeout"}}',
+        );
+        expect(tagAttributedError('Entra', { message: ['first', 'second'] })).toBe(
+          'Entra: {"message":["first","second"]}',
+        );
+        expect(tagAttributedError('Claude', { message: null, code: 42 })).toBe(
+          'Claude: {"message":null,"code":42}',
+        );
+      });
+
+      it('falls back to Unknown error when a non-string message cannot be serialized', () => {
+        const circular: Record<string, unknown> = { message: { nested: true } };
+        circular.self = circular;
+        expect(tagAttributedError('Claude', circular)).toBe('Claude: Unknown error');
+      });
     });
   });
 
@@ -127,6 +149,37 @@ describe('errorAttribution', () => {
       expect(stripErrorPrefix('   ')).toBe('');
       expect(stripErrorPrefix(null as unknown as string)).toBe('');
       expect(stripErrorPrefix(undefined as unknown as string)).toBe('');
+    });
+  });
+
+  describe('source prefix detection', () => {
+    it('matches a source prefix whether or not a space follows the colon', () => {
+      expect(hasErrorSourcePrefix('Entra: Session expired', 'Entra')).toBe(true);
+      expect(hasErrorSourcePrefix('Entra:Session expired', 'Entra')).toBe(true);
+      expect(hasErrorSourcePrefix('Yvoke Backend: 502 Bad Gateway', 'Yvoke Backend')).toBe(true);
+      expect(hasErrorSourcePrefix('Claude: Overloaded', 'Claude')).toBe(true);
+    });
+
+    it('does not match another source, a bare mention, or a different case', () => {
+      expect(hasErrorSourcePrefix('Claude: Overloaded', 'Entra')).toBe(false);
+      expect(hasErrorSourcePrefix('Network disconnected', 'Entra')).toBe(false);
+      // Only a prefix is an attribution; the same word mid-message is not.
+      expect(hasErrorSourcePrefix('Failed to reach Entra: timeout', 'Entra')).toBe(false);
+      expect(hasErrorSourcePrefix('entra: lowercase', 'Entra')).toBe(false);
+      expect(hasErrorSourcePrefix('', 'Entra')).toBe(false);
+      // The colon is what makes it an attribution; merely starting with the source's
+      // name does not, or ordinary prose would be mistaken for an attributed message.
+      expect(hasErrorSourcePrefix('Entra sign-in was cancelled', 'Entra')).toBe(false);
+    });
+
+    it('isAttributedError matches any known source and nothing else', () => {
+      expect(isAttributedError('Claude: Overloaded')).toBe(true);
+      expect(isAttributedError('Entra:no space')).toBe(true);
+      expect(isAttributedError('Yvoke Backend: 502 Bad Gateway')).toBe(true);
+      expect(isAttributedError('Custom: Server error')).toBe(false);
+      expect(isAttributedError('Network disconnected')).toBe(false);
+      expect(isAttributedError('Claude was unreachable')).toBe(false);
+      expect(isAttributedError('')).toBe(false);
     });
   });
 

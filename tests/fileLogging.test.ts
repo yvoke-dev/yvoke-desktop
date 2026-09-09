@@ -11,6 +11,7 @@ import {
   safeEndStream,
   MAX_BUFFERED_LOGS,
   getLogBufferForTesting,
+  STREAM_CLOSE_TIMEOUT_MS,
 } from '../src/main/log';
 
 describe('fileLogging', () => {
@@ -34,7 +35,7 @@ describe('fileLogging', () => {
   });
 
   it('creates logs directory and app.log upon initialization and logging', async () => {
-    initFileLogging(tmpDir);
+    await initFileLogging(tmpDir);
     expect(fs.existsSync(logsDir)).toBe(true);
 
     log('testScope', 'Hello file logging');
@@ -46,7 +47,7 @@ describe('fileLogging', () => {
   });
 
   it('formats multiple arguments, objects, and errors properly in log output', async () => {
-    initFileLogging(tmpDir);
+    await initFileLogging(tmpDir);
 
     log('multiArg', 'User ID:', 42, { role: 'admin' });
     logError('errorScope', new Error('Something failed in subsystem'));
@@ -58,7 +59,7 @@ describe('fileLogging', () => {
   });
 
   it('sanitizes secrets (Bearer tokens, sk-ant keys) before writing to app.log', async () => {
-    initFileLogging(tmpDir);
+    await initFileLogging(tmpDir);
 
     log('auth', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token123');
     log('agent', 'Connecting with sk-ant-api03-abcdef987654321');
@@ -95,7 +96,7 @@ describe('fileLogging', () => {
 
   describe('rotation at 5MB boundary', () => {
     it('rotates app.log to app.log.1 when the 5MB boundary is crossed', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
 
       // Write a 5MB payload (5 * 1024 * 1024 bytes)
       const bigPayload = 'x'.repeat(5 * 1024 * 1024);
@@ -117,7 +118,7 @@ describe('fileLogging', () => {
     });
 
     it('cleanly overwrites prior app.log.1 on subsequent rotations without errors', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
 
       // First rotation
       const chunk1 = 'A'.repeat(5 * 1024 * 1024);
@@ -130,7 +131,7 @@ describe('fileLogging', () => {
       expect(rot1Content).toContain('AAAA');
 
       // Reopen file logging and trigger second rotation
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       const chunk2 = 'B'.repeat(5 * 1024 * 1024);
       log('rot2', chunk2);
       log('rot2', 'After second rotation');
@@ -146,7 +147,7 @@ describe('fileLogging', () => {
     });
 
     it('buffers logs while rotation is in flight so nothing is lost', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
 
       // Cross 5MB
       log('bulk', 'M'.repeat(5 * 1024 * 1024));
@@ -164,7 +165,7 @@ describe('fileLogging', () => {
     });
 
     it('caps logBuffer to MAX_BUFFERED_LOGS if rotation stalls', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
 
       const stream = getLogStreamForTesting()!;
       let finishRotation: () => void = () => {};
@@ -203,7 +204,7 @@ describe('fileLogging', () => {
     });
 
     it('re-checks file size on renameSync failure so rotation can be re-attempted', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
 
       // Write 5MB to set up rotation
       log('bulk', 'Y'.repeat(5 * 1024 * 1024));
@@ -222,7 +223,7 @@ describe('fileLogging', () => {
         expect(fs.existsSync(rotatedLogPath)).toBe(false);
 
         // Next time file logging is initialized, size should not be reset to 0
-        initFileLogging(tmpDir);
+        await initFileLogging(tmpDir);
         const stream = getLogStreamForTesting();
         expect(stream).not.toBeNull();
       } finally {
@@ -234,7 +235,7 @@ describe('fileLogging', () => {
 
   describe('stream error resilience', () => {
     it('handles stream error events gracefully without uncaught exceptions or crashes', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       const stream = getLogStreamForTesting();
       expect(stream).not.toBeNull();
 
@@ -256,7 +257,7 @@ describe('fileLogging', () => {
     });
 
     it('closeFileLogging resolves cleanly even when a stream error occurs', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       const stream = getLogStreamForTesting();
       expect(stream).not.toBeNull();
 
@@ -272,18 +273,60 @@ describe('fileLogging', () => {
       const mockStream = new EventEmitter() as any;
       mockStream.destroyed = false;
       mockStream.closed = false;
-      mockStream.end = (cb?: () => void) => {
+      // A real autoClose stream that fails to end destroys itself and still emits 'close'.
+      mockStream.end = () => {
         mockStream.emit('error', new Error('Failed to end stream'));
-        if (cb) cb();
+        mockStream.destroyed = true;
+        mockStream.emit('close');
       };
 
       await expect(safeEndStream(mockStream)).resolves.toBeUndefined();
+    });
+
+    it('safeEndStream resolves only once the file descriptor is actually closed', async () => {
+      await initFileLogging(tmpDir);
+      const stream = getLogStreamForTesting();
+      expect(stream).not.toBeNull();
+
+      // Enough data that the flush is genuinely asynchronous, so 'finish' and 'close'
+      // cannot collapse into the same tick.
+      stream!.write('x'.repeat(256 * 1024));
+
+      let closeSeen = false;
+      stream!.once('close', () => {
+        closeSeen = true;
+      });
+
+      await safeEndStream(stream);
+
+      // 'finish' only means the buffers reached write(2); the descriptor is closed
+      // asynchronously afterwards, and rotation renames the file the moment this resolves.
+      expect(closeSeen).toBe(true);
+      expect(stream!.closed).toBe(true);
+    });
+
+    it('safeEndStream gives up on a stream that never closes instead of hanging forever', async () => {
+      const EventEmitter = (await import('node:events')).EventEmitter;
+      const mockStream = new EventEmitter() as any;
+      mockStream.destroyed = false;
+      mockStream.closed = false;
+      // A descriptor wedged in the kernel: end() is accepted and nothing is ever emitted.
+      mockStream.end = () => {};
+
+      vi.useFakeTimers();
+      try {
+        const pending = safeEndStream(mockStream);
+        await vi.advanceTimersByTimeAsync(STREAM_CLOSE_TIMEOUT_MS);
+        await expect(pending).resolves.toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
   describe('idempotent lifecycle', () => {
     it('calling closeFileLogging multiple times does not throw', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       log('test', 'active write');
 
       await closeFileLogging();
@@ -292,7 +335,7 @@ describe('fileLogging', () => {
     });
 
     it('writing after closeFileLogging does not throw', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       log('test', 'initial write');
       await closeFileLogging();
 
@@ -302,12 +345,66 @@ describe('fileLogging', () => {
       }).not.toThrow();
     });
 
+    it('releases the previous log descriptor when re-initialised over a live stream', async () => {
+      await initFileLogging(tmpDir);
+      const first = getLogStreamForTesting();
+      expect(first).not.toBeNull();
+      log('phase1', 'first session line');
+
+      const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-test-logging-alt-'));
+      try {
+        await initFileLogging(otherDir);
+
+        // The old descriptor has to be gone before the new one is in use: the size of the
+        // new file is read from disk, and a stream still flushing would make that a lie.
+        expect(first!.closed).toBe(true);
+      } finally {
+        await closeFileLogging();
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
+    });
+
+    it('awaits an in-flight rotation instead of losing it', async () => {
+      await initFileLogging(tmpDir);
+
+      const stream = getLogStreamForTesting()!;
+      let finishRotation: () => void = () => {};
+      const stalled = new Promise<void>((resolve) => {
+        finishRotation = resolve;
+      });
+      const originalEnd = stream.end.bind(stream);
+      stream.end = function (...args: any[]) {
+        void stalled.then(() => originalEnd(...args));
+        return stream;
+      } as any;
+
+      const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-test-logging-alt-'));
+      try {
+        log('bulk', 'Z'.repeat(5 * 1024 * 1024));
+        log('trigger', 'Crosses the rotation threshold');
+
+        // Rotation is in flight and reads the log paths only after it resumes. Re-pointing
+        // them underneath it drops the rotation entirely — the oversized log is never renamed,
+        // and the byte count resets to zero, so nothing retries it either.
+        const initialising = initFileLogging(otherDir);
+        finishRotation();
+        await initialising;
+
+        expect(fs.existsSync(rotatedLogPath)).toBe(true);
+        expect(fs.existsSync(path.join(otherDir, 'logs', 'app.log.1'))).toBe(false);
+      } finally {
+        finishRotation();
+        await closeFileLogging();
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
+    });
+
     it('re-initializing file logging after close works cleanly', async () => {
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       log('phase1', 'First session');
       await closeFileLogging();
 
-      initFileLogging(tmpDir);
+      await initFileLogging(tmpDir);
       log('phase2', 'Second session');
       await closeFileLogging();
 

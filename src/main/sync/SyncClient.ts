@@ -1,7 +1,7 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
 import type { OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
-import { tagAttributedError } from '../../shared/error';
+import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 
 export interface ConversationDto {
   id: string;
@@ -68,7 +68,7 @@ export class SyncClient {
       token = await this.deps.getToken(retried);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;
       }
       throw new Error(tagAttributedError('Yvoke Backend', err));

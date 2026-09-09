@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
-import { ERROR_SOURCES, tagAttributedError } from '../../shared/error';
+import { isAttributedError, tagAttributedError } from '../../shared/error';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -158,7 +158,7 @@ export class SyncQueue {
         } catch (error) {
           this.flushing = null;
           const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-          const isAttributed = ERROR_SOURCES.some((s) => msg.startsWith(`${s}:`) || msg.startsWith(`${s}: `));
+          const isAttributed = isAttributedError(msg);
           const detail = isAttributed ? msg : tagAttributedError('Yvoke Backend', error);
 
           if (error instanceof SyncApiError && error.status >= 400 && error.status < 500 && error.status !== 401) {

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
-import { tagAttributedError } from '../../shared/error';
+import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
@@ -82,7 +82,7 @@ export async function loadRequiredSystemPrompt(
     prompt = await syncClient.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+    if (hasErrorSourcePrefix(msg, 'Entra')) {
       throw err;
     }
     throw new Error(
@@ -105,6 +105,34 @@ export async function loadRequiredSystemPrompt(
   }
   log('agent', `Loaded system prompt "${BASE_SYSTEM_PROMPT_NAME}" from remote server`);
   return prompt;
+}
+
+/**
+ * Decides how a thrown turn failure reaches the user.
+ *
+ * An Entra or Yvoke Backend message was already attributed by the layer that raised it and
+ * passes through untouched — re-tagging it would blame the wrong subsystem. Anything else is
+ * attributed to `fallbackSource`, except a Claude auth failure, which is replaced by the
+ * login instructions.
+ */
+function attributeTurnFailure(
+  error: unknown,
+  fallbackSource: ErrorSource,
+): { messageText: string; message: string; authRequired: boolean } {
+  const messageText = error instanceof Error ? error.message : String(error);
+  const preAttributed =
+    hasErrorSourcePrefix(messageText, 'Entra') || hasErrorSourcePrefix(messageText, 'Yvoke Backend');
+  const authRequired = !preAttributed && isAuthError(messageText);
+
+  if (authRequired) {
+    return { messageText, message: tagAttributedError('Claude', LOGIN_INSTRUCTIONS), authRequired };
+  }
+  if (preAttributed) {
+    return { messageText, message: messageText, authRequired };
+  }
+  // `error`, not `messageText`: a thrown non-Error stringifies to '[object Object]' here but
+  // still serializes usefully inside tagAttributedError.
+  return { messageText, message: tagAttributedError(fallbackSource, error), authRequired };
 }
 
 /** Simple push-based async iterable used as the streaming-input prompt. */
@@ -233,25 +261,9 @@ export class AgentService {
     try {
       session = await this.ensureSession(thread, opts.playbookName);
     } catch (error) {
-      const messageText = error instanceof Error ? error.message : String(error);
+      const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
       logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-      const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
-      const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
-      const authRequired = !isEntra && !isBackend && isAuthError(messageText);
-      let emittedMessage: string;
-      if (authRequired) {
-        emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
-      } else if (isBackend || isEntra) {
-        emittedMessage = messageText;
-      } else {
-        emittedMessage = tagAttributedError('Yvoke Backend', error);
-      }
-      this.deps.emit({
-        kind: 'error',
-        threadId: thread.id,
-        message: emittedMessage,
-        authRequired,
-      });
+      this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
       throw error;
     }
 
@@ -269,25 +281,9 @@ export class AgentService {
       try {
         session = await this.ensureSession(thread, opts.playbookName);
       } catch (error) {
-        const messageText = error instanceof Error ? error.message : String(error);
+        const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
         logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-        const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
-        const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
-        const authRequired = !isEntra && !isBackend && isAuthError(messageText);
-        let emittedMessage: string;
-        if (authRequired) {
-          emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
-        } else if (isBackend || isEntra) {
-          emittedMessage = messageText;
-        } else {
-          emittedMessage = tagAttributedError('Yvoke Backend', error);
-        }
-        this.deps.emit({
-          kind: 'error',
-          threadId: thread.id,
-          message: emittedMessage,
-          authRequired,
-        });
+        this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
         throw error;
       }
     }
@@ -629,25 +625,9 @@ export class AgentService {
         }
       }
     } catch (error) {
-      const messageText = error instanceof Error ? error.message : String(error);
+      const { messageText, message, authRequired } = attributeTurnFailure(error, 'Claude');
       logError('agent', `turn failed thread=${threadId}:`, messageText);
-      const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
-      const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
-      const authRequired = !isEntra && !isBackend && isAuthError(messageText);
-      let emittedMessage: string;
-      if (authRequired) {
-        emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
-      } else if (isBackend || isEntra) {
-        emittedMessage = messageText;
-      } else {
-        emittedMessage = tagAttributedError('Claude', error);
-      }
-      this.deps.emit({
-        kind: 'error',
-        threadId,
-        message: emittedMessage,
-        authRequired,
-      });
+      this.deps.emit({ kind: 'error', threadId, message, authRequired });
       session.busy = false;
       this.sessions.delete(threadId);
     }

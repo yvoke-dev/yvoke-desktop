@@ -6,6 +6,9 @@ const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 
 export const MAX_BUFFERED_LOGS = 1000;
 
+/** Upper bound on how long a single stream close may hold up rotation or quit. */
+export const STREAM_CLOSE_TIMEOUT_MS = 2000;
+
 let currentStream: fs.WriteStream | null = null;
 let currentBytes = 0;
 let logFilePath = '';
@@ -53,8 +56,16 @@ function openStream(filePath: string): fs.WriteStream {
 }
 
 /**
- * Safely ends a WriteStream listening for finish, close, and error events
- * without hanging or leaking listeners.
+ * Ends a WriteStream and resolves once its file descriptor has actually been released.
+ *
+ * Only 'close' reports that. 'finish' fires while the descriptor is still open — it means
+ * the buffered writes reached write(2), nothing more — so resolving on it hands control
+ * back while the handle is still live, and the callers here immediately rename the file
+ * (rotation) or tear the process down (quit). An errored stream is destroyed and emits
+ * 'close' too, so it needs no separate listener.
+ *
+ * The wait is bounded because a wedged descriptor must not be able to stall rotation
+ * (which would strand every later line in the buffer) or keep the app from quitting.
  */
 export function safeEndStream(stream: fs.WriteStream | null): Promise<void> {
   if (!stream || stream.destroyed || stream.closed) {
@@ -63,22 +74,20 @@ export function safeEndStream(stream: fs.WriteStream | null): Promise<void> {
 
   return new Promise<void>((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
-      if (!settled) {
-        settled = true;
-        stream.removeListener('close', cleanup);
-        stream.removeListener('finish', cleanup);
-        stream.removeListener('error', cleanup);
-        resolve();
-      }
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      stream.removeListener('close', cleanup);
+      resolve();
     };
 
     stream.once('close', cleanup);
-    stream.once('finish', cleanup);
-    stream.once('error', cleanup);
+    timer = setTimeout(cleanup, STREAM_CLOSE_TIMEOUT_MS);
 
     try {
-      stream.end(cleanup);
+      stream.end();
     } catch {
       cleanup();
     }
@@ -184,12 +193,14 @@ function writeToLogFile(entry: string): void {
 /**
  * Initializes file-based persistent logging in `userDataDir/logs/app.log`.
  * Configures secret scrubbing and 5MB rotation to `app.log.1`.
+ *
+ * Closes whatever was already running first, so calling this twice is safe.
  */
-export function initFileLogging(userDataDir: string): void {
-  if (currentStream) {
-    safeEndStream(currentStream);
-    currentStream = null;
-  }
+export async function initFileLogging(userDataDir: string): Promise<void> {
+  // Any in-flight rotation and any live stream have to finish first. Rotation reads the log
+  // paths only after it resumes, and the size below is read from disk, so re-pointing either
+  // underneath them loses the rotation and leaks the stream it left behind.
+  await closeFileLogging();
 
   const logsDir = path.join(userDataDir, 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
