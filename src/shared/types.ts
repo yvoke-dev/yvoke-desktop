@@ -539,6 +539,22 @@ export interface AuthStatus {
   server: { mode: 'dev' | 'entra'; signedIn: boolean; account?: string };
 }
 
+export type AuthVerificationFailureReason =
+  | 'expired'
+  | 'missing'
+  | 'unreachable'
+  | 'rate_limited'
+  | 'error';
+
+export type LoginVerificationResult =
+  | { status: 'ok'; account?: string; token?: string }
+  | { status: AuthVerificationFailureReason; message: string; account?: string };
+
+export interface AuthVerificationResponse {
+  server: LoginVerificationResult;
+  claude: LoginVerificationResult;
+}
+
 /**
  * Alias for the MCP connection, which becomes the `mcp__<name>__` prefix on every tool the SDK
  * exposes. It names the PRODUCT's MCP server, not a knowledge base: every knowledge base is served

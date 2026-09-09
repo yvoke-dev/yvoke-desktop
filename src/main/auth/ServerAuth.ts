@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PublicClientApplication, type AccountInfo, type Configuration } from '@azure/msal-node';
-import type { AppSettings } from '../../shared/types';
+import type { AppSettings, LoginVerificationResult } from '../../shared/types';
 import { tagAttributedError } from '../../shared/error';
 import type { McpAuthProvider } from '../agent/McpConnection';
 
@@ -44,6 +44,7 @@ export class ServerAuth implements McpAuthProvider {
   /** clientId+tenantId the cached pca was built with; rebuild when settings change. */
   private pcaKey: string | null = null;
   private account: AccountInfo | null = null;
+  private cacheCorrupted = false;
   private readonly initializePromise: Promise<void>;
 
   constructor(
@@ -55,6 +56,9 @@ export class ServerAuth implements McpAuthProvider {
   }
 
   private async initializeAccount(): Promise<void> {
+    if (this.isDevMode()) {
+      return;
+    }
     try {
       const pca = this.getPca();
       const accounts = await pca.getTokenCache().getAllAccounts();
@@ -85,8 +89,14 @@ export class ServerAuth implements McpAuthProvider {
           ? {
               cachePlugin: {
                 beforeCacheAccess: async (ctx) => {
-                  const data = this.cache!.read();
-                  if (data) ctx.tokenCache.deserialize(data);
+                  try {
+                    const data = this.cache!.read();
+                    if (data) ctx.tokenCache.deserialize(data);
+                    this.cacheCorrupted = false;
+                  } catch (err) {
+                    this.cacheCorrupted = true;
+                    throw err;
+                  }
                 },
                 afterCacheAccess: async (ctx) => {
                   if (ctx.cacheHasChanged) this.cache!.write(ctx.tokenCache.serialize());
@@ -206,6 +216,88 @@ export class ServerAuth implements McpAuthProvider {
     }
     await this.initializePromise;
     return { mode: 'entra', signedIn: this.account != null, account: this.account?.username };
+  }
+
+  async acquireTokenSilentOnly(): Promise<string> {
+    if (this.isDevMode()) {
+      return DEV_TOKEN;
+    }
+    await this.initializePromise;
+    const pca = this.getPca();
+    let account: AccountInfo | null = null;
+    try {
+      account = this.account ?? (await pca.getTokenCache().getAllAccounts())[0] ?? null;
+    } catch (err) {
+      if (this.cacheCorrupted) {
+        throw new Error('Token cache unreadable or corrupt.');
+      }
+      throw err;
+    }
+    if (this.cacheCorrupted) {
+      throw new Error('Token cache unreadable or corrupt.');
+    }
+    if (!account) {
+      throw new Error('No cached corporate account found.');
+    }
+    const scopes = [this.getSettings().entra.scope];
+    const silent = await pca.acquireTokenSilent({ account, scopes });
+    if (!silent?.accessToken) {
+      throw new Error('Authentication session expired or invalid. Please sign in again.');
+    }
+    this.account = silent.account ?? account;
+    return silent.accessToken;
+  }
+
+  async verifyToken(forceInteractive = false): Promise<LoginVerificationResult> {
+    if (this.isDevMode()) {
+      return { status: 'ok', account: 'dev-mode (mock security)', token: DEV_TOKEN };
+    }
+    await this.initializePromise;
+
+    try {
+      const token = await this.acquireTokenSilentOnly();
+      return {
+        status: 'ok',
+        account: this.account?.username,
+        token,
+      };
+    } catch (err) {
+      if (this.cacheCorrupted) {
+        return { status: 'missing', message: 'Token cache unreadable or corrupt.' };
+      }
+      if (forceInteractive) {
+        const scopes = [this.getSettings().entra.scope];
+        try {
+          const pca = this.getPca();
+          const interactive = await pca.acquireTokenInteractive({
+            scopes,
+            openBrowser: this.openBrowser,
+            successTemplate:
+              '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
+          });
+          this.account = interactive.account;
+          return {
+            status: 'ok',
+            account: interactive.account?.username,
+            token: interactive.accessToken,
+          };
+        } catch {
+          return {
+            status: 'expired',
+            message: 'Authentication session expired or invalid. Please sign in again.',
+          };
+        }
+      }
+
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('No cached corporate account')) {
+        return { status: 'missing', message: 'No cached corporate account found.' };
+      }
+      return {
+        status: 'expired',
+        message: 'Authentication session expired or invalid. Please sign in again.',
+      };
+    }
   }
 
   /** MCP header seam: pre-M19-flip the MCP endpoint is open and gets no header. */

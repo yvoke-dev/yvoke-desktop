@@ -1,6 +1,6 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
-import type { OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
+import type { LoginVerificationResult, OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 
 export interface ConversationDto {
@@ -158,5 +158,71 @@ export class SyncClient {
   /** Persist a completed local multi-agent run (agent_runs + agent_steps) for the admin viewer. */
   recordOrchestratorRun(payload: OrchestratorRunPayload): Promise<{ id: string }> {
     return this.request('POST', '/orchestrator/runs', payload);
+  }
+
+  async verifyConnection(token?: string): Promise<LoginVerificationResult> {
+    const baseUrl = this.deps.getBaseUrl();
+    if (!baseUrl || !baseUrl.trim()) {
+      return { status: 'unreachable', message: 'Server URL not configured' };
+    }
+
+    let probeToken = token;
+    if (probeToken === undefined) {
+      try {
+        probeToken = await this.deps.getToken(false);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          msg.includes('fetch failed') ||
+          msg.includes('ECONNREFUSED') ||
+          msg.includes('ENOTFOUND') ||
+          msg.includes('ETIMEDOUT') ||
+          msg.includes('EAI_AGAIN')
+        ) {
+          return { status: 'unreachable', message: 'Server unreachable' };
+        }
+        return {
+          status: 'expired',
+          message: msg || 'Authentication session expired or invalid. Please sign in again.',
+        };
+      }
+    }
+
+    let response: Response;
+    try {
+      response = await this.fetchFn(this.url('/prompts/system/default-chat'), {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${probeToken}`,
+        },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        msg.includes('fetch failed') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ENOTFOUND') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('EAI_AGAIN') ||
+        err instanceof TypeError
+      ) {
+        return { status: 'unreachable', message: 'Server unreachable' };
+      }
+      return { status: 'error', message: msg };
+    }
+
+    if (response.status === 200 || response.status === 204) {
+      return { status: 'ok' };
+    }
+    if (response.status === 401) {
+      return { status: 'expired', message: 'Server refused credentials (401 Unauthorized)' };
+    }
+    if (response.status === 429) {
+      return { status: 'rate_limited', message: 'Rate limit exceeded' };
+    }
+
+    const text = await response.text().catch(() => '');
+    const message = text ? `Server error (${response.status}): ${text}` : `Server error (${response.status})`;
+    return { status: 'error', message };
   }
 }
