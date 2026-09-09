@@ -19,7 +19,7 @@
 ### Development & Build Tools
 - **electron-vite**: Specialized builder for Electron processes.
 - **electron-builder**: Package distributions into portable formats (`.zip`, `.exe`).
-- **vitest**: Fast test runner for Node.js unit testing.
+- **vitest**: Fast test runner for Node.js unit and integration testing (`vitest.config.ts`).
 - **tsx**: Executing spike/test scripts without pre-compiling.
 
 ## Configuration

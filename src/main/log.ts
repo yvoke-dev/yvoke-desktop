@@ -247,17 +247,28 @@ export function getLogBufferForTesting(): readonly string[] {
   return logBuffer;
 }
 
+/** Maximum length of a single line emitted to stdout/stderr. Long lines freeze CI runners and terminal emulators. */
+export const MAX_CONSOLE_LINE_LENGTH = 8192;
+
+function printToConsole(printer: (msg: string) => void, text: string): void {
+  if (text.length > MAX_CONSOLE_LINE_LENGTH) {
+    printer(`${text.slice(0, MAX_CONSOLE_LINE_LENGTH)}… [truncated ${text.length - MAX_CONSOLE_LINE_LENGTH} chars]`);
+  } else {
+    printer(text);
+  }
+}
+
 export function log(scope: string, ...args: unknown[]): void {
   const line = `[${ts()}] [${scope}] ${formatArgs(args)}`;
   const sanitized = sanitizeLogContent(line);
-  console.log(sanitized);
+  printToConsole(console.log, sanitized);
   writeToLogFile(`${sanitized}\n`);
 }
 
 export function logError(scope: string, ...args: unknown[]): void {
   const line = `[${ts()}] [${scope}] ${formatArgs(args)}`;
   const sanitized = sanitizeLogContent(line);
-  console.error(sanitized);
+  printToConsole(console.error, sanitized);
   writeToLogFile(`${sanitized}\n`);
 }
 

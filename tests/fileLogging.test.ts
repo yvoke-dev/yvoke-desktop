@@ -20,14 +20,21 @@ describe('fileLogging', () => {
   let appLogPath: string;
   let rotatedLogPath: string;
 
+  let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-test-logging-'));
     logsDir = path.join(tmpDir, 'logs');
     appLogPath = path.join(logsDir, 'app.log');
     rotatedLogPath = path.join(logsDir, 'app.log.1');
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(async () => {
+    consoleLogSpy?.mockRestore();
+    consoleErrorSpy?.mockRestore();
     await closeFileLogging();
     if (fs.existsSync(tmpDir)) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -73,25 +80,38 @@ describe('fileLogging', () => {
   });
 
   it('scrubs raw secrets from console.log and console.error outputs', () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    log('auth', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token123');
+    expect(consoleLogSpy).toHaveBeenCalled();
+    const logCall = consoleLogSpy.mock.calls[0].join(' ');
+    expect(logCall).toContain('Bearer [REDACTED]');
+    expect(logCall).not.toContain('eyJhbGci');
 
-    try {
-      log('auth', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token123');
-      expect(logSpy).toHaveBeenCalled();
-      const logCall = logSpy.mock.calls[0].join(' ');
-      expect(logCall).toContain('Bearer [REDACTED]');
-      expect(logCall).not.toContain('eyJhbGci');
+    logError('agent', 'Failed with sk-ant-api03-abcdef987654321');
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    const errorCall = consoleErrorSpy.mock.calls[0].join(' ');
+    expect(errorCall).toContain('sk-ant-[REDACTED]');
+    expect(errorCall).not.toContain('abcdef987654321');
+  });
 
-      logError('agent', 'Failed with sk-ant-api03-abcdef987654321');
-      expect(errorSpy).toHaveBeenCalled();
-      const errorCall = errorSpy.mock.calls[0].join(' ');
-      expect(errorCall).toContain('sk-ant-[REDACTED]');
-      expect(errorCall).not.toContain('abcdef987654321');
-    } finally {
-      logSpy.mockRestore();
-      errorSpy.mockRestore();
-    }
+  it('truncates excessively long log lines before printing to console to avoid freezing terminal and CI pipes', () => {
+    const hugeMsg = 'a'.repeat(20000);
+    log('huge', hugeMsg);
+
+    expect(consoleLogSpy).toHaveBeenCalled();
+    const call = consoleLogSpy.mock.calls[0].join(' ');
+    expect(call.length).toBeLessThan(10000);
+    expect(call).toContain('… [truncated');
+  });
+
+  it('preserves full untruncated content in the persistent log file even when console output is truncated', async () => {
+    await initFileLogging(tmpDir);
+    const hugeMsg = 'b'.repeat(20000);
+    log('hugeFile', hugeMsg);
+    await closeFileLogging();
+
+    const fileContent = fs.readFileSync(appLogPath, 'utf8');
+    expect(fileContent).toContain(hugeMsg);
+    expect(fileContent).not.toContain('… [truncated');
   });
 
   describe('rotation at 5MB boundary', () => {
