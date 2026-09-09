@@ -1,5 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { sanitizeLogContent } from '../shared/error';
+
+const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+
+export const MAX_BUFFERED_LOGS = 1000;
+
+let currentStream: fs.WriteStream | null = null;
+let currentBytes = 0;
+let logFilePath = '';
+let rotatedFilePath = '';
+let isRotating = false;
+let rotationPromise: Promise<void> | null = null;
+const logBuffer: string[] = [];
 
 /**
  * Minimal timestamped logger for the main process. Output goes to stdout/stderr,
@@ -9,12 +22,232 @@ function ts(): string {
   return new Date().toISOString();
 }
 
+function formatArgs(args: unknown[]): string {
+  return args.map((arg) => {
+    if (typeof arg === 'string') return arg;
+    if (arg instanceof Error) return arg.stack || `${arg.name}: ${arg.message}`;
+    if (typeof arg === 'object' && arg !== null) {
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    }
+    return String(arg);
+  }).join(' ');
+}
+
+function attachStreamHandlers(stream: fs.WriteStream): void {
+  stream.on('error', (err) => {
+    console.error('[log] File logging stream error:', err);
+    if (currentStream === stream) {
+      currentStream = null;
+    }
+  });
+}
+
+function openStream(filePath: string): fs.WriteStream {
+  const stream = fs.createWriteStream(filePath, { flags: 'a' });
+  attachStreamHandlers(stream);
+  return stream;
+}
+
+/**
+ * Safely ends a WriteStream listening for finish, close, and error events
+ * without hanging or leaking listeners.
+ */
+export function safeEndStream(stream: fs.WriteStream | null): Promise<void> {
+  if (!stream || stream.destroyed || stream.closed) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const cleanup = () => {
+      if (!settled) {
+        settled = true;
+        stream.removeListener('close', cleanup);
+        stream.removeListener('finish', cleanup);
+        stream.removeListener('error', cleanup);
+        resolve();
+      }
+    };
+
+    stream.once('close', cleanup);
+    stream.once('finish', cleanup);
+    stream.once('error', cleanup);
+
+    try {
+      stream.end(cleanup);
+    } catch {
+      cleanup();
+    }
+  });
+}
+
+function pushToBuffer(entry: string): void {
+  if (logBuffer.length >= MAX_BUFFERED_LOGS) {
+    logBuffer.shift();
+  }
+  logBuffer.push(entry);
+}
+
+function startRotation(): Promise<void> {
+  if (rotationPromise) {
+    return rotationPromise;
+  }
+
+  isRotating = true;
+  rotationPromise = (async () => {
+    const oldStream = currentStream;
+    currentStream = null;
+
+    await safeEndStream(oldStream);
+
+    try {
+      if (fs.existsSync(rotatedFilePath)) {
+        fs.unlinkSync(rotatedFilePath);
+      }
+    } catch (err) {
+      console.error('[log] Failed to unlink rotated log:', err);
+    }
+
+    let rotatedSuccessfully = false;
+    try {
+      if (fs.existsSync(logFilePath)) {
+        fs.renameSync(logFilePath, rotatedFilePath);
+        rotatedSuccessfully = true;
+      } else {
+        rotatedSuccessfully = true;
+      }
+    } catch (err) {
+      console.error('[log] Failed to rename log for rotation:', err);
+    }
+
+    if (rotatedSuccessfully) {
+      currentBytes = 0;
+    } else {
+      try {
+        currentBytes = fs.existsSync(logFilePath) ? fs.statSync(logFilePath).size : currentBytes;
+      } catch {
+        // keep currentBytes as-is
+      }
+    }
+
+    try {
+      currentStream = openStream(logFilePath);
+    } catch (err) {
+      console.error('[log] Failed to open new log stream after rotation:', err);
+    }
+
+    if (currentStream) {
+      while (logBuffer.length > 0) {
+        const next = logBuffer.shift()!;
+        const bytes = Buffer.byteLength(next, 'utf8');
+        currentBytes += bytes;
+        currentStream.write(next);
+      }
+    } else {
+      logBuffer.length = 0;
+    }
+  })().finally(() => {
+    isRotating = false;
+    rotationPromise = null;
+  });
+
+  return rotationPromise;
+}
+
+function writeToLogFile(entry: string): void {
+  if (!currentStream && !isRotating) {
+    return;
+  }
+
+  if (isRotating) {
+    pushToBuffer(entry);
+    return;
+  }
+
+  if (currentBytes >= MAX_LOG_SIZE_BYTES) {
+    pushToBuffer(entry);
+    startRotation();
+    return;
+  }
+
+  const entryBytes = Buffer.byteLength(entry, 'utf8');
+  if (currentStream && !currentStream.destroyed) {
+    currentBytes += entryBytes;
+    currentStream.write(entry);
+  }
+}
+
+/**
+ * Initializes file-based persistent logging in `userDataDir/logs/app.log`.
+ * Configures secret scrubbing and 5MB rotation to `app.log.1`.
+ */
+export function initFileLogging(userDataDir: string): void {
+  if (currentStream) {
+    safeEndStream(currentStream);
+    currentStream = null;
+  }
+
+  const logsDir = path.join(userDataDir, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+
+  logFilePath = path.join(logsDir, 'app.log');
+  rotatedFilePath = path.join(logsDir, 'app.log.1');
+
+  try {
+    currentBytes = fs.existsSync(logFilePath) ? fs.statSync(logFilePath).size : 0;
+  } catch {
+    currentBytes = 0;
+  }
+
+  currentStream = openStream(logFilePath);
+}
+
+/**
+ * Flushes active stream and safely closes file logging.
+ * Idempotent: safe to call multiple times.
+ */
+export async function closeFileLogging(): Promise<void> {
+  if (rotationPromise) {
+    await rotationPromise;
+  }
+
+  const streamToClose = currentStream;
+  currentStream = null;
+
+  await safeEndStream(streamToClose);
+  logBuffer.length = 0;
+}
+
+/**
+ * Returns active stream reference for unit testing stream error resilience.
+ */
+export function getLogStreamForTesting(): fs.WriteStream | null {
+  return currentStream;
+}
+
+/**
+ * Returns buffered logs reference for unit testing log buffer limits.
+ */
+export function getLogBufferForTesting(): readonly string[] {
+  return logBuffer;
+}
+
 export function log(scope: string, ...args: unknown[]): void {
-  console.log(`[${ts()}] [${scope}]`, ...args);
+  const line = `[${ts()}] [${scope}] ${formatArgs(args)}`;
+  const sanitized = sanitizeLogContent(line);
+  console.log(sanitized);
+  writeToLogFile(`${sanitized}\n`);
 }
 
 export function logError(scope: string, ...args: unknown[]): void {
-  console.error(`[${ts()}] [${scope}]`, ...args);
+  const line = `[${ts()}] [${scope}] ${formatArgs(args)}`;
+  const sanitized = sanitizeLogContent(line);
+  console.error(sanitized);
+  writeToLogFile(`${sanitized}\n`);
 }
 
 /**
