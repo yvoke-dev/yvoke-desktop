@@ -185,7 +185,7 @@ def check_import_boundaries(file_path, repo_root):
 def main():
     print("🔍 Checking for structural changes and boundary violations...")
     
-    # Normalize working directory to repo or worktree root
+    # Normalize working directory to repository root
     if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
         repo_root = os.path.abspath(sys.argv[1])
     else:

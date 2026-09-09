@@ -30,7 +30,7 @@ The spike script needs the Spring app running (`APP_SECURITY_MOCK=true` recommen
 
 - **Functional specification**: Modular capability documentation lives under [`spec/`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/spec/README.md) (`01_` through `08_`), enforced by `tests/spec.test.ts`.
 - **AI rules & parity**: Project rules live in [`CLAUDE.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/CLAUDE.md) and [`.agents/AGENTS.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.agents/AGENTS.md), kept in word-for-word parity via `tests/AgentRuleFilesParity.test.ts`.
-- **Spec-Driven Development (ASDD)**: Follow [`.antigravity/sdd_protocol.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.antigravity/sdd_protocol.md) (or `/sdd` in Claude Code) for feature development in isolated worktrees (`.worktrees/sdd-<feature>`).
+- **Spec-Driven Development (ASDD)**: Follow [`.antigravity/sdd_protocol.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.antigravity/sdd_protocol.md) (or `/sdd` in Claude Code) for feature development on dedicated branches (`sdd/<feature>`).
 
 ## Packaging (self-signed, shared as plain files)
 

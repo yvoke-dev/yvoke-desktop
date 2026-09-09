@@ -14,12 +14,12 @@ The durable **functional specification** in `spec/` (indexed by `spec/README.md`
           (Gate 1)               boundaries, CSP, React 19 leaks, unrepresentability).
                                  Parent produces hardened implementation_plan.md artifact.
           │
-  Phase 3: Worktree & Tasks      sdd_task_architect creates git worktree in .worktrees/.
+  Phase 3: Branch & Tasks        Verify and confirm active branch with user (Gate 2 prep).
           (Gate 2)               sdd_task_critic eliminates Happy-Path Test Syndrome,
                                  mandating negative/failure test cases per wave.
                                  Emits task.md with explicit negative test criteria.
           │
-  Phase 4: Wave Execution Loop   For each wave (inside the worktree):
+  Phase 4: Wave Execution Loop   For each wave (in active workspace on feature branch):
           (Gate 3)               1. desktop_implementer: Red -> Green -> Refactor (Vitest).
                                     Test Mutation Proof (break production code, watch RED, restore).
                                  2. desktop_reviewer: Audits diff (IPC safety, memory leaks, CSP).
@@ -40,7 +40,7 @@ The durable **functional specification** in `spec/` (indexed by `spec/README.md`
 Before starting, ensure the required SDD subagents are defined for the session. In Antigravity, subagents from `.antigravity/agents/*.md` must be registered via `define_subagent` if not already loaded:
 - `sdd_planner`: Read-only requirements discovery and sparring partner (`.antigravity/agents/sdd_planner.md`).
 - `sdd_plan_critic`: Read-only adversarial architect attacking draft plans against Known Pitfalls (`.antigravity/agents/sdd_plan_critic.md`).
-- `sdd_task_architect`: Generates isolated worktree and task waves (`.antigravity/agents/sdd_task_architect.md`).
+- `sdd_task_architect`: Verifies branch status and generates wave breakdown (`.antigravity/agents/sdd_task_architect.md`).
 - `sdd_task_critic`: Read-only QA critic eliminating Happy-Path Test Syndrome (`.antigravity/agents/sdd_task_critic.md`).
 - `desktop_implementer`: Writes code and tests strictly via Red-Green TDD (`.antigravity/agents/desktop_implementer.md`).
 - `desktop_reviewer`: Read-only diff auditor inspecting IPC security, listener leaks, and CSP (`.antigravity/agents/desktop_reviewer.md`).
@@ -73,14 +73,23 @@ Before starting, ensure the required SDD subagents are defined for the session. 
 
 ---
 
-## Phase 3: Task Architecture & Adversarial Test Critique (Gate 2)
-1. **Worktree Creation**: Invoke `sdd_task_architect` to create an isolated git worktree inside `.worktrees/`:
+## Phase 3: Branch Pre-flight Verification & Adversarial Test Critique (Gate 2)
+1. **Active Branch Pre-flight Confirmation**:
+   Before breaking down waves or writing any code, inspect the current git environment:
    ```bash
-   git worktree add -b sdd/<feature-name> .worktrees/sdd-<feature-name> HEAD
+   git branch --show-current
+   git status --porcelain
    ```
-   *Rule*: All implementation and review work must execute strictly within this worktree. The main working tree on `main` remains untouched and undisturbed.
-   - **Worktree Dependencies & `node_modules`**: Brand new git worktrees do not contain `node_modules/` (gitignored). Worktrees rely on Node's upward module resolution to load packages from the repository root. If a wave adds or updates packages in `package.json`, `npm install` must be executed at the **root repository level** (not inside `.worktrees/`) to preserve a single canonical `package-lock.json` and prevent duplicating hundreds of megabytes in the worktree.
-   - **Build Caches**: Vite and TypeScript build caches (e.g. `node_modules/.vite` or `*.tsbuildinfo`) generated in the worktree are local and gitignored.
+   The agent **MUST ALWAYS** ask the user to confirm whether the current branch is the intended branch for this task, even if not on `main` (to eliminate stale feature branch contamination or accidental branch pollution):
+   - **If on `main`**: Direct commits to `main` are strictly prohibited. Halt and prompt the user:
+     1. Create and checkout a new branch (`git checkout -b sdd/<feature-name>`) in the current workspace.
+     2. Pause so the user can switch or set up a branch manually.
+   - **If on another branch**: Prompt the user with the branch name and status:
+     1. Proceed on the current branch.
+     2. Create and checkout a new branch (`sdd/<feature-name>`).
+     3. Pause so the user can switch branches manually.
+   - **If working tree is dirty**: Warn and prompt the user to commit, stash, or review changes before starting waves.
+
 2. **Draft Wave Breakdown**: The task architect organizes the work into sequential waves (State/Store -> IPC/Preload Bridge -> React UI & styles.css -> Spec Update -> Audit).
 3. **Adversarial Task & Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandates that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC args, corrupt JSON store recovery, network sync timeouts, bad tool input rejection).
@@ -92,19 +101,19 @@ Before starting, ensure the required SDD subagents are defined for the session. 
 ---
 
 ## Phase 4: Wave Execution Loop & Resilience Review (Gate 3)
-Execute each wave sequentially inside the worktree directory:
+Execute each wave sequentially directly in the active workspace on the confirmed feature branch:
 
-> [!IMPORTANT]
-> **Worktree Path Propagation**: Subagents inherit the workspace root by default. The parent agent MUST explicitly instruct `desktop_implementer` and `desktop_reviewer` to pass `Cwd: <absolute-path-to-worktree>` for all shell commands and use absolute paths inside the worktree for all file edits. If Node is managed via `fnm`/`nvm` in user directories, commands like `npm test` and `npm run typecheck` may require `BypassSandbox: true` so the user can permit execution outside the standard sandbox.
+> [!NOTE]
+> If Node is managed via `fnm`/`nvm` in user directories, commands like `npm test` and `npm run typecheck` in Antigravity on macOS must specify `BypassSandbox: true` so the user can permit execution outside the standard sandbox.
 
 1. **Implementer (Strict Red-Green TDD)**:
-   Invoke `desktop_implementer` inside `.worktrees/sdd-<feature-name>`:
+   Invoke `desktop_implementer` in the workspace:
    - **Red Phase**: Write the test first (both happy-path and mandatory negative tests) in `tests/`. Run the targeted test command (e.g. `npm test -- tests/MyFeature.test.ts`) and verify it fails (RED).
    - **Green Phase**: Write minimal production code to satisfy the test. Verify it passes (GREEN).
    - **Refactor & Typing**: Clean up code and run `npm run typecheck`.
    - **Test Mutation Proof**: A test does not count until you have seen it fail. Break the production code minimally to confirm RED, then restore by re-reading the original.
 2. **Adversarial Code & Resilience Review (Gate 3)**:
-   Invoke `desktop_reviewer` inside `.worktrees/sdd-<feature-name>` to audit `git diff`:
+   Invoke `desktop_reviewer` in the workspace to audit `git diff`:
    - Inspects for IPC parameter validation, contextBridge leaks, CSP compliance, React `useEffect` listener cleanups, type safety, and Known Pitfalls.
    - Probes for tainted input vulnerabilities (renderer IPC payloads, LLM outputs, sync responses).
    - Verifies test quality and confirms the test actually ran Red -> Green.
@@ -119,7 +128,7 @@ Execute each wave sequentially inside the worktree directory:
 ---
 
 ## Phase 5: Holistic Audit & Verification
-Invoke `sdd_auditor` inside `.worktrees/sdd-<feature-name>` to run the release gatekeeper checks:
+Invoke `sdd_auditor` in the workspace to run the release gatekeeper checks:
 1. **Spec Verification**: Verify the relevant chapter in `spec/` was updated, and run:
    ```bash
    npm test -- tests/spec.test.ts
@@ -131,7 +140,7 @@ Invoke `sdd_auditor` inside `.worktrees/sdd-<feature-name>` to run the release g
 ---
 
 ## Phase 6: Branch Push, PR Creation & User Handoff
-1. **Push Branch**: Inside the worktree, push the feature branch to origin:
+1. **Push Branch**: Push the feature branch to origin:
    ```bash
    git push -u origin sdd/<feature-name>
    ```
@@ -143,8 +152,3 @@ Invoke `sdd_auditor` inside `.worktrees/sdd-<feature-name>` to run the release g
 3. **Walkthrough & Handoff**:
    - Compile `walkthrough.md` in the brain directory with the PR link, summary of wave commits, and verification logs.
    - Instruct the user to review the PR on GitHub and squash-merge when ready.
-   - Once merged, the worktree can be cleanly removed:
-     ```bash
-     git worktree remove --force .worktrees/sdd-<feature-name>
-     git branch -D sdd/<feature-name>
-     ```

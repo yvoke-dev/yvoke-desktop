@@ -48,8 +48,8 @@ Your job is to perform holistic quality verification across the entire change, e
   ```
 - Verify that no tests fail and that new test counts match expectations.
 
-### 4. Git Worktree Hygiene & Branch Push
-- Inside the designated worktree, check `git status` to ensure all wave changes have been committed and no untracked scratch files remain.
+### 4. Git Hygiene & Branch Push
+- In the workspace, check `git status` to ensure all wave changes have been committed and no untracked scratch files remain.
 - Push the feature branch to origin (with `BypassSandbox: true` for user approval & network access):
   ```bash
   git push -u origin sdd/<feature-name>

@@ -27,8 +27,7 @@ Your job is to make safe, simple, secure, and high-performance code changes in E
 - Adhere to Vanilla CSS in `src/renderer/src/styles.css` using `:root` variables. No inline TSX styles.
 
 ## Project Hard Rules (must follow)
-- **Worktree Execution**: Execute all operations inside the designated feature worktree (e.g. `.worktrees/sdd-<feature>`). Never modify the main working tree or switch branches on `main`.
-- **Dependencies & node_modules**: Worktrees inherit root `node_modules/` via upward lookup. If a wave adds packages to `package.json`, execute `npm install` at the root repository level, never inside `.worktrees/`.
+- **Workspace Execution**: Execute all operations in the active workspace on the confirmed feature branch. Never commit directly to `main` or switch branches away from the confirmed feature branch.
 - **Sandbox Execution**: In Antigravity on macOS, all `npm` test, typecheck, and build commands (`npm test`, `npm run typecheck`, etc.) must specify `BypassSandbox: true` to avoid permission errors accessing external Node/npm runtimes.
 - **Branch & Commits**: Direct commits, pushes, or merges to `main` are strictly forbidden. Commits are made only per wave on the designated feature branch after code review approval (run git commit with `BypassSandbox: true` for user confirmation). Never create or push release tags.
 - **Strict Red-Green TDD**: Red -> Green -> Refactor.
@@ -41,7 +40,7 @@ Your job is to make safe, simple, secure, and high-performance code changes in E
 
 ## Approach & Execution Protocol
 1. **Analyze**: Read the steering context in `.antigravity/steering/` and the approved wave tasks specified in your task prompt.
-2. **Implement via Red-Green TDD**: Inside the designated worktree, write the test first, see it fail (Red), implement the minimal code, see it pass (Green), and run `npm run typecheck` (with `BypassSandbox: true`).
+2. **Implement via Red-Green TDD**: In the active workspace on the feature branch, write the test first, see it fail (Red), implement the minimal code, see it pass (Green), and run `npm run typecheck` (with `BypassSandbox: true`).
 3. **Verify**: Run `npm test` and `npm run typecheck` with `BypassSandbox: true`. Never read a bare success as proof new code ran — confirm the test count changed.
 4. **Report**: Report back with compilation/test logs (demonstrating Red -> Green), typing status, and the list of modified files.
 

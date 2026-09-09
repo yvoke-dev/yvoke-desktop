@@ -26,20 +26,20 @@ For features, architectural enhancements, and refactors, follow the strict 6-pha
 - **Harden Plan**: Planner incorporates critic feedback.
 - **Design Plan Artifact**: Parent agent writes `implementation_plan.md` in native brain folder (`RequestFeedback: true`) and waits for explicit user approval.
 
-### Phase 3: Worktree Setup & Adversarial Test Critique (Gate 2)
-- **Worktree Creation**: Invoke `sdd_task_architect` to create an isolated git worktree:
-  `git worktree add -b sdd/<feature-name> .worktrees/sdd-<feature-name> HEAD`
+### Phase 3: Branch Pre-flight Verification & Adversarial Test Critique (Gate 2)
+- **Active Branch Pre-flight Confirmation**: Inspect `git branch --show-current` and `git status --porcelain`. ALWAYS confirm the active branch with the user (even if not on `main`). If on `main`, halt and prompt to checkout `sdd/<feature-name>`.
+- **Wave Breakdown**: Invoke `sdd_task_architect` to decompose the plan into waves.
 - **Adversarial Task Critique**: Invoke `sdd_task_critic` to eliminate Happy-Path Test Syndrome, mandating negative/failure tests for boundary conditions and errors in every wave.
 - **Task Artifact**: Emit `task.md` with Mandatory Wave N-1 (Update spec chapter) and Wave N (Holistic audit & PR).
 
 ### Phase 4: Wave Execution Loop & Resilience Review (Gate 3)
-Execute each wave sequentially inside the worktree:
-1. **Implementer (Strict TDD)**: Invoke `desktop_implementer` inside `.worktrees/sdd-<feature>`. Write test first (Red), implement minimal code (Green), refactor and verify with `npm run typecheck`. Confirm test mutation proof (break minimal production code, observe RED, restore).
+Execute each wave sequentially in the active workspace on the confirmed feature branch:
+1. **Implementer (Strict TDD)**: Invoke `desktop_implementer` in the workspace. Write test first (Red), implement minimal code (Green), refactor and verify with `npm run typecheck`. Confirm test mutation proof (break minimal production code, observe RED, restore).
 2. **Reviewer (Gate 3 Diff Audit)**: Invoke `desktop_reviewer` to audit git diff for IPC parameter validation, memory leaks, CSP, and type safety. Remediate if issues found.
 3. **Wave Commit**: Commit wave on feature branch: `git commit -m "feat(<domain>): [Wave N] <description>"`.
 
 ### Phase 5: Holistic Audit & Quality Gates
-Invoke `sdd_auditor` inside worktree to run release gates:
+Invoke `sdd_auditor` in the workspace to run release gates:
 1. Spec update verified: `npm test -- tests/spec.test.ts`.
 2. Steering check: `python3 .antigravity/scripts/check_steering.py`.
 3. Typecheck and rule parity: `npm run typecheck` and `npm test -- tests/AgentRuleFilesParity.test.ts`.

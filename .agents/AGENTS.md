@@ -8,7 +8,7 @@ These rules **override** default behavior. Follow them exactly.
 
 ## 1. Universal Hard Rules (apply to ALL tasks)
 
-- **Worktree isolation, wave commits & PRs**: Never commit directly to `main`, push to `main`, or merge via Git. The same applies to release tags: never create, move or push one. Releases are cut strictly via `npm run release` (`scripts/release.sh`), which checks for clean `main`, runs typecheck and tests, bumps `package.json`, commits, tags, and pushes in one place. For SDD feature development, work in an isolated git worktree (`.worktrees/sdd-<feature>`) on a dedicated `sdd/<feature>` branch, commit per wave once reviewed, and open a Pull Request against `main` for the user to review and squash-merge.
+- **Branch isolation, pre-flight confirmation, wave commits & PRs**: Never commit directly to `main`, push to `main`, or merge via Git. The same applies to release tags: never create, move or push one. Releases are cut strictly via `npm run release` (`scripts/release.sh`), which checks for clean `main`, runs typecheck and tests, bumps `package.json`, commits, tags, and pushes in one place. For SDD feature development, always verify and confirm the active branch with the user as the first step (even if not on `main`, to guard against stale feature branches); work on a confirmed dedicated branch (`sdd/<feature>`), commit per wave once reviewed, and open a Pull Request against `main` for the user to review and squash-merge.
 - **Testing & TDD**: Use strict TDD (Red → Green → Refactor). All tests live under `tests/`, ending with `.test.ts` or `.test.tsx`. Run unit and integration tests via `npm test` (Vitest).
 - **Regression testing**: When a bug is discovered, first write a failing test in `tests/` that reproduces it, then fix it.
 - **A test does not count until you have seen it fail**: after writing or changing a test, break the *one specific thing it claims to pin* with a minimal edit to production code, run it, watch it go **red**, then restore — by re-reading the original, never from memory, since a whole-file restore silently reverts a sibling mutation and the "green" run afterwards proves nothing. A test that has only ever been green is a claim, not evidence, and a brand-new test that passes on its **first** run against code you have not yet fixed is a defect in the test, not luck.
@@ -56,7 +56,7 @@ Apply to **all** code, not just large tasks. Get it right while writing — do n
 - **Subagents**: In Antigravity, bootstrap roles via `define_subagent` from `.antigravity/agents/*.md`:
   - `sdd_planner`: requirements discovery & sparring.
   - `sdd_plan_critic`: adversarial plan critique against Known Pitfalls (Gate 1).
-  - `sdd_task_architect`: worktree setup & wave breakdown.
+  - `sdd_task_architect`: branch pre-flight check & wave breakdown.
   - `sdd_task_critic`: adversarial test critique eliminating Happy-Path Test Syndrome (Gate 2).
   - `desktop_implementer`: writes Electron main, preload, React UI, Vanilla CSS, and Vitest code via Red-Green TDD.
   - `desktop_reviewer`: read-only audit for IPC validation, memory leaks, CSP, type safety (Gate 3).

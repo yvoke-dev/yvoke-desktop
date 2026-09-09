@@ -1,7 +1,7 @@
 ---
 name: asdd
 description: >-
-  Run the Antigravity Spec-Driven Development (ASDD) workflow for large tasks, new features, architectural enhancements, or major refactors in yvoke-desktop. Enforces 6 phases with 3 adversarial gates, isolated git worktrees, strict TDD mutation proofs, and spec updates.
+  Run the Antigravity Spec-Driven Development (ASDD) workflow for large tasks, new features, architectural enhancements, or major refactors in yvoke-desktop. Enforces 6 phases with active branch pre-flight confirmation, 3 adversarial gates, strict TDD mutation proofs, and spec updates.
 ---
 
 # Antigravity Spec-Driven Development (ASDD)
@@ -53,13 +53,23 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
 
 ---
 
-## Phase 3: Worktree Setup & Adversarial Test Critique (Gate 2)
+## Phase 3: Branch Pre-flight Verification & Adversarial Test Critique (Gate 2)
 
-1. **Worktree Creation**: Invoke `sdd_task_architect` to create an isolated worktree inside `.worktrees/`:
+1. **Active Branch Pre-flight Confirmation**:
+   Before breaking down waves or touching code, inspect git status:
    ```bash
-   git worktree add -b sdd/<feature-name> .worktrees/sdd-<feature-name> HEAD
+   git branch --show-current
+   git status --porcelain
    ```
-   - *Dependencies*: Brand new git worktrees do not contain `node_modules/` (gitignored). Worktrees rely on Node's upward module resolution to load packages from the repository root. If a wave adds packages to `package.json`, run `npm install` at the **root repository level** (never inside `.worktrees/`).
+   The agent **MUST ALWAYS** ask the user to confirm whether the current branch is the intended branch for this task, even if not on `main` (to guard against stale feature branches or branch pollution):
+   - **If on `main`**: Committing directly to `main` is strictly prohibited. Halt and prompt the user:
+     1. Create and checkout a new branch (`git checkout -b sdd/<feature-name>`) in the current workspace.
+     2. Pause so the user can switch or set up a branch manually.
+   - **If on another branch**: Prompt the user with the branch name and status:
+     1. Proceed on the current branch.
+     2. Create and checkout a new branch (`sdd/<feature-name>`).
+     3. Pause so the user can switch branches manually.
+   - **If working tree is dirty**: Warn and prompt the user to commit, stash, or review changes before starting waves.
 2. **Draft Wave Breakdown**: Group tasks into dependency-ordered waves (Main Store -> Preload -> React UI -> Spec Update -> Audit).
 3. **Adversarial Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandate that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC arguments, corrupt JSON recovery, sync timeouts).
@@ -71,10 +81,7 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
 
 ## Phase 4: Wave Execution Loop (Gate 3)
 
-For each wave, execute strictly inside the worktree directory:
-
-> [!IMPORTANT]
-> **Worktree Path Propagation**: Subagents inherit the workspace root by default. The parent agent MUST explicitly instruct `desktop_implementer` and `desktop_reviewer` to pass `Cwd: /path/to/.worktrees/sdd-<feature-name>` for all shell commands and use absolute paths inside the worktree for all file edits.
+For each wave, execute directly in the active workspace on the confirmed feature branch:
 
 1. **Implementer (Strict Red-Green TDD)**:
    Invoke `desktop_implementer`:
@@ -83,7 +90,7 @@ For each wave, execute strictly inside the worktree directory:
    - *Refactor Phase*: Clean up, run `npm run typecheck`.
    - *Test Mutation Proof*: Break the production code minimally to confirm RED, then restore by re-reading the original.
 2. **Adversarial Code Review (Gate 3)**:
-   Invoke `desktop_reviewer` to audit `git diff` inside the worktree for IPC validation, memory leaks, CSP, and type safety.
+   Invoke `desktop_reviewer` to audit `git diff` for IPC validation, memory leaks, CSP, and type safety.
 3. **Wave Commit**:
    Commit the wave on the feature branch:
    ```bash
@@ -94,7 +101,7 @@ For each wave, execute strictly inside the worktree directory:
 
 ## Phase 5: Holistic Audit & Verification
 
-Invoke `sdd_auditor` inside the worktree:
+Invoke `sdd_auditor` in the workspace:
 1. **Spec Verification**: Verify `spec/` was updated and run `npm test -- tests/spec.test.ts`.
 2. **Steering Check**: Run `python3 .antigravity/scripts/check_steering.py`.
 3. **Typecheck & Parity**: Run `npm run typecheck` and `npm test -- tests/AgentRuleFilesParity.test.ts`.

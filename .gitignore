@@ -42,7 +42,7 @@ Thumbs.db
 .env.production.local
 scripts/git-*
 
-# Git worktrees for SDD agents
+# Optional git worktrees
 .worktrees/
 
 # Claude Code local settings
