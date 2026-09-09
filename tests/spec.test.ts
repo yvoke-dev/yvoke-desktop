@@ -1,57 +1,46 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
- * `spec.md` is the functional specification: the one prose document this repository keeps, and the
- * thing its own header tells "anyone — person or agent — about to make a substantial change" to read
- * first. This test pins the parts of it a machine can actually check.
+ * `spec/` is the functional specification: the modular prose documentation this repository keeps,
+ * and the thing a person or an agent is told to read before making a substantial change.
+ * This test pins the parts of it a machine can actually check.
  *
- * What it deliberately does NOT do is check that the prose is current. Nothing can, and that limit
- * is worth stating plainly here because it is easy to mistake a passing spec test for a guarantee
- * the spec is true: in a single session this document twice ended up describing behaviour that had
- * been changed underneath it — a reviewer tool that had been withdrawn, and a citation panel that
- * had stopped showing what it claimed. Both were semantic, and neither is the kind of thing this
- * file could ever fail on. The exact behaviour contract lives in the rest of the suite, which is
- * why the spec's own header says "to change behaviour, change a test".
+ * What it deliberately does NOT do is check that the prose is current — nothing can, which is
+ * exactly why the exact behaviour contract lives in the rest of the test suite rather than in a
+ * document. What it can enforce is the shape the document promises its readers, and that promise
+ * carries weight in four ways:
  *
- * What it CAN enforce is the shape the document promises its readers, and that promise carries
- * weight in four ways:
- *
- *  - **The file must exist.** It is the only place recording what the product deliberately does not
- *    do, which is invisible in the code by definition, so its loss is silent.
- *  - **Every chapter must carry all four sections.** A chapter missing *Limits* or *Not supported*
+ *  - **The specification directory and README must exist.** It is the only place recording what the
+ *    product deliberately does not do, which is invisible in the code by definition, so its loss is silent.
+ *  - **Every chapter must carry all four sections in order.** A chapter missing *Limits* or *Not supported*
  *    is not merely thin — those two are where a decision against something is written down, and
  *    omitting them quietly turns "we decided against this" into "nobody considered it".
- *  - **The Contents table must resolve.** It is the document's only navigation. A chapter appended
- *    without an entry, or an entry whose anchor no longer matches a renamed heading, makes that
- *    chapter unreachable while the document still looks complete.
- *  - **Chapter numbers must run 1..N without gaps or repeats.** The numbers are the anchors, so a
- *    duplicated or skipped one silently points two Contents rows at one chapter.
+ *  - **The Contents table must resolve.** It is the document's navigation. A chapter added without an
+ *    entry, or an entry whose link or anchor no longer matches, makes that chapter unreachable while
+ *    the documentation still looks complete.
+ *  - **Chapter numbers must run 1..N without gaps or repeats.**
  */
 
-const SPEC_PATH = resolve(__dirname, '..', 'spec.md');
+const SPEC_DIR = resolve(__dirname, '..', 'spec');
+const SPEC_README = resolve(SPEC_DIR, 'README.md');
 
 /** The four sections every capability chapter promises. */
 const REQUIRED_SECTIONS = ['What you can do', 'How it behaves', 'Limits', 'Not supported'] as const;
 
-/** A numbered capability chapter, e.g. `## 3. Multi-agent investigations`. */
-const CHAPTER = /^## (\d+)\. (.+)$/gm;
+/** A numbered capability chapter heading, e.g. `# 3. Multi-agent investigations`. */
+const CHAPTER_HEADING = /^# (\d+)\. (.+)$/m;
 
-/** Any second- or third-level heading, used to resolve the Contents anchors. */
-const HEADING = /^#{2,3} (.+)$/gm;
+/** Any second- or third-level heading in README, used to resolve in-document anchors. */
+const README_HEADING = /^#{2,3} (.+)$/gm;
 
-/** A markdown link to an in-document anchor, e.g. `[Limits](#3-limits)`. */
+/** A markdown link to an in-document anchor, e.g. `[What Yvoke is](#what-yvoke---desktop-is)`. */
 const ANCHOR_LINK = /\[[^\]]+\]\(#([a-z0-9-]+)\)/g;
 
-/**
- * GitHub's heading-to-anchor rule: lower-case, drop everything that is not a letter, digit, space
- * or hyphen, then spaces to hyphens.
- *
- * The surviving hyphens are why this cannot be simplified to a slug helper — "What Yvoke - Desktop
- * is" anchors as `what-yvoke---desktop-is`, with all three hyphens, because the spaces either side
- * of the literal hyphen each become one.
- */
+/** A markdown link to a chapter file, e.g. `[Asking questions](01_asking_questions.md)`. */
+const CHAPTER_FILE_LINK = /\[[^\]]+\]\((0\d_[a-z0-9_-]+\.md)\)/g;
+
 function githubAnchor(headingText: string): string {
   return headingText
     .trim()
@@ -60,112 +49,132 @@ function githubAnchor(headingText: string): string {
     .replace(/ /g, '-');
 }
 
-function spec(): string {
-  // Read per test rather than once at module load: a cached copy would make a failure survive the
-  // edit that fixed it, on a file whose whole point is being edited.
-  return readFileSync(SPEC_PATH, 'utf8');
+function specReadme(): string {
+  expect(existsSync(SPEC_README), 'spec/README.md must exist').toBe(true);
+  return readFileSync(SPEC_README, 'utf8');
 }
 
-interface Chapter {
+interface ChapterFile {
+  filename: string;
+  fullPath: string;
   number: number;
   title: string;
-  start: number;
+  content: string;
 }
 
-function chapters(text: string): Chapter[] {
-  const out: Chapter[] = [];
-  for (const m of text.matchAll(CHAPTER)) {
-    out.push({ number: Number(m[1]), title: m[2].trim(), start: m.index ?? 0 });
-  }
-  return out;
+function chapterFiles(): ChapterFile[] {
+  expect(existsSync(SPEC_DIR), 'spec/ directory must exist').toBe(true);
+  expect(statSync(SPEC_DIR).isDirectory(), 'spec/ must be a directory').toBe(true);
+
+  const files = readdirSync(SPEC_DIR)
+    .filter((f) => /^0\d_.+\.md$/.test(f))
+    .sort();
+
+  return files.map((f) => {
+    const fullPath = resolve(SPEC_DIR, f);
+    const content = readFileSync(fullPath, 'utf8');
+    const m = content.match(CHAPTER_HEADING);
+    expect(m, `${f} must start with '# <N>. <Title>' heading`).not.toBeNull();
+    return {
+      filename: f,
+      fullPath,
+      number: Number(m![1]),
+      title: m![2].trim(),
+      content,
+    };
+  });
 }
 
-/** The Contents table: everything between its heading and the first numbered chapter. */
-function contentsTable(text: string): string {
-  const start = text.indexOf('## Contents');
-  expect(start, 'spec.md must have a Contents table').toBeGreaterThanOrEqual(0);
-  const end = text.indexOf('\n## 1.');
-  expect(end, 'spec.md must have a chapter 1 after the Contents table').toBeGreaterThan(start);
-  return text.slice(start, end);
+/** The Contents table in spec/README.md. */
+function contentsTable(readmeText: string): string {
+  const start = readmeText.indexOf('## Contents');
+  expect(start, 'spec/README.md must have a Contents table').toBeGreaterThanOrEqual(0);
+  const end = readmeText.indexOf('\n## What Yvoke - Desktop is');
+  expect(end, 'spec/README.md must have "What Yvoke - Desktop is" after Contents').toBeGreaterThan(start);
+  return readmeText.slice(start, end);
 }
 
-describe('spec.md structure', () => {
-  it('exists and is a substantial document', () => {
-    // The spec is the only record of what the product deliberately does not do — a record that is
-    // invisible in the code, so its absence would not otherwise fail anything.
-    const text = spec();
-    expect(text.length).toBeGreaterThan(1000);
-    expect(text.startsWith('# ')).toBe(true);
+describe('spec/ modular structure', () => {
+  it('exists with spec/README.md as a substantial document', () => {
+    const readme = specReadme();
+    expect(readme.length).toBeGreaterThan(1000);
+    expect(readme.startsWith('# ')).toBe(true);
   });
 
-  it('has numbered capability chapters, or the rest of this file is vacuous', () => {
-    const found = chapters(spec());
-    expect(found.length).toBeGreaterThan(0);
+  it('contains at least 8 numbered capability chapters (01_ to 08_)', () => {
+    const chapters = chapterFiles();
+    expect(chapters.length).toBeGreaterThanOrEqual(8);
   });
 
   it('numbers its chapters 1..N with no gaps and no repeats', () => {
-    // The number is part of the anchor, so a duplicate silently aims two Contents rows at one
-    // chapter and a gap leaves a row aimed at nothing.
-    const numbers = chapters(spec()).map((c) => c.number);
+    const numbers = chapterFiles().map((c) => c.number);
     const expected = Array.from({ length: numbers.length }, (_, i) => i + 1);
     expect(numbers).toEqual(expected);
   });
 
-  it.each(REQUIRED_SECTIONS)('gives every chapter a "%s" section', (section) => {
-    const text = spec();
-    const found = chapters(text);
-    const missing = found
-      .filter((chapter, i) => {
-        const end = i + 1 < found.length ? found[i + 1].start : text.length;
-        return !text.slice(chapter.start, end).includes(`### ${section}`);
-      })
-      .map((c) => `${c.number}. ${c.title}`);
+  it.each(REQUIRED_SECTIONS)('gives every chapter a "## %s" section', (section) => {
+    const chapters = chapterFiles();
+    const missing = chapters
+      .filter((c) => !c.content.includes(`## ${section}`))
+      .map((c) => `${c.filename} (${c.number}. ${c.title})`);
 
-    // Asserted per section rather than per chapter so a failure names the missing section once,
-    // instead of one opaque failure per chapter.
-    expect(missing, `chapters with no "### ${section}" section`).toEqual([]);
+    expect(missing, `chapters with no "## ${section}" section`).toEqual([]);
   });
 
   it('keeps the four sections in the promised order within each chapter', () => {
-    // The order is the document's argument: what it does, how, where it stops, what it refuses.
-    // A chapter that lists Limits before How it behaves reads as a different claim.
-    const text = spec();
-    const found = chapters(text);
-    for (const [i, chapter] of found.entries()) {
-      const end = i + 1 < found.length ? found[i + 1].start : text.length;
-      const body = text.slice(chapter.start, end);
-      const positions = REQUIRED_SECTIONS.map((s) => body.indexOf(`### ${s}`));
+    const chapters = chapterFiles();
+    for (const chapter of chapters) {
+      const positions = REQUIRED_SECTIONS.map((s) => chapter.content.indexOf(`## ${s}`));
       const sorted = [...positions].sort((a, b) => a - b);
-      expect(positions, `section order in chapter ${chapter.number}. ${chapter.title}`).toEqual(
+      expect(positions, `section order in ${chapter.filename} (${chapter.number}. ${chapter.title})`).toEqual(
         sorted,
       );
     }
   });
 
-  it('resolves every Contents link to a heading that exists', () => {
-    const text = spec();
-    const anchors = new Set([...text.matchAll(HEADING)].map((m) => githubAnchor(m[1])));
-    const linked = [...contentsTable(text).matchAll(ANCHOR_LINK)].map((m) => m[1]);
+  it('resolves every in-document anchor in the Contents table', () => {
+    const readme = specReadme();
+    const anchors = new Set([...readme.matchAll(README_HEADING)].map((m) => githubAnchor(m[1])));
+    const table = contentsTable(readme);
+    const linked = [...table.matchAll(ANCHOR_LINK)].map((m) => m[1]);
 
-    expect(linked.length, 'the Contents table must link to the chapters').toBeGreaterThan(0);
+    expect(linked.length, 'Contents table must have in-document links').toBeGreaterThan(0);
     const dangling = linked.filter((a) => !anchors.has(a));
-    expect(dangling, 'Contents links pointing at no heading').toEqual([]);
+    expect(dangling, 'Contents links pointing to no heading in README.md').toEqual([]);
   });
 
-  it('lists every capability chapter in the Contents', () => {
-    // The other direction: a chapter can exist, be complete, and still be unreachable.
-    const text = spec();
-    const table = contentsTable(text);
-    const unlisted = chapters(text)
-      .filter((c) => !table.includes(`(#${githubAnchor(`${c.number}. ${c.title}`)})`))
-      .map((c) => `${c.number}. ${c.title}`);
-    expect(unlisted, 'chapters missing from the Contents table').toEqual([]);
+  it('resolves every chapter file link in the Contents table', () => {
+    const readme = specReadme();
+    const table = contentsTable(readme);
+    const linkedFiles = [...table.matchAll(CHAPTER_FILE_LINK)].map((m) => m[1]);
+    const actualFiles = new Set(chapterFiles().map((c) => c.filename));
+
+    expect(linkedFiles.length, 'Contents table must link to chapter files').toBeGreaterThanOrEqual(8);
+    for (const file of linkedFiles) {
+      expect(actualFiles.has(file), `Contents links to non-existent chapter file: ${file}`).toBe(true);
+    }
   });
 
-  it('keeps the glossary, which is what settles a word when code and prose disagree', () => {
-    // "Words we use" is not decoration: it is the tie-breaker. It is what established that a
-    // "passage" is the product's word for what the database calls a chunk — the question that
-    // decided how the citation panel and the tools are allowed to label the same count.
-    expect(spec()).toContain('## Words we use');
+  it('lists every capability chapter in the Contents table', () => {
+    const readme = specReadme();
+    const table = contentsTable(readme);
+    const chapters = chapterFiles();
+    const unlisted = chapters
+      .filter((c) => !table.includes(`(${c.filename})`))
+      .map((c) => c.filename);
+
+    expect(unlisted, 'chapter files missing from Contents table in README.md').toEqual([]);
+  });
+
+  it('keeps the glossary in spec/README.md', () => {
+    expect(specReadme()).toContain('## Words we use');
+  });
+
+  it('keeps the architectural overview in spec/README.md', () => {
+    expect(specReadme()).toContain('## What Yvoke - Desktop is');
+  });
+
+  it('keeps the decisions register in spec/README.md', () => {
+    expect(specReadme()).toContain('## Decisions worth taking');
   });
 });
