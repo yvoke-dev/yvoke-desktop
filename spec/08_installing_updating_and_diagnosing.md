@@ -15,6 +15,7 @@ something goes wrong.
 | **See which build is running** | The version is in the sidebar footer, in the About pane, and — on macOS — in the standard About panel. |
 | **Cut a release** | One command checks the branch is clean and current, runs the type check and the tests, bumps the version, commits, tags and pushes — behind a single confirmation. The tag then builds both platforms and publishes them. |
 | **Retry a failed release** | A second command re-creates the tag for the same version rather than burning the next one. |
+| **Open logs folder** | A button in Settings opens the application's diagnostic logs directory in the system file manager (Finder on macOS, Explorer on Windows). |
 
 ## How it behaves
 
@@ -40,6 +41,7 @@ something goes wrong.
 - **The window itself is hardened.** The page it runs is locked to its own files with no outside
   connections, no frames and no plug-ins, and the interface has no direct access to the system: the
   whole surface between the two is twenty-odd named calls.
+- **Application logs are written to a persistent file.** Standard output, agent lifecycle events, MCP operations, sync progress and errors are written to `logs/app.log` in the application's user data directory with ISO timestamps and scope tags. Secret credentials such as Bearer tokens and Anthropic API keys are scrubbed automatically before being persisted. When `app.log` crosses 5 MB, it rotates to `app.log.1`, keeping at most one archive file to bound disk space to 10 MB total. Quitting waits for the log to reach disk, so the lines written during shutdown are in the file rather than lost with the process — bounded, so a stuck disk delays closing the app briefly instead of preventing it.
 
 ## Limits
 
@@ -52,10 +54,7 @@ something goes wrong.
 - **The app icon is not in the repository.** It sits in the working tree of whoever made it and nothing
   ignores it — it was simply never committed — so a fresh clone builds without the artwork the build
   file names.
-- **There is no log file.** Everything the app records goes to standard output, which a Finder- or
-  Explorer-launched app writes nowhere the user can reach. The one line that would say the token cache
-  is disabled is written there and nowhere else. Diagnosing a packaged build means launching it from a
-  terminal.
+- **Log retention is capped at one archive file (10 MB total).** Once the active log file crosses 5 MB, it rotates to `app.log.1` and replaces any previous archive; diagnostic history beyond 10 MB is discarded rather than maintained indefinitely.
 - **There is no crash reporting, no telemetry and no diagnostics bundle.** A user's report is the only
   signal that anything went wrong.
 - **The app installs no menu of its own, so the platform's stock one ships** — its View menu supplies
@@ -91,7 +90,7 @@ something goes wrong.
 - Auto-update, update notifications, or any check for a newer version.
 - Notarization or a trusted publisher signature on either platform.
 - Central deployment, managed installation, or any way to push a configuration with the app.
-- A support bundle, a log viewer, or any way for a user to send diagnostics.
+- An in-app log viewer, a support bundle packager, or automated telemetry upload to send diagnostics to a server.
 - Rolling back to a previous version from inside the app.
 - Removing the user's data on uninstall. The Windows uninstaller leaves the cached conversations, the
   search index and the encrypted token cache in place.

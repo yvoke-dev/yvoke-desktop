@@ -61,10 +61,7 @@ behind it, and the work that produced it can be opened and read.
   turn ceiling counts as a failure, so a long investigation that runs out of steps loses everything.
 - **Stopping is the same act, for the same reason.** Stopping produces an error result, so the partial
   answer and the question are both discarded. The web app keeps a stopped answer; this one does not.
-- **Failures are shown in full, and sometimes only as a code.** Where the web app shows one generic
-  notice, the desktop shows the underlying message — including the sign-in instructions when the
-  cause is a missing Claude login. A failure the model service reports without a message shows as its
-  bare outcome name, such as `error_max_turns`.
+- **Failures are shown in full, and identify their origin upfront with a clear prefix.** Where the web app shows one generic notice, the desktop shows the underlying message and prefixes it with its actual cause: `Claude: ` for model service failures, turn limits (such as `error_max_turns`), or missing Claude sign-in; `Entra: ` for Microsoft Entra ID authentication and token acquisition failures; and `Yvoke Backend: ` for knowledge-base MCP connectivity, prompt loading, or sync API failures.
 - **Anything the user has to act on sits above the conversation, not in it.** Errors, notices, the
   playbook cards and the check's own progress line occupy a strip between the title bar and the
   transcript, outside the part that scrolls, so none of them can be scrolled past — under a

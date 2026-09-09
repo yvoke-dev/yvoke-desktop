@@ -49,4 +49,13 @@ describe('loadRequiredSystemPrompt', () => {
     });
     await expect(loadRequiredSystemPrompt(c)).rejects.toThrow(/plain string failure/);
   });
+
+  it('re-throws Entra error untouched without wrapping into Yvoke Backend:', async () => {
+    const entraError = new Error('Entra: Interactive login required');
+    const c = client(async () => {
+      throw entraError;
+    });
+    await expect(loadRequiredSystemPrompt(c)).rejects.toBe(entraError);
+  });
 });
+

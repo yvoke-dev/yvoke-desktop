@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { SettingsView } from '../../src/renderer/src/components/SettingsView';
 import type { AppSettings } from '../../src/shared/types';
@@ -30,7 +30,16 @@ function openPane(name: string): void {
   fireEvent.click(screen.getByRole('button', { name }));
 }
 
-afterEach(() => cleanup());
+let originalApi: unknown;
+
+beforeEach(() => {
+  originalApi = (window as unknown as { api?: unknown }).api;
+});
+
+afterEach(() => {
+  (window as unknown as { api?: unknown }).api = originalApi;
+  cleanup();
+});
 
 describe('SettingsView', () => {
   it('surfaces a rejected save as an inline error and does not close', async () => {
@@ -217,5 +226,35 @@ describe('SettingsView', () => {
         }),
       ),
     );
+  });
+
+  describe('About pane & Diagnostics', () => {
+    it('renders "Open Logs Folder" button in the About / Diagnostics section', () => {
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+      expect(screen.getByText('Diagnostics')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Open Logs Folder' })).toBeTruthy();
+    });
+
+    it('calls window.api.openLogsFolder() when the button is clicked', async () => {
+      const openLogsFolder = vi.fn().mockResolvedValue(undefined);
+      (window as unknown as { api: unknown }).api = { openLogsFolder };
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Open Logs Folder' }));
+      expect(openLogsFolder).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles openLogsFolder rejection gracefully and displays an error message', async () => {
+      const openLogsFolder = vi.fn().mockRejectedValue(new Error('Failed to open logs directory'));
+      (window as unknown as { api: unknown }).api = { openLogsFolder };
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Open Logs Folder' }));
+      await waitFor(() =>
+        expect(screen.getByText(/Failed to open logs directory/)).toBeTruthy(),
+      );
+      expect(openLogsFolder).toHaveBeenCalledTimes(1);
+    });
   });
 });

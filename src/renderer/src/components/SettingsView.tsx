@@ -897,6 +897,21 @@ export function SettingsView(props: {
                       ? 'No Claude Code credentials found'
                       : 'Detected from Claude Code')}
                 </dd>
+                <dt>Diagnostics</dt>
+                <dd>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => {
+                      setError(null);
+                      window.api.openLogsFolder().catch((err: unknown) => {
+                        setError(err instanceof Error ? err.message : String(err));
+                      });
+                    }}
+                  >
+                    Open Logs Folder
+                  </button>
+                </dd>
               </dl>
             </>
           )}

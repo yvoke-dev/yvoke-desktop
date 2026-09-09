@@ -142,4 +142,43 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
     ).toBe(true);
     queue.dispose();
   });
+
+  it('preserves Entra error prefix without double-tagging as Yvoke Backend: Entra:', async () => {
+    const queue = new SyncQueue(
+      deps(
+        fakeClient(async () => {
+          throw new Error('Entra: Authentication session expired or invalid. Please sign in again.');
+        }),
+      ),
+    );
+    queue.enqueue(turn('t1', 1));
+    await queue.flush();
+
+    const errEvent = events.find(
+      (e): e is Extract<SyncEvent, { kind: 'sync-state' }> => e.kind === 'sync-state' && e.state === 'error',
+    );
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.detail).toBe('Entra: Authentication session expired or invalid. Please sign in again.');
+    expect(errEvent?.detail?.startsWith('Yvoke Backend:')).toBe(false);
+    queue.dispose();
+  });
+
+  it('tags SyncApiError(500) with Yvoke Backend prefix', async () => {
+    const queue = new SyncQueue(
+      deps(
+        fakeClient(async () => {
+          throw new SyncApiError(500, 'POST /messages failed (500): Internal Server Error');
+        }),
+      ),
+    );
+    queue.enqueue(turn('t1', 1));
+    await queue.flush();
+
+    const errEvent = events.find(
+      (e): e is Extract<SyncEvent, { kind: 'sync-state' }> => e.kind === 'sync-state' && e.state === 'error',
+    );
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.detail?.startsWith('Yvoke Backend: ')).toBe(true);
+    queue.dispose();
+  });
 });

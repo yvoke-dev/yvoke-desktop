@@ -14,7 +14,8 @@ import type {
 } from '../shared/types';
 import { AppCore } from './AppCore';
 import { fileTokenCache } from './auth/ServerAuth';
-import { log, packageVersion } from './log';
+import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
+import { createBeforeQuitHandler } from './lifecycle';
 
 let core: AppCore | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -190,7 +191,7 @@ function send(channel: string, payload: unknown): void {
 // app origin. This rejects IPC from any frame that was (e.g. via redirect)
 // navigated to a foreign origin, so the bridge cannot be driven from untrusted
 // content.
-function registerIpc(appCore: AppCore): void {
+function registerIpc(appCore: AppCore, userDataDir: string): void {
   const origin = appOrigin();
   const handle = (
     channel: string,
@@ -248,6 +249,18 @@ function registerIpc(appCore: AppCore): void {
   handle(IpcChannels.authStatus, () => appCore.authStatus());
   handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
   handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
+  handle(IpcChannels.logsOpenFolder, async () => {
+    const logsDir = path.join(userDataDir, 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    try {
+      const err = await shell.openPath(logsDir);
+      if (err) {
+        logError('app', `Failed to open logs folder: ${err}`);
+      }
+    } catch (err) {
+      logError('app', `Failed to open logs folder: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
   handle(IpcChannels.clipboardWriteImage, (_e, dataUrl: string) => {
     // createFromDataURL yields an *empty* NativeImage for anything it cannot decode rather than
     // throwing, and writeImage would then hand the OS a blank — silently replacing whatever the
@@ -275,8 +288,9 @@ if (!gotLock) {
     }
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     const userDataDir = app.getPath('userData');
+    await initFileLogging(userDataDir);
     const canEncrypt = safeStorage.isEncryptionAvailable();
     log(
       'startup',
@@ -298,7 +312,7 @@ if (!gotLock) {
           )
         : null,
     });
-    registerIpc(core);
+    registerIpc(core, userDataDir);
     // Resolve the theme BEFORE the window is constructed so its backgroundColor is already
     // right; doing it after would reintroduce the cold-start flash this is here to prevent.
     applyTheme(core.settings.get().appearance?.theme ?? DEFAULT_APPEARANCE.theme);
@@ -318,7 +332,12 @@ if (!gotLock) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => {
-    core?.dispose();
-  });
+  app.on(
+    'before-quit',
+    createBeforeQuitHandler({
+      dispose: () => core?.dispose(),
+      flushLogs: closeFileLogging,
+      quit: () => app.quit(),
+    }),
+  );
 }

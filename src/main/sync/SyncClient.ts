@@ -1,6 +1,7 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
 import type { OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
+import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 
 export interface ConversationDto {
   id: string;
@@ -62,27 +63,47 @@ export class SyncClient {
 
   /** One automatic retry with a fresh (interactive if needed) token on 401. */
   private async request<T>(method: string, p: string, body?: unknown, retried = false): Promise<T> {
-    const token = await this.deps.getToken(retried);
-    const response = await this.fetchFn(this.url(p), {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
+    let token: string;
+    try {
+      token = await this.deps.getToken(retried);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
+        throw err;
+      }
+      throw new Error(tagAttributedError('Yvoke Backend', err));
+    }
+
+    let response: Response;
+    try {
+      response = await this.fetchFn(this.url(p), {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch (err) {
+      throw new Error(tagAttributedError('Yvoke Backend', err));
+    }
 
     if (response.status === 401 && !retried) {
       return this.request<T>(method, p, body, true);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new SyncApiError(response.status, `${method} ${p} failed (${response.status}): ${text}`);
+      const raw = `${method} ${p} failed (${response.status}): ${text}`;
+      throw new SyncApiError(response.status, tagAttributedError('Yvoke Backend', raw));
     }
     if (response.status === 204) {
       return undefined as T;
     }
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (err) {
+      throw new Error(tagAttributedError('Yvoke Backend', err));
+    }
   }
 
   listConversations(): Promise<ConversationDto[]> {

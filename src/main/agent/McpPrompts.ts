@@ -3,6 +3,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { AppSettings, CitationRef, McpPromptInfo } from '../../shared/types';
+import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 import { log, logError } from '../log';
 import type { McpAuthProvider } from './McpConnection';
 
@@ -94,35 +95,55 @@ export class McpPrompts {
     try {
       return await op(await this.connect());
     } catch (err) {
-      logError('mcp', `request failed (${err instanceof Error ? err.message : String(err)}); reconnecting and retrying once`);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
+        throw err;
+      }
+      logError('mcp', `request failed (${msg}); reconnecting and retrying once`);
       this.reset();
       return op(await this.connect());
     }
   }
 
   async list(): Promise<McpPromptInfo[]> {
-    // Short TTL: the playbook set is static, but re-check occasionally and on cache miss.
-    if (this.listCache && Date.now() - this.listCache.at < 60_000) {
-      return this.listCache.prompts;
+    try {
+      // Short TTL: the playbook set is static, but re-check occasionally and on cache miss.
+      if (this.listCache && Date.now() - this.listCache.at < 60_000) {
+        return this.listCache.prompts;
+      }
+      const result = await this.run((client) => client.listPrompts(undefined, { timeout: REQUEST_TIMEOUT_MS }));
+      const prompts: McpPromptInfo[] = result.prompts.map(toPromptInfo);
+      this.listCache = { at: Date.now(), prompts };
+      return prompts;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
+        throw err;
+      }
+      throw new Error(tagAttributedError('Yvoke Backend', err));
     }
-    const result = await this.run((client) => client.listPrompts(undefined, { timeout: REQUEST_TIMEOUT_MS }));
-    const prompts: McpPromptInfo[] = result.prompts.map(toPromptInfo);
-    this.listCache = { at: Date.now(), prompts };
-    return prompts;
   }
 
   /** Returns the prompt's messages concatenated into a single playbook string. */
   async getText(name: string, args?: Record<string, string>): Promise<string> {
-    const result = await this.run((client) =>
-      client.getPrompt({ name, arguments: args ?? {} }, { timeout: REQUEST_TIMEOUT_MS }),
-    );
-    return result.messages
-      .map((m) => {
-        const c = m.content;
-        return c && typeof c === 'object' && 'type' in c && c.type === 'text' ? String(c.text) : '';
-      })
-      .filter(Boolean)
-      .join('\n\n');
+    try {
+      const result = await this.run((client) =>
+        client.getPrompt({ name, arguments: args ?? {} }, { timeout: REQUEST_TIMEOUT_MS }),
+      );
+      return result.messages
+        .map((m) => {
+          const c = m.content;
+          return c && typeof c === 'object' && 'type' in c && c.type === 'text' ? String(c.text) : '';
+        })
+        .filter(Boolean)
+        .join('\n\n');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
+        throw err;
+      }
+      throw new Error(tagAttributedError('Yvoke Backend', err));
+    }
   }
 
   /**
@@ -139,30 +160,39 @@ export class McpPrompts {
    * document id reads as "This source is no longer available" in the browser).
    */
   async getSection(ref: CitationRef): Promise<string> {
-    if (ref.id) {
-      const asChunk = await this.callGetSection({ chunk_id: ref.id });
-      if (asChunk.ok) return asChunk.text;
-      const asDocument = await this.callGetSection({ document_id: ref.id });
-      if (asDocument.ok) return asDocument.text;
-      // Neither table has it. Report the chunk attempt: that is the likelier intent, so its
-      // message is the more useful one, and a stale id fails identically either way.
-      throw new Error(asChunk.text || 'Citation lookup failed.');
-    }
+    try {
+      if (ref.id) {
+        const asChunk = await this.callGetSection({ chunk_id: ref.id });
+        if (asChunk.ok) return asChunk.text;
+        const asDocument = await this.callGetSection({ document_id: ref.id });
+        if (asDocument.ok) return asDocument.text;
+        // Neither table has it. Report the chunk attempt: that is the likelier intent, so its
+        // message is the more useful one, and a stale id fails identically either way.
+        throw new Error(asChunk.text || 'Citation lookup failed.');
+      }
 
-    // Only the parameters the server's `get_section` tool actually declares (document_id, chunk_id,
-    // document, heading_path). The tool schema forbids extra properties, so passing anything else
-    // (e.g. max_chars/version) makes the whole call fail validation. The server already returns the
-    // full section/document text, so no cap parameter is needed.
-    const args: Record<string, unknown> = {};
-    if (ref.chunkId) args.chunk_id = ref.chunkId;
-    if (ref.documentId) args.document_id = ref.documentId;
-    if (ref.file) args.document = ref.file;
-    const call = await this.callGetSection(args);
-    if (!call.ok) {
-      throw new Error(call.text || 'Citation lookup failed.');
+      // Only the parameters the server's `get_section` tool actually declares (document_id, chunk_id,
+      // document, heading_path). The tool schema forbids extra properties, so passing anything else
+      // (e.g. max_chars/version) makes the whole call fail validation. The server already returns the
+      // full section/document text, so no cap parameter is needed.
+      const args: Record<string, unknown> = {};
+      if (ref.chunkId) args.chunk_id = ref.chunkId;
+      if (ref.documentId) args.document_id = ref.documentId;
+      if (ref.file) args.document = ref.file;
+      const call = await this.callGetSection(args);
+      if (!call.ok) {
+        throw new Error(call.text || 'Citation lookup failed.');
+      }
+      return call.text;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (hasErrorSourcePrefix(msg, 'Entra')) {
+        throw err;
+      }
+      throw new Error(tagAttributedError('Yvoke Backend', err));
     }
-    return call.text;
   }
+
 
   /**
    * One `get_section` call, with failure reported rather than thrown so a caller can try again
