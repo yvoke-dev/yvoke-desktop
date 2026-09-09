@@ -4,6 +4,11 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   // React plugin for JSX in component tests; harmless for the node-env unit tests.
   plugins: [react()],
+  server: {
+    fs: {
+      allow: ['..', '../..'],
+    },
+  },
   test: {
     include: ['tests/**/*.test.{ts,tsx}'],
     // Node by default (main-process logic); component tests opt into jsdom via a

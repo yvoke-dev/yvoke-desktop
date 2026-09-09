@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PublicClientApplication, type AccountInfo, type Configuration } from '@azure/msal-node';
 import type { AppSettings } from '../../shared/types';
+import { tagAttributedError } from '../../shared/error';
 import type { McpAuthProvider } from '../agent/McpConnection';
 
 /** Token used while the server runs with APP_SECURITY_MOCK=true (any token accepted). */
@@ -105,86 +106,98 @@ export class ServerAuth implements McpAuthProvider {
   }
 
   async getAccessToken(forceInteractive = false): Promise<string> {
-    if (this.isDevMode()) {
-      return DEV_TOKEN;
-    }
-    await this.initializePromise;
-    const scopes = [this.getSettings().entra.scope];
-    const pca = this.getPca();
-
-    if (!forceInteractive) {
-      let account: AccountInfo | null = null;
-      try {
-        account = this.account ?? (await pca.getTokenCache().getAllAccounts())[0] ?? null;
-      } catch {
-        // ignore
+    try {
+      if (this.isDevMode()) {
+        return DEV_TOKEN;
       }
+      await this.initializePromise;
+      const scopes = [this.getSettings().entra.scope];
+      const pca = this.getPca();
 
-      if (account) {
+      if (!forceInteractive) {
+        let account: AccountInfo | null = null;
         try {
-          const silent = await pca.acquireTokenSilent({ account, scopes });
-          if (silent?.accessToken) {
-            this.account = silent.account ?? account;
-            return silent.accessToken;
-          }
-        } catch (err) {
-          const errorString = String(err);
-          const isNetworkError =
-            errorString.includes('ENOTFOUND') ||
-            errorString.includes('ETIMEDOUT') ||
-            errorString.includes('ECONNREFUSED') ||
-            errorString.includes('EAI_AGAIN') ||
-            errorString.includes('fetch failed');
+          account = this.account ?? (await pca.getTokenCache().getAllAccounts())[0] ?? null;
+        } catch {
+          // ignore
+        }
 
-          if (isNetworkError) {
-            throw err;
-          }
-
-          // Silent token acquisition failed due to expired/invalid session.
-          // Clear account status to display sign-in required in the UI, and automatically try interactive sign-in.
-          this.account = null;
+        if (account) {
           try {
-            const interactive = await pca.acquireTokenInteractive({
-              scopes,
-              openBrowser: this.openBrowser,
-              successTemplate:
-                '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
-            });
-            this.account = interactive.account;
-            return interactive.accessToken;
-          } catch (interactiveErr) {
-            throw new Error('Authentication session expired or invalid. Please sign in again.');
+            const silent = await pca.acquireTokenSilent({ account, scopes });
+            if (silent?.accessToken) {
+              this.account = silent.account ?? account;
+              return silent.accessToken;
+            }
+          } catch (err) {
+            const errorString = String(err);
+            const isNetworkError =
+              errorString.includes('ENOTFOUND') ||
+              errorString.includes('ETIMEDOUT') ||
+              errorString.includes('ECONNREFUSED') ||
+              errorString.includes('EAI_AGAIN') ||
+              errorString.includes('fetch failed');
+
+            if (isNetworkError) {
+              throw err;
+            }
+
+            // Silent token acquisition failed due to expired/invalid session.
+            // Clear account status to display sign-in required in the UI, and automatically try interactive sign-in.
+            this.account = null;
+            try {
+              const interactive = await pca.acquireTokenInteractive({
+                scopes,
+                openBrowser: this.openBrowser,
+                successTemplate:
+                  '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
+              });
+              this.account = interactive.account;
+              return interactive.accessToken;
+            } catch (interactiveErr) {
+              throw new Error('Authentication session expired or invalid. Please sign in again.');
+            }
           }
         }
+
+        this.account = null;
+        throw new Error('Authentication session expired or invalid. Please sign in again.');
       }
 
-      this.account = null;
-      throw new Error('Authentication session expired or invalid. Please sign in again.');
+      const interactive = await pca.acquireTokenInteractive({
+        scopes,
+        openBrowser: this.openBrowser,
+        successTemplate: '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
+      });
+      this.account = interactive.account;
+      return interactive.accessToken;
+    } catch (err) {
+      throw new Error(tagAttributedError('Entra', err));
     }
-
-    const interactive = await pca.acquireTokenInteractive({
-      scopes,
-      openBrowser: this.openBrowser,
-      successTemplate: '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
-    });
-    this.account = interactive.account;
-    return interactive.accessToken;
   }
 
   async signIn(): Promise<string | undefined> {
-    if (this.isDevMode()) {
-      return 'dev-mode';
+    try {
+      if (this.isDevMode()) {
+        return 'dev-mode';
+      }
+      await this.getAccessToken(true);
+      return this.account?.username;
+    } catch (err) {
+      throw new Error(tagAttributedError('Entra', err));
     }
-    await this.getAccessToken(true);
-    return this.account?.username;
   }
 
   async signOut(): Promise<void> {
-    await this.initializePromise;
-    if (this.pca && this.account) {
-      await this.pca.getTokenCache().removeAccount(this.account);
+    try {
+      await this.initializePromise;
+      if (this.pca && this.account) {
+        await this.pca.getTokenCache().removeAccount(this.account);
+      }
+      this.account = null;
+    } catch (err) {
+      throw new Error(tagAttributedError('Entra', err));
     }
-    this.account = null;
   }
 
   async status(): Promise<{ mode: 'dev' | 'entra'; signedIn: boolean; account?: string }> {

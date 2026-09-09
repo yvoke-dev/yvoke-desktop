@@ -86,4 +86,21 @@ describe('bare-id citation lookup', () => {
       expect(calls).toEqual([expected]);
     }
   });
+
+  it('re-throws Entra errors untouched without wrapping into Yvoke Backend:', async () => {
+    const entraErr = new Error('Entra: Token expired');
+    const prompts = new McpPrompts({
+      getSettings: () => ({ serverBaseUrl: 'http://localhost:3000', mcpTransport: 'http' }) as AppSettings,
+      auth: {
+        headers: async () => {
+          throw entraErr;
+        },
+      },
+    });
+
+    await expect(prompts.list()).rejects.toBe(entraErr);
+    await expect(prompts.getText('test')).rejects.toBe(entraErr);
+    await expect(prompts.getSection({ id: '123' })).rejects.toBe(entraErr);
+  });
 });
+

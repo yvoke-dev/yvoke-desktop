@@ -18,6 +18,8 @@ import type { AgentEvent, AppSettings, McpPromptInfo, ThreadMeta } from '../src/
  */
 const h = vi.hoisted(() => ({
   sessions: [] as { options: Record<string, unknown>; pushed: string[]; closed: boolean }[],
+  nextQueryError: null as Error | null,
+  nextQueryResult: null as Record<string, unknown> | null,
 }));
 
 // Partial mock: only `query` is replaced. The rest is real, because the in-process compute server
@@ -58,20 +60,32 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
           tools: [],
           slash_commands: [],
         });
-        emit({ type: 'result', subtype: 'success', is_error: false, result: 'answer', usage: {} });
+        if (h.nextQueryResult) {
+          const res = h.nextQueryResult;
+          h.nextQueryResult = null;
+          emit({ type: 'result', ...res });
+        } else {
+          emit({ type: 'result', subtype: 'success', is_error: false, result: 'answer', usage: {} });
+        }
       }
     })();
 
     return {
       [Symbol.asyncIterator]: () => ({
-        next: (): Promise<IteratorResult<unknown>> =>
-          outbox.length > 0
+        next: (): Promise<IteratorResult<unknown>> => {
+          if (h.nextQueryError) {
+            const err = h.nextQueryError;
+            h.nextQueryError = null;
+            return Promise.reject(err);
+          }
+          return outbox.length > 0
             ? Promise.resolve({ value: outbox.shift(), done: false })
             : session.closed
               ? Promise.resolve({ value: undefined, done: true })
               : new Promise<IteratorResult<unknown>>((resolve) => {
                   waiting = resolve;
-                }),
+                });
+        },
       }),
       setModel: async () => undefined,
       setMaxThinkingTokens: async () => undefined,
@@ -169,6 +183,8 @@ async function ask(
 
 beforeEach(() => {
   h.sessions.length = 0;
+  h.nextQueryError = null;
+  h.nextQueryResult = null;
   events = [];
   sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-agent-'));
 });
@@ -250,3 +266,136 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 });
+
+describe('error attribution across session events', () => {
+  it('emits an error message prefixed with "Claude: " for unauthenticated Claude Code', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+    h.nextQueryError = new Error('Please run /login to authenticate with Claude Code');
+
+    await svc.sendMessage(meta, 'Question');
+    for (let i = 0; i < 50 && events.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.authRequired).toBe(true);
+    expect(errEvent?.message.startsWith('Claude: ')).toBe(true);
+    svc.closeAll();
+  });
+
+  it('emits an error message prefixed with "Claude: " for turn ceiling or execution error', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+    h.nextQueryResult = {
+      subtype: 'error_max_turns',
+      is_error: true,
+      result: 'Maximum turns reached',
+      usage: {},
+    };
+
+    await svc.sendMessage(meta, 'Question');
+    for (let i = 0; i < 50 && events.every((e) => e.kind !== 'turn-complete'); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const completeEvent = events.find((e) => e.kind === 'turn-complete');
+    expect(completeEvent).toBeDefined();
+    expect(completeEvent?.isError).toBe(true);
+    expect(completeEvent?.errorMessage?.startsWith('Claude: ')).toBe(true);
+    svc.closeAll();
+  });
+
+  it('emits an error message prefixed with "Yvoke Backend: " for prompt fetch failure before turn starts', async () => {
+    const meta = thread();
+    const svc = new AgentService({
+      getSettings: settings,
+      mcpAuthProvider: { headers: async () => ({}) } as never,
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId) => {
+        meta.sessionId = sessionId;
+      },
+      onTurnPersist: () => undefined,
+      sandboxDir,
+      syncClient: {
+        getSystemPrompt: async () => {
+          throw new Error('Connection refused to backend prompt service');
+        },
+      } as never,
+      mcpPrompts: { list: async () => PLAYBOOKS } as never,
+      getOrchestratorProfile: async () => undefined,
+    });
+
+    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow();
+
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.message.startsWith('Yvoke Backend: ')).toBe(true);
+    expect(errEvent?.message.startsWith('Claude: ')).toBe(false);
+    svc.closeAll();
+  });
+
+  it('preserves "Entra: " error when prompt fetch fails and does not wrap in "Yvoke Backend:"', async () => {
+    const meta = thread();
+    const svc = new AgentService({
+      getSettings: settings,
+      mcpAuthProvider: { headers: async () => ({}) } as never,
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId) => {
+        meta.sessionId = sessionId;
+      },
+      onTurnPersist: () => undefined,
+      sandboxDir,
+      syncClient: {
+        getSystemPrompt: async () => {
+          throw new Error('Entra: Authentication token expired');
+        },
+      } as never,
+      mcpPrompts: { list: async () => PLAYBOOKS } as never,
+      getOrchestratorProfile: async () => undefined,
+    });
+
+    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow('Entra: Authentication token expired');
+
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.message.startsWith('Entra: ')).toBe(true);
+    expect(errEvent?.message.startsWith('Yvoke Backend:')).toBe(false);
+    expect(errEvent?.message).toBe('Entra: Authentication token expired');
+    svc.closeAll();
+  });
+
+  it('preserves "Entra: " error when auth provider fails and does not wrap in "Yvoke Backend:"', async () => {
+    const meta = thread();
+    const svc = new AgentService({
+      getSettings: settings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new Error('Entra: User is not authenticated');
+        },
+      } as never,
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId) => {
+        meta.sessionId = sessionId;
+      },
+      onTurnPersist: () => undefined,
+      sandboxDir,
+      syncClient: {
+        getSystemPrompt: async () => 'BASE SYSTEM PROMPT',
+      } as never,
+      mcpPrompts: { list: async () => PLAYBOOKS } as never,
+      getOrchestratorProfile: async () => undefined,
+    });
+
+    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow('Entra: User is not authenticated');
+
+    const errEvent = events.find((e) => e.kind === 'error');
+    expect(errEvent).toBeDefined();
+    expect(errEvent?.message.startsWith('Entra: ')).toBe(true);
+    expect(errEvent?.message.startsWith('Yvoke Backend:')).toBe(false);
+    expect(errEvent?.message).toBe('Entra: User is not authenticated');
+    svc.closeAll();
+  });
+});
+

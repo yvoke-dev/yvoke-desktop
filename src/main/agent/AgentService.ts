@@ -4,6 +4,7 @@ import path from 'node:path';
 import { query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
+import { tagAttributedError } from '../../shared/error';
 import { isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
@@ -80,15 +81,26 @@ export async function loadRequiredSystemPrompt(
   try {
     prompt = await syncClient.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('Entra:') || msg.startsWith('Entra: ')) {
+      throw err;
+    }
     throw new Error(
-      `System prompt "${BASE_SYSTEM_PROMPT_NAME}" could not be loaded (is the server reachable?): ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+      tagAttributedError(
+        'Yvoke Backend',
+        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" could not be loaded (is the server reachable?): ` +
+          msg,
+      ),
     );
   }
+
   if (!prompt || !prompt.trim()) {
     // A 200 with an empty body is a failure too, not an empty-but-valid prompt.
     throw new Error(
-      `System prompt "${BASE_SYSTEM_PROMPT_NAME}" came back empty (is the server reachable?).`,
+      tagAttributedError(
+        'Yvoke Backend',
+        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" came back empty (is the server reachable?).`,
+      ),
     );
   }
   log('agent', `Loaded system prompt "${BASE_SYSTEM_PROMPT_NAME}" from remote server`);
@@ -217,7 +229,32 @@ export class AgentService {
   constructor(private readonly deps: AgentServiceDeps) {}
 
   async sendMessage(thread: ThreadMeta, text: string, opts: SendOptions = {}): Promise<void> {
-    let session = await this.ensureSession(thread, opts.playbookName);
+    let session: ThreadSession;
+    try {
+      session = await this.ensureSession(thread, opts.playbookName);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
+      const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
+      const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
+      const authRequired = !isEntra && !isBackend && isAuthError(messageText);
+      let emittedMessage: string;
+      if (authRequired) {
+        emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
+      } else if (isBackend || isEntra) {
+        emittedMessage = messageText;
+      } else {
+        emittedMessage = tagAttributedError('Yvoke Backend', error);
+      }
+      this.deps.emit({
+        kind: 'error',
+        threadId: thread.id,
+        message: emittedMessage,
+        authRequired,
+      });
+      throw error;
+    }
+
     if (session.busy) {
       throw new Error('A turn is already running for this conversation.');
     }
@@ -229,7 +266,30 @@ export class AgentService {
           `profile "${session.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
       );
       this.closeThread(thread.id);
-      session = await this.ensureSession(thread, opts.playbookName);
+      try {
+        session = await this.ensureSession(thread, opts.playbookName);
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
+        const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
+        const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
+        const authRequired = !isEntra && !isBackend && isAuthError(messageText);
+        let emittedMessage: string;
+        if (authRequired) {
+          emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
+        } else if (isBackend || isEntra) {
+          emittedMessage = messageText;
+        } else {
+          emittedMessage = tagAttributedError('Yvoke Backend', error);
+        }
+        this.deps.emit({
+          kind: 'error',
+          threadId: thread.id,
+          message: emittedMessage,
+          authRequired,
+        });
+        throw error;
+      }
     }
 
     // In orchestrator mode the per-role models/thinking are fixed by the profile + settings; the
@@ -571,11 +631,21 @@ export class AgentService {
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
       logError('agent', `turn failed thread=${threadId}:`, messageText);
-      const authRequired = isAuthError(messageText);
+      const isEntra = messageText.startsWith('Entra:') || messageText.startsWith('Entra: ');
+      const isBackend = messageText.startsWith('Yvoke Backend:') || messageText.startsWith('Yvoke Backend: ');
+      const authRequired = !isEntra && !isBackend && isAuthError(messageText);
+      let emittedMessage: string;
+      if (authRequired) {
+        emittedMessage = tagAttributedError('Claude', LOGIN_INSTRUCTIONS);
+      } else if (isBackend || isEntra) {
+        emittedMessage = messageText;
+      } else {
+        emittedMessage = tagAttributedError('Claude', error);
+      }
       this.deps.emit({
         kind: 'error',
         threadId,
-        message: authRequired ? LOGIN_INSTRUCTIONS : messageText,
+        message: emittedMessage,
         authRequired,
       });
       session.busy = false;
@@ -699,7 +769,8 @@ export class AgentService {
 
     const costUsd =
       session.turn.carriedCostUsd != null ? session.turn.carriedCostUsd + (resultCostUsd ?? 0) : resultCostUsd;
-    const errorMessage = isError ? String((result as { result?: string }).result ?? result.subtype) : undefined;
+    const rawErrorMessage = isError ? String((result as { result?: string }).result ?? result.subtype) : undefined;
+    const errorMessage = isError && rawErrorMessage ? tagAttributedError('Claude', rawErrorMessage) : undefined;
     log(
       'agent',
       `turn ${aborted ? 'stopped' : isError ? 'error' : 'complete'} thread=${threadId} ` +
@@ -726,7 +797,7 @@ export class AgentService {
       durationMs: Date.now() - startedAt,
       isError,
       aborted,
-      errorMessage: isError ? String((result as { result?: string }).result ?? result.subtype) : undefined,
+      errorMessage,
     });
 
     session.busy = false;

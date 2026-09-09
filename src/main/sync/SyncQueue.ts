@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
+import { ERROR_SOURCES, tagAttributedError } from '../../shared/error';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -156,6 +157,10 @@ export class SyncQueue {
           });
         } catch (error) {
           this.flushing = null;
+          const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+          const isAttributed = ERROR_SOURCES.some((s) => msg.startsWith(`${s}:`) || msg.startsWith(`${s}: `));
+          const detail = isAttributed ? msg : tagAttributedError('Yvoke Backend', error);
+
           if (error instanceof SyncApiError && error.status >= 400 && error.status < 500 && error.status !== 401) {
             // Non-retriable (validation/ownership): drop the turn, surface the error.
             this.removeTurn(turn);
@@ -165,7 +170,7 @@ export class SyncQueue {
               threadId: turn.threadId,
               state: 'error',
               pendingCount: this.pendingCount(turn.threadId),
-              detail: error.message,
+              detail,
             });
             continue;
           }
@@ -176,7 +181,7 @@ export class SyncQueue {
             threadId: turn.threadId,
             state: 'error',
             pendingCount: this.pendingCount(turn.threadId),
-            detail: error instanceof Error ? error.message : String(error),
+            detail,
           });
           this.scheduleRetry(turn.attempts);
           return;
