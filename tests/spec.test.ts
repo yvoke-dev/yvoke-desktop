@@ -185,12 +185,17 @@ describe('spec/ modular structure', () => {
     expect(signingIn).toContain('Verify logins');
     expect(signingIn).toContain('Verifying logins tests the server token silently without launching the browser.');
     expect(signingIn).toContain('Claude verification performs an isolated, single-turn live probe.');
-    expect(signingIn).toContain('On macOS, Claude verification tests keychain credentials directly.');
+    expect(signingIn).toContain('On macOS, Claude verification reaches keychain credentials.');
     expect(signingIn).toContain('Dev server mode is verified against the server endpoint');
     expect(signingIn).toContain('Check Credentials');
 
     expect(settings).toContain('on-demand credential verification checkmarks');
     expect(settings).toContain('Verifying credentials in the About pane is on-demand.');
+
+    // Limits are load-bearing: an intentional absence is what no other test can fail on.
+    expect(signingIn).toContain('Verifying Claude gives up after 45 seconds');
+    expect(signingIn).toContain("Nothing warns in advance when the subscription's allowance runs out.");
+    expect(settings).toContain('A verification result describes the settings as they were saved.');
   });
 });
 

@@ -315,7 +315,11 @@ describe('SettingsView', () => {
       });
     });
 
-    it('Test 3.1: React 19 unmount mid-flight - no state updates / clean unmount', async () => {
+    // The old version of this test asserted only that console.error was not called. React 19
+    // does not warn on setState-after-unmount, so it passed with or without the guards it
+    // claimed to pin. What actually matters is that unmounting mid-flight is harmless and that
+    // a later resolution cannot resurrect the pane.
+    it('Test 3.1: React 19 unmount mid-flight - resolving later is harmless', async () => {
       let resolveVerify!: (val: AuthVerificationResponse) => void;
       const verifyPromise = new Promise<AuthVerificationResponse>((resolve) => {
         resolveVerify = resolve;
@@ -323,29 +327,72 @@ describe('SettingsView', () => {
       const verifyAuth = vi.fn().mockReturnValue(verifyPromise);
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
       const { unmount } = render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
       openPane('About');
 
-      const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
-      fireEvent.click(checkBtn);
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       expect(verifyAuth).toHaveBeenCalledTimes(1);
 
-      // Unmount mid-flight
       unmount();
-
-      // Resolve promise after unmount
       resolveVerify({
         server: { status: 'ok', account: 'admin@corp.com' },
         claude: { status: 'ok', account: 'dev@corp.com' },
       });
-
-      // Allow tick for any pending microtasks
       await new Promise((r) => setTimeout(r, 10));
 
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
-      consoleErrorSpy.mockRestore();
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain('admin@corp.com');
+    });
+
+    // The probe runs against SAVED settings in main, but the row is labelled from the draft.
+    // A badge must never outlive the configuration it describes.
+    it('drops a stale verdict when the server configuration is edited', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'dev-mode (mock security)' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'dev' }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified').length).toBe(2));
+
+      // Switch the mode without saving; main has still only ever verified dev mode.
+      openPane('Server');
+      const modeGroup = screen.getByRole('group', { name: 'Server authentication' });
+      fireEvent.click(within(modeGroup).getByRole('button', { name: 'Entra ID' }));
+      openPane('About');
+
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain('dev-mode (mock security)');
+    });
+
+    it('drops a stale verdict when the server address is edited', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'admin@corp.com' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified').length).toBe(2));
+
+      openPane('Server');
+      fireEvent.change(screen.getByLabelText('Server base URL'), {
+        target: { value: 'https://other.example' },
+      });
+      openPane('About');
+
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
     });
 
     it('Test 3.3: IPC transport rejection - error surfaced in banner without crashing', async () => {
@@ -410,6 +457,7 @@ describe('SettingsView', () => {
       render(
         <SettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
           onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
@@ -445,6 +493,29 @@ describe('SettingsView', () => {
         expect(serverSignIn).toHaveBeenCalledTimes(1);
         expect(onAuthChange).toHaveBeenCalledTimes(1);
       });
+    });
+
+
+    it('offers no inline Sign in when the saved mode is the dev token', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'expired', message: 'Token expired' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn: vi.fn() };
+
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'ok', server: { mode: 'dev', signedIn: true } }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Token expired/)).toBeTruthy());
+
+      expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
     });
 
     it('renders failure alerts with ⚠ for unreachable server and ✗ for missing claude credentials', async () => {

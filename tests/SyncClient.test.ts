@@ -49,7 +49,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({
       status: 'unreachable',
       message: 'Server URL not configured',
@@ -62,7 +62,7 @@ describe('SyncClient.verifyConnection', () => {
       getToken: async () => 'token',
       fetchFn: fetchMock as unknown as typeof fetch,
     });
-    const resultSpaces = await clientSpaces.verifyConnection();
+    const resultSpaces = await clientSpaces.verifyConnection('test-token');
     expect(resultSpaces).toEqual({
       status: 'unreachable',
       message: 'Server URL not configured',
@@ -79,7 +79,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({
       status: 'unreachable',
       message: 'Server unreachable',
@@ -94,7 +94,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({
       status: 'unreachable',
       message: 'Server unreachable',
@@ -110,19 +110,20 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({
       status: 'expired',
       message: 'Server refused credentials (401 Unauthorized)',
     });
-    expect(getTokenMock).toHaveBeenCalledTimes(1);
-    expect(getTokenMock).toHaveBeenCalledWith(false);
+    expect(getTokenMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('uses the passed token directly without calling getToken', async () => {
     const getTokenMock = vi.fn().mockResolvedValue('unused-token');
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ systemPrompt: 'hi' }), { status: 200 }));
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example',
       getToken: getTokenMock,
@@ -150,7 +151,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({
       status: 'rate_limited',
       message: 'Rate limit exceeded',
@@ -165,7 +166,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result.status).toBe('error');
     if (result.status === 'error') {
       expect(result.message).toContain('500');
@@ -180,7 +181,7 @@ describe('SyncClient.verifyConnection', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.verifyConnection();
+    const result = await client.verifyConnection('test-token');
     expect(result).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
       'https://server.example/api/chat/v1/prompts/system/default-chat',
@@ -191,5 +192,73 @@ describe('SyncClient.verifyConnection', () => {
         }),
       }),
     );
+  });
+});
+
+describe('SyncClient.verifyConnection review regressions', () => {
+  // A server that accepts the connection and never answers used to hang the probe for undici's
+  // 300s default, wedging the whole check behind AppCore's coalescing latch.
+  it('gives up on a server that never answers', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: ((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () =>
+            reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })),
+          );
+        })) as unknown as typeof fetch,
+    });
+
+    const result = await client.verifyConnection('token', 20);
+    expect(result).toEqual({ status: 'unreachable', message: 'Server unreachable' });
+  });
+
+  // An SSO reverse proxy answers an unauthenticated API GET with 200 and an HTML sign-in page.
+  // Trusting the status code alone reported that as a working credential.
+  it('does not accept a 200 that is not the expected payload', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () =>
+        new Response('<html><body>Sign in with your organization account</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        })) as unknown as typeof fetch,
+    });
+
+    const result = await client.verifyConnection('token');
+    expect(result.status).toBe('expired');
+  });
+
+  it('accepts a 200 carrying the expected payload', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () =>
+        new Response(JSON.stringify({ systemPrompt: 'You are Yvoke.' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })) as unknown as typeof fetch,
+    });
+
+    expect(await client.verifyConnection('token')).toEqual({ status: 'ok' });
+  });
+
+  // The message is rendered verbatim in the About pane; an error page must not arrive whole,
+  // and a proxy that echoes the request must not carry the bearer back into the renderer.
+  it('caps and redacts the server body it quotes back', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () =>
+        new Response(`Bearer secret-jwt-value ${'x'.repeat(5000)}`, { status: 500 })) as unknown as typeof fetch,
+    });
+
+    const result = await client.verifyConnection('token');
+    expect(result.status).toBe('error');
+    const message = 'message' in result ? result.message : '';
+    expect(message.length).toBeLessThan(400);
+    expect(message).not.toContain('secret-jwt-value');
   });
 });

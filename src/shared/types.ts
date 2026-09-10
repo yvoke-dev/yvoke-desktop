@@ -546,8 +546,13 @@ export type AuthVerificationFailureReason =
   | 'rate_limited'
   | 'error';
 
+/**
+ * What the renderer is told about one login. It deliberately has no field a bearer token could
+ * occupy: this type crosses IPC into the renderer, and the token stays in the main process on
+ * `ServerTokenVerification` instead.
+ */
 export type LoginVerificationResult =
-  | { status: 'ok'; account?: string; token?: string }
+  | { status: 'ok'; account?: string }
   | { status: AuthVerificationFailureReason; message: string; account?: string };
 
 export interface AuthVerificationResponse {

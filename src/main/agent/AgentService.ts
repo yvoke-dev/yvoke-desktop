@@ -6,7 +6,8 @@ import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaT
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
-import { readSingleReply } from './singleTurn';
+import { NoReplyError, readSingleReply } from './singleTurn';
+import { VALIDATION_TIMEOUT_MS } from './playbookValidation';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
 import { buildAllowedTools, buildAutoApproveTools, buildCanUseTool } from './policy';
@@ -396,10 +397,13 @@ export class AgentService {
     }
 
     const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), 5000);
+    const timer = setTimeout(() => abortController.abort(), CLAUDE_VERIFY_TIMEOUT_MS);
 
     const binary = claudeBinaryPath();
     const options: Options = {
+      // A bare string replaces the Claude Code preset outright — the same isolation the other
+      // single-turn probes rely on, and without it a "ping" drags the whole preset along.
+      systemPrompt: 'Reply with the single word: pong.',
       tools: [],
       disallowedTools: ['Bash'],
       canUseTool: async () => ({ behavior: 'deny', message: 'No tools for verification' }),
@@ -412,7 +416,7 @@ export class AgentService {
       maxTurns: 1,
       abortController,
       cwd: sandboxDir,
-      env: sanitizedEnv(debugEnv()),
+      env: debugEnv(),
       pathToClaudeCodeExecutable: binary ?? undefined,
       ...(model ? { model } : {}),
     };
@@ -420,26 +424,29 @@ export class AgentService {
     let q: Query | undefined;
     try {
       q = query({ prompt: 'ping', options });
-      await readSingleReply(q, 'credential verification');
+      await readSingleReply(q, 'login check');
       return { status: 'ok', account: detectClaudeAccount() };
     } catch (err) {
-      if (
-        err instanceof AbortError ||
-        (err instanceof Error && (err.name === 'AbortError' || /aborted|timeout/i.test(err.message)))
-      ) {
+      if (abortController.signal.aborted || err instanceof AbortError) {
         return { status: 'unreachable', message: 'Claude verification timed out' };
       }
       const msg = err instanceof Error ? err.message : String(err);
+      // A stream that closed with nothing in it says the subprocess failed, not that the login
+      // did — and it must be settled by type, before any prose matching gets a chance at it.
+      if (err instanceof NoReplyError) {
+        return { status: 'error', message: `Claude verification failed: ${msg}` };
+      }
+      // Allowance first: a genuine 429 body names the API key, which isAuthError also matches.
+      if (/rate limit|allowance|usage limit|\b429\b/i.test(msg)) {
+        return {
+          status: 'rate_limited',
+          message: 'Claude subscription allowance or rate limit reached.',
+        };
+      }
       if (isAuthError(msg)) {
         return {
           status: 'expired',
           message: 'Session expired or not logged in. Run claude /login in a terminal.',
-        };
-      }
-      if (/rate limit|allowance|usage limit|429/i.test(msg)) {
-        return {
-          status: 'rate_limited',
-          message: 'Claude subscription allowance or rate limit reached.',
         };
       }
       return { status: 'error', message: `Claude verification failed: ${msg}` };
@@ -861,6 +868,13 @@ export class AgentService {
     session.turn = newTurnContext(threadId, Boolean(session.orchestratorProfile));
   }
 }
+
+/**
+ * How long the credential probe waits. It must cover a cold spawn of the packaged Claude CLI
+ * plus a full model round trip, so it matches the structurally identical playbook check rather
+ * than guessing lower — a probe that fails closed reports working credentials as broken.
+ */
+export const CLAUDE_VERIFY_TIMEOUT_MS = VALIDATION_TIMEOUT_MS;
 
 export function sandboxDirFor(userDataDir: string): string {
   return path.join(userDataDir, 'agent-sandbox');

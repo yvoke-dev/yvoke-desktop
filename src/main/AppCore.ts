@@ -661,42 +661,60 @@ export class AppCore {
     };
   }
 
+  /**
+   * Test both logins at once, coalescing concurrent callers onto one run.
+   *
+   * The latch is cleared with `.finally()` on the *assigned* promise rather than inside the async
+   * body: a body that threw synchronously would run its own `finally` before the assignment
+   * completed, leaving a permanently-rejected promise latched and the check dead until restart.
+   */
   verifyAuth(): Promise<AuthVerificationResponse> {
     if (this.activeVerification) {
       return this.activeVerification;
     }
 
-    this.activeVerification = (async (): Promise<AuthVerificationResponse> => {
-      try {
-        const serverCheck = (async (): Promise<LoginVerificationResult> => {
-          const baseUrl = this.settings.get().serverBaseUrl;
-          if (!baseUrl?.trim()) {
-            return { status: 'unreachable', message: 'Server URL not configured' };
-          }
-          const tokenResult = await this.serverAuth.verifyToken(false);
-          if (tokenResult.status !== 'ok') {
-            return tokenResult;
-          }
-          const connResult = await this.syncClient.verifyConnection(tokenResult.token);
-          if (connResult.status === 'ok' && tokenResult.account) {
-            return { ...connResult, account: tokenResult.account };
-          }
-          return connResult;
-        })();
-
-        const claudeCheck = this.agent.verifyClaudeCredentials(
+    const run = (async (): Promise<AuthVerificationResponse> => {
+      const [server, claude] = await Promise.all([
+        this.verifyServerLogin(),
+        this.agent.verifyClaudeCredentials(
           sandboxDirFor(this.deps.userDataDir),
           this.settings.get().defaultModel,
-        );
-
-        const [server, claude] = await Promise.all([serverCheck, claudeCheck]);
-        return { server, claude };
-      } finally {
-        this.activeVerification = null;
-      }
+        ),
+      ]);
+      return { server, claude };
     })();
 
-    return this.activeVerification;
+    this.activeVerification = run;
+    run.finally(() => {
+      if (this.activeVerification === run) {
+        this.activeVerification = null;
+      }
+    }).catch(() => {
+      // The rejection is delivered to the real callers; this arm only guards the latch.
+    });
+
+    return run;
+  }
+
+  /**
+   * The corporate half of `verifyAuth`. The token stays inside this method: what it returns is the
+   * renderer-facing `LoginVerificationResult`, which has no field a bearer could occupy.
+   */
+  private async verifyServerLogin(): Promise<LoginVerificationResult> {
+    // Nothing to test against, and no reason to make Entra mint a token for it.
+    if (!this.settings.get().serverBaseUrl?.trim()) {
+      return { status: 'unreachable', message: 'Server URL not configured' };
+    }
+    const tokenResult = await this.serverAuth.verifyToken();
+    if (tokenResult.status !== 'ok') {
+      const { status, message, account } = tokenResult;
+      return { status, message, account };
+    }
+    const connResult = await this.syncClient.verifyConnection(tokenResult.token);
+    if (connResult.status === 'ok' && tokenResult.account) {
+      return { status: 'ok', account: tokenResult.account };
+    }
+    return connResult;
   }
 
   dispose(): void {

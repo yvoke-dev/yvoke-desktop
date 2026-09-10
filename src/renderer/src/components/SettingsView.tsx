@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../../shared/types';
 import type {
   AppearanceSettings,
@@ -312,14 +312,15 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const [verification, setVerification] = useState<AuthVerificationResponse | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
-  const isMounted = useRef(true);
 
+  /**
+   * A verdict describes the settings that were on disk when it was taken — main reads the *saved*
+   * settings, while this pane renders the draft. Editing any of them makes the badge a claim
+   * about a configuration that was never tested, so the verdict is dropped rather than relabelled.
+   */
   useEffect(() => {
-    isMounted.current = true;
-    return () => {
-      isMounted.current = false;
-    };
-  }, []);
+    setVerification(null);
+  }, [draft.serverAuthMode, draft.serverBaseUrl, draft.defaultModel]);
 
   const orch: OrchestratorSettings = draft.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
   const updateOrch = (patch: Partial<OrchestratorSettings>): void =>
@@ -345,18 +346,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     setVerifying(true);
     setError(null);
     try {
-      const res = await window.api.verifyAuth();
-      if (isMounted.current) {
-        setVerification(res);
-      }
+      setVerification(await window.api.verifyAuth());
     } catch (e) {
-      if (isMounted.current) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (isMounted.current) {
-        setVerifying(false);
-      }
+      setVerifying(false);
     }
   };
 
@@ -367,18 +361,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     try {
       await window.api.serverSignIn();
       props.onAuthChange?.();
-      const res = await window.api.verifyAuth();
-      if (isMounted.current) {
-        setVerification(res);
-      }
+      setVerification(await window.api.verifyAuth());
     } catch (e) {
-      if (isMounted.current) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (isMounted.current) {
-        setSigningIn(false);
-      }
+      setSigningIn(false);
     }
   };
 
@@ -390,13 +377,9 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
       // keep the panel open and surface the message instead of failing silently.
       await props.onSave(draft);
     } catch (e) {
-      if (isMounted.current) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (isMounted.current) {
-        setSaving(false);
-      }
+      setSaving(false);
     }
   };
 
@@ -967,7 +950,9 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                           <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
                             {isWarning ? '⚠' : '✗'} {verification.server.message}
                           </span>
-                          {draft.serverAuthMode === 'entra' && (
+                          {/* Gated on the mode main actually signed in with, not the draft: a
+                              button offered against an unsaved mode signs in to the other one. */}
+                          {props.auth?.server.mode === 'entra' && (
                             <button
                               type="button"
                               className="button secondary cred-inline-btn"
@@ -1030,9 +1015,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                     onClick={() => {
                       setError(null);
                       window.api.openLogsFolder().catch((err: unknown) => {
-                        if (isMounted.current) {
-                          setError(err instanceof Error ? err.message : String(err));
-                        }
+                        setError(err instanceof Error ? err.message : String(err));
                       });
                     }}
                   >

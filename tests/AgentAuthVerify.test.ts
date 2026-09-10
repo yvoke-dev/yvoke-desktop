@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AbortError } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentServiceDeps } from '../src/main/agent/AgentService';
-import { LOGIN_INSTRUCTIONS } from '../src/main/agent/ClaudeAuth';
+import { isAuthError, LOGIN_INSTRUCTIONS } from '../src/main/agent/ClaudeAuth';
+import { NoReplyError } from '../src/main/agent/singleTurn';
 
 const mockDetectCredentials = vi.fn();
 const mockDetectAccount = vi.fn();
@@ -188,5 +189,114 @@ describe('AgentService.verifyClaudeCredentials', () => {
       message: 'Claude verification failed: Unexpected string error without Error instance',
     });
     expect(close).toHaveBeenCalled();
+  });
+});
+
+describe('AgentService.verifyClaudeCredentials error classification', () => {
+  let agentService: InstanceType<typeof AgentService>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDetectAccount.mockReturnValue(undefined);
+    mockDetectCredentials.mockReturnValue('ok');
+    const deps: AgentServiceDeps = {
+      getSettings: () => ({ defaultModel: 'sonnet' }) as any,
+      mcpAuthProvider: { headers: async () => ({}) },
+      emit: vi.fn(),
+      onSessionId: vi.fn(),
+      onTurnPersist: vi.fn(),
+      sandboxDir: '/tmp/test-sandbox',
+      syncClient: {} as any,
+      mcpPrompts: {} as any,
+      getOrchestratorProfile: vi.fn(),
+    };
+    agentService = new AgentService(deps);
+  });
+
+  async function verifyWith(error: unknown) {
+    const { iterator } = createFakeQuery({ errorToThrow: error });
+    mockQuery.mockReturnValue(iterator);
+    return agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+  }
+
+  // The probe's own "ended without a result" message contains the word "credential", which
+  // isAuthError matches — so a subprocess that died reported an expired login and the user was
+  // sent to re-run `claude /login`, which could not help.
+  it('does not report a stream that ended without a result as an expired login', async () => {
+    // The label is deliberately one isAuthError WOULD match: the type, not the prose, must
+    // decide. This is what keeps a dead subprocess from being reported as a stale login.
+    const result = await verifyWith(new NoReplyError('credential check'));
+    expect(result.status).not.toBe('expired');
+    expect(result.status).toBe('error');
+  });
+
+  // Belt and braces: even read as prose, the probe's own label must not look like an auth
+  // failure. `isAuthError` matches /credential/, so the old 'credential verification' collided.
+  it('uses a probe label that no auth-error match can claim', async () => {
+    expect(isAuthError(new NoReplyError('login check').message)).toBe(false);
+  });
+
+  // A real Anthropic 429 body names the API key, which isAuthError matched first.
+  it('reports a rate-limit body that mentions the api key as rate limited', async () => {
+    const result = await verifyWith(
+      new Error('429 rate_limit_error: your API key has exceeded the per-minute rate limit'),
+    );
+    expect(result.status).toBe('rate_limited');
+  });
+
+  // `429` was unanchored, so any digit run containing it read as an allowance failure.
+  it.each([
+    ['spawn /opt/build/claude/4290/claude ENOENT'],
+    ['Request id req_011CQ429ab failed'],
+  ])('does not read an incidental 429 (%s) as a rate limit', async (msg) => {
+    const result = await verifyWith(new Error(msg));
+    expect(result.status).not.toBe('rate_limited');
+  });
+
+  it('still reports a genuine allowance failure as rate limited', async () => {
+    const result = await verifyWith(new Error('Claude AI usage limit reached'));
+    expect(result.status).toBe('rate_limited');
+  });
+
+  it('still reports a genuine auth failure as expired', async () => {
+    const result = await verifyWith(new Error('Invalid API key · Please run /login'));
+    expect(result.status).toBe('expired');
+  });
+});
+
+describe('AgentService.verifyClaudeCredentials isolation', () => {
+  it('budgets the same time as the other single-turn probes and isolates the preset', async () => {
+    const { CLAUDE_VERIFY_TIMEOUT_MS } = await import('../src/main/agent/AgentService');
+    const { VALIDATION_TIMEOUT_MS } = await import('../src/main/agent/playbookValidation');
+    // A cold CLI spawn plus a model round trip does not fit in a fraction of what the
+    // structurally identical playbook probe already needs.
+    expect(CLAUDE_VERIFY_TIMEOUT_MS).toBeGreaterThanOrEqual(VALIDATION_TIMEOUT_MS);
+
+    vi.clearAllMocks();
+    mockDetectCredentials.mockReturnValue('ok');
+    mockDetectAccount.mockReturnValue(undefined);
+    const { iterator } = createFakeQuery({
+      messages: [{ type: 'result', subtype: 'success', result: 'pong' }],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const svc = new AgentService({
+      getSettings: () => ({ defaultModel: 'sonnet' }) as any,
+      mcpAuthProvider: { headers: async () => ({}) },
+      emit: vi.fn(),
+      onSessionId: vi.fn(),
+      onTurnPersist: vi.fn(),
+      sandboxDir: '/tmp/test-sandbox',
+      syncClient: {} as any,
+      mcpPrompts: {} as any,
+      getOrchestratorProfile: vi.fn(),
+    });
+    await svc.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    // A bare systemPrompt string replaces the Claude Code preset outright, as the sibling
+    // probes do — without it this "isolated" check drags the whole preset along.
+    const options = mockQuery.mock.calls[0][0].options;
+    expect(typeof options.systemPrompt).toBe('string');
+    expect(options.systemPrompt.length).toBeGreaterThan(0);
   });
 });

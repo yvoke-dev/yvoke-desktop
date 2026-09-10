@@ -118,3 +118,31 @@ export function sanitizeLogContent(text: string): string {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[REDACTED]');
 }
+
+/**
+ * Whether an error is the network failing rather than the peer refusing. Node's undici reports
+ * the syscall on `cause`, not in `message`, so both are checked.
+ *
+ * This lives here because all three callers — the Entra silent refresh, the sync request path and
+ * the connection probe — must agree: the same outage classified as "expired" in one place and
+ * "unreachable" in another sends the user to re-authenticate against a server that is merely down.
+ */
+export function isNetworkError(error: unknown): boolean {
+  const codes = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNRESET', 'EPIPE'];
+  const seen = new Set<unknown>();
+  let cursor: unknown = error;
+
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const code = (cursor as { code?: unknown }).code;
+    if (typeof code === 'string' && codes.includes(code)) {
+      return true;
+    }
+    const message = cursor instanceof Error ? cursor.message : String(cursor ?? '');
+    if (message.includes('fetch failed') || codes.some((c) => message.includes(c))) {
+      return true;
+    }
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return false;
+}

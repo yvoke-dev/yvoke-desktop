@@ -74,6 +74,7 @@
   --danger-bg: #fdecee;
   --danger: #e63746;
   --danger-ink: #b01827;
+  --danger-line: #e08a92;
   --on-danger: #ffffff;
   --ok-bg: #e8f5e9;
   --ok-ink: #1b6b2f;
@@ -147,6 +148,7 @@
     --danger-bg: #2c1417;
     --danger: #e63746;
     --danger-ink: #ff8a94;
+    --danger-line: #7a2a32;
     --on-danger: #ffffff;
     --ok-bg: #16281a;
     --ok-ink: #7fd48a;
@@ -2521,10 +2523,18 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   word-break: break-all;
 }
 
+/*
+ * A self-styling variant, so it is excluded from the default `button:not(...)` chrome above and
+ * carries the whole box itself. The two size variants below match its specificity (0,2,0) via the
+ * `.button` prefix and win on order — without it they would lose and need `!important`.
+ */
 .button.secondary {
   background: transparent;
   border: 1px solid var(--line);
   color: var(--text);
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -2539,16 +2549,16 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   cursor: default;
 }
 
-.check-credentials-btn {
+.button.check-credentials-btn {
   padding: 5px 12px;
   font-size: 12px;
   border-radius: 3px;
 }
 
-.cred-inline-btn {
+.button.cred-inline-btn {
   margin-left: 8px;
-  padding: 2px 8px !important;
-  font-size: 11px !important;
+  padding: 2px 8px;
+  font-size: 11px;
   border-radius: 3px;
   vertical-align: middle;
 }
@@ -2644,7 +2654,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss) {
+button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;

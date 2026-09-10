@@ -82,10 +82,16 @@ export default function App(): React.JSX.Element {
     return result.serverReachable;
   }, []);
 
-  /** The list plus the catalogues only the server can supply — skipped when it is not answering. */
+  /**
+   * The list plus the catalogues only the server can supply — skipped when it is not answering.
+   *
+   * `authStatus` is deliberately outside that guard: it reads local cache state, not the server,
+   * and the moment it matters most is right after an inline sign-in taken *because* the server
+   * check failed — exactly when `refreshThreads()` is still reporting unreachable.
+   */
   const refreshServer = useCallback(async () => {
-    if (!(await refreshThreads())) return;
     void window.api.authStatus().then(setAuth);
+    if (!(await refreshThreads())) return;
     void window.api.listPrompts().then(setPrompts);
     void window.api.listOrchestratorProfiles().then(setProfiles);
   }, [refreshThreads]);

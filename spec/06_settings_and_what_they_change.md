@@ -36,6 +36,7 @@ configuration: whatever ships as the build's defaults, the user can change.
   it.
 - **Reduced motion follows the system**, with no control of its own.
 - **Verifying credentials in the About pane is on-demand.** Clicking *Check Credentials* tests whether the corporate or development token is accepted and whether the Claude credentials generate a live reply. It runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
+- **A verification result describes the settings as they were saved.** Editing the server address, the sign-in mode or the default model clears the result rather than relabelling it, so a checkmark never appears beside a configuration that was not the one tested.
 
 ## Limits
 
