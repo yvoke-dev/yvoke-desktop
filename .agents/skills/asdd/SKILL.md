@@ -70,7 +70,9 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
      2. Create and checkout a new branch (`sdd/<feature-name>`).
      3. Pause so the user can switch branches manually.
    - **If working tree is dirty**: Warn and prompt the user to commit, stash, or review changes before starting waves.
-2. **Draft Wave Breakdown**: Group tasks into dependency-ordered waves (Main Store -> Preload -> React UI -> Spec Update -> Audit).
+2. **Draft Wave Breakdown**: The task architect reads `implementation_plan.md` first (Plan-Binding & Anti-Drift Invariant) and organizes the work into waves sized proportionally to scope:
+   - **Focused tasks (2 Waves)**: Wave 1 (Implementation & Strict TDD) -> Wave 2 (Spec Update, Audit & PR).
+   - **Large multi-system tasks (3+ Waves)**: Staged layered waves (e.g. State/Store -> IPC/Preload Bridge -> React UI -> Spec Update -> Audit) only when deep dependencies require staged review.
 3. **Adversarial Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandate that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC arguments, corrupt JSON recovery, sync timeouts).
 4. **Task Artifact**: Emit `task.md` in the native brain folder:
