@@ -177,4 +177,20 @@ describe('spec/ modular structure', () => {
   it('keeps the decisions register in spec/README.md', () => {
     expect(specReadme()).toContain('## Decisions worth taking');
   });
+
+  it('documents credential verification in 05_signing_in.md and 06_settings_and_what_they_change.md', () => {
+    const signingIn = readFileSync(resolve(SPEC_DIR, '05_signing_in.md'), 'utf8');
+    const settings = readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8');
+
+    expect(signingIn).toContain('Verify logins');
+    expect(signingIn).toContain('Verifying logins tests the server token silently without launching the browser.');
+    expect(signingIn).toContain('Claude verification performs an isolated, single-turn live probe.');
+    expect(signingIn).toContain('On macOS, Claude verification tests keychain credentials directly.');
+    expect(signingIn).toContain('Dev server mode is verified against the server endpoint');
+    expect(signingIn).toContain('Check Credentials');
+
+    expect(settings).toContain('on-demand credential verification checkmarks');
+    expect(settings).toContain('Verifying credentials in the About pane is on-demand.');
+  });
 });
+

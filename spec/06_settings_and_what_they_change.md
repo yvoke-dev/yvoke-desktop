@@ -15,7 +15,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
-| **About** | Version, server address, both sign-in states. |
+| **About** | Version, server address, both sign-in states, and on-demand credential verification checkmarks. |
 
 ## How it behaves
 
@@ -35,6 +35,7 @@ configuration: whatever ships as the build's defaults, the user can change.
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.
 - **Reduced motion follows the system**, with no control of its own.
+- **Verifying credentials in the About pane is on-demand.** Clicking *Check Credentials* tests whether the corporate or development token is accepted and whether the Claude credentials generate a live reply. It runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
 
 ## Limits
 
