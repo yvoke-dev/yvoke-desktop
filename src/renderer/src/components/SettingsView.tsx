@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../../shared/types';
 import type {
   AppearanceSettings,
   AppSettings,
   AuthStatus,
+  AuthVerificationResponse,
   Density,
   OrchestratorSettings,
   RoleModelConfig,
@@ -293,18 +294,33 @@ function ThemeChoice(props: {
   );
 }
 
-export function SettingsView(props: {
+export interface SettingsViewProps {
   settings: AppSettings;
   appVersion?: string;
   auth?: AuthStatus | null;
   serverReachable?: boolean;
+  onAuthChange?: () => void;
   onSave: (update: Partial<AppSettings>) => Promise<void>;
   onClose: () => void;
-}): React.JSX.Element {
+}
+
+export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const [draft, setDraft] = useState<AppSettings>(props.settings);
   const [pane, setPane] = useState<Pane>('Server');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [verification, setVerification] = useState<AuthVerificationResponse | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const isMounted = useRef(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
   const orch: OrchestratorSettings = draft.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
   const updateOrch = (patch: Partial<OrchestratorSettings>): void =>
     setDraft({ ...draft, orchestrator: { ...orch, ...patch } });
@@ -324,6 +340,48 @@ export function SettingsView(props: {
       defaultModel: models.includes(draft.defaultModel) ? draft.defaultModel : (models[0] ?? ''),
     });
 
+  const handleCheckCredentials = async (): Promise<void> => {
+    if (verifying || signingIn) return;
+    setVerifying(true);
+    setError(null);
+    try {
+      const res = await window.api.verifyAuth();
+      if (isMounted.current) {
+        setVerification(res);
+      }
+    } catch (e) {
+      if (isMounted.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (isMounted.current) {
+        setVerifying(false);
+      }
+    }
+  };
+
+  const handleInlineSignIn = async (): Promise<void> => {
+    if (signingIn || verifying) return;
+    setSigningIn(true);
+    setError(null);
+    try {
+      await window.api.serverSignIn();
+      props.onAuthChange?.();
+      const res = await window.api.verifyAuth();
+      if (isMounted.current) {
+        setVerification(res);
+      }
+    } catch (e) {
+      if (isMounted.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (isMounted.current) {
+        setSigningIn(false);
+      }
+    }
+  };
+
   const handleSave = async (): Promise<void> => {
     setSaving(true);
     setError(null);
@@ -332,9 +390,13 @@ export function SettingsView(props: {
       // keep the panel open and surface the message instead of failing silently.
       await props.onSave(draft);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isMounted.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setSaving(false);
+      if (isMounted.current) {
+        setSaving(false);
+      }
     }
   };
 
@@ -888,14 +950,77 @@ export function SettingsView(props: {
                 <dt>Server sign-in</dt>
                 <dd>
                   {draft.serverAuthMode === 'entra' ? 'Microsoft Entra' : 'Dev token'} ·{' '}
-                  {signedIn ? (props.auth?.server.account ?? 'signed in') : 'not signed in'}
+                  {verification ? (
+                    verification.server.status === 'ok' ? (
+                      <>
+                        <span className="cred-badge verified">✓ Verified</span>
+                        {(verification.server.account ?? props.auth?.server.account)
+                          ? ` ${verification.server.account ?? props.auth?.server.account}`
+                          : ''}
+                      </>
+                    ) : (() => {
+                      const isWarning =
+                        verification.server.status === 'unreachable' ||
+                        verification.server.status === 'rate_limited';
+                      return (
+                        <>
+                          <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
+                            {isWarning ? '⚠' : '✗'} {verification.server.message}
+                          </span>
+                          {draft.serverAuthMode === 'entra' && (
+                            <button
+                              type="button"
+                              className="button secondary cred-inline-btn"
+                              onClick={handleInlineSignIn}
+                              disabled={signingIn || verifying}
+                            >
+                              {signingIn ? 'Signing in…' : 'Sign in'}
+                            </button>
+                          )}
+                        </>
+                      );
+                    })()
+                  ) : (
+                    signedIn ? (props.auth?.server.account ?? 'signed in') : 'not signed in'
+                  )}
                 </dd>
                 <dt>Claude account</dt>
                 <dd>
-                  {props.auth?.claudeAccount ??
+                  {verification ? (
+                    verification.claude.status === 'ok' ? (
+                      <>
+                        <span className="cred-badge verified">✓ Verified</span>
+                        {(verification.claude.account ?? props.auth?.claudeAccount)
+                          ? ` ${verification.claude.account ?? props.auth?.claudeAccount}`
+                          : ''}
+                      </>
+                    ) : (() => {
+                      const isWarning =
+                        verification.claude.status === 'unreachable' ||
+                        verification.claude.status === 'rate_limited';
+                      return (
+                        <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
+                          {isWarning ? '⚠' : '✗'} {verification.claude.message}
+                        </span>
+                      );
+                    })()
+                  ) : (
+                    props.auth?.claudeAccount ??
                     (props.auth?.claude === 'missing'
                       ? 'No Claude Code credentials found'
-                      : 'Detected from Claude Code')}
+                      : 'Detected from Claude Code')
+                  )}
+                </dd>
+                <dt>Credentials</dt>
+                <dd>
+                  <button
+                    type="button"
+                    className="button secondary check-credentials-btn"
+                    onClick={handleCheckCredentials}
+                    disabled={verifying || signingIn}
+                  >
+                    {verifying ? 'Verifying credentials…' : 'Check Credentials'}
+                  </button>
                 </dd>
                 <dt>Diagnostics</dt>
                 <dd>
@@ -905,7 +1030,9 @@ export function SettingsView(props: {
                     onClick={() => {
                       setError(null);
                       window.api.openLogsFolder().catch((err: unknown) => {
-                        setError(err instanceof Error ? err.message : String(err));
+                        if (isMounted.current) {
+                          setError(err instanceof Error ? err.message : String(err));
+                        }
                       });
                     }}
                   >

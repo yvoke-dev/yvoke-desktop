@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { SettingsView } from '../../src/renderer/src/components/SettingsView';
-import type { AppSettings } from '../../src/shared/types';
+import type { AppSettings, AuthVerificationResponse } from '../../src/shared/types';
 
 const settings: AppSettings = {
   serverBaseUrl: 'https://app.example/',
@@ -255,6 +255,232 @@ describe('SettingsView', () => {
         expect(screen.getByText(/Failed to open logs directory/)).toBeTruthy(),
       );
       expect(openLogsFolder).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Wave 3: Login Verification & Credential Checking', () => {
+    it('Test 3.4: Strictly on-demand - verifyAuth is NOT called on mount or pane switch', () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'srv@test.com' },
+        claude: { status: 'ok', account: 'claude@test.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      expect(verifyAuth).not.toHaveBeenCalled();
+
+      openPane('Models');
+      expect(verifyAuth).not.toHaveBeenCalled();
+
+      openPane('About');
+      expect(verifyAuth).not.toHaveBeenCalled();
+
+      // "Check Credentials" button is present in About pane
+      expect(screen.getByRole('button', { name: 'Check Credentials' })).toBeTruthy();
+    });
+
+    it('Test 3.2: Double-click / in-flight debounce - verifyAuth invoked once and button disabled while verifying', async () => {
+      let resolveVerify!: (val: AuthVerificationResponse) => void;
+      const verifyPromise = new Promise<AuthVerificationResponse>((resolve) => {
+        resolveVerify = resolve;
+      });
+      const verifyAuth = vi.fn().mockReturnValue(verifyPromise);
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+
+      // First click initiates verification
+      fireEvent.click(checkBtn);
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(true);
+      expect(checkBtn.textContent).toBe('Verifying credentials…');
+
+      // Second click while in-flight is debounced/ignored
+      fireEvent.click(checkBtn);
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+
+      // Resolve in-flight verification
+      resolveVerify({
+        server: { status: 'ok', account: 'admin@corp.com' },
+        claude: { status: 'ok', account: 'dev@corp.com' },
+      });
+
+      await waitFor(() => {
+        expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+        expect(checkBtn.textContent).toBe('Check Credentials');
+      });
+    });
+
+    it('Test 3.1: React 19 unmount mid-flight - no state updates / clean unmount', async () => {
+      let resolveVerify!: (val: AuthVerificationResponse) => void;
+      const verifyPromise = new Promise<AuthVerificationResponse>((resolve) => {
+        resolveVerify = resolve;
+      });
+      const verifyAuth = vi.fn().mockReturnValue(verifyPromise);
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { unmount } = render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
+      fireEvent.click(checkBtn);
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+
+      // Unmount mid-flight
+      unmount();
+
+      // Resolve promise after unmount
+      resolveVerify({
+        server: { status: 'ok', account: 'admin@corp.com' },
+        claude: { status: 'ok', account: 'dev@corp.com' },
+      });
+
+      // Allow tick for any pending microtasks
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('Test 3.3: IPC transport rejection - error surfaced in banner without crashing', async () => {
+      const verifyAuth = vi.fn().mockRejectedValue(new Error('IPC transport failed'));
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
+      fireEvent.click(checkBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText(/IPC transport failed/)).toBeTruthy();
+      });
+
+      // Button returns to enabled state
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+      expect(checkBtn.textContent).toBe('Check Credentials');
+    });
+
+    it('renders verified checkmarks (✓ Verified) on success with account info', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'srv-admin@corp.com' },
+        claude: { status: 'ok', account: 'claude-user@corp.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+
+      await waitFor(() => {
+        const verifiedBadges = screen.getAllByText('✓ Verified');
+        expect(verifiedBadges.length).toBe(2);
+        for (const badge of verifiedBadges) {
+          expect(badge.className).toContain('cred-badge');
+          expect(badge.className).toContain('verified');
+        }
+      });
+
+      expect(screen.getByText(/srv-admin@corp\.com/)).toBeTruthy();
+      expect(screen.getByText(/claude-user@corp\.com/)).toBeTruthy();
+    });
+
+    it('renders failure alerts with inline "Sign in" button in Entra mode and handles sign-in', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'expired', message: 'Token expired' },
+          claude: { status: 'rate_limited', message: 'Rate limit exceeded' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'signed-in@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      const serverSignIn = vi.fn().mockResolvedValue('new-token');
+      const onAuthChange = vi.fn();
+      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn };
+
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/✗ Token expired/)).toBeTruthy();
+        expect(screen.getByText(/⚠ Rate limit exceeded/)).toBeTruthy();
+      });
+
+      // Server expired status has error class, Claude rate_limited has warning class
+      const serverBadge = screen.getByText(/Token expired/);
+      expect(serverBadge.className).toContain('cred-badge');
+      expect(serverBadge.className).toContain('error');
+
+      const claudeBadge = screen.getByText(/Rate limit exceeded/);
+      expect(claudeBadge.className).toContain('cred-badge');
+      expect(claudeBadge.className).toContain('warning');
+
+      // Inline "Sign in" button is rendered in Entra mode
+      const signInBtn = screen.getByRole('button', { name: 'Sign in' });
+      expect(signInBtn).toBeTruthy();
+      expect(signInBtn.className).toContain('cred-inline-btn');
+
+      // Click inline sign in
+      fireEvent.click(signInBtn);
+
+      await waitFor(() => {
+        expect(serverSignIn).toHaveBeenCalledTimes(1);
+        expect(onAuthChange).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('renders failure alerts with ⚠ for unreachable server and ✗ for missing claude credentials', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'unreachable', message: 'Server connection refused' },
+        claude: { status: 'missing', message: 'No Claude credentials found' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'dev' }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/⚠ Server connection refused/)).toBeTruthy();
+        expect(screen.getByText(/✗ No Claude credentials found/)).toBeTruthy();
+      });
+
+      // Server unreachable status has warning class, Claude missing has error class
+      const serverBadge = screen.getByText(/Server connection refused/);
+      expect(serverBadge.className).toContain('cred-badge');
+      expect(serverBadge.className).toContain('warning');
+
+      const claudeBadge = screen.getByText(/No Claude credentials found/);
+      expect(claudeBadge.className).toContain('cred-badge');
+      expect(claudeBadge.className).toContain('error');
+
+      // In Dev token mode, inline "Sign in" button is NOT rendered
+      expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
     });
   });
 });
