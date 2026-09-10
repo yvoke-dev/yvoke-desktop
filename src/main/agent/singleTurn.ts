@@ -13,6 +13,20 @@ import type { Query } from '@anthropic-ai/claude-agent-sdk';
  * `what` names the caller in the "ended without a result" message, which is otherwise the one
  * failure with nothing in it to say where it came from.
  */
+/**
+ * The stream closed before any result arrived — the subprocess died, the transport dropped, or
+ * the CLI exited early. It is a *type* rather than a message because callers that classify
+ * failures cannot safely tell it apart from a real one by reading its prose: the credential check
+ * used to match its own `what` string against an "is this an auth error?" regex and tell the user
+ * to run `claude /login`.
+ */
+export class NoReplyError extends Error {
+  constructor(what: string) {
+    super(`${what} ended without a result`);
+    this.name = 'NoReplyError';
+  }
+}
+
 export async function readSingleReply(q: Query, what: string): Promise<string> {
   for await (const message of q) {
     if (message.type !== 'result') continue;
@@ -21,5 +35,5 @@ export async function readSingleReply(q: Query, what: string): Promise<string> {
     }
     return message.result ?? '';
   }
-  throw new Error(`${what} ended without a result`);
+  throw new NoReplyError(what);
 }

@@ -249,6 +249,7 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   handle(IpcChannels.authStatus, () => appCore.authStatus());
   handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
   handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
+  handle(IpcChannels.authVerify, () => appCore.verifyAuth());
   handle(IpcChannels.logsOpenFolder, async () => {
     const logsDir = path.join(userDataDir, 'logs');
     fs.mkdirSync(logsDir, { recursive: true });

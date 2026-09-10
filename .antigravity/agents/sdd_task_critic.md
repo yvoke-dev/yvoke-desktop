@@ -18,12 +18,18 @@ Your job is to challenge the wave breakdown and test specifications in `task.md`
 
 ### 1. Eliminate "Happy-Path Test Syndrome"
 - Inspect every proposed test in the wave breakdown. Flag any task where tests only verify valid, ideal inputs.
-- **Mandate Negative / Failure Tests**: Every implementation wave MUST include at least one explicit negative test case:
+- **Mandatory Negative / Failure Tests**: Every implementation wave MUST include at least one explicit negative test case:
   - What happens with `null`, `undefined`, empty strings, or malformed IPC arguments?
   - What happens when a local JSON file in `userData` is corrupt or unreadable?
   - What happens when the server Sync API responds with 401, 500, or times out?
   - What happens when Claude Agent SDK emits unexpected errors or unrecognised status values?
   - What happens when a React component unmounts while an async IPC call is in flight?
+- **Mandatory Error Classification Matrix**: When a task introduces an error classifier or failure categorizer:
+  - Mandate tests verifying that neighboring error categories do NOT falsely match (e.g. prove that a 429 rate limit body does not trigger `isAuthError`, and word-anchored `\b429\b` does not match request IDs).
+  - Mandate tests verifying that internal helper/probe labels (e.g. "ended without a result") do not match user-facing auth regexes.
+  - Require typed errors (e.g. `err instanceof NoReplyError`) to settle outcomes before prose regexes run.
+- **IPC Secret Non-Leakage**: When IPC channels return auth or sync status, mandate tests asserting that no bearer tokens, private keys, or credentials are present on the renderer-facing payload.
+- **SSO Reverse Proxy Mock**: For server probes, mandate a test simulating an enterprise gateway returning HTTP 200 with an HTML login page, asserting it is rejected as expired/unauthenticated.
 
 ### 2. Tautology & False-Green Inspection
 - Challenge test assertions: will they pass even if the business logic is broken?

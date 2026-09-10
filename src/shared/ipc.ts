@@ -24,6 +24,7 @@ export const IpcChannels = {
   authStatus: 'auth:status',
   authSignin: 'auth:signin',
   authSignout: 'auth:signout',
+  authVerify: 'auth:verify',
   clipboardWriteImage: 'clipboard:write-image',
   logsOpenFolder: 'logs:open-folder',
 

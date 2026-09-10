@@ -25,9 +25,12 @@ Cross-reference the proposed changes against all hard-won gotchas in `CLAUDE.md`
 - **Deployment Settings**: Are allowed domains read strictly from bundled `settings.json` and never accepted from the renderer?
 - **Settings Versioning**: Does a changed default require bumping `CURRENT_SETTINGS_VERSION`?
 - **Preload Listener Cleanup**: Do React components subscribing to IPC events guarantee unsubscription in `useEffect`?
-- **Cross-Process Imports**: Does any planned file import across disallowed layers (e.g. renderer importing main)?
+- **Cross-Process Imports & Secret Exposure**: Does any planned file import across disallowed layers (e.g. renderer importing main)? Do any data structures crossing IPC (in `src/preload/index.ts` or `src/shared/types.ts`) leak sensitive bearer tokens, session keys, or credentials to renderer memory? Tokens must remain encapsulated in `src/main/` on main-only internal types.
+- **Prose Regex Shadowing & Self-Matching**: Are failures classified by typed errors (e.g. `NoReplyError`, `SilentTokenError`) rather than matching raw prose? Does any error label passed into a helper contain vocabulary that matches an error classifier (e.g. passing `'credential'` into a function checked by `isAuthError`)? Is rate-limit detection checked before auth error checks?
 
 ### 2. Failure Mode & Concurrency Analysis
+- **Enterprise Probe Payload Validation**: Does any connection or health probe validate the expected response *payload shape* (JSON schema or specific properties), rather than relying on HTTP 200/204 status codes alone? (Enterprise SSO gateways and captive portals answer unauthenticated API calls with 200 OK and an HTML login page).
+- **Grounded Subprocess Timeouts**: Are subprocess or LLM timeouts arbitrarily low (e.g. 5s)? Timeouts must cover cold binary spawn + TLS handshake + LLM completion, grounded against existing benchmarks in the codebase (e.g. `VALIDATION_TIMEOUT_MS = 45s`).
 - **Partial Failures**: What happens if the network sync fails or drops mid-turn? Can `SyncQueue` get poisoned with duplicate turns?
 - **Blocking Operations**: Are any expensive disk writes, regex runs, or JSON parses planned synchronously on Electron's main UI thread?
 - **Store Recovery**: What happens if `userData` JSON files are corrupted or half-written on app crash?

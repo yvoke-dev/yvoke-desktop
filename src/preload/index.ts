@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   AppSettings,
   AuthStatus,
+  AuthVerificationResponse,
   ChatMessage,
   CitationRef,
   FeedbackRequest,
@@ -44,6 +45,7 @@ export interface DesktopApi {
   submitClarification(threadId: string, toolUseId: string, answer: string): Promise<void>;
   submitFeedback(request: FeedbackRequest): Promise<void>;
   authStatus(): Promise<AuthStatus>;
+  verifyAuth(): Promise<AuthVerificationResponse>;
   serverSignIn(): Promise<string | undefined>;
   serverSignOut(): Promise<void>;
   writeClipboardImage(dataUrl: string): Promise<void>;
@@ -73,6 +75,7 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IpcChannels.chatSubmitClarification, threadId, toolUseId, answer),
   submitFeedback: (request) => ipcRenderer.invoke(IpcChannels.feedbackSubmit, request),
   authStatus: () => ipcRenderer.invoke(IpcChannels.authStatus),
+  verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
   serverSignOut: () => ipcRenderer.invoke(IpcChannels.authSignout),
   writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke(IpcChannels.clipboardWriteImage, dataUrl),
