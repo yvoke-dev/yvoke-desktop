@@ -2549,7 +2549,8 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   cursor: default;
 }
 
-.button.check-credentials-btn {
+.button.check-credentials-btn,
+.button.open-logs-btn {
   padding: 5px 12px;
   font-size: 12px;
   border-radius: 3px;

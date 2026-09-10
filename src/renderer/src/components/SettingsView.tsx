@@ -1011,7 +1011,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                 <dd>
                   <button
                     type="button"
-                    className="button secondary"
+                    className="button secondary open-logs-btn"
                     onClick={() => {
                       setError(null);
                       window.api.openLogsFolder().catch((err: unknown) => {

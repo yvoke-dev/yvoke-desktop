@@ -75,4 +75,8 @@ describe('button variant selectors', () => {
     const block = CSS.match(/\.cred-inline-btn\s*\{[^}]*\}/)?.[0] ?? '';
     expect(block).not.toContain('!important');
   });
+
+  it('styles open-logs-btn with the same compact secondary button size as check-credentials-btn', () => {
+    expect(CSS).toMatch(/\.button\.check-credentials-btn,\s*\.button\.open-logs-btn/);
+  });
 });

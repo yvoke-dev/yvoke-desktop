@@ -233,7 +233,9 @@ describe('SettingsView', () => {
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
       openPane('About');
       expect(screen.getByText('Diagnostics')).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Open Logs Folder' })).toBeTruthy();
+      const btn = screen.getByRole('button', { name: 'Open Logs Folder' });
+      expect(btn).toBeTruthy();
+      expect(btn.classList.contains('open-logs-btn')).toBe(true);
     });
 
     it('calls window.api.openLogsFolder() when the button is clicked', async () => {
