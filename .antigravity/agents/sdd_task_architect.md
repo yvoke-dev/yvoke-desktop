@@ -32,9 +32,21 @@ Your job is to take an approved implementation plan, verify and confirm the acti
   - **If working tree is dirty**: Warn that uncommitted changes exist and must be stashed, committed, or discarded before starting.
 - All subsequent subagents (Implementer, Reviewer, Auditor) will execute directly in the active workspace on this confirmed branch.
 
-### 2. Wave-Based Work Breakdown
-Decompose the implementation plan into ordered, dependency-respecting waves:
-- **Wave Ordering**: Foundation (Main store, sync queue, SDK policy) -> Preload bridge & IPC handlers -> React UI & styles.css -> Spec Update -> Audit.
+### 2. Plan Binding & Anti-Drift Invariant (CRITICAL)
+- **You MUST read the approved `implementation_plan.md` artifact using `view_file` before drafting tasks.**
+- You are strictly bound by the user-approved decisions, type interfaces, discriminated unions, and invariants established in that plan:
+  - Never alter approved data types into loose booleans or ambiguous representations.
+  - Never re-introduce options, behaviors, or automatic triggers that the user explicitly rejected or that Gate 1 struck out.
+  - Quote or reference the exact types and contracts from the plan in each wave task.
+
+### 3. Wave-Based Work Breakdown & Proportional Sizing
+Decompose the implementation plan into ordered, dependency-respecting waves. **Size waves proportionally to change scope**:
+- **Focused / Standard Tasks (2 Waves)**:
+  - **Wave 1: Implementation & Strict TDD** (Contracts, Main/Preload/Renderer changes, and all Negative tests).
+  - **Wave 2: Spec Updates, Holistic Audit & PR** (update `spec/` chapter, `spec.test.ts`, `check_steering.py`, full suite, branch push, and PR creation).
+- **Large / Multi-System Tasks (3+ Waves)**:
+  - Decompose into layered waves (e.g. Wave 1: Core/Store -> Wave 2: Agent/IPC -> Wave 3: UI -> Wave 4: Spec -> Wave 5: Audit) **ONLY** when deep cross-process architectural dependencies require staged review.
+  - Do NOT artificially fragment cohesive vertical slices into 4+ waves unless strictly necessary.
 - **Strict TDD Contract per Wave**: For each wave, define explicit Red-Green test requirements:
   - Acceptance criteria: what exact behavior must be pinned by tests.
   - **Mandatory Negative / Failure Tests**: To defeat "Happy-Path Test Syndrome", every wave must specify tests for boundary conditions, invalid inputs, or unhandled tool failures as surfaced by `sdd_task_critic`.
