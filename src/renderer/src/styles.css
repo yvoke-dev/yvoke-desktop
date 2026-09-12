@@ -1671,10 +1671,15 @@ h6 {
 .composer-input {
   position: relative;
   display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
 }
 
 .composer textarea {
-  width: 100%;
+  flex: 1 1 auto;
+  width: 0;
+  min-width: 0;
   resize: none;
   overflow-y: auto;
   border: none;
@@ -1701,9 +1706,27 @@ h6 {
 .composer-controls {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
   border-top: 1px solid var(--hairline);
   padding: 8px 10px;
+}
+
+.composer-controls-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.composer-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .composer-attach-btn {
@@ -1756,7 +1779,11 @@ h6 {
 }
 
 .composer-send {
-  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .active-playbook {

@@ -38,6 +38,13 @@ const THREAD: ThreadMeta = {
 
 const IDLE: LiveTurn = { running: false, liveText: '', liveThinking: '', blocks: [] };
 
+const ORDINARY: OrchestratorProfile = {
+  name: 'OIM',
+  orchestratorPlaybook: 'oim-orchestrator',
+  reviewerPlaybook: 'oim-orchestrator-reviewer',
+  specialistPlaybooks: [],
+};
+
 function settings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
     serverBaseUrl: 'https://example.invalid',
@@ -55,6 +62,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
 
 let validatePlaybook: Mock<(request: PlaybookValidationRequest) => Promise<PlaybookValidation>>;
 let onSend: Mock<(text: string, promptName?: string) => void>;
+let onInterrupt: Mock<() => void>;
 let writeText: Mock<(text: string) => Promise<void>>;
 let originalClipboard: PropertyDescriptor | undefined;
 
@@ -64,6 +72,8 @@ interface ChatOpts {
   messages?: ChatMessage[];
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
+  liveTurn?: LiveTurn;
+  onInterrupt?: () => void;
 }
 
 function chat(opts: ChatOpts = {}): React.JSX.Element {
@@ -74,9 +84,9 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       messages={opts.messages ?? []}
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
-      liveTurn={IDLE}
+      liveTurn={opts.liveTurn ?? IDLE}
       onSend={onSend}
-      onInterrupt={() => undefined}
+      onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
       onFeedback={async () => undefined}
     />
@@ -116,6 +126,7 @@ function ask(container: HTMLElement, question: string, playbookTitle?: string): 
 beforeEach(() => {
   validatePlaybook = vi.fn(async () => ({ plausible: true }) as PlaybookValidation);
   onSend = vi.fn<(text: string, promptName?: string) => void>();
+  onInterrupt = vi.fn<() => void>();
   (window as unknown as { api: unknown }).api = { validatePlaybook };
 
   // Stubbed per test and restored below: a leaked always-succeeding clipboard would stop a later
@@ -533,12 +544,6 @@ describe('playbook preflight', () => {
 });
 
 describe('the multi-agent profile selector', () => {
-  const ORDINARY: OrchestratorProfile = {
-    name: 'OIM',
-    orchestratorPlaybook: 'oim-orchestrator',
-    reviewerPlaybook: 'oim-orchestrator-reviewer',
-    specialistPlaybooks: [],
-  };
   const PROTOTYPE: OrchestratorProfile = { ...ORDINARY, name: 'OIM Browsing', prototype: true };
 
   /** The agent-mode select's option labels, in order. '' when the selector is not rendered. */
@@ -578,6 +583,230 @@ describe('the multi-agent profile selector', () => {
   it('renders no selector when every profile is a hidden prototype', () => {
     const { container } = renderChat({ profiles: [PROTOTYPE] });
     expect(options(container)).toEqual([]);
+  });
+});
+
+describe('composer redesign (inline send/stop and split toolbar)', () => {
+  describe('negative event tests', () => {
+    it('send button is disabled on empty string and clicking it does not call onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.disabled).toBe(true);
+      fireEvent.click(sendBtn);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('send button is disabled on whitespace-only draft and clicking it does not call onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '   \n\t  ' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.disabled).toBe(true);
+      fireEvent.click(sendBtn);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('pressing Enter in textarea with whitespace-only draft does not call onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '   \n\t  ' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('pressing Enter while liveTurn.running is true does not call onSend', () => {
+      const { container } = renderChat({
+        prompts: [],
+        liveTurn: { ...IDLE, running: true },
+      });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Valid question' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('pressing Enter while checking is true does not call onSend', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+      const { container } = renderChat();
+      ask(container, 'First question', 'Getting started');
+      await waitFor(() => expect(container.querySelector('.preflight-checking')).toBeTruthy());
+
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('pressing Enter while liveTurn.clarifyingQuestion is non-null does not call onSend', () => {
+      const { container } = renderChat({
+        prompts: [],
+        liveTurn: {
+          ...IDLE,
+          clarifyingQuestion: {
+            toolUseId: 'cq-1',
+            question: 'Which region?',
+            options: ['US', 'EU'],
+          },
+        },
+      });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Valid question' } });
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('mutual exclusivity tests', () => {
+    it('renders Stop button when liveTurn.running is true; clicking it calls onInterrupt and never onSend', () => {
+      const { container } = renderChat({
+        liveTurn: { ...IDLE, running: true },
+      });
+      const stopBtn = container.querySelector<HTMLButtonElement>('.danger.composer-send');
+      expect(stopBtn).not.toBeNull();
+      expect(stopBtn?.textContent).toContain('Stop');
+      fireEvent.click(stopBtn!);
+      expect(onInterrupt).toHaveBeenCalledTimes(1);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('renders Send button when liveTurn.running is false; clicking it with valid draft calls onSend and never onInterrupt', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Valid question' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.classList.contains('danger')).toBe(false);
+      expect(sendBtn.textContent).toContain('Send');
+      fireEvent.click(sendBtn);
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onInterrupt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('dynamic state transition test', () => {
+    it('with empty text, attaching an image enables Send; clicking .attachment-pill-remove returns Send to disabled === true', async () => {
+      const fakeBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const originalFileReader = window.FileReader;
+      class MockFileReader {
+        onload: any = null;
+        readAsDataURL() {
+          setTimeout(() => {
+            if (this.onload) {
+              this.onload({ target: { result: `data:image/png;base64,${fakeBase64}` } });
+            }
+          }, 10);
+        }
+        get result() {
+          return `data:image/png;base64,${fakeBase64}`;
+        }
+      }
+      window.FileReader = MockFileReader as any;
+
+      try {
+        const { container } = renderChat({ prompts: [] });
+        const textarea = container.querySelector('textarea')!;
+        const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+        expect(sendBtn.disabled).toBe(true);
+
+        const file = new File(['fake content'], 'diagram.png', { type: 'image/png' });
+        fireEvent.paste(textarea, {
+          clipboardData: {
+            items: [{ type: 'image/png', getAsFile: () => file }],
+          },
+        });
+
+        await waitFor(() => {
+          expect(container.querySelector('.composer-attachments')).not.toBeNull();
+        });
+        expect(sendBtn.disabled).toBe(false);
+
+        const removeBtn = container.querySelector('.attachment-pill-remove')!;
+        fireEvent.click(removeBtn);
+
+        expect(container.querySelector('.composer-attachments')).toBeNull();
+        expect(sendBtn.disabled).toBe(true);
+      } finally {
+        window.FileReader = originalFileReader;
+      }
+    });
+  });
+
+  describe('attach button boundary tests', () => {
+    it('.composer-attach-btn has disabled === true when liveTurn.running === true', () => {
+      const { container } = renderChat({
+        liveTurn: { ...IDLE, running: true },
+      });
+      const attachBtn = container.querySelector<HTMLButtonElement>('.composer-attach-btn')!;
+      expect(attachBtn.disabled).toBe(true);
+    });
+
+    it('.composer-attach-btn has disabled === true when checking === true', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+      const { container } = renderChat();
+      ask(container, 'Checking question', 'Getting started');
+      await waitFor(() => expect(container.querySelector('.preflight-checking')).toBeTruthy());
+
+      const attachBtn = container.querySelector<HTMLButtonElement>('.composer-attach-btn')!;
+      expect(attachBtn.disabled).toBe(true);
+    });
+  });
+
+  describe('strict structural pinning tests', () => {
+    it('textarea.parentElement and sendBtn.parentElement are both .composer-input, and .composer-controls has no .composer-send', () => {
+      const { container } = renderChat();
+      const textarea = container.querySelector('textarea')!;
+      const sendBtn = container.querySelector('.composer-send')!;
+      expect(textarea.parentElement?.classList.contains('composer-input')).toBe(true);
+      expect(sendBtn.parentElement?.classList.contains('composer-input')).toBe(true);
+      expect(container.querySelector('.composer-controls .composer-send')).toBeNull();
+    });
+
+    it('.composer-controls direct children are .composer-controls-left and .composer-controls-right', () => {
+      const { container } = renderChat();
+      const controls = container.querySelector('.composer-controls')!;
+      expect(controls.children.length).toBe(2);
+      expect(controls.children[0].classList.contains('composer-controls-left')).toBe(true);
+      expect(controls.children[1].classList.contains('composer-controls-right')).toBe(true);
+    });
+
+    it('.composer-controls-left contains .composer-attach-btn', () => {
+      const { container } = renderChat();
+      const left = container.querySelector('.composer-controls-left')!;
+      expect(left.querySelector('.composer-attach-btn')).not.toBeNull();
+    });
+
+    it('when a playbook is selected, .composer-controls-left contains .active-playbook', async () => {
+      const { container } = renderChat();
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.composer-controls-left .active-playbook')).not.toBeNull();
+      });
+    });
+
+    it('.composer-controls-right contains 2 selects by default (Model, Thinking Level) when profiles: []', () => {
+      const { container } = renderChat({ profiles: [] });
+      const right = container.querySelector('.composer-controls-right')!;
+      expect(right.querySelectorAll('select').length).toBe(2);
+    });
+
+    it('.composer-controls-right contains 3 selects (Profile, Model, Thinking Level) when profiles: [ORDINARY]', () => {
+      const { container } = renderChat({ profiles: [ORDINARY] });
+      const right = container.querySelector('.composer-controls-right')!;
+      expect(right.querySelectorAll('select').length).toBe(3);
+    });
+
+    it('.composer-controls-right contains 1 select and .orchestrator-hint when orchestratorActive is true', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: 'OIM' },
+        profiles: [ORDINARY],
+      });
+      const right = container.querySelector('.composer-controls-right')!;
+      expect(right.querySelectorAll('select').length).toBe(1);
+      expect(right.querySelector('.orchestrator-hint')).not.toBeNull();
+    });
   });
 });
 

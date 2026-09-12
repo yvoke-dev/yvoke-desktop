@@ -514,7 +514,7 @@ export function ChatView(props: {
 
   const submit = (): void => {
     const text = draft.trim();
-    if ((!text && attachments.length === 0) || liveTurn.running || checking) return;
+    if ((!text && attachments.length === 0) || liveTurn.running || checking || !!liveTurn.clarifyingQuestion) return;
     const prompt = activePrompt;
     // A single-agent answer runs under a playbook, so a question sent without one is refused
     // rather than quietly answered with the bare default tool set. Multi-agent conversations take
@@ -970,100 +970,6 @@ export function ChatView(props: {
               onPaste={handlePaste}
               rows={3}
             />
-          </div>
-          <div className="composer-controls">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept={ALLOWED_IMAGE_MEDIA_TYPES.join(',')}
-              multiple
-              style={{ display: 'none' }}
-              onChange={(e) => {
-                if (e.target.files && e.target.files.length > 0) {
-                  void processFiles(e.target.files);
-                  e.target.value = '';
-                }
-              }}
-            />
-            <button
-              type="button"
-              className="composer-attach-btn"
-              data-tip="Attach images"
-              aria-label="Attach images"
-              disabled={liveTurn.running || checking || attachments.length >= MAX_IMAGE_COUNT}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <PaperclipIcon size={14} />
-            </button>
-            {activePrompt && (
-              <span className="active-playbook" data-tip={activePrompt.description}>
-                <PlaybookIcon size={11} />
-                {activePrompt.title}
-                <button
-                  className="active-playbook-remove"
-                  data-tip="Remove playbook"
-                  disabled={checking}
-                  onClick={() => {
-                    setPromptOverride({ threadId: thread.id, prompt: null });
-                  }}
-                >
-                  <CloseIcon size={11} />
-                </button>
-              </span>
-            )}
-            {visibleProfiles.length > 0 && (
-              <select
-                className="composer-select"
-                value={thread.orchestratorProfile ?? ''}
-                data-tip="Multi-agent profile (orchestrator mode)"
-                aria-label="Agent mode"
-                // Switching to orchestrator mode mid-check would leave the verdict deciding the
-                // playbook for a turn that no longer takes one.
-                disabled={checking}
-                onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
-              >
-                <option value="">Single agent</option>
-                {visibleProfiles.map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.prototype ? `🧪 ${p.name}` : p.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {!orchestratorActive ? (
-              <>
-                <select
-                  className="composer-select"
-                  value={thread.model}
-                  data-tip="Model"
-                  aria-label="Model"
-                  onChange={(e) => onPatchThread({ model: e.target.value })}
-                >
-                  {settings.models.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  className="composer-select"
-                  value={thread.thinkingLevel}
-                  data-tip="Thinking effort"
-                  aria-label="Thinking effort"
-                  onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
-                >
-                  {THINKING_LEVELS.map((l) => (
-                    <option key={l} value={l}>
-                      thinking · {l}
-                    </option>
-                  ))}
-                </select>
-              </>
-            ) : (
-              <span className="orchestrator-hint" data-tip="Models are set per role in Settings → Agents">
-                specialists + reviewer
-              </span>
-            )}
             {liveTurn.running ? (
               <button className="danger composer-send" onClick={onInterrupt}>
                 <StopIcon size={10} />
@@ -1079,6 +985,104 @@ export function ChatView(props: {
                 <SendIcon size={12} />
               </button>
             )}
+          </div>
+          <div className="composer-controls">
+            <div className="composer-controls-left">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ALLOWED_IMAGE_MEDIA_TYPES.join(',')}
+                multiple
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) {
+                    void processFiles(e.target.files);
+                    e.target.value = '';
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="composer-attach-btn"
+                data-tip="Attach images"
+                aria-label="Attach images"
+                disabled={liveTurn.running || checking || attachments.length >= MAX_IMAGE_COUNT}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <PaperclipIcon size={14} />
+              </button>
+              {activePrompt && (
+                <span className="active-playbook" data-tip={activePrompt.description}>
+                  <PlaybookIcon size={11} />
+                  {activePrompt.title}
+                  <button
+                    className="active-playbook-remove"
+                    data-tip="Remove playbook"
+                    disabled={checking}
+                    onClick={() => {
+                      setPromptOverride({ threadId: thread.id, prompt: null });
+                    }}
+                  >
+                    <CloseIcon size={11} />
+                  </button>
+                </span>
+              )}
+            </div>
+            <div className="composer-controls-right">
+              {visibleProfiles.length > 0 && (
+                <select
+                  className="composer-select"
+                  value={thread.orchestratorProfile ?? ''}
+                  data-tip="Multi-agent profile (orchestrator mode)"
+                  aria-label="Agent mode"
+                  // Switching to orchestrator mode mid-check would leave the verdict deciding the
+                  // playbook for a turn that no longer takes one.
+                  disabled={checking}
+                  onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
+                >
+                  <option value="">Single agent</option>
+                  {visibleProfiles.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.prototype ? `🧪 ${p.name}` : p.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!orchestratorActive ? (
+                <>
+                  <select
+                    className="composer-select"
+                    value={thread.model}
+                    data-tip="Model"
+                    aria-label="Model"
+                    onChange={(e) => onPatchThread({ model: e.target.value })}
+                  >
+                    {settings.models.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="composer-select"
+                    value={thread.thinkingLevel}
+                    data-tip="Thinking effort"
+                    aria-label="Thinking effort"
+                    onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
+                  >
+                    {THINKING_LEVELS.map((l) => (
+                      <option key={l} value={l}>
+                        thinking · {l}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : (
+                <span className="orchestrator-hint" data-tip="Models are set per role in Settings → Agents">
+                  specialists + reviewer
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </footer>
