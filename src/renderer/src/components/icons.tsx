@@ -123,6 +123,16 @@ export const ChevronRightIcon = (p: IconProps): React.JSX.Element =>
 export const ChevronDownIcon = (p: IconProps): React.JSX.Element =>
   svg(<path d="m6 9 6 6 6-6" />, { strokeWidth: 2.5, ...p });
 
+export const MicIcon = (p: IconProps): React.JSX.Element =>
+  svg(
+    <>
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </>,
+    p,
+  );
+
 export const CopyIcon = (p: IconProps): React.JSX.Element =>
   svg(
     <>

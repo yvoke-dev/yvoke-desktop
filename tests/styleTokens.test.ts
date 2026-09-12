@@ -57,6 +57,14 @@ describe('theme tokens', () => {
     ];
     expect(palette.filter((t) => !darkTokens.has(t))).toEqual([]);
   });
+
+  it('mic-pulse keyframes use tokenized color-mix instead of hardcoded colors', () => {
+    const startIdx = CSS.indexOf('@keyframes mic-pulse');
+    const endIdx = CSS.indexOf('}', CSS.indexOf('100%', startIdx));
+    const micPulseBlock = CSS.slice(startIdx, endIdx + 1);
+    expect(micPulseBlock).toContain('var(--danger)');
+    expect(micPulseBlock).not.toMatch(/rgba\(/);
+  });
 });
 
 describe('button variant selectors', () => {

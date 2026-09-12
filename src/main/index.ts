@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, session, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
+import { registerMediaPermissions } from './mediaPermissions';
 import { IpcChannels } from '../shared/ipc';
 import { DEFAULT_APPEARANCE } from '../shared/types';
 import type {
@@ -314,6 +315,7 @@ if (!gotLock) {
         : null,
     });
     registerIpc(core, userDataDir);
+    registerMediaPermissions(session.defaultSession, appOrigin);
     // Resolve the theme BEFORE the window is constructed so its backgroundColor is already
     // right; doing it after would reintroduce the cold-start flash this is here to prevent.
     applyTheme(core.settings.get().appearance?.theme ?? DEFAULT_APPEARANCE.theme);

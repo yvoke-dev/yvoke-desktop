@@ -64,7 +64,8 @@ yvoke-desktop/
 │   │   │   └── SyncQueue.ts
 │   │   ├── AppCore.ts      # Core orchestrator wiring main-process modules
 │   │   ├── index.ts        # Electron entry point (window setup, IPC registry)
-│   │   └── log.ts          # Main process logger
+│   │   ├── log.ts          # Main process logger
+│   │   └── mediaPermissions.ts # Pure media permission validation and registration
 │   ├── preload/            # Preload script (context bridge to expose secure APIs)
 │   │   └── index.ts
 │   ├── renderer/           # Renderer process (HTML/JS/CSS React app)
@@ -78,7 +79,8 @@ yvoke-desktop/
 │   │       │   ├── SettingsView.tsx
 │   │       │   ├── StatusBanners.tsx
 │   │       │   ├── ThreadList.tsx
-│   │       │   └── ToolCallCard.tsx
+│   │       │   ├── ToolCallCard.tsx
+│   │       │   └── VoiceInput.tsx
 │   │       ├── App.tsx     # Main application container
 │   │       ├── env.d.ts    # Renderer-side typescript definitions
 │   │       ├── main.tsx    # React mount entry point

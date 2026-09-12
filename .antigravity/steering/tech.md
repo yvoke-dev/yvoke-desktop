@@ -27,7 +27,7 @@
 - **Multi-Environment TS**:
   - `tsconfig.node.json` targets Node environment (`src/main/`, `src/preload/`, `tests/`, `scripts/`).
   - `tsconfig.web.json` targets Browser DOM environment (`src/renderer/`).
-- **electron-builder.yml**: Configures macOS app builder and Windows NSIS installer properties.
+- **electron-builder.yml**: Configures macOS app builder (including NSMicrophoneUsageDescription entitlements for voice dictation) and Windows NSIS installer properties.
 
 ## Styling & CSS Architecture
 

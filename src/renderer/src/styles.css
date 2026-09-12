@@ -1671,10 +1671,13 @@ h6 {
 .composer-input {
   position: relative;
   display: flex;
+  align-items: center;
+  padding-right: 8px;
 }
 
 .composer textarea {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   resize: none;
   overflow-y: auto;
   border: none;
@@ -1701,62 +1704,162 @@ h6 {
 .composer-controls {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   border-top: 1px solid var(--hairline);
   padding: 8px 10px;
 }
 
-.composer-attach-btn {
+.composer-controls-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.composer-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.composer-voice-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.composer-voice-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 26px;
   height: 26px;
   border: 1px solid var(--line);
+  border-radius: 2px 0 0 2px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
   padding: 0;
-  border-radius: 2px;
   flex-shrink: 0;
 }
 
-.composer-attach-btn:hover:not(:disabled) {
+.composer-voice-btn:hover:not(:disabled) {
   border-color: var(--text-dim);
   color: var(--text);
 }
 
-.composer-attach-btn:disabled {
+.composer-voice-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-/* The active playbook, model and thinking level as a row of chips instead of three
-   web-default dropdowns. The selects underneath are still native — restyled, not replaced. */
-.composer-select {
-  appearance: none;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 20px 3px 7px;
-  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
-    linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position: right 9px center, right 5px center;
-  background-size: 4px 4px, 4px 4px;
-  background-repeat: no-repeat;
-  cursor: pointer;
+.composer-voice-btn.recording {
+  border-color: var(--danger-ink);
+  color: var(--danger-ink);
+  animation: mic-pulse 1.5s infinite;
 }
 
-.composer-select:hover {
+@keyframes mic-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 40%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 0%, transparent);
+  }
+}
+
+.composer-voice-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-left: none;
+  border-radius: 0 2px 2px 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.composer-voice-chevron:hover:not(:disabled) {
   border-color: var(--text-dim);
   color: var(--text);
 }
 
+.composer-voice-chevron:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.voice-settings-dropdown {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  background: var(--pane);
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  z-index: 20;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.voice-switch-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.voice-switch {
+  cursor: pointer;
+}
+
+.voice-error-banner {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+  border: 1px solid var(--danger-line);
+  padding: 4px 8px;
+  font-size: 11px;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.voice-error-dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: bold;
+  line-height: 1;
+}
+
 .composer-send {
-  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .active-playbook {
@@ -2655,7 +2758,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss) {
+button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.composer-voice-btn):not(.composer-voice-chevron):not(.composer-send):not(.voice-error-dismiss) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;

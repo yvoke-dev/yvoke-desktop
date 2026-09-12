@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type React from 'react';
-import { ChatView } from '../../src/renderer/src/components/ChatView';
+import { ChatView, appendTranscript } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
 import type {
   AppSettings,
@@ -58,12 +58,50 @@ let onSend: Mock<(text: string, promptName?: string) => void>;
 let writeText: Mock<(text: string) => Promise<void>>;
 let originalClipboard: PropertyDescriptor | undefined;
 
+class MockSpeechRecognition {
+  static instances: MockSpeechRecognition[] = [];
+  continuous = false;
+  interimResults = false;
+  lang = '';
+  onstart: (() => void) | null = null;
+  onend: (() => void) | null = null;
+  onerror: ((event: { error: string }) => void) | null = null;
+  onresult: ((event: any) => void) | null = null;
+  start = vi.fn(() => {});
+  stop = vi.fn(() => {});
+  abort = vi.fn(() => {});
+
+  constructor() {
+    MockSpeechRecognition.instances.push(this);
+  }
+
+  simulateStart(): void {
+    if (this.onstart) this.onstart();
+  }
+
+  simulateEnd(): void {
+    if (this.onend) this.onend();
+  }
+
+  simulateResult(transcript: string, isFinal = true): void {
+    if (this.onresult) {
+      this.onresult({
+        resultIndex: 0,
+        results: [Object.assign([{ transcript }], { isFinal })],
+      });
+    }
+  }
+}
+
 interface ChatOpts {
   thread?: ThreadMeta;
   settings?: AppSettings;
   messages?: ChatMessage[];
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
+  liveTurn?: LiveTurn;
+  onInterrupt?: () => void;
+  onSend?: (text: string, promptName?: string) => void;
 }
 
 function chat(opts: ChatOpts = {}): React.JSX.Element {
@@ -74,9 +112,9 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       messages={opts.messages ?? []}
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
-      liveTurn={IDLE}
-      onSend={onSend}
-      onInterrupt={() => undefined}
+      liveTurn={opts.liveTurn ?? IDLE}
+      onSend={opts.onSend ?? onSend}
+      onInterrupt={opts.onInterrupt ?? (() => undefined)}
       onPatchThread={() => undefined}
       onFeedback={async () => undefined}
     />
@@ -114,6 +152,9 @@ function ask(container: HTMLElement, question: string, playbookTitle?: string): 
 }
 
 beforeEach(() => {
+  MockSpeechRecognition.instances = [];
+  (window as any).SpeechRecognition = MockSpeechRecognition;
+  (window as any).webkitSpeechRecognition = MockSpeechRecognition;
   validatePlaybook = vi.fn(async () => ({ plausible: true }) as PlaybookValidation);
   onSend = vi.fn<(text: string, promptName?: string) => void>();
   (window as unknown as { api: unknown }).api = { validatePlaybook };
@@ -127,6 +168,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete (window as any).SpeechRecognition;
+  delete (window as any).webkitSpeechRecognition;
   if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
   else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
 });
@@ -580,4 +623,176 @@ describe('the multi-agent profile selector', () => {
     expect(options(container)).toEqual([]);
   });
 });
+
+describe('composer redesign and voice input integration', () => {
+  it('renders Send/Stop button inside .composer-input', () => {
+    const { container } = renderChat();
+    const composerInput = container.querySelector('.composer-input');
+    expect(composerInput).toBeTruthy();
+    expect(composerInput?.querySelector('.composer-send')).toBeTruthy();
+  });
+
+  it('organizes controls into .composer-controls-left and .composer-controls-right', () => {
+    const { container } = renderChat();
+    const leftControls = container.querySelector('.composer-controls-left');
+    const rightControls = container.querySelector('.composer-controls-right');
+    expect(leftControls).toBeTruthy();
+    expect(rightControls).toBeTruthy();
+    expect(leftControls?.querySelector('.composer-attach-btn')).toBeTruthy();
+    expect(leftControls?.querySelector('.composer-voice-group')).toBeTruthy();
+  });
+
+  describe('VoiceInput lockout matrix', () => {
+    it('disables VoiceInput when liveTurn.running is true', () => {
+      const { container } = renderChat({ liveTurn: { ...IDLE, running: true } });
+      const voiceBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      expect(voiceBtn).toBeTruthy();
+      expect(voiceBtn.disabled).toBe(true);
+    });
+
+    it('disables VoiceInput when liveTurn.clarifyingQuestion is active', () => {
+      const { container } = renderChat({
+        liveTurn: {
+          ...IDLE,
+          clarifyingQuestion: {
+            toolUseId: 'call_1',
+            question: 'Which database?',
+            options: [],
+          },
+        },
+      });
+      const voiceBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      expect(voiceBtn).toBeTruthy();
+      expect(voiceBtn.disabled).toBe(true);
+    });
+
+    it('disables VoiceInput when checking is true', async () => {
+      const { promise } = deferred();
+      validatePlaybook = vi.fn(() => promise);
+      const { container } = renderChat();
+
+      // Pick a playbook and submit to trigger preflight check
+      fireEvent.change(container.querySelector('textarea')!, { target: { value: '/schema' } });
+      fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+      fireEvent.change(container.querySelector('textarea')!, { target: { value: 'How does this work?' } });
+      fireEvent.click(container.querySelector('.composer-send')!);
+
+      const voiceBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      expect(voiceBtn.disabled).toBe(true);
+    });
+  });
+
+  describe('Send / Stop button transitions', () => {
+    it('disables Send button when draft is whitespace-only and attachments are empty', () => {
+      const { container } = renderChat();
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '   \n  \t ' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.disabled).toBe(true);
+    });
+
+    it('enables Send button when draft has non-whitespace text', () => {
+      const { container } = renderChat();
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Hello' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.disabled).toBe(false);
+    });
+
+    it('renders Stop button and triggers onInterrupt when liveTurn.running is true', () => {
+      const onInterrupt = vi.fn();
+      const { container } = renderChat({
+        liveTurn: { ...IDLE, running: true },
+        onInterrupt,
+      });
+      const stopBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(stopBtn.textContent).toContain('Stop');
+      expect(stopBtn.classList.contains('danger')).toBe(true);
+      fireEvent.click(stopBtn);
+      expect(onInterrupt).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('transcript boundary concatenation', () => {
+    it('concatenates transcripts according to boundary rules', () => {
+      expect(appendTranscript('', 'hello')).toBe('hello');
+      expect(appendTranscript('hello', 'world')).toBe('hello world');
+      expect(appendTranscript('hello  \n', 'world')).toBe('hello  \nworld');
+      expect(appendTranscript('test ', 'again')).toBe('test again');
+    });
+
+    it('updates textarea value when speech chunks arrive', () => {
+      const { container } = renderChat();
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.value).toBe('');
+
+      const micBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      fireEvent.click(micBtn);
+
+      const recognition = MockSpeechRecognition.instances[0];
+      act(() => {
+        recognition.simulateStart();
+        recognition.simulateResult('hello');
+      });
+      expect(textarea.value).toBe('hello');
+
+      act(() => {
+        recognition.simulateResult('world');
+      });
+      expect(textarea.value).toBe('hello world');
+    });
+  });
+
+  describe('dynamic textarea placeholder', () => {
+    it('displays "Listening... Speak now." when voice dictation is active', () => {
+      const { container } = renderChat();
+      const textarea = container.querySelector('textarea')!;
+      const micBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+
+      expect(textarea.placeholder).not.toBe('Listening... Speak now.');
+
+      fireEvent.click(micBtn);
+      const recognition = MockSpeechRecognition.instances[0];
+      act(() => {
+        recognition.simulateStart();
+      });
+
+      expect(textarea.placeholder).toBe('Listening... Speak now.');
+
+      act(() => {
+        recognition.simulateEnd();
+      });
+
+      expect(textarea.placeholder).not.toBe('Listening... Speak now.');
+    });
+  });
+
+  describe('VoiceInput conversation thread switching', () => {
+    it('unmounts VoiceInput and aborts active speech capture cleanly when thread.id changes', () => {
+      const threadA = { ...THREAD, id: 'thread-alpha' };
+      const threadB = { ...THREAD, id: 'thread-beta' };
+      const { rerender, container } = renderChat({ thread: threadA });
+
+      const micBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      fireEvent.click(micBtn);
+
+      const recognitionA = MockSpeechRecognition.instances[0];
+      act(() => {
+        recognitionA.simulateStart();
+      });
+      expect(micBtn.classList.contains('recording')).toBe(true);
+
+      // Switch threads
+      rerender(chat({ thread: threadB }));
+
+      // Old instance aborted on unmount
+      expect(recognitionA.abort).toHaveBeenCalled();
+
+      // New VoiceInput instance is mounted cleanly in idle state
+      const newMicBtn = container.querySelector<HTMLButtonElement>('.composer-voice-btn')!;
+      expect(newMicBtn.classList.contains('recording')).toBe(false);
+    });
+  });
+});
+
 

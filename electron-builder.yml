@@ -50,6 +50,8 @@ mac:
   signIgnore:
     - 'claude$'
   category: public.app-category.productivity
+  extendInfo:
+    NSMicrophoneUsageDescription: 'Yvoke requires microphone access for voice input and dictation.'
 win:
   target:
     - target: nsis
