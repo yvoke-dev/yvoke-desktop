@@ -538,7 +538,6 @@ export default function App(): React.JSX.Element {
             settings={settings}
             appVersion={appVersion}
             auth={auth}
-            serverReachable={serverReachable}
             onAuthChange={() => void refreshServer()}
             onSave={async (update) => {
               setSettings(await window.api.setSettings(update));

@@ -7,6 +7,7 @@ export const IpcChannels = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   appVersion: 'app:version',
+  appCheckUpdate: 'app:check-update',
   promptsList: 'prompts:list',
   playbookValidate: 'playbook:validate',
   orchestratorProfiles: 'orchestrator:profiles',

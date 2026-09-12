@@ -10,6 +10,7 @@ import type {
   RoleModelConfig,
   ThemePreference,
   ThinkingLevel,
+  UpdateCheckResult,
 } from '../../../shared/types';
 import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
@@ -23,17 +24,6 @@ const THINKING_SHORT: Record<ThinkingLevel, string> = { off: 'off', low: 'low', 
 const PANES = ['Server', 'Models', 'Agents', 'Web search', 'Appearance', 'Advanced', 'About'] as const;
 type Pane = (typeof PANES)[number];
 const SECONDARY_PANES: Pane[] = ['Advanced', 'About'];
-
-/** Host for the connection card. The field is edited character by character, so a partially
- *  typed URL is the normal case, not an error state. */
-function hostOf(base: string): string {
-  if (!base.trim()) return 'Not configured';
-  try {
-    return new URL(base).host;
-  } catch {
-    return base;
-  }
-}
 
 /** Parse a number field, keeping a cleared/garbage input at 0 rather than NaN. */
 function toNumber(value: string): number {
@@ -298,7 +288,6 @@ export interface SettingsViewProps {
   settings: AppSettings;
   appVersion?: string;
   auth?: AuthStatus | null;
-  serverReachable?: boolean;
   onAuthChange?: () => void;
   onSave: (update: Partial<AppSettings>) => Promise<void>;
   onClose: () => void;
@@ -312,6 +301,16 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const [verification, setVerification] = useState<AuthVerificationResponse | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const isMounted = React.useRef(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
 
   /**
    * A verdict describes the settings that were on disk when it was taken — main reads the *saved*
@@ -369,6 +368,30 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     }
   };
 
+  const handleCheckUpdates = async (): Promise<void> => {
+    if (checkingUpdates) return;
+    setCheckingUpdates(true);
+    setError(null);
+    try {
+      const res = await window.api.checkForUpdates();
+      if (isMounted.current) {
+        setUpdateResult(res);
+      }
+    } catch (err) {
+      if (isMounted.current) {
+        setUpdateResult({
+          status: 'error',
+          currentVersion: props.appVersion ?? '',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      if (isMounted.current) {
+        setCheckingUpdates(false);
+      }
+    }
+  };
+
   const handleSave = async (): Promise<void> => {
     setSaving(true);
     setError(null);
@@ -385,7 +408,6 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
 
   const caps = worstCase(orch);
   const signedIn = props.auth?.server.signedIn ?? false;
-  const reachable = props.serverReachable ?? true;
 
   return (
     <div className="settings-view">
@@ -406,17 +428,6 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
             </button>
           </React.Fragment>
         ))}
-        <div className="settings-connection">
-          <div className="settings-connection-label">Connection</div>
-          <div className="settings-connection-host">
-            <span className={`status-dot ${reachable && signedIn ? '' : 'off'}`} />
-            {hostOf(draft.serverBaseUrl)}
-          </div>
-          <div className="settings-connection-detail">
-            {draft.serverAuthMode === 'entra' ? 'Entra' : 'Dev token'} ·{' '}
-            {!reachable ? 'unreachable' : signedIn ? 'signed in' : 'not signed in'}
-          </div>
-        </div>
       </nav>
 
       <div className="settings-main">
@@ -927,7 +938,36 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
               </div>
               <dl className="about-grid">
                 <dt>Version</dt>
-                <dd>{props.appVersion ? `v${props.appVersion}` : '—'}</dd>
+                <dd className="about-version-row">
+                  <span>{props.appVersion ? `v${props.appVersion}` : '—'}</span>
+                  <button
+                    type="button"
+                    className="button secondary check-updates-btn"
+                    onClick={handleCheckUpdates}
+                    disabled={checkingUpdates}
+                  >
+                    {checkingUpdates ? 'Checking…' : 'Check for Updates'}
+                  </button>
+                  {updateResult && (
+                    updateResult.status === 'latest' ? (
+                      <span className="cred-badge verified">Latest version</span>
+                    ) : updateResult.status === 'update_available' ? (
+                      <a
+                        href={updateResult.releaseUrl || 'https://github.com/yvoke-dev/yvoke-desktop/releases/latest'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="cred-badge warning update-badge"
+                        title="Open latest release on GitHub"
+                      >
+                        Latest version is {updateResult.latestVersion}
+                      </a>
+                    ) : (
+                      <span className="cred-badge error" title={updateResult.message}>
+                        {updateResult.message || 'Check failed'}
+                      </span>
+                    )
+                  )}
+                </dd>
                 <dt>Server</dt>
                 <dd>{draft.serverBaseUrl || 'Not configured'}</dd>
                 <dt>Server sign-in</dt>
@@ -936,10 +976,10 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   {verification ? (
                     verification.server.status === 'ok' ? (
                       <>
-                        <span className="cred-badge verified">✓ Verified</span>
                         {(verification.server.account ?? props.auth?.server.account)
-                          ? ` ${verification.server.account ?? props.auth?.server.account}`
+                          ? `${verification.server.account ?? props.auth?.server.account} `
                           : ''}
+                        <span className="cred-badge verified">✓ Verified</span>
                       </>
                     ) : (() => {
                       const isWarning =
@@ -974,10 +1014,10 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   {verification ? (
                     verification.claude.status === 'ok' ? (
                       <>
-                        <span className="cred-badge verified">✓ Verified</span>
                         {(verification.claude.account ?? props.auth?.claudeAccount)
-                          ? ` ${verification.claude.account ?? props.auth?.claudeAccount}`
+                          ? `${verification.claude.account ?? props.auth?.claudeAccount} `
                           : ''}
+                        <span className="cred-badge verified">✓ Verified</span>
                       </>
                     ) : (() => {
                       const isWarning =
