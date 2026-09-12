@@ -107,13 +107,26 @@ export class ThreadStore {
     if (!existing) {
       return undefined;
     }
-    this.index[threadId] = { ...existing, ...update };
+    const updated = { ...existing, ...update };
+    if ('sessionId' in update && update.sessionId === undefined) {
+      delete updated.sessionId;
+    }
+    if ('sessionProfile' in update && update.sessionProfile === undefined) {
+      delete updated.sessionProfile;
+    }
+    if ('orchestratorProfile' in update && !update.orchestratorProfile) {
+      delete updated.orchestratorProfile;
+    }
+    this.index[threadId] = updated;
     this.persistIndex();
     return this.index[threadId];
   }
 
-  setSessionId(threadId: string, sessionId: string): void {
-    this.patch(threadId, { sessionId });
+  setSessionId(threadId: string, sessionId: string, profile?: string): void {
+    this.patch(threadId, {
+      sessionId: sessionId || undefined,
+      sessionProfile: profile || undefined,
+    });
   }
 
   setSyncState(threadId: string, syncState: SyncState): void {

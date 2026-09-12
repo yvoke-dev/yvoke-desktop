@@ -210,7 +210,7 @@ export interface AgentServiceDeps {
   mcpAuthProvider: McpAuthProvider;
   emit: (event: AgentEvent) => void;
   /** Called when a session id is (re)established for a thread, for resume persistence. */
-  onSessionId: (threadId: string, sessionId: string) => void;
+  onSessionId: (threadId: string, sessionId: string, profile?: string) => void;
   /** Called when a turn finishes so the store/sync layers can persist it. */
   onTurnPersist: (threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage) => void;
   sandboxDir: string;
@@ -471,8 +471,17 @@ export class AgentService {
   private async ensureSession(thread: ThreadMeta, playbookName?: string): Promise<ThreadSession> {
     const existing = this.sessions.get(thread.id);
     if (existing) {
-      existing.lastActiveAt = Date.now();
-      return existing;
+      if (existing.orchestratorProfile !== thread.orchestratorProfile || existing.playbookName !== playbookName) {
+        log(
+          'agent',
+          `Session config changed (playbook "${existing.playbookName}"→"${playbookName}", ` +
+            `profile "${existing.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
+        );
+        this.closeThread(thread.id);
+      } else {
+        existing.lastActiveAt = Date.now();
+        return existing;
+      }
     }
 
     const MAX_WARM_SESSIONS = 3;
@@ -565,6 +574,22 @@ export class AgentService {
     const effectiveThinking =
       orchestrator && orchCfg ? orchCfg.orchestrator.thinkingLevel : thread.thinkingLevel;
 
+    const canResume =
+      Boolean(thread.sessionId) &&
+      (thread.sessionProfile === thread.orchestratorProfile ||
+        (!thread.sessionProfile && !thread.orchestratorProfile));
+
+    if (!canResume && thread.sessionId) {
+      log(
+        'agent',
+        `Mode changed: session ${thread.sessionId} was established under profile "${thread.sessionProfile ?? 'single-agent'}" ` +
+          `but thread is now "${thread.orchestratorProfile ?? 'single-agent'}". Clearing incompatible session id.`,
+      );
+      thread.sessionId = undefined;
+      thread.sessionProfile = undefined;
+      this.deps.onSessionId(thread.id, '', undefined);
+    }
+
     const options: Options = {
       systemPrompt: orchestrator ? '' : systemPrompt,
       mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider),
@@ -591,14 +616,14 @@ export class AgentService {
       env: debugEnv(),
       ...(claudeBinary ? { pathToClaudeCodeExecutable: claudeBinary } : {}),
       ...(orchestrator ? { agent: ORCHESTRATOR_AGENT, agents: orchestrator.agents, forwardSubagentText: true } : {}),
-      ...(thread.sessionId ? { resume: thread.sessionId } : {}),
+      ...(canResume ? { resume: thread.sessionId } : {}),
     };
 
     log(
       'agent',
       `new session thread=${thread.id} model=${effectiveModel} thinking=${effectiveThinking}` +
         (orchestrator ? ` orchestrator=${thread.orchestratorProfile}` : '') +
-        (thread.sessionId ? ` resume=${thread.sessionId}` : ' (fresh)'),
+        (canResume ? ` resume=${thread.sessionId}` : ' (fresh)'),
     );
     const q = query({ prompt: queue, options });
     const session: ThreadSession = {
@@ -700,7 +725,7 @@ export class AgentService {
           if (kbTools.length > 0) {
             log('mcp', `agent knowledge-base tools: ${kbTools.join(', ')}`);
           }
-          this.deps.onSessionId(threadId, message.session_id);
+          this.deps.onSessionId(threadId, message.session_id, session.orchestratorProfile);
         }
         if (message.type === 'result') {
           this.completeTurn(threadId, session, message, startedAt);

@@ -28,6 +28,11 @@ profiles and the playbooks; there is no way to build one from the app.
 - **Choosing a profile takes over the conversation.** The playbook picker, the active playbook badge,
   the model selector and the thinking selector all disappear, because the profile and Settings decide
   them. A message sent in a multi-agent conversation carries no playbook and is not preflighted.
+- **Switching between single-agent and multi-agent modes (or between profiles) starts a fresh session.**
+  An existing single-agent session cannot be resumed by the multi-agent orchestrator (nor vice versa),
+  as their agent topologies, roles and tool permissions are mutually incompatible. Past messages remain
+  visible in the conversation log, but the underlying agent subprocess runs fresh under the selected
+  profile.
 - **The lead never touches the knowledge base.** It can delegate and it can ask the user a clarifying
   question; everything else is somebody else's job.
 - **The lead and the specialists run under the base instructions; the reviewer does not.** The lead
@@ -124,6 +129,9 @@ profiles and the playbooks; there is no way to build one from the app.
 - **The code's own fallback and the shipped configuration disagree** about the specialist's thinking
   level — medium in one, high in the other. Which one applies depends on whether the deployment's
   settings file reached the machine.
+- **Mode switching does not carry model-level session context across boundaries.** When switching
+  between single agent and an orchestrator profile, or switching between different profiles, the new
+  turn does not resume the prior mode's model session on disk.
 
 ## Not supported
 

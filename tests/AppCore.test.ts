@@ -148,3 +148,124 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
     );
   });
 });
+
+describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-mode-boundary-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(() => {
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('clears sessionId and closes agent session when switching from single-agent to multi-agent', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-1',
+      sessionId: 'session-single-1',
+      title: 'Switch Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.sessionId).toBeUndefined();
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+  });
+
+  it('clears sessionId and closes agent session when switching from multi-agent to single-agent', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-2',
+      sessionId: 'session-orch-1',
+      sessionProfile: 'OIM',
+      title: 'Switch Test 2',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: undefined });
+
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.sessionId).toBeUndefined();
+    expect(patched?.orchestratorProfile).toBeUndefined();
+    expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+  });
+
+  it('clears sessionId and closes agent session when switching between different orchestrator profiles', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-3',
+      sessionId: 'session-orch-oim',
+      sessionProfile: 'OIM',
+      title: 'Switch Test 3',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'Security' });
+
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.sessionId).toBeUndefined();
+    expect(patched?.orchestratorProfile).toBe('Security');
+    expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+  });
+
+  it('preserves sessionId and does not close agent session when patching non-profile fields', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-4',
+      sessionId: 'session-keep-1',
+      title: 'Preserve Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { model: 'opus', title: 'Updated Title' });
+
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(patched?.sessionId).toBe('session-keep-1');
+    expect(patched?.model).toBe('opus');
+    expect(patched?.title).toBe('Updated Title');
+    expect(appCore.threads.get(thread.id)?.sessionId).toBe('session-keep-1');
+  });
+});
+

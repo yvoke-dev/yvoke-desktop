@@ -183,7 +183,7 @@ export class AppCore {
       getSettings: () => this.settings.get(),
       mcpAuthProvider,
       emit: deps.emitAgentEvent,
-      onSessionId: (threadId, sessionId) => this.threads.setSessionId(threadId, sessionId),
+      onSessionId: (threadId, sessionId, profile) => this.threads.setSessionId(threadId, sessionId, profile),
       onTurnPersist: (threadId, userMessage, assistantMessage) =>
         this.persistTurn(threadId, userMessage, assistantMessage),
       sandboxDir: sandboxDirFor(deps.userDataDir),
@@ -437,9 +437,16 @@ export class AppCore {
       for (const c of conversations) {
         const existing = this.threads.get(c.id);
         const settings = this.settings.get();
+        const orchestratorProfile =
+          existing?.orchestratorProfile ??
+          (c.settings?.['orchestrator-profile'] ? String(c.settings['orchestrator-profile']) : undefined);
+        const modeMatches =
+          existing?.sessionProfile === orchestratorProfile ||
+          (!existing?.sessionProfile && !orchestratorProfile);
         this.threads.upsert({
           id: c.id,
-          sessionId: existing?.sessionId,
+          sessionId: modeMatches ? existing?.sessionId : undefined,
+          sessionProfile: modeMatches ? existing?.sessionProfile : undefined,
           title: c.title,
           model: existing?.model ?? String(c.settings?.model ?? settings.defaultModel),
           thinkingLevel: existing?.thinkingLevel ?? (String(c.settings?.['thinking-level'] ?? c.settings?.thinkingLevel ?? settings.defaultThinkingLevel) as ThinkingLevel),
@@ -447,9 +454,7 @@ export class AppCore {
           updatedAt: c.updatedAt ?? existing?.updatedAt ?? c.createdAt,
           totals: existing?.totals ?? ThreadStore.emptyTotals(),
           syncState: existing?.syncState ?? 'synced',
-          orchestratorProfile:
-            existing?.orchestratorProfile ??
-            (c.settings?.['orchestrator-profile'] ? String(c.settings['orchestrator-profile']) : undefined),
+          orchestratorProfile,
         });
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
@@ -502,9 +507,28 @@ export class AppCore {
     if (update.model !== undefined) sanitized.model = update.model;
     if (update.thinkingLevel !== undefined) sanitized.thinkingLevel = update.thinkingLevel;
     if (update.title !== undefined) sanitized.title = update.title;
-    if (update.orchestratorProfile !== undefined) sanitized.orchestratorProfile = update.orchestratorProfile;
+    if ('orchestratorProfile' in update) {
+      sanitized.orchestratorProfile = update.orchestratorProfile || undefined;
+    }
     update = sanitized;
-    const patched = this.threads.patch(threadId, sanitized);
+
+    const existing = this.threads.get(threadId);
+    const modeChanged =
+      'orchestratorProfile' in update &&
+      existing !== undefined &&
+      (sanitized.orchestratorProfile || undefined) !== (existing.orchestratorProfile || undefined);
+
+    if (modeChanged) {
+      this.agent.closeThread(threadId);
+    }
+
+    const patchPayload: Partial<ThreadMeta> = { ...sanitized };
+    if (modeChanged) {
+      patchPayload.sessionId = undefined;
+      patchPayload.sessionProfile = undefined;
+    }
+
+    const patched = this.threads.patch(threadId, patchPayload);
     if (patched) {
       // Undefined means "this patch is not about the title" — see updateConversation.
       const title = update.title;
@@ -515,8 +539,8 @@ export class AppCore {
         settingsPayload['thinking-level'] = update.thinkingLevel;
       }
       // Mirror the web ConversationSetting key so both surfaces share the selection.
-      if (update.orchestratorProfile !== undefined) {
-        settingsPayload['orchestrator-profile'] = update.orchestratorProfile;
+      if ('orchestratorProfile' in update) {
+        settingsPayload['orchestrator-profile'] = sanitized.orchestratorProfile ?? '';
       }
       void this.syncClient.updateConversation(threadId, title, settingsPayload).catch(() => undefined);
     }

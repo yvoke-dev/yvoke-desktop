@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, AppSettings, McpPromptInfo, ThreadMeta } from '../src/shared/types';
+import type { AgentEvent, AppSettings, McpPromptInfo, OrchestratorProfile, ThreadMeta } from '../src/shared/types';
 
 /**
  * Session lifecycle, against a stand-in for the Agent SDK.
@@ -114,6 +114,13 @@ const TEXT: Record<string, string> = {
   'oim-customers': 'CUSTOMERS PLAYBOOK INSTRUCTIONS',
 };
 
+const OIM_PROFILE: OrchestratorProfile = {
+  name: 'OIM',
+  orchestratorPlaybook: 'oim-schema',
+  reviewerPlaybook: 'oim-customers',
+  specialistPlaybooks: ['oim-schema'],
+};
+
 function settings(): AppSettings {
   return {
     serverBaseUrl: 'https://example.invalid',
@@ -125,6 +132,16 @@ function settings(): AppSettings {
     defaultThinkingLevel: 'medium',
     webSearch: { enabled: false, allowedDomains: [] },
     maxTurns: 25,
+    orchestrator: {
+      orchestrator: { model: 'sonnet', thinkingLevel: 'medium' },
+      specialist: { model: 'sonnet', thinkingLevel: 'low' },
+      reviewer: { model: 'sonnet', thinkingLevel: 'low' },
+      maxReviewRounds: 2,
+      maxSpecialistCalls: 5,
+      orchestratorMaxTurns: 20,
+      specialistMaxTurns: 10,
+      requireReview: false,
+    },
   } as AppSettings;
 }
 
@@ -150,14 +167,18 @@ function makeService(meta: ThreadMeta) {
     getSettings: settings,
     mcpAuthProvider: { headers: async () => ({}) } as never,
     emit: (e) => events.push(e),
-    onSessionId: (_threadId, sessionId) => {
+    onSessionId: (_threadId, sessionId, profile) => {
       meta.sessionId = sessionId;
+      meta.sessionProfile = profile;
     },
     onTurnPersist: () => undefined,
     sandboxDir,
     syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
-    mcpPrompts: { list: async () => PLAYBOOKS } as never,
-    getOrchestratorProfile: async () => undefined,
+    mcpPrompts: {
+      list: async () => PLAYBOOKS,
+      getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+    } as never,
+    getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
   });
 }
 
@@ -263,6 +284,56 @@ describe('playbook injection across a session', () => {
       await new Promise((r) => setTimeout(r, 0));
     }
     expect(h.sessions[0].pushed).toEqual(['Bare question']);
+    svc.closeAll();
+  });
+
+  it('starts a fresh session (omits resume) when switching from single-agent to orchestrator mode', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    // Turn 1: Single agent turn
+    await ask(svc, meta, 'First question', 'oim-schema');
+    expect(meta.sessionId).toBe('sdk-session-1');
+    expect(h.sessions[0].options.resume).toBeUndefined();
+
+    // Switch thread to multi-agent
+    meta.orchestratorProfile = 'OIM';
+
+    // Turn 2: Multi-agent turn
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Multi-agent question', {});
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(h.sessions).toHaveLength(2);
+    // Invariant: Turn 2 MUST NOT resume the single-agent session!
+    expect(h.sessions[1].options.resume).toBeUndefined();
+    expect(meta.sessionId).toBe('sdk-session-2');
+    expect(meta.sessionProfile).toBe('OIM');
+    svc.closeAll();
+  });
+
+  it('starts a fresh session (omits resume) when cold resuming a thread whose sessionId was single-agent but profile is orchestrator', async () => {
+    const meta = thread();
+    meta.sessionId = 'old-single-session';
+    meta.sessionProfile = undefined; // established under single agent
+    meta.orchestratorProfile = 'OIM'; // now in orchestrator mode
+
+    const svc = makeService(meta);
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Cold start multi-agent question', {});
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.resume).toBeUndefined();
+    expect(meta.sessionId).toBe('sdk-session-1');
+    expect(meta.sessionProfile).toBe('OIM');
     svc.closeAll();
   });
 });

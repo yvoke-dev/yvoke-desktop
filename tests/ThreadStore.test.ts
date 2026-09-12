@@ -42,6 +42,17 @@ describe('ThreadStore', () => {
     expect(reopened.get('t1')?.sessionId).toBe('session-abc');
   });
 
+  it('tracks sessionProfile and allows clearing sessionId via patch', () => {
+    store.upsert(meta('t1'));
+    store.setSessionId('t1', 'session-abc', 'OIM');
+    expect(store.get('t1')?.sessionId).toBe('session-abc');
+    expect(store.get('t1')?.sessionProfile).toBe('OIM');
+
+    store.patch('t1', { sessionId: undefined, sessionProfile: undefined });
+    expect(store.get('t1')?.sessionId).toBeUndefined();
+    expect(store.get('t1')?.sessionProfile).toBeUndefined();
+  });
+
   it('appends messages and accumulates usage totals', async () => {
     store.upsert(meta('t1'));
     await store.appendMessages('t1', [
