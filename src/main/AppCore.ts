@@ -610,7 +610,7 @@ export class AppCore {
       thinkingOverride: request.thinkingOverride,
       injectBefore,
       playbook,
-      playbookName: request.promptName,
+      playbookName: playbook,
       images: sanitizedImages,
     });
   }

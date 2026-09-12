@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type React from 'react';
+import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
 import type {
@@ -833,6 +833,323 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       const right = container.querySelector('.composer-controls-right')!;
       expect(right.querySelectorAll('select').length).toBe(1);
       expect(right.querySelector('.orchestrator-hint')).not.toBeNull();
+    });
+  });
+
+  describe('multi-agent playbook suppression and isolation', () => {
+    function StatefulChatView(opts: ChatOpts = {}) {
+      const [thread, setThread] = useState<ThreadMeta>(opts.thread ?? THREAD);
+      return (
+        <ChatView
+          {...opts}
+          thread={thread}
+          settings={opts.settings ?? settings()}
+          messages={opts.messages ?? []}
+          prompts={opts.prompts ?? PROMPTS}
+          profiles={opts.profiles ?? [ORDINARY]}
+          liveTurn={opts.liveTurn ?? IDLE}
+          onSend={onSend}
+          onInterrupt={opts.onInterrupt ?? onInterrupt}
+          onPatchThread={(patch) => setThread((prev) => ({ ...prev, ...patch }))}
+          onFeedback={async () => undefined}
+        />
+      );
+    }
+
+    it('Test 1.1 (Playbook Badge Suppression): In single-agent mode with an active or draft playbook override, selecting an orchestrator profile hides the playbook badge', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.active-playbook')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      expect(container.querySelector('.active-playbook')).toBeNull();
+      expect(container.querySelector('.chat-composer-prompt')).toBeNull();
+    });
+
+    it('Test 1.2 (Draft Playbook Restoration): In a stateful harness, setting a draft playbook override, switching dropdown to an orchestrator profile, then switching back to Single agent restores the draft playbook chip', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+      expect(container.querySelector('.active-playbook')).toBeNull();
+
+      fireEvent.change(select, { target: { value: '' } });
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    });
+
+    it('Test 1.3a (Playbook Notice Dismissal & Empty Container Prevention): With Playbook required refusal active, switching to orchestrator profile dismisses the card and does not leave an empty .chat-notices container', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Question without playbook' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      fireEvent.click(sendBtn);
+
+      expect(container.querySelector('.playbook-required')).not.toBeNull();
+      expect(container.querySelector('.chat-notices')).not.toBeNull();
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      expect(container.querySelector('.playbook-required')).toBeNull();
+      expect(container.querySelector('.chat-notices')).toBeNull();
+    });
+
+    it('Test 1.3a (preflight card): With preflight recommendation card standing, switching to orchestrator profile dismisses the card and does not leave an empty .chat-notices container', async () => {
+      validatePlaybook.mockResolvedValueOnce({
+        plausible: false,
+        reason: 'Better on schema',
+        suggestedPlaybookName: 'oim-schema',
+        suggestedPlaybookTitle: 'Schema',
+      });
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      ask(container, 'Schema question', 'Getting started');
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-card')).not.toBeNull();
+      });
+      expect(container.querySelector('.chat-notices')).not.toBeNull();
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      expect(container.querySelector('.preflight-card')).toBeNull();
+      expect(container.querySelector('.chat-notices')).toBeNull();
+    });
+
+    it('Test 1.3b (Co-existing Notice Isolation): Switching to an orchestrator profile dismisses the playbook card but keeps the attachment error mounted and visible in .chat-notices', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const textarea = container.querySelector('textarea')!;
+
+      const invalidFile = new File(['bad'], 'document.bmp', { type: 'image/bmp' });
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          items: [{ type: 'image/bmp', getAsFile: () => invalidFile }],
+        },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('.chat-notices .banner.error')).not.toBeNull();
+      });
+
+      fireEvent.change(textarea, { target: { value: 'Question with attachment error' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      fireEvent.click(sendBtn);
+
+      expect(container.querySelector('.playbook-required')).not.toBeNull();
+      expect(container.querySelector('.chat-notices .banner.error')).not.toBeNull();
+      expect(container.querySelector('.chat-notices')).not.toBeNull();
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      // Playbook-required card must be dismissed
+      expect(container.querySelector('.playbook-required')).toBeNull();
+      // Attachment error notice remains mounted and visible in .chat-notices
+      expect(container.querySelector('.chat-notices .banner.error')).not.toBeNull();
+      expect(container.querySelector('.chat-notices .banner.error')?.textContent).toContain('Unsupported image type');
+      expect(container.querySelector('.chat-notices')).not.toBeNull();
+    });
+
+    it('Test 1.4 (Multi-Agent Send & Override Retirement): In multi-agent mode with a suppressed draft override, clicking Send calls onSend(text, undefined, toSend) and retires the draft override', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.active-playbook')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+      expect(container.querySelector('.active-playbook')).toBeNull();
+
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Investigate system alert' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      fireEvent.click(sendBtn);
+
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Investigate system alert', undefined);
+
+      fireEvent.change(select, { target: { value: '' } });
+      expect(container.querySelector('.active-playbook')).toBeNull();
+    });
+
+    it('Test 1.5 (Sticky Continuity): In a thread with single-agent history (lastUserPlaybook), switching back to Single agent after sending a multi-agent message restores lastUserPlaybook', async () => {
+      const prevMessages: ChatMessage[] = [
+        {
+          localId: 'm1',
+          role: 'user',
+          content: 'Previous single agent question',
+          playbook: 'oim-schema',
+          createdAt: '2026-08-01T10:00:00.000Z',
+        },
+        {
+          localId: 'm2',
+          role: 'assistant',
+          content: 'Single agent answer',
+          createdAt: '2026-08-01T10:01:00.000Z',
+        },
+      ];
+
+      const { container } = render(
+        <StatefulChatView
+          messages={prevMessages}
+          profiles={[ORDINARY]}
+          thread={{ ...THREAD, orchestratorProfile: 'OIM' }}
+        />,
+      );
+
+      expect(container.querySelector('.active-playbook')).toBeNull();
+
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Multi agent question' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      fireEvent.click(sendBtn);
+
+      expect(onSend).toHaveBeenCalledWith('Multi agent question', undefined);
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: '' } });
+
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    });
+
+    it('Test 1.6a (Guarded Preflight Card): If a preflight check resolves with plausible: false after mode switched to multi-agent, no recommendation card is rendered and no empty .chat-notices strip is mounted', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      ask(container, 'Check question', 'Getting started');
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-checking')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      act(() => {
+        pending.settle({
+          plausible: false,
+          reason: 'Off topic',
+          suggestedPlaybookName: 'oim-schema',
+          suggestedPlaybookTitle: 'Schema',
+        });
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-checking')).toBeNull();
+      });
+
+      expect(container.querySelector('.preflight-card')).toBeNull();
+      expect(container.querySelector('.chat-notices')).toBeNull();
+    });
+
+    it('Test 1.6b (Late Preflight Resolution Race - Plausible): If an in-flight preflight check resolves with plausible: true after user switches mode to multi-agent, the resolution is discarded: onSend is NOT called', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      ask(container, 'Check question', 'Getting started');
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-checking')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      act(() => {
+        pending.settle({ plausible: true });
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-checking')).toBeNull();
+      });
+
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('Test 1.8 (Backspace Safety): Pressing Backspace on an empty composer in multi-agent mode does not clear the suppressed draft override', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.active-playbook')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+      expect(container.querySelector('.active-playbook')).toBeNull();
+
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.value).toBe('');
+      fireEvent.keyDown(textarea, { key: 'Backspace' });
+
+      fireEvent.change(select, { target: { value: '' } });
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    });
+
+    it('Test 1.8 (Cmd+Enter / Ctrl+Enter send in multi-agent): Triggers clean send with promptName = undefined and retires draft override', async () => {
+      const { container } = render(<StatefulChatView profiles={[ORDINARY]} />);
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        expect(container.querySelector('.active-playbook')).not.toBeNull();
+      });
+
+      const select = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]')!;
+      fireEvent.change(select, { target: { value: 'OIM' } });
+
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Keyboard shortcut submission' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Keyboard shortcut submission', undefined);
+
+      fireEvent.change(select, { target: { value: '' } });
+      expect(container.querySelector('.active-playbook')).toBeNull();
+    });
+
+    it('Test 1.9 (Boundary: Empty Prompts Catalogue Resilience): When prompts: [], typing a question and submitting in multi-agent mode succeeds without refusal or error', async () => {
+      const { container } = render(
+        <StatefulChatView
+          prompts={[]}
+          profiles={[ORDINARY]}
+          thread={{ ...THREAD, orchestratorProfile: 'OIM' }}
+        />,
+      );
+
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Multi-agent question with empty catalogue' } });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.disabled).toBe(false);
+      fireEvent.click(sendBtn);
+
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Multi-agent question with empty catalogue', undefined);
+      expect(container.querySelector('.playbook-required')).toBeNull();
     });
   });
 });
