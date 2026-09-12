@@ -11,17 +11,18 @@ behind it, and the work that produced it can be opened and read.
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
 | **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
-| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
+| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook. |
+| **Attach images** | Attach up to five images (PNG, JPEG, WebP, GIF) using the attach button on the left of the toolbar, drag-and-drop, or clipboard paste. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options, and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
 | **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
-| **Stop a running answer** | The send button becomes *Stop* while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
+| **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
 | **Copy an answer** | A copy button on every answer copies the answer prose — not the reasoning, the tool calls or the trace. |
-| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit beside the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
+| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the bottom toolbar below the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
 | **Search conversations** | The sidebar search matches conversation titles *and* the text of messages, showing the matching excerpt with the terms highlighted under the row. |
 | **Browse by age** | Conversations are grouped *Today · This Week · Last Week · Earlier*, newest first, each row carrying a relative time that loses precision as it ages — *just now*, *12m ago*, *3h ago*, *Yesterday 14:22*, a weekday, then a date. Only the newest group is open to begin with; a section the reader opens or shuts stays that way. Weeks break where the reader's locale says they do. |
 | **Delete a conversation** | Confirmed, then permanent — on the server as well as here. |
@@ -54,6 +55,7 @@ behind it, and the work that produced it can be opened and read.
   tool and did no visible reasoning has no bar at all, and its token counts move into the footer.
 - **A question is displayed exactly as typed.** Only answers are rendered as formatted text; a
   question containing code, markdown or a citation-shaped token appears verbatim.
+- **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
   the same act. So a failed turn leaves no record of having been asked. The question stays on screen
@@ -187,10 +189,11 @@ behind it, and the work that produced it can be opened and read.
 - **The app defines no menu of its own, so the platform's stock one ships** — including *Reload*,
   *Force Reload* and *Toggle Developer Tools* in a released build, on their usual shortcuts. Reloading
   mid-answer throws away the live view of a turn that keeps running without it.
-- **The app's own keyboard support stops at the composer.** Enter, Shift+Enter,
-  Backspace-clears-playbook, Escape and the arrow keys inside the autocomplete are the whole set —
-  and Escape there clears the entire draft rather than just closing the list. There is no shortcut for
-  new conversation, search, settings, delete or stop.
+- **The app's own keyboard support stops at the composer.** Enter (insert newline),
+  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook, Escape and the arrow
+  keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
+  than just closing the list. There is no shortcut for new conversation, search, settings, delete or
+  stop.
 
 ## Not supported
 
@@ -203,7 +206,8 @@ behind it, and the work that produced it can be opened and read.
 - Removing a rating once given. The two thumbs toggle between them; there is no third state.
 - Folders, tags, pinning, favourites or archiving. Grouping by age is the only structure.
 - Sharing a conversation, or opening one somebody else shared. Both are web-only.
-- Attaching a file, image or screenshot to a question.
+- Non-image file attachments (PDF, DOCX, CSV, audio, etc.).
+- Audio and voice input (dictation, recording); speech-to-text; text-to-speech audio playback of answers. (OS-level native keyboard dictation remains supported through standard text input.)
 - Exporting or printing a conversation. Copy, one answer at a time and prose only, is the whole of it.
 - Jumping from a search result to the message that matched, or searching inside an open conversation.
 - Setting the thinking effort for a single message. The contract carries a per-message override, and
