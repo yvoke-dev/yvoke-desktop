@@ -11,17 +11,18 @@ behind it, and the work that produced it can be opened and read.
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
 | **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
-| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
+| **Ask by typing** | Ask by typing or voice dictation — the composer starts three rows high and grows with the text to a maximum of nine. Enter sends, Shift+Enter adds a line. Tap the microphone icon or hold to record to transcribe spoken questions directly into the prompt draft. |
+| **Attach images** | The paperclip button on the left of the composer toolbar attaches images to a question, or paste and drop images directly into the composer, with thumbnail previews above the input. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options, and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
 | **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
-| **Stop a running answer** | The send button becomes *Stop* while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
+| **Stop a running answer** | The Send button (↵) inside the input container dynamically switches to Stop (■) while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
 | **Copy an answer** | A copy button on every answer copies the answer prose — not the reasoning, the tool calls or the trace. |
-| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit beside the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
+| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the composer toolbar. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
 | **Search conversations** | The sidebar search matches conversation titles *and* the text of messages, showing the matching excerpt with the terms highlighted under the row. |
 | **Browse by age** | Conversations are grouped *Today · This Week · Last Week · Earlier*, newest first, each row carrying a relative time that loses precision as it ages — *just now*, *12m ago*, *3h ago*, *Yesterday 14:22*, a weekday, then a date. Only the newest group is open to begin with; a section the reader opens or shuts stays that way. Weeks break where the reader's locale says they do. |
 | **Delete a conversation** | Confirmed, then permanent — on the server as well as here. |
@@ -77,6 +78,16 @@ behind it, and the work that produced it can be opened and read.
 - **A recommendation belongs to the composer, not the conversation.** Switching conversations retires
   the check and clears the card, and a verdict that arrives late for a conversation the user has left
   is dropped rather than applied.
+- **The composer layout cleanly separates drafting from conversation settings.** Inside `.composer-input`,
+  the dual action button (Send ↵ / Stop ■) is vertically centered on the right, dynamically toggling
+  between Send and Stop while a turn runs. Below the input, the toolbar is cleanly partitioned into input
+  attachments (Attach, Voice, Playbook chip) on the left and conversation settings (Profile, Model, Thinking)
+  on the right.
+- **Voice dictation transcribes spoken questions directly into the prompt draft.** The voice input control
+  uses the Chromium Web Speech API (`webkitSpeechRecognition`) and respects the system language or English.
+  Spoken transcript chunks append seamlessly with space normalization. The user's hold-to-record toggle
+  preference is preserved in local storage across sessions. When microphone access is denied or audio capture
+  hardware is missing, non-blocking banners display above the control with clear diagnostics and dismiss actions.
 - **A source marker is a bare id, shown short.** The server instructs the assistant to write the
   source's id in brackets — `[274b9610-9148-4621-a5a1-089e807210c1]` — with no prefix, no numbering
   and no reference list. The pill is labelled with the first eight characters, so an answer that
@@ -191,6 +202,8 @@ behind it, and the work that produced it can be opened and read.
   Backspace-clears-playbook, Escape and the arrow keys inside the autocomplete are the whole set —
   and Escape there clears the entire draft rather than just closing the list. There is no shortcut for
   new conversation, search, settings, delete or stop.
+- **Voice dictation relies on Chromium's speech recognition pipeline and operating system microphone access**,
+  requiring active internet connectivity for cloud speech endpoints and capturing live microphone audio only.
 
 ## Not supported
 
@@ -203,7 +216,9 @@ behind it, and the work that produced it can be opened and read.
 - Removing a rating once given. The two thumbs toggle between them; there is no third state.
 - Folders, tags, pinning, favourites or archiving. Grouping by age is the only structure.
 - Sharing a conversation, or opening one somebody else shared. Both are web-only.
-- Attaching a file, image or screenshot to a question.
+- Offline speech recognition.
+- Audio file attachment, voice memos, or uploading pre-recorded audio.
+- Text-to-speech (TTS) audio playback of answers.
 - Exporting or printing a conversation. Copy, one answer at a time and prose only, is the whole of it.
 - Jumping from a search result to the message that matched, or searching inside an open conversation.
 - Setting the thinking effort for a single message. The contract carries a per-message override, and
