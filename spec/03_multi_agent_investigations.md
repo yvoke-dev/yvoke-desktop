@@ -25,9 +25,9 @@ profiles and the playbooks; there is no way to build one from the app.
 
 ## How it behaves
 
-- **Choosing a profile takes over the conversation.** The playbook picker, the model selector and the
-  thinking selector all disappear, because the profile and Settings decide them. A message sent in a
-  multi-agent conversation carries no playbook and is not preflighted.
+- **Choosing a profile takes over the conversation.** The playbook picker, the active playbook badge,
+  the model selector and the thinking selector all disappear, because the profile and Settings decide
+  them. A message sent in a multi-agent conversation carries no playbook and is not preflighted.
 - **The lead never touches the knowledge base.** It can delegate and it can ask the user a clarifying
   question; everything else is somebody else's job.
 - **The lead and the specialists run under the base instructions; the reviewer does not.** The lead
