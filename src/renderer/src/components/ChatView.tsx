@@ -215,6 +215,9 @@ export function ChatView(props: {
   const runIdRef = useRef(0);
 
   // When switching conversations, retire the transient cards and composer attachments.
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/i.test(navigator.userAgent || '');
+  const sendShortcut = isMac ? '⌘↵' : 'Ctrl+↵';
+
   useEffect(() => {
     runIdRef.current += 1;
     setPreflight(null);
@@ -570,7 +573,7 @@ export function ChatView(props: {
       setPromptOverride({ threadId: thread.id, prompt: null });
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
       submit();
     }
@@ -960,10 +963,10 @@ export function ChatView(props: {
                     : orchestratorActive
                       ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer.`
                       : activePrompt
-                        ? `Add your question for “${activePrompt.title}” — ↵ to send`
+                        ? `Add your question for “${activePrompt.title}” — ${sendShortcut} to send`
                         : prompts.length > 0
                           ? 'Pick a playbook first — / to choose one'
-                          : 'Ask a question or paste/drop images — ↵ to send'
+                          : `Ask a question or paste/drop images — ${sendShortcut} to send`
               }
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
@@ -978,6 +981,7 @@ export function ChatView(props: {
             ) : (
               <button
                 className="primary composer-send"
+                title={`Send (${sendShortcut})`}
                 disabled={(draft.trim().length === 0 && attachments.length === 0) || checking || !!liveTurn.clarifyingQuestion}
                 onClick={submit}
               >

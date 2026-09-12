@@ -11,7 +11,7 @@ behind it, and the work that produced it can be opened and read.
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
 | **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
-| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter sends, Shift+Enter adds a line. Backspace on an empty composer removes the attached playbook. |
+| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook. |
 | **Attach images** | Attach up to five images (PNG, JPEG, WebP, GIF) using the attach button on the left of the toolbar, drag-and-drop, or clipboard paste. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
@@ -189,10 +189,11 @@ behind it, and the work that produced it can be opened and read.
 - **The app defines no menu of its own, so the platform's stock one ships** — including *Reload*,
   *Force Reload* and *Toggle Developer Tools* in a released build, on their usual shortcuts. Reloading
   mid-answer throws away the live view of a turn that keeps running without it.
-- **The app's own keyboard support stops at the composer.** Enter, Shift+Enter,
-  Backspace-clears-playbook, Escape and the arrow keys inside the autocomplete are the whole set —
-  and Escape there clears the entire draft rather than just closing the list. There is no shortcut for
-  new conversation, search, settings, delete or stop.
+- **The app's own keyboard support stops at the composer.** Enter (insert newline),
+  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook, Escape and the arrow
+  keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
+  than just closing the list. There is no shortcut for new conversation, search, settings, delete or
+  stop.
 
 ## Not supported
 

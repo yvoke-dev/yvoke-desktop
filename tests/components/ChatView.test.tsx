@@ -606,26 +606,53 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       expect(onSend).not.toHaveBeenCalled();
     });
 
-    it('pressing Enter in textarea with whitespace-only draft does not call onSend', () => {
+    it('pressing Enter alone in textarea with a valid draft does not call onSend (allows multiline typing)', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
-      fireEvent.change(textarea, { target: { value: '   \n\t  ' } });
+      fireEvent.change(textarea, { target: { value: 'First sentence. Second sentence.' } });
       fireEvent.keyDown(textarea, { key: 'Enter' });
       expect(onSend).not.toHaveBeenCalled();
     });
 
-    it('pressing Enter while liveTurn.running is true does not call onSend', () => {
+    it('pressing Cmd+Enter (macOS) in textarea with a valid draft calls onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Valid question' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    });
+
+    it('pressing Ctrl+Enter (Windows) in textarea with a valid draft calls onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: 'Valid question' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    });
+
+    it('pressing Cmd+Enter or Ctrl+Enter in textarea with whitespace-only draft does not call onSend', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '   \n\t  ' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it('pressing Cmd+Enter while liveTurn.running is true does not call onSend', () => {
       const { container } = renderChat({
         prompts: [],
         liveTurn: { ...IDLE, running: true },
       });
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: 'Valid question' } });
-      fireEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
       expect(onSend).not.toHaveBeenCalled();
     });
 
-    it('pressing Enter while checking is true does not call onSend', async () => {
+    it('pressing Cmd+Enter while checking is true does not call onSend', async () => {
       const pending = deferred();
       validatePlaybook.mockReturnValueOnce(pending.promise);
       const { container } = renderChat();
@@ -633,11 +660,11 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       await waitFor(() => expect(container.querySelector('.preflight-checking')).toBeTruthy());
 
       const textarea = container.querySelector('textarea')!;
-      fireEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
       expect(onSend).not.toHaveBeenCalled();
     });
 
-    it('pressing Enter while liveTurn.clarifyingQuestion is non-null does not call onSend', () => {
+    it('pressing Cmd+Enter while liveTurn.clarifyingQuestion is non-null does not call onSend', () => {
       const { container } = renderChat({
         prompts: [],
         liveTurn: {
@@ -651,7 +678,7 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       });
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: 'Valid question' } });
-      fireEvent.keyDown(textarea, { key: 'Enter' });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
       expect(onSend).not.toHaveBeenCalled();
     });
   });
