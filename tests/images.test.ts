@@ -93,6 +93,7 @@ const successResult = (text: string) => ({ type: 'result', subtype: 'success', r
 describe('Image Attachments & Vision Support', () => {
   let tmpDir: string;
   const activeCores: AppCore[] = [];
+  const activeStores: ThreadStore[] = [];
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-images-test-'));
@@ -103,15 +104,20 @@ describe('Image Attachments & Vision Support', () => {
   });
 
   afterEach(async () => {
-    await Promise.all(activeCores.map((c) => c.drain()));
+    await Promise.all([
+      ...activeCores.map((core) => core.drain().catch(() => {})),
+      ...activeStores.map((store) => store.drain().catch(() => {})),
+    ]);
     for (const core of activeCores) core.dispose();
     activeCores.length = 0;
-    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    activeStores.length = 0;
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   describe('ThreadStore Persistence', () => {
     it('persists and rehydrates ChatMessage with images intact', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-1';
       store.upsert({
         id: threadId,
@@ -170,6 +176,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('keeps base64 out of the message log, writing blobs beside it', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-blob';
       store.upsert({
         id: threadId,
@@ -210,6 +217,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('reads logs written before the blob split, with data still inline', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-legacy';
       const data = Buffer.from('legacy bytes').toString('base64');
       fs.writeFileSync(
@@ -229,6 +237,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('drops blobs when the thread is deleted', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-delete';
       store.upsert({
         id: threadId,
@@ -260,6 +269,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('collects orphaned blobs when a server rehydrate replaces the log', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-gc';
       store.upsert({
         id: threadId,
@@ -309,6 +319,7 @@ describe('Image Attachments & Vision Support', () => {
         openBrowser: vi.fn().mockResolvedValue(undefined),
         tokenCache: null,
       });
+      activeCores.push(appCore);
 
       // Insert thread
       appCore.threads.upsert({
@@ -323,10 +334,6 @@ describe('Image Attachments & Vision Support', () => {
       });
 
       agentServiceSendMock = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined);
-    });
-
-    afterEach(() => {
-      appCore.dispose();
     });
 
     it('accepts valid images and passes them to agent.sendMessage', async () => {
