@@ -450,8 +450,13 @@ export default function App(): React.JSX.Element {
 
   const patchThread = useCallback(
     async (threadId: string, update: Partial<ThreadMeta>) => {
-      await window.api.patchThread(threadId, update);
-      await refreshThreads();
+      try {
+        await window.api.patchThread(threadId, update);
+      } catch (error) {
+        console.warn('Failed to patch thread:', error);
+      } finally {
+        await refreshThreads();
+      }
     },
     [refreshThreads],
   );

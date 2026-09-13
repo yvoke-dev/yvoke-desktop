@@ -42,6 +42,26 @@ describe('ThreadStore', () => {
     expect(reopened.get('t1')?.sessionId).toBe('session-abc');
   });
 
+  it('Test 1.7 & 1.7b: tracks sessionProfile and asserts sessionId and sessionProfile keys are completely omitted when cleared via patch (in-memory and reloaded from disk)', () => {
+    store.upsert(meta('t1'));
+    store.setSessionId('t1', 'session-abc', 'OIM');
+    expect(store.get('t1')?.sessionId).toBe('session-abc');
+    expect(store.get('t1')?.sessionProfile).toBe('OIM');
+
+    store.patch('t1', { sessionId: undefined, sessionProfile: undefined });
+    const inMemory = store.get('t1')!;
+    expect(inMemory.sessionId).toBeUndefined();
+    expect(inMemory.sessionProfile).toBeUndefined();
+    expect('sessionId' in inMemory).toBe(false);
+    expect('sessionProfile' in inMemory).toBe(false);
+
+    const reloaded = new ThreadStore(dir).get('t1')!;
+    expect(reloaded.sessionId).toBeUndefined();
+    expect(reloaded.sessionProfile).toBeUndefined();
+    expect('sessionId' in reloaded).toBe(false);
+    expect('sessionProfile' in reloaded).toBe(false);
+  });
+
   it('appends messages and accumulates usage totals', async () => {
     store.upsert(meta('t1'));
     await store.appendMessages('t1', [

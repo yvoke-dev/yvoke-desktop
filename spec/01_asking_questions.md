@@ -55,7 +55,8 @@ behind it, and the work that produced it can be opened and read.
   tool and did no visible reasoning has no bar at all, and its token counts move into the footer.
 - **A question is displayed exactly as typed.** Only answers are rendered as formatted text; a
   question containing code, markdown or a citation-shaped token appears verbatim.
-- **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right.
+- **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right. In multi-agent mode, the active playbook badge is hidden because playbooks are defined strictly by the orchestrator profile.
+- **Composer controls are disabled while an answer generates or preflight checks.** When an answer is streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation configuration controls (agent mode selector, model selector, thinking effort selector) and context modifiers (playbook removal button, image attachments button, and prompt textarea) are disabled. Only the *Stop* button remains interactive during answer generation so the turn can be cancelled.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
   the same act. So a failed turn leaves no record of having been asked. The question stays on screen
@@ -168,13 +169,13 @@ behind it, and the work that produced it can be opened and read.
 - **A diagram is not drawn until the answer finishes.** While streaming it is shown as source text.
 - **Stopping is not immediate.** The turn ends at the next point the run can be interrupted.
 - **The *Playbook required* refusal cannot be dismissed either**, and it says nothing about which
-  playbook to pick — it is cleared by picking any one of them, by sending, or by switching
-  conversation. Nothing marks the composer as needing a playbook before the first attempt to send:
-  the only warning is its placeholder.
+  playbook to pick — it is cleared by picking any one of them, by sending, by switching to multi-agent
+  mode, or by switching conversation. Nothing marks the composer as needing a playbook before the
+  first attempt to send: the only warning is its placeholder.
 - **A playbook recommendation cannot be dismissed.** It is cleared only by sending, by switching
-  conversation, or by a newer check — and both of its buttons are disabled while the composer is
-  empty. Clearing the composer with a card standing therefore leaves a card that cannot be acted on,
-  and the playbook picker stays hidden behind it.
+  conversation, by switching to multi-agent mode, or by a newer check — and both of its buttons are
+  disabled while the composer is empty. Clearing the composer with a card standing therefore leaves a
+  card that cannot be acted on, and the playbook picker stays hidden behind it.
 - **The `/` list is about eight rows tall before it scrolls**, against roughly thirty playbooks.
 - **Playbook names are what the picker shows.** The server currently gives every playbook a title
   identical to its name, so rows read like `oim-ts-directory-messaging-browsing`. Nothing in the app
@@ -214,4 +215,5 @@ behind it, and the work that produced it can be opened and read.
   no control anywhere sets it — the selector changes the whole conversation.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
+- Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
 

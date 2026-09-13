@@ -81,7 +81,8 @@ server.
 - **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
   allow-list and instructions take effect. When continuing under the same playbook, the session
   remains warm and playbook instructions are not redundantly re-injected. When switching playbooks,
-  a fresh session is initialized with the new playbook's tools and instructions.
+  a fresh session is initialized with the new playbook's tools and instructions. Attempting to change
+  agent mode while a turn is already running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -109,8 +110,9 @@ server.
   knowledge base, on the conversation's own model — it is a real, billed call, not a cheap classifier.
   It re-sends the entire playbook catalogue as its instructions every time. It cannot be cancelled:
   while it runs there is no *Stop*, only a disabled composer.
-- **Changing the model while the check runs is allowed**, so the verdict can come from one model and
-  the turn run on another.
+- **Changing the model while the check runs is prevented.** All conversation configuration selectors
+  (model, thinking effort, agent mode) and playbook controls are disabled while a check runs, so the verdict
+  and turn run under the selected model.
 - **The check is skipped when there is nothing to compare against** — fewer than two playbooks offered,
   an unreachable server, a playbook the picker does not list, or a multi-agent conversation.
 - **A playbook whose constraints cannot be resolved runs with the full default tool set and no
@@ -156,4 +158,5 @@ server.
 - Automatically retrying a failed turn, or falling back to another model or service when one is busy.
 - Any cost figure. The runtime reports what a turn cost and the app forwards it to the interface,
   where nothing displays it.
+- Changing the agent mode while a turn is in progress.
 

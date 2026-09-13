@@ -263,10 +263,10 @@ export function ChatView(props: {
   );
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
-    if (promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (orchestratorActive) return null;
+    if (promptOverride?.threadId === thread.id) return promptOverride.prompt;
     return prompts.find((p) => p.name === lastUserPlaybook) ?? null;
-  }, [promptOverride, thread.id, orchestratorActive, lastUserPlaybook, prompts]);
+  }, [orchestratorActive, promptOverride, thread.id, lastUserPlaybook, prompts]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -471,6 +471,17 @@ export function ChatView(props: {
     setPlaybookRequired(false);
     setAttachmentError(null);
     const toSend = imagesToSend ?? (attachments.length > 0 ? attachments : undefined);
+    if (orchestratorActive) {
+      setPromptOverride(null);
+      if (toSend && toSend.length > 0) {
+        onSend(text, undefined, toSend);
+      } else {
+        onSend(text, undefined);
+      }
+      setDraft('');
+      setAttachments([]);
+      return;
+    }
     // The recommendation card's "Switch to …" sends under a playbook that is not the active one;
     // make it the active one so the composer agrees with what was just asked.
     if (promptName && promptName !== activePrompt?.name) {
@@ -501,7 +512,7 @@ export function ChatView(props: {
       verdict = { plausible: true };
     }
     // Superseded — by a thread switch or by a later run.
-    if (runIdRef.current !== runId) return;
+    if (runIdRef.current !== runId || orchestratorActive) return;
     setChecking(false);
     if (verdict.plausible) {
       send(text, prompt.name, imagesToSend);
@@ -585,11 +596,13 @@ export function ChatView(props: {
    */
   const hasNotice =
     checking ||
-    !!preflight ||
+    (!!preflight && !orchestratorActive) ||
     (playbookRequired && !orchestratorActive) ||
     !!attachmentError ||
     !!liveTurn.error ||
     !!liveTurn.notice;
+
+  const controlsDisabled = liveTurn.running || checking;
 
   // The picker owns the empty thread until a question is actually on its way. Once a check is
   // running (or its recommendation is standing), that grid is thirty rows of noise between the
@@ -685,7 +698,7 @@ export function ChatView(props: {
               </button>
             </div>
           )}
-          {preflight && (
+          {preflight && !orchestratorActive && (
             <div className="preflight-card">
               <div className="preflight-card-head">
                 <AlertIcon size={14} />
@@ -1022,7 +1035,7 @@ export function ChatView(props: {
                   <button
                     className="active-playbook-remove"
                     data-tip="Remove playbook"
-                    disabled={checking}
+                    disabled={controlsDisabled}
                     onClick={() => {
                       setPromptOverride({ threadId: thread.id, prompt: null });
                     }}
@@ -1039,10 +1052,17 @@ export function ChatView(props: {
                   value={thread.orchestratorProfile ?? ''}
                   data-tip="Multi-agent profile (orchestrator mode)"
                   aria-label="Agent mode"
-                  // Switching to orchestrator mode mid-check would leave the verdict deciding the
-                  // playbook for a turn that no longer takes one.
-                  disabled={checking}
-                  onChange={(e) => onPatchThread({ orchestratorProfile: e.target.value })}
+                  disabled={controlsDisabled}
+                  onChange={(e) => {
+                    const profile = e.target.value;
+                    if (profile) {
+                      setPlaybookRequired(false);
+                      setPreflight(null);
+                      runIdRef.current += 1;
+                      setChecking(false);
+                    }
+                    onPatchThread({ orchestratorProfile: profile });
+                  }}
                 >
                   <option value="">Single agent</option>
                   {visibleProfiles.map((p) => (
@@ -1059,6 +1079,7 @@ export function ChatView(props: {
                     value={thread.model}
                     data-tip="Model"
                     aria-label="Model"
+                    disabled={controlsDisabled}
                     onChange={(e) => onPatchThread({ model: e.target.value })}
                   >
                     {settings.models.map((m) => (
@@ -1072,6 +1093,7 @@ export function ChatView(props: {
                     value={thread.thinkingLevel}
                     data-tip="Thinking effort"
                     aria-label="Thinking effort"
+                    disabled={controlsDisabled}
                     onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
                   >
                     {THINKING_LEVELS.map((l) => (

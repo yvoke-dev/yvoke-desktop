@@ -503,5 +503,35 @@ describe('App conversation switching with in-progress turn', () => {
 
     expect(screen.queryByText('Network connection dropped')).toBeNull();
   });
+
+  it('Test 1.10: patchThread invokes refreshThreads in finally block even if window.api.patchThread rejects', async () => {
+    const patchSpy = vi
+      .fn()
+      .mockRejectedValue(new Error('Cannot change agent mode while a turn is in progress'));
+    (window as unknown as { api: Record<string, unknown> }).api.patchThread = patchSpy;
+    const listThreadsSpy = vi.spyOn((window as unknown as { api: any }).api, 'listThreads');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByLabelText('Model')).toBeTruthy());
+
+    const initialListCalls = listThreadsSpy.mock.calls.length;
+
+    const modelSelect = screen.getByLabelText('Model');
+    fireEvent.change(modelSelect, { target: { value: 'opus' } });
+
+    await waitFor(() => {
+      expect(patchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(listThreadsSpy.mock.calls.length).toBeGreaterThan(initialListCalls);
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith('Failed to patch thread:', expect.any(Error));
+    warnSpy.mockRestore();
+  });
 });
 

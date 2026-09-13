@@ -222,6 +222,8 @@ export interface ThreadMeta {
   id: string;
   /** Agent SDK session id — local only, used for model-context resume. */
   sessionId?: string;
+  /** Orchestrator profile name under which sessionId was established (undefined = single agent). */
+  sessionProfile?: string;
   title: string;
   model: string;
   thinkingLevel: ThinkingLevel;
