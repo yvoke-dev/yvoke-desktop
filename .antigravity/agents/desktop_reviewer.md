@@ -28,8 +28,10 @@ Your job is to perform focused reviews on TypeScript, Electron, React, and CSS c
 - **IPC Input Validation**: Check all IPC handlers in the main process (`ipcMain.on` or `ipcMain.handle`) to ensure parameters passed from the renderer process are thoroughly validated and sanitized.
 - **Content Security Policy (CSP)**: Verify that HTML structures maintain strict CSP in `src/renderer/index.html`.
 
-### 2. Event Listener Memory Leaks
+### 2. Event Listener Memory Leaks & Lifecycle Ordering
 - **IPC Cleanup**: Check React components subscribing to main-process IPC notifications return an unsubscription cleanup function in `useEffect`.
+- **Lifecycle Ownership & Ordering**: When test fixtures (`afterEach`) manage lifecycle methods (e.g. `drain()`, `dispose()`), ensure single ownership: avoid double-disposals and ensure in-flight asynchronous operations are drained *before* disposal (`drain()` → `dispose()`), never draining an already-disposed instance.
+- **Map Retention & Queue Hygiene**: When in-memory concurrency queues or promise chains (`Map<string, Promise<...>>`) are introduced, ensure settled keys are pruned via `.finally()` so the map does not grow monotonically over time.
 
 ### 3. React Rendering & UI Quality
 - **React 19 Best Practices**: Proper use of hooks (`useEffect` dependency arrays, `useCallback`, `useMemo`, key props).

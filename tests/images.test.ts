@@ -92,6 +92,8 @@ const successResult = (text: string) => ({ type: 'result', subtype: 'success', r
 
 describe('Image Attachments & Vision Support', () => {
   let tmpDir: string;
+  const activeCores: AppCore[] = [];
+  const activeStores: ThreadStore[] = [];
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-images-test-'));
@@ -101,13 +103,21 @@ describe('Image Attachments & Vision Support', () => {
     sdkMock.defaultDescription = 'A detailed diagram of cloud architecture.';
   });
 
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await Promise.all([
+      ...activeCores.map((core) => core.drain().catch(() => {})),
+      ...activeStores.map((store) => store.drain().catch(() => {})),
+    ]);
+    for (const core of activeCores) core.dispose();
+    activeCores.length = 0;
+    activeStores.length = 0;
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   describe('ThreadStore Persistence', () => {
     it('persists and rehydrates ChatMessage with images intact', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-1';
       store.upsert({
         id: threadId,
@@ -166,6 +176,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('keeps base64 out of the message log, writing blobs beside it', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-blob';
       store.upsert({
         id: threadId,
@@ -206,6 +217,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('reads logs written before the blob split, with data still inline', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-legacy';
       const data = Buffer.from('legacy bytes').toString('base64');
       fs.writeFileSync(
@@ -225,6 +237,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('drops blobs when the thread is deleted', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-delete';
       store.upsert({
         id: threadId,
@@ -256,6 +269,7 @@ describe('Image Attachments & Vision Support', () => {
 
     it('collects orphaned blobs when a server rehydrate replaces the log', async () => {
       const store = new ThreadStore(tmpDir);
+      activeStores.push(store);
       const threadId = 'test-thread-img-gc';
       store.upsert({
         id: threadId,
@@ -305,6 +319,7 @@ describe('Image Attachments & Vision Support', () => {
         openBrowser: vi.fn().mockResolvedValue(undefined),
         tokenCache: null,
       });
+      activeCores.push(appCore);
 
       // Insert thread
       appCore.threads.upsert({
@@ -319,10 +334,6 @@ describe('Image Attachments & Vision Support', () => {
       });
 
       agentServiceSendMock = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined);
-    });
-
-    afterEach(() => {
-      appCore.dispose();
     });
 
     it('accepts valid images and passes them to agent.sendMessage', async () => {
@@ -890,6 +901,7 @@ describe('Image Attachments & Vision Support', () => {
         openBrowser: vi.fn().mockResolvedValue(undefined),
         tokenCache: null,
       });
+      activeCores.push(appCore);
       appCore.threads.upsert({
         id: threadId,
         title: 'Sync Thread',
@@ -963,8 +975,6 @@ describe('Image Attachments & Vision Support', () => {
       expect(stored[0].images?.[0].description).toBe(
         'High-level cloud infrastructure architecture overview.',
       );
-
-      appCore.dispose();
     });
 
     it('preserves pre-existing descriptions and does not call the model for them', async () => {
@@ -984,8 +994,6 @@ describe('Image Attachments & Vision Support', () => {
       const userMsg = enqueued[0].messages.find((m: any) => m.role === 'user');
       expect(userMsg.content).toContain('[Attached Image 1 (existing.png): Manual user-provided description.]');
       expect(sdkMock.queryCalls).toHaveLength(0);
-
-      appCore.dispose();
     });
 
     it('keeps turns in order when a slow description is followed by a plain text turn', async () => {
@@ -1008,8 +1016,6 @@ describe('Image Attachments & Vision Support', () => {
       expect(enqueued.map((t) => t.localIds[0])).toEqual(['u1', 'u2']);
       const stored = await appCore.threads.readMessages('sync-order-thread');
       expect(stored.map((m) => m.localId)).toEqual(['u1', 'u1-a', 'u2', 'u2-a']);
-
-      appCore.dispose();
     });
 
     it('does not hold one thread up behind another thread’s slow description', async () => {
@@ -1026,9 +1032,6 @@ describe('Image Attachments & Vision Support', () => {
 
       gate.resolve(successResult('Architecture overview.'));
       await vi.waitFor(() => expect(slow.enqueued).toHaveLength(1));
-
-      slow.appCore.dispose();
-      fast.appCore.dispose();
     });
 
     it('still persists the turn when every description fails', async () => {
@@ -1045,8 +1048,6 @@ describe('Image Attachments & Vision Support', () => {
       expect(userMsg.content).toBe('Check the diagram below\n\n[Attached Image 1 (architecture.png)]');
       const stored = await appCore.threads.readMessages('sync-desc-fail-thread');
       expect(stored).toHaveLength(2);
-
-      appCore.dispose();
     });
 
     it('does not mutate the caller’s user message', async () => {
@@ -1060,8 +1061,6 @@ describe('Image Attachments & Vision Support', () => {
       // AgentService still holds this object as the session's pendingUser.
       expect(userMessage.images).toBe(images);
       expect(images[0].description).toBeUndefined();
-
-      appCore.dispose();
     });
 
     it('persists the turn anyway when descriptions outrun the grace period', async () => {
@@ -1081,8 +1080,6 @@ describe('Image Attachments & Vision Support', () => {
         expect(userMsg.content).toBe('Check the diagram below\n\n[Attached Image 1 (architecture.png)]');
         const stored = await appCore.threads.readMessages('sync-grace-thread');
         expect(stored).toHaveLength(2);
-
-        appCore.dispose();
       } finally {
         vi.useRealTimers();
       }
@@ -1098,8 +1095,6 @@ describe('Image Attachments & Vision Support', () => {
       expect(sdkMock.queryCalls).toHaveLength(0);
       const userMsg = enqueued[0].messages.find((m: any) => m.role === 'user');
       expect(userMsg.content).toBe('Check the diagram below\n\n[Attached Image 1 (architecture.png)]');
-
-      appCore.dispose();
     });
   });
 

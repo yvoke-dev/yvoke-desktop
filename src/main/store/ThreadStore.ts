@@ -147,6 +147,20 @@ export class ThreadStore {
     );
   }
 
+  /**
+   * Flushes queued background operations across all threads, or for a specific thread if threadId is provided.
+   */
+  async drain(threadId?: string): Promise<void> {
+    if (threadId !== undefined) {
+      this.validateThreadId(threadId);
+      await (this.opChain.get(threadId) ?? Promise.resolve());
+      return;
+    }
+    while (this.opChain.size > 0) {
+      await Promise.all(Array.from(this.opChain.values()));
+    }
+  }
+
   // Per-thread message logs can grow with the conversation, so their I/O is async to avoid
   // blocking the Electron main (event-loop) thread. The small index.json stays sync.
   //
@@ -159,8 +173,16 @@ export class ThreadStore {
   private runExclusive<T>(threadId: string, op: () => Promise<T>): Promise<T> {
     const prev = this.opChain.get(threadId) ?? Promise.resolve();
     const result = prev.then(op, op);
-    // Store a normalized, never-rejecting tail so the chain survives an op's failure.
-    this.opChain.set(threadId, result.then(() => undefined, () => undefined));
+    // Store a normalized, never-rejecting tail so the chain survives an op's failure,
+    // and prune settled entries so opChain does not hold stale promises indefinitely.
+    const tail: Promise<undefined> = result
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (this.opChain.get(threadId) === tail) {
+          this.opChain.delete(threadId);
+        }
+      });
+    this.opChain.set(threadId, tail);
     return result;
   }
 

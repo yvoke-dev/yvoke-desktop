@@ -20,12 +20,14 @@ Your job is to perform holistic quality verification across the entire change, e
 > In Antigravity on macOS, all `npm test` and `npm run typecheck` commands must specify `BypassSandbox: true` so Node/npm runtimes can execute outside sandbox restrictions.
 
 ### 1. Specification Compliance Gate
-- Verify that the appropriate chapter file in `spec/` (e.g. `spec/01_asking_questions.md`) was updated to reflect any new capabilities, altered behaviors, adjusted limits, or removed "Not supported" items.
+- If the task altered user-observable capabilities, limits, defaults, or behaviors, verify that the appropriate chapter file in `spec/` (e.g. `spec/01_asking_questions.md`) was updated to reflect them.
+- If the task was purely an internal engineering, test infrastructure, or CI fix, verify that `spec/` was NOT modified (protecting spec purity).
+- If `spec/` was updated, verify that all added text describes user-observable product behavior (never test harness details or code mechanics) and that any claimed callers (e.g. "on shutdown") actually exist in production code.
 - Run the specification contract test (with `BypassSandbox: true`):
   ```bash
   npm test -- tests/spec.test.ts
   ```
-- If the test fails or the spec was not updated, report the failure immediately.
+- If the test fails, report the failure immediately.
 
 ### 2. Steering & Formatting Gate
 - Run the steering documentation and process boundary check:

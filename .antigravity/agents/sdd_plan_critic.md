@@ -42,7 +42,8 @@ Cross-reference the proposed changes against all hard-won gotchas in `CLAUDE.md`
 ### 4. Specification & Invariant Gate
 - Does the plan contradict any intentional absence listed under **Not supported** in `spec/`?
 - Does it exceed any ceiling listed under **Limits** in `spec/`?
-- Does it properly account for required updates to the corresponding chapter file in `spec/`?
+- Does it properly account for required updates to the corresponding chapter file in `spec/` when user-observable behavior changes?
+- **Spec Purity & Truthfulness**: Does any proposed edit to `spec/` describe internal implementation, test infrastructure, or testing details rather than user-observable product behavior? Does any claimed production caller (e.g. "on shutdown") actually exist in production code? If a change is purely an internal test fix, refactoring, or CI fix, enforce that `spec/` is left untouched.
 
 ## Output Format
 - **Verdict**: `REJECTED (Requires Hardening)` or `APPROVED WITH CAVEATS` or `APPROVED`.

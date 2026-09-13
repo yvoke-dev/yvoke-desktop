@@ -31,7 +31,8 @@ describe('ThreadStore', () => {
     store = new ThreadStore(dir);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await store.drain();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -172,5 +173,117 @@ describe('ThreadStore', () => {
       expect(() => store.delete(invalidId)).toThrow(/Invalid threadId/);
       await expect(store.appendMessages(invalidId, [message('u1', 'user')])).rejects.toThrow(/Invalid threadId/);
     }
+  });
+
+  describe('drain', () => {
+    // Note: These tests use `(store as any).runExclusive` to inject controllable pending/deferred
+    // promises directly into the private opChain, isolating drainage timing from disk I/O latency.
+    it('waits for in-flight operations across all threads to settle before resolving', async () => {
+      store.upsert(meta('t1'));
+      store.upsert(meta('t2'));
+
+      let t1Done = false;
+      let t2Done = false;
+      let resolveT1!: () => void;
+      let resolveT2!: () => void;
+      const p1 = new Promise<void>((res) => {
+        resolveT1 = res;
+      });
+      const p2 = new Promise<void>((res) => {
+        resolveT2 = res;
+      });
+
+      void (store as any).runExclusive('t1', async () => {
+        await p1;
+        t1Done = true;
+      });
+      void (store as any).runExclusive('t2', async () => {
+        await p2;
+        t2Done = true;
+      });
+
+      let drained = false;
+      const drainPromise = store.drain().then(() => {
+        drained = true;
+      });
+
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      expect(t1Done).toBe(false);
+      expect(t2Done).toBe(false);
+
+      resolveT1();
+      await Promise.resolve();
+      expect(drained).toBe(false);
+
+      resolveT2();
+      await drainPromise;
+      expect(drained).toBe(true);
+      expect(t1Done).toBe(true);
+      expect(t2Done).toBe(true);
+    });
+
+    it('waits only for the targeted thread when threadId is specified', async () => {
+      store.upsert(meta('t1'));
+      store.upsert(meta('t2'));
+
+      let t1Done = false;
+      let t2Done = false;
+      let resolveT1!: () => void;
+      let resolveT2!: () => void;
+      const p1 = new Promise<void>((res) => {
+        resolveT1 = res;
+      });
+      const p2 = new Promise<void>((res) => {
+        resolveT2 = res;
+      });
+
+      void (store as any).runExclusive('t1', async () => {
+        await p1;
+        t1Done = true;
+      });
+      void (store as any).runExclusive('t2', async () => {
+        await p2;
+        t2Done = true;
+      });
+
+      let t1Drained = false;
+      const drainT1 = store.drain('t1').then(() => {
+        t1Drained = true;
+      });
+
+      await Promise.resolve();
+      expect(t1Drained).toBe(false);
+
+      resolveT1();
+      await drainT1;
+      expect(t1Drained).toBe(true);
+      expect(t1Done).toBe(true);
+      expect(t2Done).toBe(false);
+
+      resolveT2();
+      await store.drain('t2');
+      expect(t2Done).toBe(true);
+    });
+
+    it('validates threadId and rejects on invalid or path traversal input', async () => {
+      await expect(store.drain('../bad/path')).rejects.toThrow(/Invalid threadId/);
+      await expect(store.drain('')).rejects.toThrow(/Invalid threadId/);
+      await expect(store.drain('bad/slash')).rejects.toThrow(/Invalid threadId/);
+    });
+
+    it('settles safely without hanging or rejecting if an in-flight operation throws', async () => {
+      store.upsert(meta('t1'));
+      let threw = false;
+      const failingOp = (store as any).runExclusive('t1', async () => {
+        threw = true;
+        throw new Error('boom');
+      });
+      await failingOp.catch(() => {});
+      expect(threw).toBe(true);
+
+      await expect(store.drain('t1')).resolves.toBeUndefined();
+      await expect(store.drain()).resolves.toBeUndefined();
+    });
   });
 });

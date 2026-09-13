@@ -54,8 +54,8 @@ Decompose the implementation plan into ordered, dependency-respecting waves. **S
   - Red Phase: Write test first, run it, observe RED.
   - Green Phase: Implement minimal code, run it, observe GREEN.
   - Refactor Phase: Verify types with `npm run typecheck`.
-- **Mandatory "Update Spec" Wave**:
-  - Every plan must include a dedicated wave to update the relevant chapter file in `spec/` (e.g. `spec/01_asking_questions.md`) and verify with `npm test -- tests/spec.test.ts`.
+- **"Update Spec" Wave (Conditional)**:
+  - IF and ONLY IF the task alters user-observable capabilities, limits, defaults, or behaviors (per `spec/README.md`), include a wave to update the relevant chapter file in `spec/` (e.g. `spec/01_asking_questions.md`) and verify with `npm test -- tests/spec.test.ts`. Internal test infrastructure, CI fixes, and pure refactorings must NOT touch `spec/`.
 - **Mandatory "SDD Audit" Wave**:
   - The final wave invokes `sdd_auditor` to verify all quality gates and open the PR.
 

@@ -76,8 +76,8 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
 3. **Adversarial Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandate that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC arguments, corrupt JSON recovery, sync timeouts).
 4. **Task Artifact**: Emit `task.md` in the native brain folder:
-   - Mandatory Wave $N-1$: Update `spec/` chapter and verify via `npm test -- tests/spec.test.ts`.
-   - Mandatory Wave $N$: Holistic audit and PR creation.
+    - Wave $N-1$ (Spec Compliance): Update `spec/` chapter IF and ONLY IF the task alters user-observable behaviour, limits, defaults, or capabilities (per `spec/README.md`). Internal test infrastructure, CI fixes, and refactorings must NOT touch `spec/`. Verify via `npm test -- tests/spec.test.ts`.
+    - Mandatory Wave $N$: Holistic audit and PR creation.
 
 ---
 
