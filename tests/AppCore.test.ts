@@ -419,3 +419,80 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
   });
 });
 
+describe('AppCore.drain', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-drain-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(async () => {
+    await (appCore as any).drain?.();
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('flushes persistTails and awaits threads.drain()', async () => {
+    const drainThreadsSpy = vi.spyOn(appCore.threads, 'drain');
+    let persistWorkFinished = false;
+
+    (appCore as any).chainPersist('t1', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      persistWorkFinished = true;
+    });
+
+    await (appCore as any).drain();
+
+    expect(persistWorkFinished).toBe(true);
+    expect(drainThreadsSpy).toHaveBeenCalledTimes(1);
+    expect(drainThreadsSpy).toHaveBeenCalledWith();
+  });
+
+  it('flushes targeted thread persistTail and awaits threads.drain(threadId)', async () => {
+    const drainThreadsSpy = vi.spyOn(appCore.threads, 'drain');
+    let t1Finished = false;
+
+    (appCore as any).chainPersist('t1', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      t1Finished = true;
+    });
+    (appCore as any).chainPersist('t2', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    await (appCore as any).drain('t1');
+
+    expect(t1Finished).toBe(true);
+    expect(drainThreadsSpy).toHaveBeenCalledWith('t1');
+  });
+
+  it('handles chained persist tails queued during drainage via while-loop', async () => {
+    const drainThreadsSpy = vi.spyOn(appCore.threads, 'drain');
+    let firstTurnDone = false;
+    let secondTurnDone = false;
+
+    (appCore as any).chainPersist('t1', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      firstTurnDone = true;
+      (appCore as any).chainPersist('t2', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        secondTurnDone = true;
+      });
+    });
+
+    await (appCore as any).drain();
+
+    expect(firstTurnDone).toBe(true);
+    expect(secondTurnDone).toBe(true);
+    expect(drainThreadsSpy).toHaveBeenCalledTimes(1);
+  });
+});
+

@@ -147,6 +147,18 @@ export class ThreadStore {
     );
   }
 
+  /**
+   * Flushes queued background operations across all threads, or for a specific thread if threadId is provided.
+   */
+  async drain(threadId?: string): Promise<void> {
+    if (threadId !== undefined) {
+      this.validateThreadId(threadId);
+      await (this.opChain.get(threadId) ?? Promise.resolve());
+      return;
+    }
+    await Promise.all(Array.from(this.opChain.values()));
+  }
+
   // Per-thread message logs can grow with the conversation, so their I/O is async to avoid
   // blocking the Electron main (event-loop) thread. The small index.json stays sync.
   //

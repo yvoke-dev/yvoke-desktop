@@ -744,6 +744,21 @@ export class AppCore {
     return connResult;
   }
 
+  /**
+   * Flushes in-flight turn persistence and drains ThreadStore writes.
+   */
+  async drain(threadId?: string): Promise<void> {
+    if (threadId !== undefined) {
+      await this.persistTails.get(threadId);
+      await this.threads.drain(threadId);
+      return;
+    }
+    while (this.persistTails.size > 0) {
+      await Promise.all(Array.from(this.persistTails.values()));
+    }
+    await this.threads.drain();
+  }
+
   dispose(): void {
     this.agent.closeAll();
     this.syncQueue.dispose();
