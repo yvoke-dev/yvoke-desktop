@@ -208,6 +208,7 @@ describe('spec/ modular structure', () => {
     expect(installing).toContain('Check for updates');
     expect(installing).toContain('Checking for updates is strictly on-demand.');
     expect(installing).toContain('There is no automatic background update or background notification.');
+    expect(installing).toContain('Version comparison requires a three-part numeric semantic version');
     expect(installing).toContain('Automatic background updates, background update notifications, or automatic downloading of new releases.');
   });
 });
