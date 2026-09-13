@@ -435,7 +435,7 @@ describe('AppCore.drain', () => {
   });
 
   afterEach(async () => {
-    await (appCore as any).drain?.();
+    await appCore.drain();
     appCore.dispose();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -449,7 +449,7 @@ describe('AppCore.drain', () => {
       persistWorkFinished = true;
     });
 
-    await (appCore as any).drain();
+    await appCore.drain();
 
     expect(persistWorkFinished).toBe(true);
     expect(drainThreadsSpy).toHaveBeenCalledTimes(1);
@@ -468,7 +468,7 @@ describe('AppCore.drain', () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
-    await (appCore as any).drain('t1');
+    await appCore.drain('t1');
 
     expect(t1Finished).toBe(true);
     expect(drainThreadsSpy).toHaveBeenCalledWith('t1');
@@ -488,7 +488,7 @@ describe('AppCore.drain', () => {
       });
     });
 
-    await (appCore as any).drain();
+    await appCore.drain();
 
     expect(firstTurnDone).toBe(true);
     expect(secondTurnDone).toBe(true);

@@ -92,6 +92,7 @@ const successResult = (text: string) => ({ type: 'result', subtype: 'success', r
 
 describe('Image Attachments & Vision Support', () => {
   let tmpDir: string;
+  const activeCores: AppCore[] = [];
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-images-test-'));
@@ -101,8 +102,11 @@ describe('Image Attachments & Vision Support', () => {
     sdkMock.defaultDescription = 'A detailed diagram of cloud architecture.';
   });
 
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+  afterEach(async () => {
+    await Promise.all(activeCores.map((c) => c.drain()));
+    for (const core of activeCores) core.dispose();
+    activeCores.length = 0;
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   });
 
   describe('ThreadStore Persistence', () => {
@@ -890,6 +894,7 @@ describe('Image Attachments & Vision Support', () => {
         openBrowser: vi.fn().mockResolvedValue(undefined),
         tokenCache: null,
       });
+      activeCores.push(appCore);
       appCore.threads.upsert({
         id: threadId,
         title: 'Sync Thread',
