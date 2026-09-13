@@ -12,7 +12,7 @@ profiles and the playbooks; there is no way to build one from the app.
 
 | Capability | What happens |
 | --- | --- |
-| **Switch a conversation to a profile** | A selector beside the composer offers *Single agent* plus every profile the server defines, minus any marked as a prototype while *Show prototypes* is off (marked 🧪 when shown). Choosing one takes over the conversation. |
+| **Switch a conversation to a profile** | A selector in the toolbar below the composer offers *Single agent* plus every profile the server defines, minus any marked as a prototype while *Show prototypes* is off (marked 🧪 when shown). Choosing one takes over the conversation. |
 | **Ask once, get one answer** | The lead plans the turn, delegates self-contained sub-questions to specialists, and composes a single cited answer from what they bring back. |
 | **See the team's work** | Each delegation is its own card: which specialist was consulted, the sub-question it was given, the tools it called inside its own turn, and the answer it returned. |
 | **See the reviewer's verdict** | The reviewer's card carries an *Approved* or *Rejected* badge and its notes. |

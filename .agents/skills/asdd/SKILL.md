@@ -1,12 +1,12 @@
 ---
 name: asdd
 description: >-
-  Run the Antigravity Spec-Driven Development (ASDD) workflow for large tasks, new features, architectural enhancements, or major refactors in yvoke-desktop. Enforces 6 phases with active branch pre-flight confirmation, 3 adversarial gates, strict TDD mutation proofs, and spec updates.
+  Run the Antigravity Spec-Driven Development (ASDD) workflow for all development tasks in yvoke-desktop, including small changes and follow-ups. Enforces 6 phases with active branch pre-flight confirmation, 3 adversarial gates, strict TDD mutation proofs, and spec updates.
 ---
 
 # Antigravity Spec-Driven Development (ASDD)
 
-Follow this workflow for large tasks, features, architectural changes, and refactors in `yvoke-desktop`. For small/medium tasks, execute directly.
+Follow this workflow for ALL tasks, features, architectural changes, refactors, and follow-up tweaks in `yvoke-desktop`. No change may bypass ASDD phases or adversarial gates.
 
 For complete normative protocol details, refer to [`.antigravity/sdd_protocol.md`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/.antigravity/sdd_protocol.md).
 
