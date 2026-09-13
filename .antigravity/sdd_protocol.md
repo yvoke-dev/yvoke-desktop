@@ -1,6 +1,6 @@
 # Strict SDD Protocol: Spec-Driven Development (Electron + React + TypeScript)
 
-This guide defines the strict Antigravity Spec-Driven Development (SDD) workflow for features, architectural enhancements, and refactors in `yvoke-desktop`. All plans and task tracking occur natively within the parent agent's `brain` directory; do NOT create *per-task* plan, design, or checklist files in the local workspace.
+This guide defines the strict Antigravity Spec-Driven Development (SDD) workflow for all development tasks (features, architectural enhancements, refactors, and small follow-ups) in `yvoke-desktop`. No change may bypass ASDD phases or adversarial gates. All plans and task tracking occur natively within the parent agent's `brain` directory; do NOT create *per-task* plan, design, or checklist files in the local workspace.
 
 The durable **functional specification** in `spec/` (indexed by `spec/README.md`) describes what the desktop app does, its limits, and what it deliberately does not do. Read the chapter in `spec/` for the area you are changing at the start of Phase 1 — that is the intent — then the tests owning the feature, which are the contract. Always update the relevant chapter in `spec/` whenever a change alters user-observable behaviour, limits, or defaults.
 

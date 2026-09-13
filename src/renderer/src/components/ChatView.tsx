@@ -215,7 +215,7 @@ export function ChatView(props: {
   const runIdRef = useRef(0);
 
   // When switching conversations, retire the transient cards and composer attachments.
-  const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/i.test(navigator.userAgent || '');
+  const isMac = typeof navigator !== 'undefined' && /Mac|darwin|iPhone|iPad/i.test(navigator.userAgent || '');
   const sendShortcut = isMac ? '⌘↵' : 'Ctrl+↵';
 
   useEffect(() => {
@@ -573,7 +573,7 @@ export function ChatView(props: {
       setPromptOverride({ threadId: thread.id, prompt: null });
       return;
     }
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    if (!e.altKey && (e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
       submit();
     }
@@ -961,7 +961,7 @@ export function ChatView(props: {
                   : checking
                     ? 'Checking the playbook…'
                     : orchestratorActive
-                      ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer.`
+                      ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer — ${sendShortcut} to send`
                       : activePrompt
                         ? `Add your question for “${activePrompt.title}” — ${sendShortcut} to send`
                         : prompts.length > 0
