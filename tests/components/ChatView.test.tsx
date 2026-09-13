@@ -1152,6 +1152,126 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       expect(container.querySelector('.playbook-required')).toBeNull();
     });
   });
+
+  describe('mid-turn controls lockout and guard retention', () => {
+    it('Test 1.1: Mid-turn controls lockout - when liveTurn.running === true, agent mode select, model select, thinking effort select, and .active-playbook-remove are disabled, while Stop button remains enabled', () => {
+      const { container } = renderChat({
+        liveTurn: { ...IDLE, running: true },
+        profiles: [ORDINARY],
+        messages: [{ localId: 'm1', role: 'user', content: 'hello', playbook: 'oim-schema', createdAt: '2026-08-01T10:00:00.000Z' }],
+      });
+
+      // Playbook remove button
+      const removeBtn = container.querySelector<HTMLButtonElement>('.active-playbook-remove');
+      expect(removeBtn).not.toBeNull();
+      expect(removeBtn?.disabled).toBe(true);
+
+      // Agent mode select
+      const modeSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]');
+      expect(modeSelect).not.toBeNull();
+      expect(modeSelect?.disabled).toBe(true);
+
+      // Model select
+      const modelSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]');
+      expect(modelSelect).not.toBeNull();
+      expect(modelSelect?.disabled).toBe(true);
+
+      // Thinking effort select
+      const thinkingSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Thinking effort"]');
+      expect(thinkingSelect).not.toBeNull();
+      expect(thinkingSelect?.disabled).toBe(true);
+
+      // Stop button
+      const stopBtn = container.querySelector<HTMLButtonElement>('.danger.composer-send');
+      expect(stopBtn).not.toBeNull();
+      expect(stopBtn?.disabled).toBe(false);
+      expect(stopBtn?.textContent).toContain('Stop');
+    });
+
+    it('Test 1.2: Checking controls lockout - when checking === true, agent mode select, model select, thinking effort select, and .active-playbook-remove are all disabled', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+
+      const { container } = renderChat({
+        profiles: [ORDINARY],
+      });
+      ask(container, 'Checking lockout question', 'Getting started');
+
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-checking')).not.toBeNull();
+      });
+
+      // Active playbook remove button
+      const removeBtn = container.querySelector<HTMLButtonElement>('.active-playbook-remove');
+      expect(removeBtn).not.toBeNull();
+      expect(removeBtn?.disabled).toBe(true);
+
+      // Agent mode select
+      const modeSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]');
+      expect(modeSelect).not.toBeNull();
+      expect(modeSelect?.disabled).toBe(true);
+
+      // Model select
+      const modelSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]');
+      expect(modelSelect).not.toBeNull();
+      expect(modelSelect?.disabled).toBe(true);
+
+      // Thinking effort select
+      const thinkingSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Thinking effort"]');
+      expect(thinkingSelect).not.toBeNull();
+      expect(thinkingSelect?.disabled).toBe(true);
+
+      pending.settle({ plausible: true });
+    });
+
+    it('Test 1.3: Declarative guard retention - (!!preflight && !orchestratorActive) prevents mounting recommendation card or empty .chat-notices container when props change without event', async () => {
+      validatePlaybook.mockResolvedValueOnce({
+        plausible: false,
+        reason: 'Better on schema',
+        suggestedPlaybookName: 'oim-schema',
+        suggestedPlaybookTitle: 'Schema',
+      });
+
+      const { container, rerender } = render(
+        <ChatView
+          thread={THREAD}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      ask(container, 'Off-topic question', 'Getting started');
+      await waitFor(() => {
+        expect(container.querySelector('.preflight-card')).not.toBeNull();
+      });
+      expect(container.querySelector('.chat-notices')).not.toBeNull();
+
+      rerender(
+        <ChatView
+          thread={{ ...THREAD, orchestratorProfile: 'OIM' }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      expect(container.querySelector('.preflight-card')).toBeNull();
+      expect(container.querySelector('.chat-notices')).toBeNull();
+    });
+  });
 });
 
 describe('keyboard shortcut submission and Alt/AltGr suppression', () => {

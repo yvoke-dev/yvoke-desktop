@@ -269,3 +269,153 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
   });
 });
 
+describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-lockout-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(() => {
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Test 1.4 & 1.4d: patchThread throws when modeChanged and agent.isBusy is true; closeThread is NOT called and store is untouched', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-busy-1',
+      title: 'Busy Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(true);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    expect(() => {
+      appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    }).toThrow('Cannot change agent mode while a turn is in progress');
+
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBeUndefined();
+  });
+
+  it('Test 1.4b (Negative control): Non-mode patch (e.g. title) allowed when agent is busy', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-busy-2',
+      title: 'Original Title',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(true);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { title: 'Updated Title' });
+    expect(patched?.title).toBe('Updated Title');
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(appCore.threads.get(thread.id)?.title).toBe('Updated Title');
+  });
+
+  it('Test 1.4c (Boundary): Identical profile patch allowed when agent is busy', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-busy-3',
+      title: 'Same Profile Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(true);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it('Test 1.5: Mode change allowed when idle (closes thread, updates store, clears sessionId/sessionProfile)', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-idle-1',
+      title: 'Idle Thread',
+      sessionId: 'session-idle-1',
+      sessionProfile: undefined,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(false);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(patched?.sessionId).toBeUndefined();
+    expect(patched?.sessionProfile).toBeUndefined();
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBe('OIM');
+  });
+
+  it('Test 1.6 & 1.6b: Profile divergence matrix in listThreads clears sessionId when server settings diverge', async () => {
+    const thread2: ThreadMeta = {
+      id: 'conv-diverge-2',
+      title: 'Divergent Thread 2',
+      sessionId: 'sess-diverge-2',
+      sessionProfile: 'OIM',
+      orchestratorProfile: undefined,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(thread2);
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 'conv-diverge-2',
+        title: 'Divergent Thread 2',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T10:05:00.000Z',
+        settings: {},
+      } as any,
+    ]);
+
+    const res = await appCore.listThreads();
+    const updated2 = res.threads.find((t) => t.id === 'conv-diverge-2');
+    expect(updated2?.sessionId).toBeUndefined();
+    expect(updated2?.sessionProfile).toBeUndefined();
+  });
+});
+

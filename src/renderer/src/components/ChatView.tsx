@@ -602,6 +602,8 @@ export function ChatView(props: {
     !!liveTurn.error ||
     !!liveTurn.notice;
 
+  const controlsDisabled = liveTurn.running || checking;
+
   // The picker owns the empty thread until a question is actually on its way. Once a check is
   // running (or its recommendation is standing), that grid is thirty rows of noise between the
   // user and the one thing they now have to read, so it stands down.
@@ -1033,7 +1035,7 @@ export function ChatView(props: {
                   <button
                     className="active-playbook-remove"
                     data-tip="Remove playbook"
-                    disabled={checking}
+                    disabled={controlsDisabled}
                     onClick={() => {
                       setPromptOverride({ threadId: thread.id, prompt: null });
                     }}
@@ -1050,6 +1052,7 @@ export function ChatView(props: {
                   value={thread.orchestratorProfile ?? ''}
                   data-tip="Multi-agent profile (orchestrator mode)"
                   aria-label="Agent mode"
+                  disabled={controlsDisabled}
                   onChange={(e) => {
                     const profile = e.target.value;
                     if (profile) {
@@ -1076,6 +1079,7 @@ export function ChatView(props: {
                     value={thread.model}
                     data-tip="Model"
                     aria-label="Model"
+                    disabled={controlsDisabled}
                     onChange={(e) => onPatchThread({ model: e.target.value })}
                   >
                     {settings.models.map((m) => (
@@ -1089,6 +1093,7 @@ export function ChatView(props: {
                     value={thread.thinkingLevel}
                     data-tip="Thinking effort"
                     aria-label="Thinking effort"
+                    disabled={controlsDisabled}
                     onChange={(e) => onPatchThread({ thinkingLevel: e.target.value as ThinkingLevel })}
                   >
                     {THINKING_LEVELS.map((l) => (

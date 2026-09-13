@@ -468,5 +468,43 @@ describe('error attribution across session events', () => {
     expect(errEvent?.message).toBe('Entra: User is not authenticated');
     svc.closeAll();
   });
+
+  it('Test 1.8: Early busy check in sendMessage throws immediately when isBusy is true, without closing active session', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First question', 'oim-schema');
+    expect(svc.isBusy(meta.id)).toBe(false);
+
+    const session = (svc as any).sessions.get(meta.id);
+    expect(session).toBeDefined();
+    session.busy = true;
+
+    expect(svc.isBusy(meta.id)).toBe(true);
+
+    const closeSpy = vi.spyOn(svc, 'closeThread');
+
+    await expect(
+      svc.sendMessage(meta, 'Second question while busy', { playbookName: 'oim-customers' }),
+    ).rejects.toThrow('A turn is already running for this conversation.');
+
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(svc.isBusy(meta.id)).toBe(true);
+    svc.closeAll();
+  });
+
+  it('Test 1.9: Session config change handling in ensureSession handles playbook changes when idle', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First question', 'oim-schema');
+    const initialSession = (svc as any).sessions.get(meta.id);
+    expect(initialSession.playbookName).toBe('oim-schema');
+
+    await ask(svc, meta, 'Second question with new playbook', 'oim-customers');
+    const updatedSession = (svc as any).sessions.get(meta.id);
+    expect(updatedSession.playbookName).toBe('oim-customers');
+    svc.closeAll();
+  });
 });
 

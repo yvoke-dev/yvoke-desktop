@@ -519,6 +519,9 @@ export class AppCore {
       (sanitized.orchestratorProfile || undefined) !== (existing.orchestratorProfile || undefined);
 
     if (modeChanged) {
+      if (this.agent.isBusy(threadId)) {
+        throw new Error('Cannot change agent mode while a turn is in progress');
+      }
       this.agent.closeThread(threadId);
     }
 

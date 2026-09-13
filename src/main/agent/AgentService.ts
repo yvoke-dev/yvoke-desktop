@@ -258,7 +258,15 @@ export class AgentService {
 
   constructor(private readonly deps: AgentServiceDeps) {}
 
+  isBusy(threadId: string): boolean {
+    return Boolean(this.sessions.get(threadId)?.busy);
+  }
+
   async sendMessage(thread: ThreadMeta, text: string, opts: SendOptions = {}): Promise<void> {
+    if (this.isBusy(thread.id)) {
+      throw new Error('A turn is already running for this conversation.');
+    }
+
     let session: ThreadSession;
     try {
       session = await this.ensureSession(thread, opts.playbookName);
@@ -271,23 +279,6 @@ export class AgentService {
 
     if (session.busy) {
       throw new Error('A turn is already running for this conversation.');
-    }
-
-    if (session.playbookName !== opts.playbookName || session.orchestratorProfile !== thread.orchestratorProfile) {
-      log(
-        'agent',
-        `Session config changed (playbook "${session.playbookName}"→"${opts.playbookName}", ` +
-          `profile "${session.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
-      );
-      this.closeThread(thread.id);
-      try {
-        session = await this.ensureSession(thread, opts.playbookName);
-      } catch (error) {
-        const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
-        logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-        this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
-        throw error;
-      }
     }
 
     // In orchestrator mode the per-role models/thinking are fixed by the profile + settings; the
