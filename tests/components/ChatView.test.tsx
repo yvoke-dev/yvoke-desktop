@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type React from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
@@ -836,4 +836,270 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
     });
   });
 });
+
+describe('keyboard shortcut submission and Alt/AltGr suppression', () => {
+  it('AltGr + Enter (ctrlKey: true, altKey: true) does NOT call onSend and has defaultPrevented === false', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, altKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('Meta + Alt + Enter (metaKey: true, altKey: true) does NOT call onSend and has defaultPrevented === false', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', metaKey: true, altKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('Alt + Enter (altKey: true) does NOT call onSend and has defaultPrevented === false', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', altKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('Shift + Enter (shiftKey: true) does NOT call onSend and has defaultPrevented === false', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('Plain Enter (key: "Enter") does NOT call onSend and has defaultPrevented === false', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('Ctrl + Enter (ctrlKey: true) with valid text calls onSend and has defaultPrevented === true', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('Meta + Enter (metaKey: true) with valid text calls onSend and has defaultPrevented === true', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('Ctrl + Enter with whitespace-only draft does NOT call onSend', () => {
+    const { container } = renderChat({ prompts: [] });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '   \t  \n  ' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl + Enter while liveTurn.running === true does NOT call onSend', () => {
+    const { container } = renderChat({
+      prompts: [],
+      liveTurn: { ...IDLE, running: true },
+    });
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Valid question' } });
+
+    const event = createEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
+    fireEvent(textarea, event);
+
+    expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('deterministic platform shortcut labels', () => {
+  let originalUserAgent: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    originalUserAgent = Object.getOwnPropertyDescriptor(navigator, 'userAgent');
+  });
+
+  afterEach(() => {
+    if (originalUserAgent) {
+      Object.defineProperty(navigator, 'userAgent', originalUserAgent);
+    } else {
+      delete (navigator as unknown as { userAgent?: string }).userAgent;
+    }
+  });
+
+  function setUserAgent(ua: string) {
+    Object.defineProperty(navigator, 'userAgent', {
+      value: ua,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  describe('macOS stub', () => {
+    beforeEach(() => {
+      setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)');
+    });
+
+    it('displays ⌘↵ shortcut in placeholder when orchestratorActive is true', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: 'OIM' },
+        profiles: [ORDINARY],
+      });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe(
+        'Ask OIM — specialists + reviewer will answer — ⌘↵ to send',
+      );
+    });
+
+    it('displays ⌘↵ shortcut in placeholder when activePrompt is selected', async () => {
+      const { container } = renderChat();
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        const textarea = container.querySelector('textarea')!;
+        expect(textarea.placeholder).toBe(
+          'Add your question for “Getting started” — ⌘↵ to send',
+        );
+      });
+    });
+
+    it('displays ⌘↵ shortcut in placeholder in default empty prompts state', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe(
+        'Ask a question or paste/drop images — ⌘↵ to send',
+      );
+    });
+
+    it('.composer-send button title equals Send (⌘↵)', () => {
+      const { container } = renderChat({ prompts: [] });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.title).toBe('Send (⌘↵)');
+    });
+  });
+
+  describe('Windows / Linux stub', () => {
+    beforeEach(() => {
+      setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+    });
+
+    it('displays Ctrl+↵ shortcut in placeholder when orchestratorActive is true', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: 'OIM' },
+        profiles: [ORDINARY],
+      });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe(
+        'Ask OIM — specialists + reviewer will answer — Ctrl+↵ to send',
+      );
+    });
+
+    it('displays Ctrl+↵ shortcut in placeholder when activePrompt is selected', async () => {
+      const { container } = renderChat();
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('Getting started'),
+      );
+      fireEvent.click(row!);
+      await waitFor(() => {
+        const textarea = container.querySelector('textarea')!;
+        expect(textarea.placeholder).toBe(
+          'Add your question for “Getting started” — Ctrl+↵ to send',
+        );
+      });
+    });
+
+    it('displays Ctrl+↵ shortcut in placeholder in default empty prompts state', () => {
+      const { container } = renderChat({ prompts: [] });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe(
+        'Ask a question or paste/drop images — Ctrl+↵ to send',
+      );
+    });
+
+    it('.composer-send button title equals Send (Ctrl+↵)', () => {
+      const { container } = renderChat({ prompts: [] });
+      const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      expect(sendBtn.title).toBe('Send (Ctrl+↵)');
+    });
+  });
+
+  describe('negative copy checks', () => {
+    it('shows Clarifying question placeholder without send shortcut', () => {
+      const { container } = renderChat({
+        prompts: [],
+        liveTurn: {
+          ...IDLE,
+          clarifyingQuestion: {
+            toolUseId: 'cq-1',
+            question: 'Which region?',
+            options: ['US', 'EU'],
+          },
+        },
+      });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe('Awaiting clarification…');
+      expect(textarea.placeholder).not.toContain('to send');
+    });
+
+    it('shows Preflight checking placeholder without send shortcut', async () => {
+      const pending = deferred();
+      validatePlaybook.mockReturnValueOnce(pending.promise);
+      const { container } = renderChat();
+      ask(container, 'Checking question', 'Getting started');
+      await waitFor(() => expect(container.querySelector('.preflight-checking')).toBeTruthy());
+
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe('Checking the playbook…');
+      expect(textarea.placeholder).not.toContain('to send');
+    });
+
+    it('shows Unselected playbook placeholder without send shortcut when prompts exist', () => {
+      const { container } = renderChat({ prompts: PROMPTS });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe('Pick a playbook first — / to choose one');
+      expect(textarea.placeholder).not.toContain('to send');
+    });
+  });
+});
+
 
