@@ -239,4 +239,130 @@ describe('UpdateService', () => {
     expect((result as any).secret_token).toBeUndefined();
     expect((result as any).author).toBeUndefined();
   });
+
+  it('returns error when currentVersion is unparseable and does not call fetch', async () => {
+    const invalidService = new UpdateService('invalid-version');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await invalidService.checkForUpdates();
+    expect(result).toEqual({
+      status: 'error',
+      currentVersion: 'invalid-version',
+      message: 'Invalid current version format',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns error when release tag is unparseable and status is not latest', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ tag_name: 'nightly' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const result = await updateService.checkForUpdates();
+    expect(result.status).not.toBe('latest');
+    expect(result).toEqual({
+      status: 'error',
+      currentVersion: '1.2.0',
+      message: 'Invalid release version format',
+    });
+  });
+
+  it('resolves with error when getCurrentVersion provider throws', async () => {
+    const throwingService = new UpdateService(() => {
+      throw new Error('Version lookup crashed');
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const result = await throwingService.checkForUpdates();
+    expect(result).toEqual({
+      status: 'error',
+      currentVersion: '',
+      message: 'Version lookup crashed',
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns error on general HTTP 500 response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('Internal Server Error', {
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' },
+      }),
+    );
+
+    const result = await updateService.checkForUpdates();
+    expect(result).toEqual({
+      status: 'error',
+      currentVersion: '1.2.0',
+      message: 'Server returned HTTP 500',
+    });
+  });
+
+  it('falls back to default release page when html_url is empty string or missing, and preserves valid html_url', async () => {
+    const defaultUrl = 'https://github.com/yvoke-dev/yvoke-desktop/releases/latest';
+
+    // 1. Empty string html_url
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ tag_name: 'v1.3.0', html_url: '' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const resEmpty = await updateService.checkForUpdates();
+    expect(resEmpty.status).toBe('update_available');
+    if (resEmpty.status === 'update_available') {
+      expect(resEmpty.releaseUrl).toBe(defaultUrl);
+    }
+
+    // 2. Missing/undefined html_url
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ tag_name: 'v1.3.0' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const resMissing = await updateService.checkForUpdates();
+    expect(resMissing.status).toBe('update_available');
+    if (resMissing.status === 'update_available') {
+      expect(resMissing.releaseUrl).toBe(defaultUrl);
+    }
+
+    // 3. Valid html_url preserved
+    const customUrl = 'https://github.com/yvoke-dev/yvoke-desktop/releases/tag/v1.3.0';
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ tag_name: 'v1.3.0', html_url: customUrl }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const resValid = await updateService.checkForUpdates();
+    expect(resValid.status).toBe('update_available');
+    if (resValid.status === 'update_available') {
+      expect(resValid.releaseUrl).toBe(customUrl);
+    }
+  });
+
+  it('normalizes uppercase V in release tag', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          tag_name: 'V1.3.0',
+          html_url: 'https://github.com/yvoke-dev/yvoke-desktop/releases/tag/v1.3.0',
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    );
+
+    const result = await updateService.checkForUpdates();
+    expect(result.status).toBe('update_available');
+    if (result.status === 'update_available') {
+      expect(result.latestVersion).toBe('1.3.0');
+    }
+  });
 });

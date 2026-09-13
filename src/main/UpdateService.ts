@@ -1,7 +1,8 @@
-import { compareSemver } from '../shared/semver';
+import { compareSemver, parseSemver } from '../shared/semver';
 import type { UpdateCheckResult } from '../shared/types';
 
-const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/yvoke-dev/yvoke-desktop/releases/latest';
+const GITHUB_API_LATEST_RELEASE_URL = 'https://api.github.com/repos/yvoke-dev/yvoke-desktop/releases/latest';
+const GITHUB_LATEST_RELEASE_URL = 'https://github.com/yvoke-dev/yvoke-desktop/releases/latest';
 
 export class UpdateService {
   private activeCheck: Promise<UpdateCheckResult> | null = null;
@@ -19,13 +20,22 @@ export class UpdateService {
   }
 
   private async executeCheck(): Promise<UpdateCheckResult> {
-    const currentVersion =
-      typeof this.getCurrentVersion === 'function'
-        ? this.getCurrentVersion()
-        : this.getCurrentVersion;
-
+    let currentVersion = '';
     try {
-      const res = await fetch(GITHUB_LATEST_RELEASE_URL, {
+      currentVersion =
+        typeof this.getCurrentVersion === 'function'
+          ? this.getCurrentVersion()
+          : (this.getCurrentVersion ?? '');
+
+      if (!parseSemver(currentVersion)) {
+        return {
+          status: 'error',
+          currentVersion,
+          message: 'Invalid current version format',
+        };
+      }
+
+      const res = await fetch(GITHUB_API_LATEST_RELEASE_URL, {
         headers: {
           'User-Agent': `Yvoke-Desktop/${currentVersion}`,
           Accept: 'application/vnd.github+json',
@@ -86,7 +96,20 @@ export class UpdateService {
 
       const latestTag = (payload as { tag_name: string; html_url?: unknown }).tag_name;
       const htmlUrl = (payload as { html_url?: unknown }).html_url;
-      const cleanLatest = latestTag.replace(/^v/, '');
+
+      if (!parseSemver(latestTag)) {
+        return {
+          status: 'error',
+          currentVersion,
+          message: 'Invalid release version format',
+        };
+      }
+
+      const cleanLatest = latestTag.trim().replace(/^v/i, '');
+      const releaseUrl =
+        typeof htmlUrl === 'string' && htmlUrl.trim()
+          ? htmlUrl
+          : GITHUB_LATEST_RELEASE_URL;
       const cmp = compareSemver(latestTag, currentVersion);
 
       if (cmp > 0) {
@@ -94,10 +117,7 @@ export class UpdateService {
           status: 'update_available',
           currentVersion,
           latestVersion: cleanLatest,
-          releaseUrl:
-            typeof htmlUrl === 'string' && htmlUrl.length > 0
-              ? htmlUrl
-              : 'https://github.com/yvoke-dev/yvoke-desktop/releases/latest',
+          releaseUrl,
         };
       }
 

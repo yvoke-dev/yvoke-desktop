@@ -687,6 +687,80 @@ describe('SettingsView', () => {
       expect(badge.className).toContain('error');
     });
 
+    it('renders generic error badge when update check returns status: error with custom message', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'error',
+        currentVersion: '1.2.0',
+        message: 'Server returned HTTP 500',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Server returned HTTP 500')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Server returned HTTP 500');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+      expect(badge.getAttribute('title')).toBe('Server returned HTTP 500');
+    });
+
+    it('renders fallback "Check failed" when status: error has no message', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'error',
+        currentVersion: '1.2.0',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Check failed')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Check failed');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+    });
+
+    it('handles window.api.checkForUpdates rejection gracefully, displays error, and re-enables button', async () => {
+      let rejectUpdate!: (err: Error) => void;
+      const checkPromise = new Promise((_, reject) => {
+        rejectUpdate = reject;
+      });
+      const checkForUpdates = vi.fn().mockReturnValue(checkPromise);
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check for Updates' });
+      fireEvent.click(checkBtn);
+
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(true);
+      expect(checkBtn.textContent).toBe('Checking…');
+
+      rejectUpdate(new Error('Network disconnected'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Network disconnected')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Network disconnected');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+      expect(checkBtn.textContent).toBe('Check for Updates');
+    });
+
     it('safely handles mid-flight unmount without errors', async () => {
       let resolveUpdate!: (val: any) => void;
       const checkPromise = new Promise((resolve) => {
