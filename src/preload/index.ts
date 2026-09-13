@@ -16,6 +16,7 @@ import type {
   SyncEvent,
   ThreadMeta,
   ThreadSearchHit,
+  UpdateCheckResult,
 } from '../shared/types';
 
 export interface DesktopApi {
@@ -26,6 +27,7 @@ export interface DesktopApi {
    */
   platform: NodeJS.Platform;
   getAppVersion(): Promise<string>;
+  checkForUpdates(): Promise<UpdateCheckResult>;
   getSettings(): Promise<AppSettings>;
   setSettings(update: Partial<AppSettings>): Promise<AppSettings>;
   listThreads(): Promise<{ threads: ThreadMeta[]; serverReachable: boolean }>;
@@ -57,6 +59,7 @@ export interface DesktopApi {
 const api: DesktopApi = {
   platform: process.platform,
   getAppVersion: () => ipcRenderer.invoke(IpcChannels.appVersion),
+  checkForUpdates: () => ipcRenderer.invoke(IpcChannels.appCheckUpdate),
   getSettings: () => ipcRenderer.invoke(IpcChannels.settingsGet),
   setSettings: (update) => ipcRenderer.invoke(IpcChannels.settingsSet, update),
   listThreads: () => ipcRenderer.invoke(IpcChannels.threadsList),

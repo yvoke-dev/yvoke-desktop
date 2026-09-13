@@ -16,6 +16,7 @@ something goes wrong.
 | **Cut a release** | One command checks the branch is clean and current, runs the type check and the tests, bumps the version, commits, tags and pushes — behind a single confirmation. The tag then builds both platforms and publishes them. |
 | **Retry a failed release** | A second command re-creates the tag for the same version rather than burning the next one. |
 | **Open logs folder** | A button in Settings opens the application's diagnostic logs directory in the system file manager (Finder on macOS, Explorer on Windows). |
+| **Check for updates** | A button in Settings > About checks whether a newer release exists on GitHub, reporting whether the build is current or displaying the latest available release. |
 
 ## How it behaves
 
@@ -42,12 +43,12 @@ something goes wrong.
   connections, no frames and no plug-ins, and the interface has no direct access to the system: the
   whole surface between the two is twenty-odd named calls.
 - **Application logs are written to a persistent file.** Standard output, agent lifecycle events, MCP operations, sync progress and errors are written to `logs/app.log` in the application's user data directory with ISO timestamps and scope tags. Secret credentials such as Bearer tokens and Anthropic API keys are scrubbed automatically before being persisted. When `app.log` crosses 5 MB, it rotates to `app.log.1`, keeping at most one archive file to bound disk space to 10 MB total. Quitting waits for the log to reach disk, so the lines written during shutdown are in the file rather than lost with the process — bounded, so a stuck disk delays closing the app briefly instead of preventing it.
+- **Checking for updates is strictly on-demand.** The About pane queries GitHub releases only when the user clicks *Check for Updates*. Outbound requests run through the main process with timeouts and rate-limit handling; the app never polls in the background or downloads files automatically.
 
 ## Limits
 
-- **There is no automatic update.** Updating means sending a new file and having each user install it.
-  Nothing tells a user their copy is old, and nothing tells the team which versions are in the field.
-  The build even produces update-feed files; nothing publishes them.
+- **There is no automatic background update or background notification.** Updating means downloading a new release and installing it. The About pane allows manual version checking on demand, but nothing silently checks in the background or tells the team which versions are in the field.
+- **Version comparison requires a three-part numeric semantic version (MAJOR.MINOR.PATCH).** An optional leading v or V is ignored. Release tags with missing or extra version segments, non-numeric parts, or unparseable formats are treated as invalid updates rather than compared. Prerelease and build suffixes (such as -beta or +build) are stripped before comparison and do not participate in precedence ordering.
 - **The release build does not run the tests.** The type check and the tests run on every push, and the
   local release command runs them again — but the workflow the tag triggers depends on neither, so a
   red test does not stop a release cut from a tag pushed by hand.
@@ -87,7 +88,7 @@ something goes wrong.
 
 ## Not supported
 
-- Auto-update, update notifications, or any check for a newer version.
+- Automatic background updates, background update notifications, or automatic downloading of new releases.
 - Notarization or a trusted publisher signature on either platform.
 - Central deployment, managed installation, or any way to push a configuration with the app.
 - An in-app log viewer, a support bundle packager, or automated telemetry upload to send diagnostics to a server.

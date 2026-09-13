@@ -555,5 +555,232 @@ describe('SettingsView', () => {
       // In Dev token mode, inline "Sign in" button is NOT rendered
       expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
     });
+
+    it('does not render .settings-connection card', () => {
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      expect(document.querySelector('.settings-connection')).toBeNull();
+    });
+
+    it('positions ✓ Verified badge after account text (anti-tautology badge placement)', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'srv-admin@corp.com' },
+        claude: { status: 'ok', account: 'claude-user@corp.com' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+
+      await waitFor(() => {
+        expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
+      });
+
+      const serverDd = screen.getByText(/srv-admin@corp\.com/).closest('dd');
+      const claudeDd = screen.getByText(/claude-user@corp\.com/).closest('dd');
+
+      expect(serverDd).not.toBeNull();
+      expect(claudeDd).not.toBeNull();
+
+      const serverText = serverDd!.textContent!;
+      const claudeText = claudeDd!.textContent!;
+
+      expect(serverText.indexOf('srv-admin@corp.com')).toBeLessThan(serverText.indexOf('✓ Verified'));
+      expect(claudeText.indexOf('claude-user@corp.com')).toBeLessThan(claudeText.indexOf('✓ Verified'));
+    });
+
+    it('does not call checkForUpdates on mount or navigation', () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({ status: 'latest', currentVersion: '1.2.0' });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      expect(checkForUpdates).not.toHaveBeenCalled();
+
+      openPane('Appearance');
+      expect(checkForUpdates).not.toHaveBeenCalled();
+
+      openPane('About');
+      expect(checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it('handles Check for Updates button click, disabled state, and latest version badge', async () => {
+      let resolveUpdate!: (val: any) => void;
+      const checkPromise = new Promise((resolve) => {
+        resolveUpdate = resolve;
+      });
+      const checkForUpdates = vi.fn().mockReturnValue(checkPromise);
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check for Updates' });
+      fireEvent.click(checkBtn);
+
+      expect(checkBtn.textContent).toBe('Checking…');
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(true);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+
+      // Concurrent click does not trigger second call
+      fireEvent.click(checkBtn);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+
+      resolveUpdate({ status: 'latest', currentVersion: '1.2.0', latestVersion: '1.2.0' });
+
+      await waitFor(() => {
+        expect(screen.getByText('Latest version')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Latest version');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('verified');
+      expect(checkBtn.textContent).toBe('Check for Updates');
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('renders update_available warning badge linking to release URL', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'update_available',
+        currentVersion: '1.2.0',
+        latestVersion: '1.3.3',
+        releaseUrl: 'https://github.com/yvoke-dev/yvoke-desktop/releases/tag/v1.3.3',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Latest version is 1.3.3')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Latest version is 1.3.3') as HTMLAnchorElement;
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('warning');
+      expect(badge.className).toContain('update-badge');
+      expect(badge.href).toBe('https://github.com/yvoke-dev/yvoke-desktop/releases/tag/v1.3.3');
+      expect(badge.target).toBe('_blank');
+    });
+
+    it('renders error badge on update check failure or rate limit', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'rate_limited',
+        currentVersion: '1.2.0',
+        message: 'Rate limit reached',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Rate limit reached')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Rate limit reached');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+    });
+
+    it('renders generic error badge when update check returns status: error with custom message', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'error',
+        currentVersion: '1.2.0',
+        message: 'Server returned HTTP 500',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Server returned HTTP 500')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Server returned HTTP 500');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+      expect(badge.getAttribute('title')).toBe('Server returned HTTP 500');
+    });
+
+    it('renders fallback "Check failed" when status: error has no message', async () => {
+      const checkForUpdates = vi.fn().mockResolvedValue({
+        status: 'error',
+        currentVersion: '1.2.0',
+      });
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Check failed')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Check failed');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+    });
+
+    it('handles window.api.checkForUpdates rejection gracefully, displays error, and re-enables button', async () => {
+      let rejectUpdate!: (err: Error) => void;
+      const checkPromise = new Promise((_, reject) => {
+        rejectUpdate = reject;
+      });
+      const checkForUpdates = vi.fn().mockReturnValue(checkPromise);
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      render(<SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />);
+      openPane('About');
+
+      const checkBtn = screen.getByRole('button', { name: 'Check for Updates' });
+      fireEvent.click(checkBtn);
+
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(true);
+      expect(checkBtn.textContent).toBe('Checking…');
+
+      rejectUpdate(new Error('Network disconnected'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Network disconnected')).toBeTruthy();
+      });
+
+      const badge = screen.getByText('Network disconnected');
+      expect(badge.className).toContain('cred-badge');
+      expect(badge.className).toContain('error');
+      expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
+      expect(checkBtn.textContent).toBe('Check for Updates');
+    });
+
+    it('safely handles mid-flight unmount without errors', async () => {
+      let resolveUpdate!: (val: any) => void;
+      const checkPromise = new Promise((resolve) => {
+        resolveUpdate = resolve;
+      });
+      const checkForUpdates = vi.fn().mockReturnValue(checkPromise);
+      (window as unknown as { api: unknown }).api = { checkForUpdates };
+
+      const { unmount } = render(
+        <SettingsView settings={settings} appVersion="1.2.0" onSave={vi.fn()} onClose={vi.fn()} />,
+      );
+      openPane('About');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check for Updates' }));
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+
+      unmount();
+      expect(() => {
+        resolveUpdate({ status: 'latest', currentVersion: '1.2.0' });
+      }).not.toThrow();
+    });
   });
 });

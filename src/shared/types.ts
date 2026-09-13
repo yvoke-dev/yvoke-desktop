@@ -562,6 +562,16 @@ export interface AuthVerificationResponse {
   claude: LoginVerificationResult;
 }
 
+export type UpdateCheckStatus = 'latest' | 'update_available' | 'error' | 'rate_limited';
+
+export interface UpdateCheckResult {
+  status: UpdateCheckStatus;
+  currentVersion: string;
+  latestVersion?: string;
+  releaseUrl?: string;
+  message?: string;
+}
+
 /**
  * Alias for the MCP connection, which becomes the `mcp__<name>__` prefix on every tool the SDK
  * exposes. It names the PRODUCT's MCP server, not a knowledge base: every knowledge base is served

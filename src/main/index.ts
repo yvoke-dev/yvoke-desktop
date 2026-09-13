@@ -16,6 +16,7 @@ import { AppCore } from './AppCore';
 import { fileTokenCache } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
+import { UpdateService } from './UpdateService';
 
 let core: AppCore | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -220,7 +221,10 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
     return next;
   });
 
+  const updateService = new UpdateService(() => app.getVersion());
+
   handle(IpcChannels.appVersion, () => app.getVersion());
+  handle(IpcChannels.appCheckUpdate, () => updateService.checkForUpdates());
 
   handle(IpcChannels.promptsList, () => appCore.listPrompts());
   handle(IpcChannels.orchestratorProfiles, () => appCore.listOrchestratorProfiles());

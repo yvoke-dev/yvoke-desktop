@@ -15,7 +15,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
-| **About** | Version, server address, both sign-in states, and on-demand credential verification checkmarks. |
+| **About** | Version, on-demand update check, server address, both sign-in states, and on-demand credential verification checkmarks. |
 
 ## How it behaves
 
@@ -37,6 +37,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 - **Reduced motion follows the system**, with no control of its own.
 - **Verifying credentials in the About pane is on-demand.** Clicking *Check Credentials* tests whether the corporate or development token is accepted and whether the Claude credentials generate a live reply. It runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
 - **A verification result describes the settings as they were saved.** Editing the server address, the sign-in mode or the default model clears the result rather than relabelling it, so a checkmark never appears beside a configuration that was not the one tested.
+- **Checking for updates in the About pane is on-demand.** Clicking *Check for Updates* queries GitHub releases via IPC through the main process. If the build is up to date, an indicator appears in green; if a newer version exists, the latest version tag appears in orange with a link to the release on GitHub. Network failures and rate limits are surfaced inline without interrupting settings navigation or ongoing chat turns.
 
 ## Limits
 

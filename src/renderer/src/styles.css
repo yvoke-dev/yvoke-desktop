@@ -1937,13 +1937,6 @@ h6 {
   margin: 12px 18px;
 }
 
-/* Connection status, assembled from settings + auth state the app already holds. */
-.settings-connection {
-  margin: 14px 18px 0;
-  border: 1px solid var(--line);
-  padding: 10px;
-}
-
 .settings-connection-label {
   font-size: 10px;
   letter-spacing: 0.12em;
@@ -1951,32 +1944,6 @@ h6 {
   font-weight: 700;
   color: var(--text-dim);
   margin-bottom: 5px;
-}
-
-.settings-connection-host {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  background: var(--accent-ink);
-}
-
-.status-dot.off {
-  background: var(--text-faint);
-}
-
-.settings-connection-detail {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 3px;
 }
 
 .settings-main {
@@ -2577,7 +2544,8 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
 }
 
 .button.check-credentials-btn,
-.button.open-logs-btn {
+.button.open-logs-btn,
+.button.check-updates-btn {
   padding: 5px 12px;
   font-size: 12px;
   border-radius: 3px;
@@ -2589,6 +2557,12 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   font-size: 11px;
   border-radius: 3px;
   vertical-align: middle;
+}
+
+.about-version-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .cred-badge {
@@ -2620,6 +2594,11 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   color: var(--danger-ink);
   background: var(--danger-bg);
   border-color: var(--danger-line);
+}
+
+.update-badge {
+  text-decoration: none;
+  cursor: pointer;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

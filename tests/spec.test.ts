@@ -197,5 +197,19 @@ describe('spec/ modular structure', () => {
     expect(signingIn).toContain("Nothing warns in advance when the subscription's allowance runs out.");
     expect(settings).toContain('A verification result describes the settings as they were saved.');
   });
+
+  it('documents on-demand update checking in 06_settings_and_what_they_change.md and 08_installing_updating_and_diagnosing.md', () => {
+    const settings = readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8');
+    const installing = readFileSync(resolve(SPEC_DIR, '08_installing_updating_and_diagnosing.md'), 'utf8');
+
+    expect(settings).toContain('Version, on-demand update check, server address, both sign-in states, and on-demand credential verification checkmarks.');
+    expect(settings).toContain('Checking for updates in the About pane is on-demand.');
+
+    expect(installing).toContain('Check for updates');
+    expect(installing).toContain('Checking for updates is strictly on-demand.');
+    expect(installing).toContain('There is no automatic background update or background notification.');
+    expect(installing).toContain('Version comparison requires a three-part numeric semantic version');
+    expect(installing).toContain('Automatic background updates, background update notifications, or automatic downloading of new releases.');
+  });
 });
 
