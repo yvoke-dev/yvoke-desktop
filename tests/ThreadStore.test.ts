@@ -176,6 +176,8 @@ describe('ThreadStore', () => {
   });
 
   describe('drain', () => {
+    // Note: These tests use `(store as any).runExclusive` to inject controllable pending/deferred
+    // promises directly into the private opChain, isolating drainage timing from disk I/O latency.
     it('waits for in-flight operations across all threads to settle before resolving', async () => {
       store.upsert(meta('t1'));
       store.upsert(meta('t2'));

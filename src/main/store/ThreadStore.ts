@@ -156,7 +156,9 @@ export class ThreadStore {
       await (this.opChain.get(threadId) ?? Promise.resolve());
       return;
     }
-    await Promise.all(Array.from(this.opChain.values()));
+    while (this.opChain.size > 0) {
+      await Promise.all(Array.from(this.opChain.values()));
+    }
   }
 
   // Per-thread message logs can grow with the conversation, so their I/O is async to avoid
@@ -171,8 +173,16 @@ export class ThreadStore {
   private runExclusive<T>(threadId: string, op: () => Promise<T>): Promise<T> {
     const prev = this.opChain.get(threadId) ?? Promise.resolve();
     const result = prev.then(op, op);
-    // Store a normalized, never-rejecting tail so the chain survives an op's failure.
-    this.opChain.set(threadId, result.then(() => undefined, () => undefined));
+    // Store a normalized, never-rejecting tail so the chain survives an op's failure,
+    // and prune settled entries so opChain does not hold stale promises indefinitely.
+    const tail: Promise<undefined> = result
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (this.opChain.get(threadId) === tail) {
+          this.opChain.delete(threadId);
+        }
+      });
+    this.opChain.set(threadId, tail);
     return result;
   }
 

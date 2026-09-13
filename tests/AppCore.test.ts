@@ -420,6 +420,8 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
 });
 
 describe('AppCore.drain', () => {
+  // Note: These tests use `(appCore as any).chainPersist` to directly enqueue asynchronous work
+  // into private persistTails, verifying drain timing and while-loop cascading independently of full turns.
   let tmpDir: string;
   let appCore: AppCore;
 

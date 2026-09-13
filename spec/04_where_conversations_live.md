@@ -23,8 +23,7 @@ or lose the network mid-conversation.
   one message log per conversation, the search index, the sync queue, the encrypted sign-in token, and
   a working directory the assistant is pointed at.
 - **A turn is written locally first, then queued.** The local write is best-effort and never delays
-  the answer; the queued copy is what guarantees delivery. In-flight local persistence operations
-  across threads can be drained deterministically before test teardown or shutdown.
+  the answer; the queued copy is what guarantees delivery.
 - **Retries are unbounded, deliberately.** A turn keeps trying rather than being lost while the server
   is merely down, backing off 2, 5, 15, 30 and then 60 seconds between attempts.
 - **A rejection is not a retry.** A response that says the request itself was wrong — anything in the
