@@ -23,8 +23,8 @@ The durable **functional specification** in `spec/` (indexed by `spec/README.md`
           (Gate 3)               1. desktop_implementer: Red -> Green -> Refactor (Vitest).
                                     Test Mutation Proof (break production code, watch RED, restore).
                                  2. desktop_reviewer: Audits diff (IPC safety, memory leaks, CSP).
-                                 3. Wave Commit: git commit -m "feat(<domain>): [Wave N] ..."
-                                 (Mandatory Wave N-1: Update spec/ chapter file)
+                                  3. Wave Commit: git commit -m "feat(<domain>): [Wave N] ..."
+                                  (Wave N-1: Update spec/ chapter file if user-observable behaviour changes)
           │
   Phase 5: Holistic Audit        sdd_auditor verifies spec/ chapter, tests/spec.test.ts,
                                  check_steering.py, npm run typecheck, AgentRuleFilesParity.test.ts,
@@ -97,8 +97,8 @@ Before starting, ensure the required SDD subagents are defined for the session. 
    - **Eliminates Happy-Path Test Syndrome**: Mandates that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC args, corrupt JSON store recovery, network sync timeouts, bad tool input rejection).
    - Verifies tests assert real state mutations rather than trivial assertions.
 4. **Task Artifact Generation (`task.md`)**: The task architect incorporates all negative tests and emits the hardened `task.md` in the brain directory:
-   - **Mandatory Wave N-1**: Update `spec/` capability chapter and verify via `tests/spec.test.ts`.
-   - **Mandatory Wave N**: SDD Auditor verification and PR creation.
+    - **Wave N-1 (Spec Compliance)**: Update `spec/` capability chapter IF and ONLY IF the task alters user-observable behaviour, limits, defaults, or capabilities (per `spec/README.md`: "A change a user would notice must update the affected chapter... For a small, local fix, go straight to the code and its tests"). Internal test infrastructure, CI fixes, and pure refactorings must NOT touch `spec/`. Verify via `npm test -- tests/spec.test.ts`.
+    - **Mandatory Wave N**: SDD Auditor verification and PR creation.
 
 ---
 
