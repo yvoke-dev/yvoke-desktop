@@ -16,7 +16,22 @@ import { _electron as electron } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { synthesizeSpeech, pcmToWav, type SynthesizeResult } from './video/tts';
 import { injectDemoCursor, glideMouse } from './video/cursor';
-import { stitchVideoAndAudio } from './video/stitch';
+import { stitchVideoAndAudio, FfmpegNotFoundError } from './video/stitch';
+
+// Automatically pick up GEMINI_API_KEY from .env.local or .env if present
+if (!process.env.GEMINI_API_KEY) {
+  for (const envFile of ['.env.local', '.env']) {
+    const envPath = path.resolve(process.cwd(), envFile);
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      const match = content.match(/^\s*GEMINI_API_KEY\s*=\s*["']?([^"'\r\n]+)["']?/m);
+      if (match && match[1]) {
+        process.env.GEMINI_API_KEY = match[1].trim();
+        break;
+      }
+    }
+  }
+}
 
 interface DemoOptions {
   skipTts: boolean;
@@ -30,7 +45,7 @@ function parseArgs(): DemoOptions {
   const outputPath =
     outIdx !== -1 && args[outIdx + 1]
       ? path.resolve(process.cwd(), args[outIdx + 1])
-      : path.resolve(process.cwd(), 'release/demo.mp4');
+      : path.resolve(process.cwd(), 'artifacts/yvoke-desktop-demo.mp4');
 
   return { skipTts, outputPath };
 }
@@ -401,14 +416,30 @@ export async function runDemoVideoGenerator(): Promise<void> {
     fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
 
     console.log(`Stitching output with universal MP4 flags to ${options.outputPath}...`);
-    await stitchVideoAndAudio({
-      videoPath: recordedVideoPath,
-      audioPath: combinedAudioPath,
-      outputPath: options.outputPath,
-      skipTts: options.skipTts,
-    });
-
-    console.log(`\nDemo video generated successfully at: ${options.outputPath}`);
+    try {
+      await stitchVideoAndAudio({
+        videoPath: recordedVideoPath,
+        audioPath: combinedAudioPath,
+        outputPath: options.outputPath,
+        skipTts: options.skipTts,
+      });
+      console.log(`\nDemo video generated successfully at: ${options.outputPath}`);
+    } catch (err) {
+      if (err instanceof FfmpegNotFoundError) {
+        const fallbackWebm = options.outputPath.replace(/\.mp4$/, '.webm');
+        fs.copyFileSync(recordedVideoPath, fallbackWebm);
+        console.warn(`\n⚠️  FFmpeg is not installed. Saved raw WebM video to: ${fallbackWebm}`);
+        if (combinedAudioPath && fs.existsSync(combinedAudioPath)) {
+          const fallbackWav = options.outputPath.replace(/\.mp4$/, '.wav');
+          fs.copyFileSync(combinedAudioPath, fallbackWav);
+          console.warn(`Saved narration audio to: ${fallbackWav}`);
+        }
+        console.warn('You can open and view the .webm video directly in Chrome, Edge, Safari, or VLC.');
+        console.warn('To convert to MP4: install FFmpeg via "brew install ffmpeg".');
+      } else {
+        throw err;
+      }
+    }
   } finally {
     await teardown();
   }
