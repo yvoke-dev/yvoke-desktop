@@ -59,9 +59,13 @@ function runPreflightChecks(skipTts: boolean): void {
     process.exit(1);
   }
 
-  if (!skipTts && !process.env.GEMINI_API_KEY) {
+  const hasValidKey =
+    !!process.env.GEMINI_API_KEY &&
+    process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here';
+
+  if (!skipTts && !hasValidKey) {
     console.error(
-      'Error: GEMINI_API_KEY is required for voice narration.\nPlease export GEMINI_API_KEY or pass --skip-tts to record video without audio.',
+      'Error: GEMINI_API_KEY is required for voice narration.\nPlease add your key to .env (or export GEMINI_API_KEY), or pass --skip-tts to record video without audio.',
     );
     process.exit(1);
   }
