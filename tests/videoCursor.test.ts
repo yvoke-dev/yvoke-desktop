@@ -27,6 +27,9 @@ describe('videoCursor', () => {
 
       const mockPage = {
         evaluate: vi.fn(async (fn: any, ...args: any[]) => {
+          if (typeof fn === 'string') {
+            return new Function(fn)();
+          }
           if (typeof fn === 'function') {
             return fn(...args);
           }
@@ -69,7 +72,12 @@ describe('videoCursor', () => {
 
     it('updates cursor position when mousemove event is dispatched', async () => {
       const mockPage = {
-        evaluate: vi.fn(async (fn: any, ...args: any[]) => fn(...args)),
+        evaluate: vi.fn(async (fn: any, ...args: any[]) => {
+          if (typeof fn === 'string') {
+            return new Function(fn)();
+          }
+          return fn(...args);
+        }),
       } as unknown as Page;
 
       await injectDemoCursor(mockPage);
