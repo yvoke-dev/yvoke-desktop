@@ -13,46 +13,35 @@ type MouseEvent = any;
  * Safe to call multiple times (strictly idempotent).
  */
 export async function injectDemoCursor(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    if (document.getElementById('demo-cursor')) {
-      return;
-    }
+  await page.evaluate(`
+    (function() {
+      window.__name = window.__name || function(t) { return t; };
+      if (document.getElementById('demo-cursor')) {
+        return;
+      }
 
-    if (window.__demoCursorMoveListener) {
-      window.removeEventListener('mousemove', window.__demoCursorMoveListener);
-    }
+      if (window.__demoCursorMoveListener) {
+        window.removeEventListener('mousemove', window.__demoCursorMoveListener);
+      }
 
-    const cursor = document.createElement('div');
-    cursor.id = 'demo-cursor';
-    cursor.setAttribute('aria-hidden', 'true');
-    cursor.style.cssText = `
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 24px;
-      height: 24px;
-      z-index: 9999999;
-      pointer-events: none;
-      transform: translate(-100px, -100px);
-      transition: transform 0.04s ease-out;
-    `;
+      var cursor = document.createElement('div');
+      cursor.id = 'demo-cursor';
+      cursor.setAttribute('aria-hidden', 'true');
+      cursor.style.cssText = 'position: fixed; top: 0; left: 0; width: 24px; height: 24px; z-index: 9999999; pointer-events: none; transform: translate(-100px, -100px); transition: transform 0.04s ease-out;';
 
-    cursor.innerHTML = `
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.35));">
-        <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.45 0 .67-.54.35-.85L5.5 3.21z" fill="#ffffff" stroke="#1e1e1e" stroke-width="1.5"/>
-      </svg>
-    `;
+      cursor.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.35));"><path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.45 0 .67-.54.35-.85L5.5 3.21z" fill="#ffffff" stroke="#1e1e1e" stroke-width="1.5"/></svg>';
 
-    document.body.appendChild(cursor);
+      document.body.appendChild(cursor);
 
-    const listener = (e: MouseEvent): void => {
-      cursor.style.transform = `translate(${e.clientX}px, ${e.clientY}px)`;
-    };
+      var listener = function(e) {
+        cursor.style.transform = 'translate(' + e.clientX + 'px, ' + e.clientY + 'px)';
+      };
 
-    window.__demoCursorMoveListener = listener;
-    window.__demoCursorInjected = true;
-    window.addEventListener('mousemove', listener);
-  });
+      window.__demoCursorMoveListener = listener;
+      window.__demoCursorInjected = true;
+      window.addEventListener('mousemove', listener);
+    })()
+  `);
 }
 
 export interface GlideOptions {

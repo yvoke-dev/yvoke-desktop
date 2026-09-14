@@ -137,7 +137,10 @@ export async function synthesizeSpeech(
     throw new TtsAuthenticationError('GEMINI_API_KEY is required for speech synthesis');
   }
 
-  const model = options.model ?? 'gemini-2.0-flash';
+  const model =
+    options.model ??
+    process.env.GEMINI_TTS_MODEL ??
+    'gemini-3.1-flash-tts-preview';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const fetcher = options.fetchFn ?? fetch;
 
@@ -210,7 +213,15 @@ export async function synthesizeSpeech(
 
   const part = data.candidates[0]?.content?.parts?.find((p: any) => p?.inlineData?.data);
   if (!part?.inlineData?.data) {
-    throw new TtsSynthesisError('TTS synthesis response did not contain audio inlineData');
+    const partsSummary = JSON.stringify(
+      data.candidates[0]?.content?.parts?.map((p: any) => ({
+        keys: Object.keys(p),
+        textSample: p.text ? p.text.slice(0, 80) : undefined,
+      })),
+    );
+    throw new TtsSynthesisError(
+      `TTS synthesis response did not contain audio inlineData. Received parts: ${partsSummary}`,
+    );
   }
 
   const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
