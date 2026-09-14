@@ -18,16 +18,27 @@ import { synthesizeSpeech, pcmToWav, type SynthesizeResult } from './video/tts';
 import { injectDemoCursor, glideMouse } from './video/cursor';
 import { stitchVideoAndAudio, FfmpegNotFoundError } from './video/stitch';
 
-// Automatically pick up GEMINI_API_KEY from .env.local or .env if present
-if (!process.env.GEMINI_API_KEY) {
-  for (const envFile of ['.env.local', '.env']) {
-    const envPath = path.resolve(process.cwd(), envFile);
-    if (fs.existsSync(envPath)) {
-      const content = fs.readFileSync(envPath, 'utf8');
-      const match = content.match(/^\s*GEMINI_API_KEY\s*=\s*["']?([^"'\r\n]+)["']?/m);
-      if (match && match[1]) {
-        process.env.GEMINI_API_KEY = match[1].trim();
-        break;
+// Automatically pick up configuration from .env.local or .env if present
+for (const envFile of ['.env.local', '.env']) {
+  const envPath = path.resolve(process.cwd(), envFile);
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+      if (match) {
+        const key = match[1];
+        let val = match[2].trim();
+        if (
+          (val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))
+        ) {
+          val = val.slice(1, -1);
+        }
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
       }
     }
   }
@@ -325,6 +336,10 @@ export async function runDemoVideoGenerator(): Promise<void> {
     }
     await appPage.waitForLoadState('domcontentloaded');
     await appPage.waitForTimeout(500);
+
+    // Safeguard browser context against esbuild/tsx __name injection
+    await appPage.addInitScript('window.__name = window.__name || function(t) { return t; };');
+    await appPage.evaluate('window.__name = window.__name || function(t) { return t; };');
 
     // Inject visible demo cursor
     await injectDemoCursor(appPage);
