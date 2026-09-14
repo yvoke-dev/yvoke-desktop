@@ -79,9 +79,10 @@ export async function launchTestApp(options: LaunchOptions = {}): Promise<Electr
   });
   fs.writeFileSync(path.join(threadsDir, 'e2e-thread-1.jsonl'), `${seedMsg}\n`, 'utf8');
 
+  // Runs headless by default unless --headed is passed or YVOKE_HEADLESS=0 is set
   const isHeadless =
     options.headless ??
-    (!process.argv.includes('--headed') && process.env.HEADED !== '1');
+    (!process.argv.includes('--headed') && process.env.YVOKE_HEADLESS !== '0');
 
   const mainEntry = path.resolve(projectRoot, 'out/main/index.js');
   const electronApp = await electron.launch({
