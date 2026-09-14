@@ -63,6 +63,7 @@ yvoke-desktop/
 │   │   │   ├── SyncClient.ts
 │   │   │   └── SyncQueue.ts
 │   │   ├── AppCore.ts      # Core orchestrator wiring main-process modules
+│   │   ├── bootstrap.ts    # Headless mode, userData path resolution, and settings recovery
 │   │   ├── index.ts        # Electron entry point (window setup, IPC registry)
 │   │   └── log.ts          # Main process logger
 │   ├── preload/            # Preload script (context bridge to expose secure APIs)
@@ -85,8 +86,13 @@ yvoke-desktop/
 │   │       └── styles.css  # Core application Vanilla CSS styling
 │   └── shared/             # TypeScript types shared between main and renderer
 │       └── types.ts
+├── e2e/                    # Playwright end-to-end test suite
+│   ├── support/
+│   │   └── electronFixture.ts # Electron launch, temp userData, preflight check
+│   └── app.spec.ts         # Application launch, composer, settings, and containment specs
 ├── tests/                  # Vitest unit and integration test suites
 │   ├── AgentRuleFilesParity.test.ts # Enforces parity between CLAUDE.md and AGENTS.md
+│   ├── bootstrap.test.ts   # Unit tests for bootstrap path & headless resolution
 │   ├── spec.test.ts        # Enforces modular spec/ structure and sections
 │   ├── SyncQueue.test.ts
 │   ├── ThreadStore.test.ts
@@ -98,7 +104,9 @@ yvoke-desktop/
 ├── tsconfig.json           # Composite typescript project references
 ├── tsconfig.node.json      # Node-side compilation targets (main/preload/scripts/tests)
 ├── tsconfig.web.json       # Browser-side compilation targets (renderer)
+├── tsconfig.e2e.json       # E2E compilation targets (e2e/ and playwright.config.ts)
 ├── electron.vite.config.ts # electron-vite bundling configuration
+├── playwright.config.ts    # Playwright E2E configuration
 ├── vitest.config.ts        # Vitest test runner configuration
 ├── package.json            # NPM dependencies and scripts
 └── README.md
