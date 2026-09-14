@@ -9,7 +9,12 @@ import type { BrowserWindowConstructorOptions } from 'electron';
  * Recursively ensures the directory exists before returning.
  */
 export function resolveUserDataDir(envVal?: string, defaultPath?: string): string {
-  const candidate = envVal && envVal.trim().length > 0 ? envVal.trim() : defaultPath && defaultPath.trim().length > 0 ? defaultPath.trim() : undefined;
+  const candidate =
+    envVal && envVal.trim().length > 0
+      ? envVal.trim()
+      : defaultPath && defaultPath.trim().length > 0
+        ? defaultPath.trim()
+        : undefined;
   if (!candidate) {
     throw new Error('No valid userData directory path specified.');
   }
@@ -46,32 +51,4 @@ export function getMainWindowOptions(
       backgroundThrottling: false,
     },
   };
-}
-
-/**
- * Recovers from a corrupted settings.json in the userData directory.
- * If the file exists but contains invalid JSON, it is backed up to settings.json.bak
- * and removed so that SettingsStore can safely load default configuration.
- * Returns true if recovery was performed, false otherwise.
- */
-export function recoverCorruptedSettings(userDataDir: string): boolean {
-  const settingsPath = path.join(userDataDir, 'settings.json');
-  if (!fs.existsSync(settingsPath)) {
-    return false;
-  }
-
-  try {
-    const raw = fs.readFileSync(settingsPath, 'utf8');
-    JSON.parse(raw);
-    return false;
-  } catch {
-    const backupPath = `${settingsPath}.bak`;
-    try {
-      fs.copyFileSync(settingsPath, backupPath);
-    } catch {
-      // Ignore backup copy failures if source cannot be read
-    }
-    fs.rmSync(settingsPath, { force: true });
-    return true;
-  }
 }

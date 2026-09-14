@@ -17,7 +17,7 @@ import { fileTokenCache } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
 import { UpdateService } from './UpdateService';
-import { getMainWindowOptions, isHeadless, recoverCorruptedSettings, resolveUserDataDir } from './bootstrap';
+import { getMainWindowOptions, isHeadless, resolveUserDataDir } from './bootstrap';
 
 let core: AppCore | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -288,7 +288,6 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
 
 const userDataDir = resolveUserDataDir(process.env.YVOKE_USER_DATA_DIR, app.getPath('userData'));
 app.setPath('userData', userDataDir);
-recoverCorruptedSettings(userDataDir);
 headless = isHeadless(process.env.YVOKE_HEADLESS);
 if (headless) {
   app.commandLine.appendSwitch('disable-gpu');

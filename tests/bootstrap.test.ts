@@ -6,7 +6,6 @@ import type { BrowserWindowConstructorOptions } from 'electron';
 import {
   getMainWindowOptions,
   isHeadless,
-  recoverCorruptedSettings,
   resolveUserDataDir,
 } from '../src/main/bootstrap';
 import { CURRENT_SETTINGS_VERSION, SettingsStore } from '../src/main/settings/Settings';
@@ -136,37 +135,15 @@ describe('bootstrap helpers', () => {
     });
   });
 
-  describe('Corrupted settings.json recovery', () => {
-    it('recovers from a corrupted settings.json by backing it up and allowing SettingsStore to load defaults', () => {
+  describe('SettingsStore corrupt JSON tolerance', () => {
+    it('safely recovers to project defaults when settings.json contains corrupt syntax', () => {
       const dir = createTempDir('yvoke-corrupt-settings-');
       const settingsFile = path.join(dir, 'settings.json');
       fs.writeFileSync(settingsFile, '{ "serverAuthMode": "dev", CORRUPTED SYNTAX !!!');
 
-      const recovered = recoverCorruptedSettings(dir);
-      expect(recovered).toBe(true);
-      expect(fs.existsSync(settingsFile)).toBe(false);
-      expect(fs.existsSync(`${settingsFile}.bak`)).toBe(true);
-
       const store = new SettingsStore(dir);
       expect(store.get().settingsVersion).toBe(CURRENT_SETTINGS_VERSION);
       expect(store.get().serverAuthMode).toBeDefined();
-    });
-
-    it('leaves valid settings.json alone and returns false', () => {
-      const dir = createTempDir('yvoke-valid-settings-');
-      const settingsFile = path.join(dir, 'settings.json');
-      fs.writeFileSync(settingsFile, JSON.stringify({ serverAuthMode: 'dev' }));
-
-      const recovered = recoverCorruptedSettings(dir);
-      expect(recovered).toBe(false);
-      expect(fs.existsSync(settingsFile)).toBe(true);
-      expect(fs.existsSync(`${settingsFile}.bak`)).toBe(false);
-    });
-
-    it('returns false when settings.json does not exist', () => {
-      const dir = createTempDir('yvoke-missing-settings-');
-      const recovered = recoverCorruptedSettings(dir);
-      expect(recovered).toBe(false);
     });
   });
 });
