@@ -24,6 +24,8 @@ yarn-error.log*
 coverage/
 *.lcov
 .nyc_output/
+/e2e-report/
+/test-results/
 
 # Editor & OS settings
 .DS_Store
