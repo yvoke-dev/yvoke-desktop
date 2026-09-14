@@ -42,7 +42,7 @@ npm run typecheck:e2e
 
 ## Architectural Principles & Test Fixture
 
-Tests utilize the custom fixture defined in [`e2e/support/electronFixture.ts`](file:///Users/eduardpal/work/yvoke/yvoke-desktop/e2e/support/electronFixture.ts):
+Tests utilize the custom fixture defined in [`e2e/support/electronFixture.ts`](support/electronFixture.ts):
 
 1. **Storage & Profile Isolation**:
    - Each test invocation creates a fresh, isolated temporary directory in `os.tmpdir()` (`yvoke-e2e-*`).
@@ -66,3 +66,14 @@ Tests utilize the custom fixture defined in [`e2e/support/electronFixture.ts`](f
 
 5. **Build Preflight Check**:
    - Verifies that `out/main/index.js` exists before attempting launch. If missing, throws an immediate actionable error directing the developer to run `npm run build`.
+
+---
+
+## Environment Variables
+
+The test harness and Electron main process recognize the following environment variables:
+
+| Variable | Description |
+| :--- | :--- |
+| `YVOKE_HEADLESS` | Controls window visibility. Set to `'1'` to run headlessly (`show: false`, `backgroundThrottling: false`, `--disable-gpu`). Set to `'0'` (or pass `--headed`) to force window display. |
+| `YVOKE_USER_DATA_DIR` | Sets a custom path for Electron's `userData` directory before acquiring the single-instance lock. Automatically managed by the test fixture. |
