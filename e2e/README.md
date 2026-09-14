@@ -77,3 +77,36 @@ The test harness and Electron main process recognize the following environment v
 | :--- | :--- |
 | `YVOKE_HEADLESS` | Controls window visibility. Set to `'1'` to run headlessly (`show: false`, `backgroundThrottling: false`, `--disable-gpu`). Set to `'0'` (or pass `--headed`) to force window display. |
 | `YVOKE_USER_DATA_DIR` | Sets a custom path for Electron's `userData` directory before acquiring the single-instance lock. Automatically managed by the test fixture. |
+
+---
+
+## Automated Demo Video Generation
+
+The repository includes an automated demonstration video generation harness powered by Playwright, Google AI Studio Gemini 2.0 Audio, and FFmpeg:
+
+```bash
+npm run demo:video
+```
+
+### Execution Modes
+1. **AI Narration Mode (Default)**:
+   - Requires `GEMINI_API_KEY` set in the environment.
+   - Synthesizes studio-quality voiceover via Google AI Studio's Gemini 2.0 Audio API (`Aoede` voice preset).
+   - Automatically parses raw 24kHz 16-bit mono PCM into standard RIFF WAV files, calculates exact durations mathematically, and aligns Playwright screen choreography with narration pauses.
+2. **Silent Capture Mode**:
+   - Run without credentials using `--skip-tts`:
+     ```bash
+     npm run demo:video -- --skip-tts
+     ```
+   - Executes the complete 4-scene choreography with calibrated baseline timing (2.5s–3.5s per scene) and produces a video without audio.
+
+### Prerequisites
+- **FFmpeg**: Required for audio/video multiplexing (`brew install ffmpeg` on macOS or `choco install ffmpeg` on Windows). If FFmpeg is absent, the harness preserves raw WebM video and audio files in `artifacts/` with an actionable notice.
+- **Application Build**: The runner performs an automatic preflight check for `out/main/index.js` (managed automatically by `npm run demo:video`, which runs `electron-vite build` first).
+
+### Architectural & Isolation Guarantees
+- **Profile Isolation**: The runner launches Electron into an isolated ephemeral temporary directory in `os.tmpdir()` (`yvoke-demo-*`). Production user profiles are never accessed or mutated.
+- **Loopback Containment**: The seeded environment configures `serverAuthMode: "dev"` and `serverBaseUrl: "http://127.0.0.1:0"`. Zero network calls are dispatched to external company endpoints.
+- **Visual Cursor Overlay**: Injects an animated cursor with click ripple animations via Playwright CDP (`addInitScript`), creating a natural human walkthrough experience.
+- **Resilient Teardown**: Signal traps (`SIGINT`, `SIGTERM`) and a 5-second SIGKILL timeout fallback ensure no orphan Electron processes or stale temp files remain.
+
