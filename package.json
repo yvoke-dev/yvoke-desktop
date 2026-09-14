@@ -18,6 +18,7 @@
     "e2e": "npm run build && playwright test",
     "e2e:ui": "npm run build && playwright test --ui",
     "e2e:headed": "npm run build && playwright test --headed",
+    "demo:video": "electron-vite build && tsx scripts/generate-demo-video.ts",
     "release": "./scripts/release.sh",
     "release:retag": "./scripts/release-retag.sh",
     "spike": "tsx scripts/spike.ts",
