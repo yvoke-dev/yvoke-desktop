@@ -157,4 +157,21 @@ describe('ToolCallCard', () => {
     fireEvent.click(sendButton);
     expect(callCount).toBe(0);
   });
+
+  it('renders question text as formatted markdown (bolding, lists, paragraphs)', () => {
+    const call: ToolCallInfo = {
+      id: '8',
+      name: 'AskUserQuestion',
+      input: {
+        question:
+          'Which type of changes?\n- **Content changes (9.3.1 -> 10.0):** Details here\n- **Schema changes:** More details',
+      },
+    };
+    const { container } = render(<ToolCallCard call={call} />);
+    const strong = container.querySelector('strong');
+    expect(strong).not.toBeNull();
+    expect(strong?.textContent).toBe('Content changes (9.3.1 -> 10.0):');
+    expect(container.querySelectorAll('li').length).toBe(2);
+  });
 });
+

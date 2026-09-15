@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
 import { isClarificationTool, normalizeClarifyingInput } from '../../../shared/types';
 import { SubagentCard } from './SubagentCard';
+import { Markdown } from './Markdown';
 import { CheckIcon, HelpIcon, SendIcon } from './icons';
 
 /**
@@ -63,7 +64,9 @@ export function ToolCallCard(props: {
           <HelpIcon size={13} />
           <span className="card-title">Clarification provided</span>
         </div>
-        <div className="card-question">{question}</div>
+        <div className="card-question">
+          <Markdown content={question} />
+        </div>
         <div className="clarified-badge">
           <CheckIcon size={12} />“{answerText}”
         </div>
@@ -77,7 +80,9 @@ export function ToolCallCard(props: {
         <HelpIcon size={13} />
         <span className="card-title">Clarification required</span>
       </div>
-      <div className="card-question">{question}</div>
+      <div className="card-question">
+        <Markdown content={question} />
+      </div>
       {isActive && onClarificationSubmit ? (
         <>
           {options.length > 0 && (
