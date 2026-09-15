@@ -84,7 +84,7 @@ export function parseArgs(): DemoOptions {
   const backendUrl =
     backendIdx !== -1 && args[backendIdx + 1]
       ? args[backendIdx + 1]
-      : (process.env.YVOKE_SERVER_URL ?? 'http://127.0.0.1:8000');
+      : (process.env.YVOKE_SERVER ?? process.env.YVOKE_SERVER_URL ?? 'http://localhost:8080');
   const outIdx = args.indexOf('--output');
   const outputPath =
     outIdx !== -1 && args[outIdx + 1]
@@ -135,13 +135,13 @@ export async function runPreflight(options: DemoOptions): Promise<void> {
   }
 }
 
-export function seedUserData(): string {
+export function seedUserData(backendUrl = 'http://localhost:8080'): string {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-demo-video-'));
 
   // 1. Settings with full orchestrator and appearance profiles
   const settings = {
     serverAuthMode: 'dev',
-    serverBaseUrl: 'http://127.0.0.1:0',
+    serverBaseUrl: backendUrl,
     appearance: {
       theme: 'dark',
       density: 'comfortable',
@@ -568,7 +568,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
   // Seed temp directory
   console.log('\n[2/4] Initializing isolated profile environment...');
-  const userDataDir = seedUserData();
+  const userDataDir = seedUserData(options.backendUrl);
   const recordingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-recordings-'));
 
   let electronApp: ElectronApplication | null = null;

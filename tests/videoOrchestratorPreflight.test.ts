@@ -32,10 +32,15 @@ describe('videoOrchestratorPreflight', () => {
         text: vi.fn().mockResolvedValue('{"status":"ok"}'),
       } as unknown as Response);
 
-      await expect(probeBackend('http://localhost:8000', mockFetch)).resolves.toBeUndefined();
+      await expect(probeBackend('http://localhost:8080', mockFetch)).resolves.toBeUndefined();
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8000/api/chat/v1/prompts/default-chat',
-        expect.objectContaining({ method: 'GET' }),
+        'http://localhost:8080/api/chat/v1/prompts/system/default-chat',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            Authorization: 'Bearer dev-local-token',
+          }),
+        }),
       );
     });
 
@@ -48,9 +53,9 @@ describe('videoOrchestratorPreflight', () => {
         text: vi.fn().mockResolvedValue('{}'),
       } as unknown as Response);
 
-      await probeBackend('http://127.0.0.1:8000/', mockFetch);
+      await probeBackend('http://127.0.0.1:8080/', mockFetch);
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:8000/api/chat/v1/prompts/default-chat',
+        'http://127.0.0.1:8080/api/chat/v1/prompts/system/default-chat',
         expect.any(Object),
       );
     });
@@ -274,7 +279,7 @@ describe('videoOrchestratorPreflight', () => {
 
       await expect(
         runAllPreflightChecks({
-          backendUrl: 'http://127.0.0.1:8000',
+          backendUrl: 'http://127.0.0.1:8080',
           skipTts: true,
           fetchFn: mockFetch,
           runner: mockRunner,
@@ -291,12 +296,12 @@ describe('videoOrchestratorPreflight', () => {
 
       await expect(
         runAllPreflightChecks({
-          backendUrl: 'http://127.0.0.1:8000',
+          backendUrl: 'http://127.0.0.1:8080',
           skipTts: true,
           fetchFn: mockFetch,
           mainEntry: '/mock/out/main/index.js',
         }),
-      ).rejects.toThrow(/Docker backend is not running at http:\/\/127\.0\.0\.1:8000/);
+      ).rejects.toThrow(/Docker backend is not running at http:\/\/127\.0\.0\.1:8080/);
     });
   });
 });
