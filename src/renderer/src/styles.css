@@ -1341,6 +1341,20 @@ h6 {
   line-height: 1.5;
 }
 
+.clarifying-question-card .card-question .markdown {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.clarifying-question-card .card-question .markdown p {
+  margin: 0 0 8px 0;
+}
+
+.clarifying-question-card .card-question .markdown ul,
+.clarifying-question-card .card-question .markdown ol {
+  margin: 0 0 8px 0;
+}
+
 .clarifying-question-card .card-options {
   display: flex;
   flex-wrap: wrap;
@@ -1376,6 +1390,10 @@ h6 {
 
 .clarifying-question-card.answered .card-header,
 .clarifying-question-card.answered .card-question {
+  color: var(--text-dim);
+}
+
+.clarifying-question-card.answered .card-question .markdown {
   color: var(--text-dim);
 }
 
