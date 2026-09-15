@@ -11,7 +11,7 @@ import {
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import { mapSpecialistTools } from '../src/main/agent/orchestration';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
-import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool, type AppSettings } from '../src/shared/types';
+import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool, type AppSettings, type ClarificationOption } from '../src/shared/types';
 
 const base: AppSettings = { ...DEFAULT_SETTINGS };
 const withSearch: AppSettings = {
@@ -168,16 +168,21 @@ describe('auto-approval is withheld from anything canUseTool has to see', () => 
     expect(autoApproved).not.toContain('WebFetch');
   });
 
-  it('keeps a playbook-declared ask_clarifying_question out of it, however it is qualified', () => {
-    const granted = buildAllowedTools(base, ['search_corpus', 'ask_clarifying_question']);
+  it('keeps AskUserQuestion and ask_clarifying_question out of the SDK auto-approval list', () => {
+    const granted = buildAllowedTools(base, ['search_corpus', 'ask_clarifying_question', 'AskUserQuestion']);
     expect(granted).toContain(qualifyTool('ask_clarifying_question'));
-    expect(buildAutoApproveTools(granted)).not.toContain(qualifyTool('ask_clarifying_question'));
+    expect(granted).toContain('AskUserQuestion');
+    const autoApproved = buildAutoApproveTools(granted);
+    expect(autoApproved).not.toContain(qualifyTool('ask_clarifying_question'));
+    expect(autoApproved).not.toContain('AskUserQuestion');
     expect(buildAutoApproveTools(['ask_clarifying_question'])).toEqual([]);
+    expect(buildAutoApproveTools(['AskUserQuestion'])).toEqual([]);
   });
 
   it('withholds nothing else — every other granted tool is still auto-approved', () => {
     const granted = buildAllowedTools(base);
-    expect(buildAutoApproveTools(granted)).toEqual(granted);
+    const expected = granted.filter((t) => !t.endsWith('ask_clarifying_question'));
+    expect(buildAutoApproveTools(granted)).toEqual(expected);
     for (const t of COMPUTE_TOOLS) expect(buildAutoApproveTools(granted)).toContain(t);
     expect(buildAutoApproveTools(granted)).toContain('ToolSearch');
   });
@@ -230,7 +235,9 @@ describe('tool confinement (Correctness Property 1)', () => {
     expect(buildAllowedTools(withSearch)).toEqual([...baseAllowed, 'WebSearch', 'WebFetch']);
     // Granted, but never pre-approved: the domain check runs in canUseTool, which the SDK skips
     // for anything on `allowedTools`.
-    expect(buildAutoApproveTools(buildAllowedTools(withSearch))).toEqual(baseAllowed);
+    expect(buildAutoApproveTools(buildAllowedTools(withSearch))).toEqual(
+      baseAllowed.filter((t) => !t.endsWith('ask_clarifying_question')),
+    );
   });
 
   it('never allow-lists Bash (code execution is unavailable)', () => {
@@ -276,28 +283,159 @@ describe('tool confinement (Correctness Property 1)', () => {
     expect(result).toEqual({ behavior: 'allow', updatedInput: { query: 'x' } });
   });
 
-  it('canUseTool intercepts ask_clarifying_question and calls onClarifyingQuestion', async () => {
-    let calledId = '';
-    let calledQuestion = '';
-    let calledOpts: string[] = [];
-    const onClarify = async (id: string, q: string, opts: string[]) => {
-      calledId = id;
-      calledQuestion = q;
-      calledOpts = opts;
-      return 'clarified-answer';
-    };
-    const canUse = buildCanUseTool(() => base, 'thread-1', onClarify);
-    const result = await canUse(
-      qualifyTool('ask_clarifying_question'),
-      { question: 'Which one?', options: ['A', 'B'] },
-      callOptions,
-    );
-    expect(calledId).toBe('t1');
-    expect(calledQuestion).toBe('Which one?');
-    expect(calledOpts).toEqual(['A', 'B']);
-    expect(result).toEqual({
-      behavior: 'deny',
-      message: 'User answered: clarified-answer',
+  describe('clarification tools policy', () => {
+    it('isToolAllowed allows AskUserQuestion and ask_clarifying_question', () => {
+      expect(isToolAllowed('AskUserQuestion', base)).toBe(true);
+      expect(isToolAllowed(`${MCP_TOOL_PREFIX}AskUserQuestion`, base)).toBe(true);
+      expect(isToolAllowed('ask_clarifying_question', base)).toBe(true);
+      expect(isToolAllowed(`${MCP_TOOL_PREFIX}ask_clarifying_question`, base)).toBe(true);
+    });
+
+    it('canUseTool intercepts AskUserQuestion with flat options', async () => {
+      let calledId = '';
+      let calledQuestion = '';
+      let calledOpts: ClarificationOption[] = [];
+      const onClarify = async (id: string, q: string, opts: ClarificationOption[]) => {
+        calledId = id;
+        calledQuestion = q;
+        calledOpts = opts;
+        return 'user-choice';
+      };
+      const canUse = buildCanUseTool(() => base, 'thread-1', onClarify);
+      const result = await canUse(
+        'AskUserQuestion',
+        { question: 'Pick env', options: ['dev', 'prod'] },
+        callOptions,
+      );
+      expect(calledId).toBe('t1');
+      expect(calledQuestion).toBe('Pick env');
+      expect(calledOpts).toEqual([{ label: 'dev' }, { label: 'prod' }]);
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'User answered: user-choice',
+      });
+    });
+
+    it('canUseTool intercepts AskUserQuestion with CLI nested options', async () => {
+      let calledQuestion = '';
+      let calledOpts: ClarificationOption[] = [];
+      const onClarify = async (_id: string, q: string, opts: ClarificationOption[]) => {
+        calledQuestion = q;
+        calledOpts = opts;
+        return '9.3.1';
+      };
+      const canUse = buildCanUseTool(() => base, 'thread-1', onClarify);
+      const result = await canUse(
+        'AskUserQuestion',
+        {
+          questions: [
+            {
+              question: 'Which version?',
+              options: [
+                { label: '9.3.1', description: 'Major release 9' },
+                { label: '10.0', description: 'Major release 10' },
+              ],
+            },
+          ],
+        },
+        callOptions,
+      );
+      expect(calledQuestion).toBe('Which version?');
+      expect(calledOpts).toEqual([
+        { label: '9.3.1', description: 'Major release 9' },
+        { label: '10.0', description: 'Major release 10' },
+      ]);
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'User answered: 9.3.1',
+      });
+    });
+
+    it('canUseTool intercepts ask_clarifying_question and calls onClarifyingQuestion', async () => {
+      let calledId = '';
+      let calledQuestion = '';
+      let calledOpts: ClarificationOption[] = [];
+      const onClarify = async (id: string, q: string, opts: ClarificationOption[]) => {
+        calledId = id;
+        calledQuestion = q;
+        calledOpts = opts;
+        return 'clarified-answer';
+      };
+      const canUse = buildCanUseTool(() => base, 'thread-1', onClarify);
+      const result = await canUse(
+        qualifyTool('ask_clarifying_question'),
+        { question: 'Which one?', options: ['A', 'B'] },
+        callOptions,
+      );
+      expect(calledId).toBe('t1');
+      expect(calledQuestion).toBe('Which one?');
+      expect(calledOpts).toEqual([{ label: 'A' }, { label: 'B' }]);
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'User answered: clarified-answer',
+      });
+    });
+
+    it('never-allow invariant: returns deny when toolUseId is missing', async () => {
+      const onClarify = async () => 'answered';
+      const canUse = buildCanUseTool(() => base, 'thread-1', onClarify);
+      const result = await canUse(
+        'AskUserQuestion',
+        { question: 'Missing id?' },
+        { signal: new AbortController().signal } as any,
+      );
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'Clarifying questions cannot be asked in this execution context.',
+      });
+    });
+
+    it('never-allow invariant: returns deny when onClarifyingQuestion is omitted', async () => {
+      const canUse = buildCanUseTool(() => base, 'thread-1', undefined);
+      const result = await canUse(
+        'AskUserQuestion',
+        { question: 'No callback?' },
+        callOptions,
+      );
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'Clarifying questions cannot be asked in this execution context.',
+      });
+    });
+
+    it('never-allow invariant: returns deny when onClarifyingQuestion throws or rejects', async () => {
+      const throwingClarify = async () => {
+        throw new Error('User closed the window or connection dropped');
+      };
+      const canUse = buildCanUseTool(() => base, 'thread-1', throwingClarify);
+      const result = await canUse(
+        'AskUserQuestion',
+        { question: 'Error case?' },
+        callOptions,
+      );
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'Clarifying questions cannot be asked in this execution context.',
+      });
+    });
+
+    it('intercepts clarifying question even when playbook restricts allowedTools', async () => {
+      const onClarify = async () => 'playbook-scoped-answer';
+      const canUse = buildCanUseTool(
+        () => base,
+        'thread-1',
+        onClarify,
+        [qualifyTool('search_corpus')],
+      );
+      const result = await canUse(
+        'AskUserQuestion',
+        { question: 'Scoped playbook question?' },
+        callOptions,
+      );
+      expect(result).toEqual({
+        behavior: 'deny',
+        message: 'User answered: playbook-scoped-answer',
+      });
     });
   });
 

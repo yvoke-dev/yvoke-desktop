@@ -18,6 +18,7 @@ import type {
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   DEFAULT_APPEARANCE,
+  isClarificationTool,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -59,8 +60,12 @@ function isInlineCall(call: ToolCallInfo): boolean {
   // have to keep their cards when it is.
   return (
     (call.name === 'Agent' && call.subagentType !== undefined) ||
-    shortName(call.name) === 'ask_clarifying_question'
+    isClarificationTool(call.name)
   );
+}
+
+function logError(...args: unknown[]): void {
+  console.error(...args);
 }
 
 /** Normalise a message into blocks, so the old flat shape and the new one read the same. */
@@ -272,7 +277,11 @@ export function ChatView(props: {
     if (!liveTurn.clarifyingQuestion) return;
     const threadId = thread.id;
     const toolUseId = liveTurn.clarifyingQuestion.toolUseId;
-    await window.api.submitClarification(threadId, toolUseId, answer);
+    try {
+      await window.api.submitClarification(threadId, toolUseId, answer);
+    } catch (err) {
+      logError('Failed to submit clarification:', err);
+    }
   };
 
   const openCitation = useCallback((ref: CitationRef): void => {
