@@ -5,6 +5,7 @@ import type {
   AppSettings,
   AuthStatus,
   ChatMessage,
+  ClarificationOption,
   ImageAttachment,
   McpPromptInfo,
   OrchestratorProfile,
@@ -37,7 +38,7 @@ export interface LiveTurn {
   clarifyingQuestion?: {
     toolUseId: string;
     question: string;
-    options: string[];
+    options: ClarificationOption[];
   };
 }
 

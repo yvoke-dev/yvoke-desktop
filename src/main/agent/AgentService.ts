@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent, AppSettings, ChatMessage, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
+import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
@@ -232,9 +232,11 @@ export class AgentService {
   private readonly threadClarifications = new Map<string, Set<string>>();
 
   resolveClarification(toolUseId: string, answer: string): void {
+    if (!toolUseId || typeof toolUseId !== 'string') return;
+    const cleanAnswer = typeof answer === 'string' ? answer.trim() : String(answer ?? '').trim();
     const resolve = this.pendingClarifications.get(toolUseId);
     if (resolve) {
-      resolve(answer);
+      resolve(cleanAnswer);
       this.pendingClarifications.delete(toolUseId);
     }
     for (const ids of this.threadClarifications.values()) {
@@ -514,7 +516,7 @@ export class AgentService {
     }
 
     const queue = new MessageQueue();
-    const onClarifyingQuestion = (toolUseId: string, question: string, options: string[]) => {
+    const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {
       this.deps.emit({
         kind: 'clarifying-question',
         threadId: thread.id,
@@ -659,7 +661,7 @@ export class AgentService {
         log('orch', `⚖ review ${event.approved ? 'APPROVED' : 'REJECTED'}${event.feedback ? ` — ${AgentService.preview(event.feedback)}` : ''}`);
         break;
       case 'clarifying-question':
-        log('orch', `❓ clarifying question: ${AgentService.preview(event.question)}${event.options?.length ? ` [options: ${event.options.join(' | ')}]` : ''}`);
+        log('orch', `❓ clarifying question: ${AgentService.preview(event.question)}${event.options?.length ? ` [options: ${event.options.map((o) => o.label).join(' | ')}]` : ''}`);
         break;
       default:
         break;
@@ -723,6 +725,7 @@ export class AgentService {
         }
       }
     } catch (error) {
+      this.cancelClarifications(threadId);
       const { messageText, message, authRequired } = attributeTurnFailure(error, 'Claude');
       logError('agent', `turn failed thread=${threadId}:`, messageText);
       this.deps.emit({ kind: 'error', threadId, message, authRequired });

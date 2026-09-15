@@ -16,7 +16,7 @@ server.
 | **Playbook preflight** | Before a playbook-carrying message runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
 | **Arithmetic without a shell** | Three in-app tools — a calculator, a summary-statistics tool and a date-difference tool — let the assistant do numeric work. They run inside the app with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
-| **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options, and continue from the answer. |
+| **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options (including descriptive explanations), and continue from the answer. |
 | **Choose how hard it thinks** | Four thinking levels per conversation. |
 | **Follow-ups remember the conversation** | The model keeps its own memory of a conversation between questions, so a follow-up does not restate what came before. |
 

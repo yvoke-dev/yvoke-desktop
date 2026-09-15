@@ -76,6 +76,19 @@ describe('button variant selectors', () => {
     expect(block).not.toContain('!important');
   });
 
+  it('excludes .option-button from the default button chrome', () => {
+    const defaultChrome = CSS.match(/^button:not\([^{]*\{/m)?.[0];
+    expect(defaultChrome).toBeDefined();
+    expect(defaultChrome).toContain(':not(.option-button)');
+  });
+
+  it('needs no !important for option-button rules', () => {
+    const optionButtonBlock = CSS.match(/\.option-button\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(optionButtonBlock).not.toContain('!important');
+    const optionButtonHoverBlock = CSS.match(/\.option-button:hover:not\(:disabled\)\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(optionButtonHoverBlock).not.toContain('!important');
+  });
+
   it('styles open-logs-btn with the same compact secondary button size as check-credentials-btn', () => {
     expect(CSS).toMatch(/\.button\.check-credentials-btn,\s*\.button\.open-logs-btn/);
   });
