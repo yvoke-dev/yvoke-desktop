@@ -21,15 +21,21 @@ export interface PreflightOptions {
 export async function probeBackend(
   url: string,
   fetchFn: typeof fetch = fetch,
+  bearerToken = 'dev-local-token',
 ): Promise<void> {
   const normalizedUrl = url.replace(/\/+$/, '');
-  const endpoint = `${normalizedUrl}/api/chat/v1/prompts/default-chat`;
+  const endpoint = `${normalizedUrl}/api/chat/v1/prompts/system/default-chat`;
 
   let res: Response;
   let bodyText: string;
 
   try {
-    res = await fetchFn(endpoint, { method: 'GET' });
+    res = await fetchFn(endpoint, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+      },
+    });
     bodyText = await res.text();
   } catch (err: any) {
     const isConnRefused =
@@ -173,7 +179,11 @@ export async function runAllPreflightChecks(options: PreflightOptions = {}): Pro
     checkGeminiApiKey(options.apiKey);
   }
 
-  const backendUrl = options.backendUrl ?? process.env.YVOKE_SERVER_URL ?? 'http://127.0.0.1:8000';
+  const backendUrl =
+    options.backendUrl ??
+    process.env.YVOKE_SERVER ??
+    process.env.YVOKE_SERVER_URL ??
+    'http://localhost:8080';
   await probeBackend(backendUrl, options.fetchFn);
 
   await probeClaudeCli(options.runner);
