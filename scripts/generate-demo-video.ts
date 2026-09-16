@@ -958,9 +958,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
       'scripts/video/assets/ambient.mp3',
     );
     if (!fs.existsSync(backgroundMusicPath)) {
-      const assetsDir = path.resolve(process.cwd(), 'scripts/video/assets');
-      fs.mkdirSync(assetsDir, { recursive: true });
-      const synthWavPath = path.join(assetsDir, 'ambient.wav');
+      const synthWavPath = path.join(recordingsDir, 'ambient.wav');
       if (!fs.existsSync(synthWavPath)) {
         fs.writeFileSync(synthWavPath, createProceduralAmbientWav(180));
       }

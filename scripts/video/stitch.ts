@@ -77,6 +77,45 @@ export async function checkFfmpegInstalled(runner: RunnerFn = defaultSpawnRunner
 }
 
 /**
+ * Checks whether an FFmpeg filter is available in the current FFmpeg build.
+ * Fails open (returns true) if -filters cannot be queried or returns empty stdout
+ * so mock test runners and restricted environments can still proceed.
+ */
+export async function checkFfmpegFilter(
+  filterName: string,
+  runner: RunnerFn = defaultSpawnRunner,
+): Promise<boolean> {
+  try {
+    const res = await runner('ffmpeg', ['-filters']);
+    if (res.code !== 0 || !res.stdout || !res.stdout.trim()) {
+      return true; // fail open
+    }
+    return new RegExp(`^\\s*\\S+\\s+${filterName}\\b`, 'm').test(res.stdout);
+  } catch {
+    return true; // fail open
+  }
+}
+
+export function isSubtitlesError(stderr: string): boolean {
+  return (
+    stderr.includes("No such filter: 'subtitles'") ||
+    stderr.includes("Error parsing filterchain 'subtitles=") ||
+    (stderr.includes('subtitles') &&
+      (stderr.includes('No option name near') ||
+        stderr.includes('Error parsing a filter description') ||
+        stderr.includes('Error opening output files')))
+  );
+}
+
+export function isSidechainError(stderr: string): boolean {
+  return (
+    stderr.includes("No such filter: 'sidechaincompress'") ||
+    stderr.includes("Error parsing filterchain 'sidechaincompress") ||
+    (stderr.includes('sidechaincompress') && stderr.includes('No option name near'))
+  );
+}
+
+/**
  * Escapes file path for FFmpeg concat demuxer format: file 'path'
  */
 export function escapeConcatPath(filePath: string): string {
@@ -228,12 +267,12 @@ export async function stitchVideoAndAudio(options: StitchOptions): Promise<void>
           throw err;
         }
         const errText = (err.stderr || err.message || '') as string;
-        if (currentSubtitlesPath && errText.includes("No such filter: 'subtitles'")) {
-          console.warn("Warning: FFmpeg filter 'subtitles' not found. Retrying stitch without subtitles.");
+        if (currentSubtitlesPath && isSubtitlesError(errText)) {
+          console.warn("Warning: FFmpeg filter 'subtitles' not found or failed. Retrying stitch without subtitles.");
           currentSubtitlesPath = null;
           continue;
         }
-        if (currentEnableDucking && errText.includes("No such filter: 'sidechaincompress'")) {
+        if (currentEnableDucking && isSidechainError(errText)) {
           console.warn("Warning: FFmpeg filter 'sidechaincompress' not found. Retrying stitch with simple amix without ducking.");
           currentEnableDucking = false;
           continue;
@@ -242,12 +281,12 @@ export async function stitchVideoAndAudio(options: StitchOptions): Promise<void>
       }
 
       if (result.code !== 0) {
-        if (currentSubtitlesPath && result.stderr.includes("No such filter: 'subtitles'")) {
-          console.warn("Warning: FFmpeg filter 'subtitles' not found. Retrying stitch without subtitles.");
+        if (currentSubtitlesPath && isSubtitlesError(result.stderr)) {
+          console.warn("Warning: FFmpeg filter 'subtitles' not found or failed. Retrying stitch without subtitles.");
           currentSubtitlesPath = null;
           continue;
         }
-        if (currentEnableDucking && result.stderr.includes("No such filter: 'sidechaincompress'")) {
+        if (currentEnableDucking && isSidechainError(result.stderr)) {
           console.warn("Warning: FFmpeg filter 'sidechaincompress' not found. Retrying stitch with simple amix without ducking.");
           currentEnableDucking = false;
           continue;
