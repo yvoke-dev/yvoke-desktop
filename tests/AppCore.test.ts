@@ -417,6 +417,28 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
     expect(updated2?.sessionId).toBeUndefined();
     expect(updated2?.sessionProfile).toBeUndefined();
   });
+
+  it('preserves local demo-prefixed threads during server sync reconciliation', async () => {
+    const demoThread: ThreadMeta = {
+      id: 'demo-thread-1',
+      title: 'POLPlaybook Introduction History',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(demoThread);
+
+    // Server returns empty list
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([]);
+
+    const res = await appCore.listThreads();
+    const found = res.threads.find((t) => t.id === 'demo-thread-1');
+    expect(found).toBeDefined();
+    expect(found?.title).toBe('POLPlaybook Introduction History');
+  });
 });
 
 describe('AppCore.drain', () => {

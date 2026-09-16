@@ -304,4 +304,36 @@ describe('videoOrchestratorPreflight', () => {
       ).rejects.toThrow(/Docker backend is not running at http:\/\/127\.0\.0\.1:8080/);
     });
   });
+
+  describe('SCENE_NARRATIONS', () => {
+    it('defines 8 dedicated scenes with correlated app and settings tours', async () => {
+      const { SCENE_NARRATIONS } = await import('../scripts/generate-demo-video');
+      expect(SCENE_NARRATIONS).toHaveLength(8);
+
+      // Scene 1: App & Sidebar Overview
+      expect(SCENE_NARRATIONS[0]).toMatch(/sidebar/i);
+      expect(SCENE_NARRATIONS[0]).toMatch(/conversation/i);
+      expect(SCENE_NARRATIONS[0]).toMatch(/search/i);
+      expect(SCENE_NARRATIONS[0]).toMatch(/settings/i);
+
+      // Scene 2: Settings Walkthrough
+      expect(SCENE_NARRATIONS[1]).toMatch(/settings/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/server/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/models/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/agents/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/appearance/i);
+
+      // Scene 3: New Conversation, Playbooks & Composer
+      expect(SCENE_NARRATIONS[2]).toMatch(/new conversation/i);
+      expect(SCENE_NARRATIONS[2]).toMatch(/playbook/i);
+      expect(SCENE_NARRATIONS[2]).toMatch(/composer/i);
+
+      // All scenes must be non-empty and well-formed
+      for (const narration of SCENE_NARRATIONS) {
+        expect(typeof narration).toBe('string');
+        expect(narration.trim().length).toBeGreaterThan(20);
+      }
+    });
+  });
 });
+
