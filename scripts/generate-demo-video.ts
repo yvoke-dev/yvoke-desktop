@@ -95,22 +95,28 @@ export function parseArgs(): DemoOptions {
 }
 
 export const SCENE_NARRATIONS = [
-  // Scene 1 (Part I: Architecture Intro with 3 presentation cards)
-  'Welcome to Yvoke Desktop, the native AI assistant built for deep engineering and multi-agent investigation. Choosing the right source scoping is vital: playbooks scope authoritative vendor manuals versus internal incident triage. If unsure, use oim-full. For complex tasks, the Multi-Agent System pairs specialized agents with an Automatic Reviewer gate to prevent hallucinations. Follow proven prompting practices: establish explicit context, provide targeted search hints, and continue conversations iteratively.',
+  // Scene 1: App & Sidebar Overview
+  'Welcome to Yvoke Desktop, the native AI assistant for deep enterprise engineering. On the left, the sidebar organizes your conversation history into clear timeframes, with instant search across past discussions. At the bottom, view your authenticated profile, security mode, and access application settings.',
 
-  // Scene 2 (Part II: Live Conversation 1: Playbook Validation Catch)
+  // Scene 2: Settings Walkthrough
+  'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints and knowledge tools. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and review thresholds. Web Search manages domain allowlists, Appearance customizes themes and density, and Advanced toggles automatic playbook validation.',
+
+  // Scene 3: New Conversation, Playbooks & Composer
+  'Starting a new conversation opens the main workspace. The Playbook picker scopes the assistant to focused knowledge domains, from getting-started manuals to database migration history. Below, the composer provides rich prompt input, image attachments, seamless single-agent or multi-agent mode selection, and granular model and thinking controls.',
+
+  // Scene 4: Live Conversation 1: Playbook Validation Catch
   'Here, an engineer asks when the table POLPlaybook was introduced under the getting-started playbook. Yvoke immediately catches that table migration history belongs in database records, recommending oim-db-history before dispatching.',
 
-  // Scene 3 (Live Conversation 2: Multi-Turn Follow-Up & Search Hints)
+  // Scene 5: Live Conversation 2: Multi-Turn Follow-Up & Search Hints
   'In this conversation, we explore iterative follow-ups and search hints. After defining a value template, we prompt the assistant to search Teams and Confluence knowledge, effortlessly combining official documentation with real-world operational experience.',
 
-  // Scene 4 (Live Conversation 3: Clarifying Questions & Citations)
+  // Scene 6: Live Conversation 3: Clarifying Questions & Citations
   'When querying complex database schema changes, Yvoke surfaces an interactive clarification card to confirm scope. Selecting an option produces grounded answers with verified citation pills and complete reasoning traces.',
 
-  // Scene 5 (Live Conversation 4: Multi-Agent System MAS)
+  // Scene 7: Live Conversation 4: Multi-Agent System MAS
   'For multi-faceted trade-offs, switching to Multi-Agent mode activates specialized roles. Autonomous specialists query parallel corpuses to compare connector options, while the Reviewer gate validates consistency and approves the response.',
 
-  // Scene 6: Speed, Instant Search (<10ms) & Dark/Light Theme toggle
+  // Scene 8: Speed, Instant Search (<10ms) & Dark/Light Theme toggle
   'Yvoke delivers sub-ten-millisecond instant search across your entire conversation history, coupled with a responsive, polished UI supporting dark and light themes.',
 ];
 
@@ -691,47 +697,254 @@ export async function runDemoVideoGenerator(): Promise<void> {
     };
 
     // =========================================================================
-    // Scene 1: Part I: Educational Architecture Intro (3 Cards)
     // =========================================================================
-    await runSceneWithPadding(0, 'Architecture Intro (3 Cards)', async () => {
-      await injectPresentationOverlay(appPage);
-
-      // Slide 0: Playbooks & Source Scoping
-      await showPresentationSlide(appPage, 0);
-      const highlight0 = appPage.locator('.yvoke-card-highlight').first();
-      if ((await highlight0.count()) > 0) {
-        await glideMouse(appPage, highlight0, 20, { delayMs: 200 });
+    // Scene 1: App & Sidebar Overview
+    // =========================================================================
+    await runSceneWithPadding(0, 'App & Sidebar Overview', async () => {
+      // Focus on the sidebar
+      const sidebar = appPage.locator('aside.thread-list').first();
+      if ((await sidebar.count()) > 0) {
+        await focusOnElement(appPage, sidebar, { zoomFactor: 1.05, durationMs: 400 });
       }
-      await appPage.waitForTimeout(2200);
 
-      // Slide 1: Single Agent vs Multi-Agent (OIM MAS)
-      await showPresentationSlide(appPage, 1);
-      const highlight1 = appPage.locator('.yvoke-card-highlight').first();
-      if ((await highlight1.count()) > 0) {
-        await glideMouse(appPage, highlight1, 20, { delayMs: 200 });
+      // Hover over the header app title "YVOKE"
+      const appTitle = appPage.locator('.thread-list-header .app-title').first();
+      if ((await appTitle.count()) > 0) {
+        await glideMouse(appPage, appTitle, 20, { delayMs: 400 });
       }
-      await appPage.waitForTimeout(2200);
 
-      // Slide 2: LLM Prompting & Collaboration Best Practices
-      await showPresentationSlide(appPage, 2);
-      const highlight2 = appPage.locator('.yvoke-card-highlight').first();
-      if ((await highlight2.count()) > 0) {
-        await glideMouse(appPage, highlight2, 20, { delayMs: 200 });
+      // Hover over the New Conversation button
+      const newBtn = appPage
+        .locator(
+          'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
+        )
+        .first();
+      if ((await newBtn.count()) > 0) {
+        await glideMouse(appPage, newBtn, 20, { delayMs: 500 });
       }
-      await appPage.waitForTimeout(2200);
 
-      await unmountPresentationOverlay(appPage);
+      // Glide through past conversation threads
+      const threadItems = appPage.locator('.thread-item');
+      const count = await threadItems.count();
+      if (count > 0) {
+        await glideMouse(appPage, threadItems.first(), 20, { delayMs: 600 });
+        if (count > 1) {
+          await glideMouse(appPage, threadItems.nth(1), 20, { delayMs: 600 });
+        }
+      }
+
+      // Glide to the search input in the sidebar
+      const searchInput = appPage
+        .locator('.thread-search input, input[placeholder*="Search"]')
+        .first();
+      if ((await searchInput.count()) > 0) {
+        await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 200 });
+        await searchInput.fill('POLPlaybook');
+        await appPage.waitForTimeout(700);
+        const searchClear = appPage.locator('.search-clear').first();
+        if ((await searchClear.count()) > 0) {
+          await glideMouse(appPage, searchClear, 20, { click: true, delayMs: 200 });
+        } else {
+          await searchInput.fill('');
+        }
+        await appPage.waitForTimeout(300);
+      }
+
+      // Glide to the footer: account chip and settings button
+      const accountChip = appPage.locator('.thread-list-footer .account-chip').first();
+      if ((await accountChip.count()) > 0) {
+        await glideMouse(appPage, accountChip, 20, { delayMs: 500 });
+      }
+
+      const settingsBtn = appPage
+        .locator('button[data-tip="Settings"], .settings-button')
+        .first();
+      if ((await settingsBtn.count()) > 0) {
+        await glideMouse(appPage, settingsBtn, 20, { delayMs: 500 });
+      }
+
+      await resetFocus(appPage, { durationMs: 400 });
       await appPage.waitForTimeout(400);
     });
 
     // =========================================================================
-    // Scene 2: Live Conversation 1 (Playbook Validation Catch)
+    // Scene 2: Settings Walkthrough
     // =========================================================================
-    await runSceneWithPadding(1, 'Playbook Validation Catch', async () => {
-      const thread1 = appPage.locator('.thread-item').filter({ hasText: 'POLPlaybook' }).first();
-      if ((await thread1.count()) > 0) {
-        await glideMouse(appPage, thread1, 25, { click: true, delayMs: 200 });
+    await runSceneWithPadding(1, 'Settings Walkthrough', async () => {
+      // Open Settings view
+      const settingsBtn = appPage
+        .locator('button[data-tip="Settings"], .settings-button')
+        .first();
+      if ((await settingsBtn.count()) > 0) {
+        await glideMouse(appPage, settingsBtn, 20, { click: true, delayMs: 250 });
       }
+      await appPage
+        .locator('.settings-view')
+        .waitFor({ state: 'visible', timeout: 3000 })
+        .catch(() => {});
+      await appPage.waitForTimeout(600);
+
+      // Focus on Settings view
+      const settingsView = appPage.locator('.settings-view').first();
+      if ((await settingsView.count()) > 0) {
+        await focusOnElement(appPage, settingsView, { zoomFactor: 1.05, durationMs: 400 });
+      }
+
+      // Helper to click pane and hover over its main content
+      const visitPane = async (name: string, contentSelector?: string, waitMs = 1400) => {
+        const paneBtn = appPage
+          .locator('.settings-nav button.nav-pane')
+          .filter({ hasText: name })
+          .first();
+        if ((await paneBtn.count()) > 0) {
+          await glideMouse(appPage, paneBtn, 20, { click: true, delayMs: 200 });
+          await appPage.waitForTimeout(300);
+          if (contentSelector) {
+            const target = appPage.locator(contentSelector).first();
+            if ((await target.count()) > 0) {
+              await glideMouse(appPage, target, 20, { delayMs: 250 });
+            }
+          }
+          await appPage.waitForTimeout(waitMs);
+        }
+      };
+
+      // 1. Server pane
+      await visitPane('Server', '.settings-field input', 1600);
+
+      // 2. Models pane
+      await visitPane('Models', '.chip-list, .seg', 2000);
+
+      // 3. Agents pane
+      await visitPane('Agents', '.role-card, .cap-field', 2600);
+
+      // 4. Web search pane
+      await visitPane('Web search', '.domain-row, .settings-field', 1800);
+
+      // 5. Appearance pane
+      await visitPane('Appearance', '.theme-choice, .density-choice', 2000);
+
+      // 6. Advanced pane
+      await visitPane('Advanced', '.toggle-row, .settings-field', 1800);
+
+      // 7. About pane
+      await visitPane('About', '.about-grid, .about-section', 1200);
+
+      // Reset focus before closing
+      await resetFocus(appPage, { durationMs: 350 });
+
+      // Close Settings
+      const cancelBtn = appPage
+        .locator('.dialog-actions button')
+        .filter({ hasText: 'Cancel' })
+        .first();
+      if ((await cancelBtn.count()) > 0) {
+        await glideMouse(appPage, cancelBtn, 20, { click: true, delayMs: 200 });
+      } else if ((await settingsBtn.count()) > 0) {
+        await glideMouse(appPage, settingsBtn, 20, { click: true, delayMs: 200 });
+      }
+      await appPage.waitForTimeout(600);
+    });
+
+    // =========================================================================
+    // Scene 3: New Conversation, Playbooks & Composer
+    // =========================================================================
+    await runSceneWithPadding(2, 'New Conversation, Playbooks & Composer', async () => {
+      // Click "New" button in sidebar header
+      const newBtn = appPage
+        .locator(
+          'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
+        )
+        .first();
+      if ((await newBtn.count()) > 0) {
+        await glideMouse(appPage, newBtn, 20, { click: true, delayMs: 200 });
+      }
+      await appPage.waitForTimeout(600);
+
+      // Focus on Playbook Picker
+      const picker = appPage.locator('.picker, .picker-list').first();
+      if ((await picker.count()) > 0) {
+        await focusOnElement(appPage, picker, { zoomFactor: 1.1, durationMs: 400 });
+        const filterInput = appPage.locator('.picker-filter input').first();
+        if ((await filterInput.count()) > 0) {
+          await glideMouse(appPage, filterInput, 20, { delayMs: 250 });
+        }
+        const rows = appPage.locator('.picker-row');
+        const rowCount = await rows.count();
+        if (rowCount > 0) {
+          await glideMouse(appPage, rows.first(), 20, { delayMs: 450 });
+          if (rowCount > 1) {
+            await glideMouse(appPage, rows.nth(1), 20, { delayMs: 450 });
+          }
+        }
+        await appPage.waitForTimeout(800);
+      }
+
+      // Reset camera and focus on Composer at the bottom
+      await resetFocus(appPage, { durationMs: 300 });
+      const composer = appPage.locator('.composer').first();
+      if ((await composer.count()) > 0) {
+        await focusOnElement(appPage, composer, { zoomFactor: 1.2, durationMs: 400 });
+
+        const textarea = appPage.locator('.composer textarea').first();
+        if ((await textarea.count()) > 0) {
+          await glideMouse(appPage, textarea, 20, { delayMs: 300 });
+        }
+
+        const attachBtn = appPage.locator('.composer-attach-btn').first();
+        if ((await attachBtn.count()) > 0) {
+          await glideMouse(appPage, attachBtn, 20, { delayMs: 300 });
+        }
+
+        const modeSelect = appPage
+          .locator('select.composer-select[data-tip*="Multi-agent"]')
+          .first();
+        if ((await modeSelect.count()) > 0) {
+          await glideMouse(appPage, modeSelect, 20, { delayMs: 350 });
+        }
+
+        const modelSelect = appPage.locator('select.composer-select[data-tip="Model"]').first();
+        if ((await modelSelect.count()) > 0) {
+          await glideMouse(appPage, modelSelect, 20, { delayMs: 350 });
+        }
+
+        const thinkingSelect = appPage
+          .locator('select.composer-select[data-tip="Thinking effort"]')
+          .first();
+        if ((await thinkingSelect.count()) > 0) {
+          await glideMouse(appPage, thinkingSelect, 20, { delayMs: 350 });
+        }
+
+        const sendBtn = appPage.locator('button.composer-send').first();
+        if ((await sendBtn.count()) > 0) {
+          await glideMouse(appPage, sendBtn, 20, { delayMs: 400 });
+        }
+      }
+
+      await resetFocus(appPage, { durationMs: 400 });
+      await appPage.waitForTimeout(400);
+    });
+
+    const selectSidebarThread = async (text: string): Promise<void> => {
+      const thread = appPage.locator('.thread-item').filter({ hasText: text }).first();
+      if ((await thread.count()) > 0) {
+        if (!(await thread.isVisible())) {
+          const shutGroups = appPage.locator('.thread-group-label[aria-expanded="false"]');
+          const shutCount = await shutGroups.count();
+          for (let i = 0; i < shutCount; i++) {
+            await shutGroups.nth(i).click().catch(() => {});
+          }
+          await appPage.waitForTimeout(200);
+        }
+        await glideMouse(appPage, thread, 25, { click: true, delayMs: 200 });
+      }
+    };
+
+    // =========================================================================
+    // Scene 4: Live Conversation 1 (Playbook Validation Catch)
+    // =========================================================================
+    await runSceneWithPadding(3, 'Playbook Validation Catch', async () => {
+      await selectSidebarThread('POLPlaybook');
       await appPage.waitForTimeout(600);
 
       // Mount recommendation card
@@ -769,16 +982,10 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
     // =========================================================================
-    // Scene 3: Live Conversation 2 (Multi-Turn Follow-Up & Search Hints)
+    // Scene 5: Live Conversation 2 (Multi-Turn Follow-Up & Search Hints)
     // =========================================================================
-    await runSceneWithPadding(2, 'Multi-Turn Follow-Up & Search Hints', async () => {
-      const thread2 = appPage
-        .locator('.thread-item')
-        .filter({ hasText: 'Value Templates' })
-        .first();
-      if ((await thread2.count()) > 0) {
-        await glideMouse(appPage, thread2, 25, { click: true, delayMs: 200 });
-      }
+    await runSceneWithPadding(4, 'Multi-Turn Follow-Up & Search Hints', async () => {
+      await selectSidebarThread('Value Templates');
       await appPage.waitForTimeout(600);
 
       const msgs = appPage.locator('.message');
@@ -794,16 +1001,10 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
     // =========================================================================
-    // Scene 4: Live Conversation 3 (Clarifying Questions & Citations)
+    // Scene 6: Live Conversation 3 (Clarifying Questions & Citations)
     // =========================================================================
-    await runSceneWithPadding(3, 'Clarifying Questions & Citations', async () => {
-      const thread3 = appPage
-        .locator('.thread-item')
-        .filter({ hasText: 'Database Schema Changes' })
-        .first();
-      if ((await thread3.count()) > 0) {
-        await glideMouse(appPage, thread3, 25, { click: true, delayMs: 200 });
-      }
+    await runSceneWithPadding(5, 'Clarifying Questions & Citations', async () => {
+      await selectSidebarThread('Database Schema Changes');
       await appPage.waitForTimeout(600);
 
       const clarifCard = appPage.locator('.clarifying-question-card, .clarified-badge').first();
@@ -849,16 +1050,10 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
     // =========================================================================
-    // Scene 5: Live Conversation 4 (Multi-Agent System MAS)
+    // Scene 7: Live Conversation 4 (Multi-Agent System MAS)
     // =========================================================================
-    await runSceneWithPadding(4, 'Multi-Agent System MAS', async () => {
-      const thread4 = appPage
-        .locator('.thread-item')
-        .filter({ hasText: 'Connector Comparison' })
-        .first();
-      if ((await thread4.count()) > 0) {
-        await glideMouse(appPage, thread4, 25, { click: true, delayMs: 200 });
-      }
+    await runSceneWithPadding(6, 'Multi-Agent System MAS', async () => {
+      await selectSidebarThread('Connector Comparison');
       await appPage.waitForTimeout(600);
 
       const subagents = appPage.locator('.subagent-card');
@@ -884,9 +1079,9 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
     // =========================================================================
-    // Scene 6: Speed, Instant Search (<10ms) & Dark/Light Theme Toggle
+    // Scene 8: Speed, Instant Search (<10ms) & Dark/Light Theme Toggle
     // =========================================================================
-    await runSceneWithPadding(5, 'Instant Search & Theme Toggle', async () => {
+    await runSceneWithPadding(7, 'Instant Search & Theme Toggle', async () => {
       const searchInput = appPage
         .locator('.thread-search input, input[placeholder*="Search"]')
         .first();
@@ -960,7 +1155,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
     if (!fs.existsSync(backgroundMusicPath)) {
       const synthWavPath = path.join(recordingsDir, 'ambient.wav');
       if (!fs.existsSync(synthWavPath)) {
-        fs.writeFileSync(synthWavPath, createProceduralAmbientWav(180));
+        fs.writeFileSync(synthWavPath, createProceduralAmbientWav(300));
       }
       backgroundMusicPath = synthWavPath;
     }
