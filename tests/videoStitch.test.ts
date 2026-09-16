@@ -582,5 +582,46 @@ describe('videoStitch', () => {
         expect(err.code).toBe(1);
       }
     });
+
+    it('intercepts real FFmpeg filterchain parsing error without libass and retries without subtitles', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let attempts = 0;
+      const capturedCalls: string[][] = [];
+
+      const mockRunner = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args.includes('-version')) {
+          return { code: 0, stdout: 'ffmpeg version 9.0.1', stderr: '' };
+        }
+        attempts++;
+        capturedCalls.push(args);
+        if (attempts === 1) {
+          return {
+            code: 234,
+            stdout: '',
+            stderr:
+              "[AVFilterGraph @ 0x89ec18000] No option name near '/tmp/subtitles.srt'\n" +
+              "[AVFilterGraph @ 0x89ec18000] Error parsing filterchain 'subtitles='/tmp/subtitles.srt'' around:\n" +
+              "Error opening output files: Invalid argument",
+          };
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      });
+
+      await stitchVideoAndAudio({
+        videoPath: '/tmp/input.webm',
+        subtitlesPath: dummySubtitles,
+        outputPath: '/tmp/output.mp4',
+        runner: mockRunner,
+      });
+
+      expect(attempts).toBe(2);
+      expect(capturedCalls[0]).toContain('-vf');
+      expect(capturedCalls[1]).not.toContain('-vf');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/subtitles.*not found|retrying.*without subtitles/i),
+      );
+
+      warnSpy.mockRestore();
+    });
   });
 });
