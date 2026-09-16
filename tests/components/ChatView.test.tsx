@@ -20,29 +20,6 @@ import type {
  * question from being asked.
  */
 
-declare module 'vitest' {
-  interface Assertion<T = any> {
-    toBeDisabled(): T;
-  }
-  interface AsymmetricMatchersContaining {
-    toBeDisabled(): void;
-  }
-}
-
-expect.extend({
-  toBeDisabled(received: unknown) {
-    const el = received as HTMLElement | null;
-    const pass = Boolean(
-      el &&
-        ('disabled' in el ? (el as HTMLButtonElement).disabled : el.hasAttribute('disabled')),
-    );
-    return {
-      pass,
-      message: () => `expected element ${pass ? 'not ' : ''}to be disabled`,
-    };
-  },
-});
-
 const PROMPTS: McpPromptInfo[] = [
   { name: 'oim-getting-started', title: 'Getting started', description: 'Onboarding.', arguments: [] },
   { name: 'oim-schema', title: 'Schema', description: 'Tables and columns.', arguments: [] },
@@ -1683,7 +1660,7 @@ describe('deterministic platform shortcut labels', () => {
       });
 
       await waitFor(() => {
-        expect(optionBtn).not.toBeDisabled();
+        expect((optionBtn as HTMLButtonElement).disabled).toBe(false);
       });
 
       errorSpy.mockRestore();

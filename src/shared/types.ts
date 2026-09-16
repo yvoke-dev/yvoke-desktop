@@ -483,6 +483,7 @@ export interface PlaybookValidation {
 export interface ClarificationOption {
   label: string;
   description?: string;
+  /** Optional preview payload (e.g. code/diff) parsed from CLI schemas; not rendered in current card UI (documented spec limit). */
   preview?: string;
 }
 
