@@ -525,10 +525,15 @@ describe('error attribution across session events', () => {
     expect(resolvedValue).toBeNull();
     expect(svc.pendingClarifications.has('tool-1')).toBe(true);
 
+    // Wire clarification to thread
+    const threadClarifications = (svc as any).threadClarifications as Map<string, Set<string>>;
+    threadClarifications.set('thread-1', new Set(['tool-1']));
+
     // Whitespace trimming
     svc.resolveClarification('tool-1', '   trimmed answer   ');
     expect(resolvedValue).toBe('trimmed answer');
     expect(svc.pendingClarifications.has('tool-1')).toBe(false);
+    expect(threadClarifications.has('thread-1')).toBe(false);
 
     // Non-string answer coercion
     let resolvedValue2: string | null = null;

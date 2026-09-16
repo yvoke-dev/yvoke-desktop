@@ -14,7 +14,7 @@ import { CheckIcon, HelpIcon, SendIcon } from './icons';
  */
 export function ToolCallCard(props: {
   call: ToolCallInfo;
-  onClarificationSubmit?: (answer: string) => void;
+  onClarificationSubmit?: (answer: string) => void | Promise<void>;
   activeClarificationId?: string;
   onCitation?: (ref: CitationRef) => void;
 }): React.JSX.Element | null {
@@ -49,11 +49,16 @@ export function ToolCallCard(props: {
   const { question, options } = normalizeClarifyingInput(call.input);
   const isActive = !done && activeClarificationId === call.id;
 
-  const handleSubmit = (answer: string) => {
+  const handleSubmit = async (answer: string) => {
     const trimmed = answer.trim();
     if (!trimmed || submitting || !onClarificationSubmit) return;
     setSubmitting(true);
-    onClarificationSubmit(trimmed);
+    try {
+      await onClarificationSubmit(trimmed);
+      setCustomAnswer('');
+    } catch (err) {
+      setSubmitting(false);
+    }
   };
 
   if (done) {
@@ -113,7 +118,6 @@ export function ToolCallCard(props: {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && customAnswer.trim()) {
                   handleSubmit(customAnswer);
-                  setCustomAnswer('');
                 }
               }}
             />
@@ -123,7 +127,6 @@ export function ToolCallCard(props: {
               disabled={submitting || !customAnswer.trim()}
               onClick={() => {
                 handleSubmit(customAnswer);
-                setCustomAnswer('');
               }}
             >
               Send

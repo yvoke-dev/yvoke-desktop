@@ -211,5 +211,15 @@ describe('spec/ modular structure', () => {
     expect(installing).toContain('Version comparison requires a three-part numeric semantic version');
     expect(installing).toContain('Automatic background updates, background update notifications, or automatic downloading of new releases.');
   });
+
+  it('documents clarification formatting and single-response turn limit in 01_asking_questions.md', () => {
+    const askingQuestions = readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8');
+    expect(askingQuestions).toContain(
+      '**A user question is displayed exactly as typed.** Answers and assistant clarifying questions are rendered as formatted text;',
+    );
+    expect(askingQuestions).toContain(
+      'Clarification prompts are answered as a single response per turn.',
+    );
+  });
 });
 

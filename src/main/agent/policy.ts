@@ -221,10 +221,7 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
  * Withholding auto-approval does NOT withhold the tool: it still reaches the model, and the
  * permission request it now raises is answered by `buildCanUseTool` with the same grant list.
  */
-const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch', 'AskUserQuestion'];
-
-/** Suffix match, because MCP tools arrive fully qualified (`mcp__yvoke__ask_clarifying_question`). */
-const NEVER_AUTO_APPROVE_SUFFIXES = ['ask_clarifying_question'];
+const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch'];
 
 /**
  * The SDK's `allowedTools`: the grant from `buildAllowedTools` minus everything whose enforcement
@@ -237,10 +234,7 @@ const NEVER_AUTO_APPROVE_SUFFIXES = ['ask_clarifying_question'];
  */
 export function buildAutoApproveTools(granted: string[]): string[] {
   return granted.filter(
-    (tool) =>
-      !NEVER_AUTO_APPROVE.includes(tool) &&
-      !isClarificationTool(tool) &&
-      !NEVER_AUTO_APPROVE_SUFFIXES.some((suffix) => tool.endsWith(suffix)),
+    (tool) => !NEVER_AUTO_APPROVE.includes(tool) && !isClarificationTool(tool),
   );
 }
 

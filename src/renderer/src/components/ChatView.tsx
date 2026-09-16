@@ -31,7 +31,6 @@ import { Markdown } from './Markdown';
 import { ToolCallCard } from './ToolCallCard';
 import { TraceBar, type TraceEntry } from './TraceBar';
 import { AlertIcon, CloseIcon, DownloadIcon, PaperclipIcon, PlaybookIcon, SearchIcon, SendIcon, StopIcon } from './icons';
-import { shortName } from './toolNames';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
 
@@ -281,6 +280,7 @@ export function ChatView(props: {
       await window.api.submitClarification(threadId, toolUseId, answer);
     } catch (err) {
       logError('Failed to submit clarification:', err);
+      throw err;
     }
   };
 

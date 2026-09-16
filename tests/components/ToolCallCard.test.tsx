@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ToolCallCard } from '../../src/renderer/src/components/ToolCallCard';
 import type { ToolCallInfo } from '../../src/shared/types';
 
@@ -172,6 +172,58 @@ describe('ToolCallCard', () => {
     expect(strong).not.toBeNull();
     expect(strong?.textContent).toBe('Content changes (9.3.1 -> 10.0):');
     expect(container.querySelectorAll('li').length).toBe(2);
+  });
+
+  it('re-enables option buttons and inputs if submission fails, allowing retry', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('IPC failed'));
+    const call: ToolCallInfo = {
+      id: '9',
+      name: 'AskUserQuestion',
+      input: {
+        question: 'Select environment',
+        options: [
+          { label: 'prod', description: 'Production server' },
+          { label: 'staging', description: 'Staging server' },
+        ],
+      },
+    };
+    const { container } = render(
+      <ToolCallCard call={call} activeClarificationId="9" onClarificationSubmit={onSubmit} />,
+    );
+
+    const button = container.querySelector<HTMLButtonElement>('.option-button')!;
+    expect(button).not.toBeNull();
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(button.disabled).toBe(false);
+    });
+  });
+
+  it('preserves custom input text if submission fails, allowing retry', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('IPC failed'));
+    const call: ToolCallInfo = {
+      id: '10',
+      name: 'AskUserQuestion',
+      input: {
+        question: 'Any extra notes?',
+      },
+    };
+    const { container } = render(
+      <ToolCallCard call={call} activeClarificationId="10" onClarificationSubmit={onSubmit} />,
+    );
+
+    const input = container.querySelector<HTMLInputElement>('input[type="text"]')!;
+    const sendButton = container.querySelector<HTMLButtonElement>('button.primary')!;
+
+    fireEvent.change(input, { target: { value: 'my retryable answer' } });
+    fireEvent.click(sendButton);
+
+    await waitFor(() => {
+      expect(sendButton.disabled).toBe(false);
+    });
+
+    expect(input.value).toBe('my retryable answer');
   });
 });
 

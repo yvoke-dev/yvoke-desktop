@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_KB_TOOLS,
   isClarificationTool,
+  MCP_PREFIX_RE,
   normalizeClarifyingInput,
   qualifyTool,
 } from '../src/shared/types';
@@ -111,6 +112,61 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(normalizeClarifyingInput({ questions: [] })).toEqual({ question: '', options: [] });
       expect(normalizeClarifyingInput({ questions: [null] })).toEqual({ question: '', options: [] });
       expect(normalizeClarifyingInput({ questions: [{}] })).toEqual({ question: '', options: [] });
+    });
+
+    it('handles header without question without producing literal undefined', () => {
+      const input = {
+        questions: [
+          {
+            header: 'Title',
+          },
+        ],
+      };
+      const result = normalizeClarifyingInput(input);
+      expect(result.question).toBe('### Title');
+      expect(result.question).not.toContain('undefined');
+      expect(result.options).toEqual([]);
+    });
+
+    it('aggregates multiple questions and their options from CLI questions array', () => {
+      const input = {
+        questions: [
+          {
+            header: 'Environment',
+            question: 'Which environment should be deployed to?',
+            options: [
+              { label: 'dev', description: 'Development' },
+              { label: 'staging', description: 'Staging' },
+            ],
+          },
+          {
+            header: 'Confirmation',
+            question: 'Proceed with migration?',
+            options: [
+              { label: 'yes', description: 'Run migration now' },
+              { label: 'no', description: 'Abort' },
+            ],
+          },
+        ],
+      };
+      expect(normalizeClarifyingInput(input)).toEqual({
+        question:
+          '### Environment\nWhich environment should be deployed to?\n\n### Confirmation\nProceed with migration?',
+        options: [
+          { label: 'dev', description: 'Development' },
+          { label: 'staging', description: 'Staging' },
+          { label: 'yes', description: 'Run migration now' },
+          { label: 'no', description: 'Abort' },
+        ],
+      });
+    });
+
+    it('qualifyTool and isClarificationTool both handle server names with underscores consistently', () => {
+      expect(MCP_PREFIX_RE.test('mcp__custom_server__tool')).toBe(true);
+      expect(isClarificationTool('mcp__custom_server__ask_clarifying_question')).toBe(true);
+      expect(isClarificationTool('mcp__custom_server__AskUserQuestion')).toBe(true);
+      expect(qualifyTool('mcp__custom_server__search_corpus')).toBe('mcp__yvoke__search_corpus');
+      expect(qualifyTool('mcp__custom_server__AskUserQuestion')).toBe('AskUserQuestion');
     });
   });
 });

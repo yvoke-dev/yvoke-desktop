@@ -239,8 +239,11 @@ export class AgentService {
       resolve(cleanAnswer);
       this.pendingClarifications.delete(toolUseId);
     }
-    for (const ids of this.threadClarifications.values()) {
-      ids.delete(toolUseId);
+    for (const [threadId, set] of this.threadClarifications.entries()) {
+      set.delete(toolUseId);
+      if (set.size === 0) {
+        this.threadClarifications.delete(threadId);
+      }
     }
   }
 

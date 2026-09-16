@@ -587,8 +587,6 @@ export const MCP_SERVER_NAME = 'yvoke';
 
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
-const QUALIFIED = /^mcp__[^_]+__/;
-
 /**
  * Harness tools a playbook may name that are NOT served by the MCP server, so they must reach the
  * runtime unprefixed.
@@ -597,6 +595,12 @@ const QUALIFIED = /^mcp__[^_]+__/;
  * that does not exist on any server, so the declaration was silently inert while the real
  * `WebSearch` arrived from the global settings toggle instead. That is what made per-playbook web
  * access inexpressible: the only way to grant it was to grant it to *every* playbook at once.
+ */
+export const MCP_PREFIX_RE = /^mcp__.+?__/;
+export const MCP_QUALIFIED_RE = MCP_PREFIX_RE;
+
+/**
+ * Built-in tools provided by the Agent SDK itself rather than an MCP server.
  *
  * Compared case-insensitively against the bare name, because a playbook author writing frontmatter
  * by hand has no reason to know the runtime's exact casing.
@@ -605,7 +609,7 @@ const BUILTIN_TOOLS = ['WebSearch', 'WebFetch', 'ToolSearch', 'AskUserQuestion']
 
 /** The canonical spelling of a built-in, or undefined when `tool` is not one. */
 export function builtinTool(tool: string): string | undefined {
-  const bare = tool.replace(QUALIFIED, '').trim();
+  const bare = tool.replace(MCP_PREFIX_RE, '').trim();
   return BUILTIN_TOOLS.find((known) => known.toLowerCase() === bare.toLowerCase());
 }
 
@@ -621,7 +625,7 @@ export function builtinTool(tool: string): string | undefined {
  * Built-ins are returned as-is: they are the runtime's own tools, not the server's.
  */
 export function qualifyTool(tool: string): string {
-  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(QUALIFIED, '')}`;
+  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(MCP_PREFIX_RE, '')}`;
 }
 
 /**
@@ -652,45 +656,11 @@ export const DEFAULT_KB_TOOLS = [
  * or `AskUserQuestion`), either bare or MCP-qualified.
  */
 export function isClarificationTool(toolName: string): boolean {
-  const bare = toolName.replace(/^mcp__.+?__/, '').trim();
+  const bare = toolName.replace(MCP_PREFIX_RE, '').trim();
   return bare === 'ask_clarifying_question' || bare === 'AskUserQuestion';
 }
 
-/**
- * Normalise tool call arguments for a clarification tool into standard question and options.
- * Handles primitive arguments, flat { question, options } shape, and CLI nested
- * { questions: [{ question, options }] } shape. Sanitizes option labels and descriptions.
- */
-export function normalizeClarifyingInput(input: unknown): {
-  question: string;
-  options: ClarificationOption[];
-} {
-  if (input === null || typeof input !== 'object') {
-    return { question: '', options: [] };
-  }
-
-  const record = input as Record<string, unknown>;
-  let rawQuestion: unknown = record.question;
-  let rawOptions: unknown = record.options;
-
-  // Handle nested CLI format: { questions: [{ question, options }] }
-  if (
-    Array.isArray(record.questions) &&
-    record.questions.length > 0 &&
-    record.questions[0] &&
-    typeof record.questions[0] === 'object'
-  ) {
-    const first = record.questions[0] as Record<string, unknown>;
-    if (rawQuestion === undefined || rawQuestion === '') {
-      rawQuestion = first.question;
-    }
-    if (rawOptions === undefined) {
-      rawOptions = first.options;
-    }
-  }
-
-  const question = typeof rawQuestion === 'string' ? rawQuestion.trim() : '';
-
+function extractOptions(rawOptions: unknown): ClarificationOption[] {
   const options: ClarificationOption[] = [];
   if (Array.isArray(rawOptions)) {
     for (const opt of rawOptions) {
@@ -714,6 +684,46 @@ export function normalizeClarifyingInput(input: unknown): {
       }
     }
   }
+  return options;
+}
+
+/**
+ * Normalise tool call arguments for a clarification tool into standard question and options.
+ * Handles primitive arguments, flat { question, options } shape, and CLI nested
+ * { questions: [{ question, options }] } shape. Sanitizes option labels and descriptions.
+ */
+export function normalizeClarifyingInput(input: unknown): {
+  question: string;
+  options: ClarificationOption[];
+} {
+  if (input === null || typeof input !== 'object') {
+    return { question: '', options: [] };
+  }
+
+  const record = input as Record<string, unknown>;
+
+  // Handle nested CLI format: { questions: [{ question, options }] }
+  if (Array.isArray(record.questions) && record.questions.length > 0) {
+    const qTexts: string[] = [];
+    const options: ClarificationOption[] = [];
+    for (const item of record.questions) {
+      if (item && typeof item === 'object') {
+        const q = item as Record<string, unknown>;
+        const body = typeof q.question === 'string' ? q.question.trim() : (q.question ? String(q.question).trim() : '');
+        const header = typeof q.header === 'string' ? q.header.trim() : (q.header ? String(q.header).trim() : '');
+        const qText = header && body ? `### ${header}\n${body}` : (header ? `### ${header}` : body);
+        if (qText) {
+          qTexts.push(qText);
+        }
+        options.push(...extractOptions(q.options));
+      }
+    }
+    const question = qTexts.filter(Boolean).join('\n\n');
+    return { question, options };
+  }
+
+  const question = typeof record.question === 'string' ? record.question.trim() : '';
+  const options = extractOptions(record.options);
 
   return { question, options };
 }
