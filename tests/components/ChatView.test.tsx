@@ -1609,6 +1609,58 @@ describe('deterministic platform shortcut labels', () => {
 
       errorSpy.mockRestore();
     });
+
+    it('throws and logs error when submitClarification returns false (stale clarification)', async () => {
+      const submitClarification = vi.fn().mockResolvedValue(false);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      (window as unknown as { api: unknown }).api = {
+        validatePlaybook,
+        submitClarification,
+      };
+
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: 'Need your choice:',
+              toolCalls: [
+                {
+                  id: 'cq-stale-1',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Pick an option', options: ['Option A'] },
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'cq-stale-1',
+            question: 'Pick an option',
+            options: [{ label: 'Option A' }],
+          },
+        },
+      });
+
+      const optionBtn = container.querySelector('.option-button') as HTMLButtonElement;
+      expect(optionBtn).toBeTruthy();
+
+      fireEvent.click(optionBtn);
+
+      await waitFor(() => {
+        expect(submitClarification).toHaveBeenCalledWith('t1', 'cq-stale-1', 'Option A');
+      });
+
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Failed to submit clarification:',
+          expect.objectContaining({ message: 'Clarification is no longer active' }),
+        );
+      });
+
+      errorSpy.mockRestore();
+    });
   });
 });
 

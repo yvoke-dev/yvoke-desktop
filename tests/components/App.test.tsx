@@ -127,7 +127,7 @@ describe('App conversation switching with in-progress turn', () => {
       getCitation: vi.fn().mockResolvedValue('citation text'),
       sendMessage: sendMessageMock,
       interrupt: vi.fn().mockResolvedValue(undefined),
-      submitClarification: vi.fn().mockResolvedValue(undefined),
+      submitClarification: vi.fn().mockResolvedValue(true),
       submitFeedback: vi.fn().mockResolvedValue(undefined),
       serverSignIn: vi.fn().mockResolvedValue(''),
       serverSignOut: vi.fn().mockResolvedValue(undefined),

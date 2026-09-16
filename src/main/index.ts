@@ -244,9 +244,9 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
 
   handle(IpcChannels.chatSend, (_e, request: SendMessageRequest) => appCore.sendMessage(request));
   handle(IpcChannels.chatInterrupt, (_e, threadId: string) => appCore.agent.interrupt(threadId));
-  handle(IpcChannels.chatSubmitClarification, (_e, _threadId: string, toolUseId: string, answer: string) =>
-    appCore.agent.resolveClarification(toolUseId, answer),
-  );
+  handle(IpcChannels.chatSubmitClarification, (_e, _threadId: string, toolUseId: string, answer: string) => {
+    return appCore.agent.resolveClarification(toolUseId, answer);
+  });
 
   handle(IpcChannels.feedbackSubmit, (_e, request: FeedbackRequest) => appCore.submitFeedback(request));
 

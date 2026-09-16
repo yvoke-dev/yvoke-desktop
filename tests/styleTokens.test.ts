@@ -93,3 +93,17 @@ describe('button variant selectors', () => {
     expect(CSS).toMatch(/\.button\.check-credentials-btn,\s*\.button\.open-logs-btn/);
   });
 });
+
+describe('clarifying question card styles', () => {
+  it('scopes markdown headings with compact margin and font size', () => {
+    const headingMatch = CSS.match(
+      /\.clarifying-question-card\s+\.card-question\s+\.markdown\s+h1,\s*\.clarifying-question-card\s+\.card-question\s+\.markdown\s+h2,\s*\.clarifying-question-card\s+\.card-question\s+\.markdown\s+h3,\s*\.clarifying-question-card\s+\.card-question\s+\.markdown\s+h4\s*\{([^}]*)\}/,
+    );
+    expect(headingMatch).toBeTruthy();
+    const body = headingMatch?.[1] ?? '';
+    expect(body).toMatch(/margin:\s*0\s+0\s+6px\s+0/);
+    expect(body).toMatch(/font-size:\s*13px/);
+    expect(body).toMatch(/font-weight:\s*600/);
+  });
+});
+

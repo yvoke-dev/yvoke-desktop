@@ -597,7 +597,6 @@ export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
  * access inexpressible: the only way to grant it was to grant it to *every* playbook at once.
  */
 export const MCP_PREFIX_RE = /^mcp__.+?__/;
-export const MCP_QUALIFIED_RE = MCP_PREFIX_RE;
 
 /**
  * Built-in tools provided by the Agent SDK itself rather than an MCP server.
@@ -706,7 +705,8 @@ export function normalizeClarifyingInput(input: unknown): {
   if (Array.isArray(record.questions) && record.questions.length > 0) {
     const qTexts: string[] = [];
     const options: ClarificationOption[] = [];
-    for (const item of record.questions) {
+    const questions = record.questions;
+    for (const item of questions) {
       if (item && typeof item === 'object') {
         const q = item as Record<string, unknown>;
         const body = typeof q.question === 'string' ? q.question.trim() : (q.question ? String(q.question).trim() : '');
@@ -715,7 +715,16 @@ export function normalizeClarifyingInput(input: unknown): {
         if (qText) {
           qTexts.push(qText);
         }
-        options.push(...extractOptions(q.options));
+        const qOptions = extractOptions(q.options).map((opt) => {
+          if (questions.length > 1 && header && !opt.description?.startsWith(`${header}:`)) {
+            return {
+              ...opt,
+              description: opt.description ? `${header}: ${opt.description}` : header,
+            };
+          }
+          return opt;
+        });
+        options.push(...qOptions);
       }
     }
     const question = qTexts.filter(Boolean).join('\n\n');

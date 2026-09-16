@@ -53,8 +53,9 @@ behind it, and the work that produced it can be opened and read.
   specialist, which in a multi-agent turn is the substance of the run.
 - **No trace line means there was nothing to show**, not that it is collapsed. A turn that called no
   tool and did no visible reasoning has no bar at all, and its token counts move into the footer.
-- **A user question is displayed exactly as typed.** Answers and assistant clarifying questions are rendered as formatted text; a
-  question containing code, markdown or a citation-shaped token appears verbatim.
+- **A user's prompt is displayed exactly as typed.** A question containing code, markdown
+  or a citation-shaped token appears verbatim. Answers and assistant clarifying questions
+  are rendered as formatted text.
 - **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right. In multi-agent mode, the active playbook badge is hidden because playbooks are defined strictly by the orchestrator profile.
 - **Composer controls are disabled while an answer generates or preflight checks.** When an answer is streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation configuration controls (agent mode selector, model selector, thinking effort selector) and context modifiers (playbook removal button, image attachments button, and prompt textarea) are disabled. Only the *Stop* button remains interactive during answer generation so the turn can be cancelled.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
@@ -216,5 +217,7 @@ behind it, and the work that produced it can be opened and read.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
-- **Clarification prompts are answered as a single response per turn.** When an assistant tool call includes multiple clarification prompts or multi-select options, the prompts are presented together in the clarification card, and user selection or custom text resolves the turn with a single answer.
+- **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
+  When an assistant call specifies multiple questions or multi-select choices, the questions are
+  presented together in the card, and the user provides a single selection or custom text answer for the turn.
 

@@ -215,10 +215,10 @@ describe('spec/ modular structure', () => {
   it('documents clarification formatting and single-response turn limit in 01_asking_questions.md', () => {
     const askingQuestions = readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8');
     expect(askingQuestions).toContain(
-      '**A user question is displayed exactly as typed.** Answers and assistant clarifying questions are rendered as formatted text;',
+      "**A user's prompt is displayed exactly as typed.** A question containing code, markdown\n  or a citation-shaped token appears verbatim. Answers and assistant clarifying questions\n  are rendered as formatted text.",
     );
     expect(askingQuestions).toContain(
-      'Clarification prompts are answered as a single response per turn.',
+      '**Multi-question and multi-select clarification tools are not supported as separate interactive steps.**\n  When an assistant call specifies multiple questions or multi-select choices, the questions are\n  presented together in the card, and the user provides a single selection or custom text answer for the turn.',
     );
   });
 });

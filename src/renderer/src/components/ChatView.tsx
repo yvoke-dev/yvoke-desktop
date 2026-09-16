@@ -277,7 +277,10 @@ export function ChatView(props: {
     const threadId = thread.id;
     const toolUseId = liveTurn.clarifyingQuestion.toolUseId;
     try {
-      await window.api.submitClarification(threadId, toolUseId, answer);
+      const resolved = await window.api.submitClarification(threadId, toolUseId, answer);
+      if (!resolved) {
+        throw new Error('Clarification is no longer active');
+      }
     } catch (err) {
       logError('Failed to submit clarification:', err);
       throw err;

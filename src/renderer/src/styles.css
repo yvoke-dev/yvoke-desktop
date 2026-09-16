@@ -1355,6 +1355,15 @@ h6 {
   margin: 0 0 8px 0;
 }
 
+.clarifying-question-card .card-question .markdown h1,
+.clarifying-question-card .card-question .markdown h2,
+.clarifying-question-card .card-question .markdown h3,
+.clarifying-question-card .card-question .markdown h4 {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .clarifying-question-card .card-options {
   display: flex;
   flex-wrap: wrap;

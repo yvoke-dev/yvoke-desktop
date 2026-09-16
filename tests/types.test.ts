@@ -153,10 +153,62 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
         question:
           '### Environment\nWhich environment should be deployed to?\n\n### Confirmation\nProceed with migration?',
         options: [
-          { label: 'dev', description: 'Development' },
-          { label: 'staging', description: 'Staging' },
-          { label: 'yes', description: 'Run migration now' },
-          { label: 'no', description: 'Abort' },
+          { label: 'dev', description: 'Environment: Development' },
+          { label: 'staging', description: 'Environment: Staging' },
+          { label: 'yes', description: 'Confirmation: Run migration now' },
+          { label: 'no', description: 'Confirmation: Abort' },
+        ],
+      });
+    });
+
+    it('associates options with question header when questions.length > 1', () => {
+      const input = {
+        questions: [
+          {
+            header: 'Target',
+            options: [
+              { label: 'local' },
+              { label: 'remote', description: 'Target: Already prefixed' },
+              { label: 'cloud', description: 'AWS env' },
+            ],
+          },
+          {
+            header: 'Dry run',
+            options: [
+              { label: 'yes' },
+            ],
+          },
+        ],
+      };
+      expect(normalizeClarifyingInput(input)).toEqual({
+        question: '### Target\n\n### Dry run',
+        options: [
+          { label: 'local', description: 'Target' },
+          { label: 'remote', description: 'Target: Already prefixed' },
+          { label: 'cloud', description: 'Target: AWS env' },
+          { label: 'yes', description: 'Dry run' },
+        ],
+      });
+    });
+
+    it('does not prepend header to options when questions.length === 1', () => {
+      const input = {
+        questions: [
+          {
+            header: 'Target',
+            question: 'Pick a target',
+            options: [
+              { label: 'local', description: 'Local machine' },
+              { label: 'remote' },
+            ],
+          },
+        ],
+      };
+      expect(normalizeClarifyingInput(input)).toEqual({
+        question: '### Target\nPick a target',
+        options: [
+          { label: 'local', description: 'Local machine' },
+          { label: 'remote' },
         ],
       });
     });

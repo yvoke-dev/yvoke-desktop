@@ -553,6 +553,23 @@ describe('error attribution across session events', () => {
     svc.closeAll();
   });
 
+  it('returns false when toolUseId is not pending, and true when resolved', () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    expect(svc.resolveClarification('', 'answer')).toBe(false);
+    expect(svc.resolveClarification(null as any, 'answer')).toBe(false);
+    expect(svc.resolveClarification('non-existent-tool-id', 'answer')).toBe(false);
+
+    svc.pendingClarifications.set('tool-pending-1', vi.fn());
+    expect(svc.resolveClarification('tool-pending-1', 'answer')).toBe(true);
+    expect(svc.pendingClarifications.has('tool-pending-1')).toBe(false);
+    // Resolving again should return false (already resolved / no longer pending)
+    expect(svc.resolveClarification('tool-pending-1', 'answer')).toBe(false);
+
+    svc.closeAll();
+  });
+
   it('cancels pending clarifications when a turn crashes in consume()', async () => {
     const meta = thread();
     const svc = makeService(meta);

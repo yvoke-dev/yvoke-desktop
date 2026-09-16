@@ -231,20 +231,22 @@ export class AgentService {
   /** Outstanding clarification toolUseIds per thread, so they can be cancelled on interrupt/close. */
   private readonly threadClarifications = new Map<string, Set<string>>();
 
-  resolveClarification(toolUseId: string, answer: string): void {
-    if (!toolUseId || typeof toolUseId !== 'string') return;
+  resolveClarification(toolUseId: string, answer: string): boolean {
+    if (!toolUseId || typeof toolUseId !== 'string') return false;
     const cleanAnswer = typeof answer === 'string' ? answer.trim() : String(answer ?? '').trim();
     const resolve = this.pendingClarifications.get(toolUseId);
-    if (resolve) {
-      resolve(cleanAnswer);
-      this.pendingClarifications.delete(toolUseId);
+    if (!resolve) {
+      return false;
     }
+    resolve(cleanAnswer);
+    this.pendingClarifications.delete(toolUseId);
     for (const [threadId, set] of this.threadClarifications.entries()) {
       set.delete(toolUseId);
       if (set.size === 0) {
         this.threadClarifications.delete(threadId);
       }
     }
+    return true;
   }
 
   /** Resolve any clarifications still awaiting an answer for a thread with an empty (cancel) answer. */
