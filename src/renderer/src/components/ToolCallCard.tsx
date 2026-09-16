@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
+import { isClarificationTool, normalizeClarifyingInput } from '../../../shared/types';
 import { SubagentCard } from './SubagentCard';
+import { Markdown } from './Markdown';
 import { CheckIcon, HelpIcon, SendIcon } from './icons';
-import { shortName } from './toolNames';
 
 /**
  * The two tool calls that stay inline in the transcript rather than folding into the trace.
@@ -13,19 +14,20 @@ import { shortName } from './toolNames';
  */
 export function ToolCallCard(props: {
   call: ToolCallInfo;
-  onClarificationSubmit?: (answer: string) => void;
+  onClarificationSubmit?: (answer: string) => void | Promise<void>;
   activeClarificationId?: string;
   onCitation?: (ref: CitationRef) => void;
 }): React.JSX.Element | null {
   const { call, onClarificationSubmit, activeClarificationId, onCitation } = props;
   const [customAnswer, setCustomAnswer] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   // Orchestrator mode: a delegation (the Agent tool) renders as a specialist/reviewer card.
   if (call.name === 'Agent') {
     return <SubagentCard call={call} onCitation={onCitation} />;
   }
 
-  if (shortName(call.name) !== 'ask_clarifying_question') {
+  if (!isClarificationTool(call.name)) {
     // Not an inline call — ChatView routes these into the trace instead.
     return null;
   }
@@ -44,10 +46,20 @@ export function ToolCallCard(props: {
     return result;
   };
 
-  const inputObj = (call.input ?? {}) as { question?: unknown; options?: unknown };
-  const question = typeof inputObj.question === 'string' ? inputObj.question : '';
-  const options = Array.isArray(inputObj.options) ? inputObj.options.map(String) : [];
+  const { question, options } = normalizeClarifyingInput(call.input);
   const isActive = !done && activeClarificationId === call.id;
+
+  const handleSubmit = async (answer: string) => {
+    const trimmed = answer.trim();
+    if (!trimmed || submitting || !onClarificationSubmit) return;
+    setSubmitting(true);
+    try {
+      await onClarificationSubmit(trimmed);
+      setCustomAnswer('');
+    } catch (err) {
+      setSubmitting(false);
+    }
+  };
 
   if (done) {
     const answerText = getAnswerText(call.result);
@@ -57,7 +69,9 @@ export function ToolCallCard(props: {
           <HelpIcon size={13} />
           <span className="card-title">Clarification provided</span>
         </div>
-        <div className="card-question">{question}</div>
+        <div className="card-question">
+          <Markdown content={question} />
+        </div>
         <div className="clarified-badge">
           <CheckIcon size={12} />“{answerText}”
         </div>
@@ -71,7 +85,9 @@ export function ToolCallCard(props: {
         <HelpIcon size={13} />
         <span className="card-title">Clarification required</span>
       </div>
-      <div className="card-question">{question}</div>
+      <div className="card-question">
+        <Markdown content={question} />
+      </div>
       {isActive && onClarificationSubmit ? (
         <>
           {options.length > 0 && (
@@ -81,9 +97,13 @@ export function ToolCallCard(props: {
                   key={idx}
                   type="button"
                   className="option-button"
-                  onClick={() => onClarificationSubmit(option)}
+                  disabled={submitting}
+                  onClick={() => handleSubmit(option.label)}
                 >
-                  {option}
+                  <span className="option-button-label">{option.label}</span>
+                  {option.description && (
+                    <span className="option-button-desc">{option.description}</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -93,21 +113,20 @@ export function ToolCallCard(props: {
               type="text"
               placeholder={options.length > 0 ? 'Or type a custom answer…' : 'Type your answer…'}
               value={customAnswer}
+              disabled={submitting}
               onChange={(e) => setCustomAnswer(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && customAnswer.trim()) {
-                  onClarificationSubmit(customAnswer);
-                  setCustomAnswer('');
+                  handleSubmit(customAnswer);
                 }
               }}
             />
             <button
               type="button"
               className="primary"
-              disabled={!customAnswer.trim()}
+              disabled={submitting || !customAnswer.trim()}
               onClick={() => {
-                onClarificationSubmit(customAnswer);
-                setCustomAnswer('');
+                handleSubmit(customAnswer);
               }}
             >
               Send

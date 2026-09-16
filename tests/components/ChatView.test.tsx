@@ -672,7 +672,7 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           clarifyingQuestion: {
             toolUseId: 'cq-1',
             question: 'Which region?',
-            options: ['US', 'EU'],
+            options: [{ label: 'US' }, { label: 'EU' }],
           },
         },
       });
@@ -1509,7 +1509,7 @@ describe('deterministic platform shortcut labels', () => {
           clarifyingQuestion: {
             toolUseId: 'cq-1',
             question: 'Which region?',
-            options: ['US', 'EU'],
+            options: [{ label: 'US' }, { label: 'EU' }],
           },
         },
       });
@@ -1535,6 +1535,135 @@ describe('deterministic platform shortcut labels', () => {
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe('Pick a playbook first — / to choose one');
       expect(textarea.placeholder).not.toContain('to send');
+    });
+
+    it('renders AskUserQuestion as an inline clarification card rather than folding into trace', () => {
+      const message: ChatMessage = {
+        localId: 'm1',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Please answer:',
+        blocks: [
+          {
+            text: 'Please answer:',
+            toolCalls: [
+              {
+                id: 'call-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Which mode?', options: ['fast', 'thorough'] },
+              },
+            ],
+          },
+        ],
+      };
+      renderChat({ messages: [message] });
+      expect(screen.getByText('Which mode?')).toBeTruthy();
+      expect(screen.getByText('Clarification required')).toBeTruthy();
+    });
+
+    it('catches and logs error when submitClarification rejects in handleClarificationSubmit', async () => {
+      const submitClarification = vi.fn().mockRejectedValue(new Error('IPC submit failed'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      (window as unknown as { api: unknown }).api = {
+        validatePlaybook,
+        submitClarification,
+      };
+
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: 'Need your choice:',
+              toolCalls: [
+                {
+                  id: 'cq-err-1',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Pick an option', options: ['Option A'] },
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'cq-err-1',
+            question: 'Pick an option',
+            options: [{ label: 'Option A' }],
+          },
+        },
+      });
+
+      const optionBtn = container.querySelector('.option-button') as HTMLButtonElement;
+      expect(optionBtn).toBeTruthy();
+
+      fireEvent.click(optionBtn);
+
+      await waitFor(() => {
+        expect(submitClarification).toHaveBeenCalledWith('t1', 'cq-err-1', 'Option A');
+      });
+
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith('Failed to submit clarification:', expect.any(Error));
+      });
+
+      errorSpy.mockRestore();
+    });
+
+    it('throws and logs error when submitClarification returns false (stale clarification)', async () => {
+      const submitClarification = vi.fn().mockResolvedValue(false);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      (window as unknown as { api: unknown }).api = {
+        validatePlaybook,
+        submitClarification,
+      };
+
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: 'Need your choice:',
+              toolCalls: [
+                {
+                  id: 'cq-stale-1',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Pick an option', options: ['Option A'] },
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'cq-stale-1',
+            question: 'Pick an option',
+            options: [{ label: 'Option A' }],
+          },
+        },
+      });
+
+      const optionBtn = container.querySelector('.option-button') as HTMLButtonElement;
+      expect(optionBtn).toBeTruthy();
+
+      fireEvent.click(optionBtn);
+
+      await waitFor(() => {
+        expect(submitClarification).toHaveBeenCalledWith('t1', 'cq-stale-1', 'Option A');
+      });
+
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Failed to submit clarification:',
+          expect.objectContaining({ message: 'Clarification is no longer active' }),
+        );
+      });
+
+      await waitFor(() => {
+        expect((optionBtn as HTMLButtonElement).disabled).toBe(false);
+      });
+
+      errorSpy.mockRestore();
     });
   });
 });

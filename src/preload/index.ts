@@ -44,7 +44,7 @@ export interface DesktopApi {
   getCitation(ref: CitationRef): Promise<string>;
   sendMessage(request: SendMessageRequest): Promise<void>;
   interrupt(threadId: string): Promise<void>;
-  submitClarification(threadId: string, toolUseId: string, answer: string): Promise<void>;
+  submitClarification(threadId: string, toolUseId: string, answer: string): Promise<boolean>;
   submitFeedback(request: FeedbackRequest): Promise<void>;
   authStatus(): Promise<AuthStatus>;
   verifyAuth(): Promise<AuthVerificationResponse>;

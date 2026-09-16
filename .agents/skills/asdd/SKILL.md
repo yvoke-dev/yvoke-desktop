@@ -47,6 +47,8 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
    - Desktop Known Pitfalls in `.agents/AGENTS.md` § 6.
    - Electron multi-process security (`contextBridge`, IPC argument validation).
    - React 19 lifecycle: listener unsubscription in `useEffect`, memory leaks.
+   - Async action state machines & silent `void` no-ops (declaring recovery paths for success, rejection, and stale resolution).
+   - Upstream schema exhaustion (accounting for all declared fields in upstream SDK/tool schemas or explicitly declaring intentional limits in `spec/`).
    - Anti-bloat & unrepresentability.
 2. **Harden Plan**: Planner refines the plan based on critic feedback.
 3. **Implementation Plan Artifact**: Parent agent writes `implementation_plan.md` in the native brain folder with `RequestFeedback: true` and pauses for explicit user approval.
@@ -75,6 +77,7 @@ Before launching Phase 1, ensure all required SDD subagents are defined for the 
    - **Large multi-system tasks (3+ Waves)**: Staged layered waves (e.g. State/Store -> IPC/Preload Bridge -> React UI -> Spec Update -> Audit) only when deep dependencies require staged review.
 3. **Adversarial Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandate that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC arguments, corrupt JSON recovery, sync timeouts).
+   - **Mandatory 3-Way Async Action Resolution Matrix**: For any task introducing an action state (`submitting: true`, `busy: true`, or disabled controls), mandate tests for success, rejected promise/IPC error, and stale/cancelled resolution.
 4. **Task Artifact**: Emit `task.md` in the native brain folder:
     - Wave $N-1$ (Spec Compliance): Update `spec/` chapter IF and ONLY IF the task alters user-observable behaviour, limits, defaults, or capabilities (per `spec/README.md`). Internal test infrastructure, CI fixes, and refactorings must NOT touch `spec/`. Verify via `npm test -- tests/spec.test.ts`.
     - Mandatory Wave $N$: Holistic audit and PR creation.
@@ -92,7 +95,7 @@ For each wave, execute directly in the active workspace on the confirmed feature
    - *Refactor Phase*: Clean up, run `npm run typecheck`.
    - *Test Mutation Proof*: Break the production code minimally to confirm RED, then restore by re-reading the original.
 2. **Adversarial Code Review (Gate 3)**:
-   Invoke `desktop_reviewer` to audit `git diff` for IPC validation, memory leaks, CSP, and type safety.
+   Invoke `desktop_reviewer` to audit `git diff` for IPC validation, memory leaks, CSP, silent `void` handlers on cancellable actions, action state recovery, embedded Markdown sizing, regex deduplication, spec contradiction search, and type safety.
 3. **Wave Commit**:
    Commit the wave on the feature branch:
    ```bash

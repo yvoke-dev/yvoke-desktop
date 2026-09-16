@@ -30,6 +30,10 @@ Your job is to challenge the wave breakdown and test specifications in `task.md`
   - Require typed errors (e.g. `err instanceof NoReplyError`) to settle outcomes before prose regexes run.
 - **IPC Secret Non-Leakage**: When IPC channels return auth or sync status, mandate tests asserting that no bearer tokens, private keys, or credentials are present on the renderer-facing payload.
 - **SSO Reverse Proxy Mock**: For server probes, mandate a test simulating an enterprise gateway returning HTTP 200 with an HTML login page, asserting it is rejected as expired/unauthenticated.
+- **Mandatory 3-Way Async Action Resolution Matrix**: For any task introducing a loading, disabling, or `submitting: true` UI state, mandate tests for all three states:
+  1. *Success*: action completes and transitions UI state.
+  2. *Rejection*: IPC/network throws, asserting controls immediately re-enable and error is surfaced/logged.
+  3. *Stale/Cancelled*: handler returns `false` or stale indicator (e.g. action dispatched after interruption or turn termination), asserting controls re-enable without freezing.
 
 ### 2. Tautology & False-Green Inspection
 - Challenge test assertions: will they pass even if the business logic is broken?

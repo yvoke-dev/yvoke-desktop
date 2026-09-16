@@ -1341,6 +1341,29 @@ h6 {
   line-height: 1.5;
 }
 
+.clarifying-question-card .card-question .markdown {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.clarifying-question-card .card-question .markdown p {
+  margin: 0 0 8px 0;
+}
+
+.clarifying-question-card .card-question .markdown ul,
+.clarifying-question-card .card-question .markdown ol {
+  margin: 0 0 8px 0;
+}
+
+.clarifying-question-card .card-question .markdown h1,
+.clarifying-question-card .card-question .markdown h2,
+.clarifying-question-card .card-question .markdown h3,
+.clarifying-question-card .card-question .markdown h4 {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .clarifying-question-card .card-options {
   display: flex;
   flex-wrap: wrap;
@@ -1376,6 +1399,10 @@ h6 {
 
 .clarifying-question-card.answered .card-header,
 .clarifying-question-card.answered .card-question {
+  color: var(--text-dim);
+}
+
+.clarifying-question-card.answered .card-question .markdown {
   color: var(--text-dim);
 }
 
@@ -2661,7 +2688,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss) {
+button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.option-button) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;
@@ -2673,17 +2700,40 @@ button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citatio
 }
 
 .option-button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 2px;
+  width: 100%;
+  max-width: 480px;
   background: var(--canvas);
-  border: 1px solid var(--line) !important;
-  padding: 5px 14px !important;
-  font-size: 13px !important;
+  border: 1px solid var(--line);
+  padding: 5px 14px;
+  font-size: 13px;
   cursor: pointer;
 }
 
-.option-button:hover {
+.option-button:hover:not(:disabled) {
   background: var(--accent);
-  border-color: var(--accent) !important;
+  border-color: var(--accent);
   color: var(--on-accent);
+}
+
+.option-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.option-button-label {
+  font-weight: 500;
+}
+
+.option-button-desc {
+  font-size: 11px;
+  opacity: 0.8;
+  font-weight: normal;
 }
 
 .icon-button {

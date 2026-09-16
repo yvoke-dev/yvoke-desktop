@@ -18,6 +18,7 @@ import type {
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   DEFAULT_APPEARANCE,
+  isClarificationTool,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -30,7 +31,6 @@ import { Markdown } from './Markdown';
 import { ToolCallCard } from './ToolCallCard';
 import { TraceBar, type TraceEntry } from './TraceBar';
 import { AlertIcon, CloseIcon, DownloadIcon, PaperclipIcon, PlaybookIcon, SearchIcon, SendIcon, StopIcon } from './icons';
-import { shortName } from './toolNames';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
 
@@ -59,8 +59,12 @@ function isInlineCall(call: ToolCallInfo): boolean {
   // have to keep their cards when it is.
   return (
     (call.name === 'Agent' && call.subagentType !== undefined) ||
-    shortName(call.name) === 'ask_clarifying_question'
+    isClarificationTool(call.name)
   );
+}
+
+function logError(...args: unknown[]): void {
+  console.error(...args);
 }
 
 /** Normalise a message into blocks, so the old flat shape and the new one read the same. */
@@ -272,7 +276,15 @@ export function ChatView(props: {
     if (!liveTurn.clarifyingQuestion) return;
     const threadId = thread.id;
     const toolUseId = liveTurn.clarifyingQuestion.toolUseId;
-    await window.api.submitClarification(threadId, toolUseId, answer);
+    try {
+      const resolved = await window.api.submitClarification(threadId, toolUseId, answer);
+      if (!resolved) {
+        throw new Error('Clarification is no longer active');
+      }
+    } catch (err) {
+      logError('Failed to submit clarification:', err);
+      throw err;
+    }
   };
 
   const openCitation = useCallback((ref: CitationRef): void => {

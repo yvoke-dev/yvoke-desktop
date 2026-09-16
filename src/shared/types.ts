@@ -480,6 +480,13 @@ export interface PlaybookValidation {
   suggestedPlaybookTitle?: string;
 }
 
+export interface ClarificationOption {
+  label: string;
+  description?: string;
+  /** Optional preview payload (e.g. code/diff) parsed from CLI schemas; not rendered in current card UI (documented spec limit). */
+  preview?: string;
+}
+
 /** Events streamed from the main process to the renderer while a turn runs. */
 export type AgentEvent =
   | { kind: 'turn-start'; threadId: string }
@@ -501,7 +508,7 @@ export type AgentEvent =
     }
   | { kind: 'error'; threadId: string; message: string; authRequired?: boolean }
   | { kind: 'mcp-status'; threadId: string; servers: { name: string; status: string }[] }
-  | { kind: 'clarifying-question'; threadId: string; toolUseId: string; question: string; options?: string[] }
+  | { kind: 'clarifying-question'; threadId: string; toolUseId: string; question: string; options?: ClarificationOption[] }
   | { kind: 'subagent-start'; threadId: string; toolUseId: string; subagentType: string; question: string }
   | { kind: 'subagent-complete'; threadId: string; toolUseId: string; subagentType: string; result: string; isError: boolean }
   | { kind: 'review-verdict'; threadId: string; toolUseId: string; approved: boolean; feedback?: string }
@@ -582,8 +589,6 @@ export const MCP_SERVER_NAME = 'yvoke';
 
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
-const QUALIFIED = /^mcp__[^_]+__/;
-
 /**
  * Harness tools a playbook may name that are NOT served by the MCP server, so they must reach the
  * runtime unprefixed.
@@ -592,15 +597,20 @@ const QUALIFIED = /^mcp__[^_]+__/;
  * that does not exist on any server, so the declaration was silently inert while the real
  * `WebSearch` arrived from the global settings toggle instead. That is what made per-playbook web
  * access inexpressible: the only way to grant it was to grant it to *every* playbook at once.
+ */
+export const MCP_PREFIX_RE = /^mcp__.+?__/;
+
+/**
+ * Built-in tools provided by the Agent SDK itself rather than an MCP server.
  *
  * Compared case-insensitively against the bare name, because a playbook author writing frontmatter
  * by hand has no reason to know the runtime's exact casing.
  */
-const BUILTIN_TOOLS = ['WebSearch', 'WebFetch', 'ToolSearch'];
+const BUILTIN_TOOLS = ['WebSearch', 'WebFetch', 'ToolSearch', 'AskUserQuestion'];
 
 /** The canonical spelling of a built-in, or undefined when `tool` is not one. */
 export function builtinTool(tool: string): string | undefined {
-  const bare = tool.replace(QUALIFIED, '').trim();
+  const bare = tool.replace(MCP_PREFIX_RE, '').trim();
   return BUILTIN_TOOLS.find((known) => known.toLowerCase() === bare.toLowerCase());
 }
 
@@ -616,7 +626,7 @@ export function builtinTool(tool: string): string | undefined {
  * Built-ins are returned as-is: they are the runtime's own tools, not the server's.
  */
 export function qualifyTool(tool: string): string {
-  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(QUALIFIED, '')}`;
+  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(MCP_PREFIX_RE, '')}`;
 }
 
 /**
@@ -639,7 +649,100 @@ export const DEFAULT_KB_TOOLS = [
   'search_graph_entities',
   'get_json_schema',
   'search_corpus',
+  'ask_clarifying_question',
 ];
+
+/**
+ * Whether `toolName` is one of the interactive clarification tools (`ask_clarifying_question`
+ * or `AskUserQuestion`), either bare or MCP-qualified.
+ */
+export function isClarificationTool(toolName: string): boolean {
+  const bare = toolName.replace(MCP_PREFIX_RE, '').trim();
+  return bare === 'ask_clarifying_question' || bare === 'AskUserQuestion';
+}
+
+function extractOptions(rawOptions: unknown): ClarificationOption[] {
+  const options: ClarificationOption[] = [];
+  if (Array.isArray(rawOptions)) {
+    for (const opt of rawOptions) {
+      if (typeof opt === 'string') {
+        const label = opt.trim();
+        if (label.length > 0) {
+          options.push({ label });
+        }
+      } else if (opt && typeof opt === 'object') {
+        const optRecord = opt as Record<string, unknown>;
+        if (typeof optRecord.label === 'string') {
+          const label = optRecord.label.trim();
+          if (label.length > 0) {
+            const description =
+              typeof optRecord.description === 'string' && optRecord.description.trim().length > 0
+                ? optRecord.description.trim()
+                : undefined;
+            const preview = typeof optRecord.preview === 'string' ? optRecord.preview.trim() : undefined;
+            options.push({
+              label,
+              ...(description ? { description } : {}),
+              ...(preview ? { preview } : {}),
+            });
+          }
+        }
+      }
+    }
+  }
+  return options;
+}
+
+/**
+ * Normalise tool call arguments for a clarification tool into standard question and options.
+ * Handles primitive arguments, flat { question, options } shape, and CLI nested
+ * { questions: [{ question, options }] } shape. Sanitizes option labels and descriptions.
+ */
+export function normalizeClarifyingInput(input: unknown): {
+  question: string;
+  options: ClarificationOption[];
+} {
+  if (input === null || typeof input !== 'object') {
+    return { question: '', options: [] };
+  }
+
+  const record = input as Record<string, unknown>;
+
+  // Handle nested CLI format: { questions: [{ question, options }] }
+  if (Array.isArray(record.questions) && record.questions.length > 0) {
+    const qTexts: string[] = [];
+    const options: ClarificationOption[] = [];
+    const questions = record.questions;
+    for (const item of questions) {
+      if (item && typeof item === 'object') {
+        const q = item as Record<string, unknown>;
+        const body = typeof q.question === 'string' ? q.question.trim() : (q.question ? String(q.question).trim() : '');
+        const header = typeof q.header === 'string' ? q.header.trim() : (q.header ? String(q.header).trim() : '');
+        const qText = header && body ? `### ${header}\n${body}` : (header ? `### ${header}` : body);
+        if (qText) {
+          qTexts.push(qText);
+        }
+        const qOptions = extractOptions(q.options).map((opt) => {
+          if (questions.length > 1 && header && !opt.description?.startsWith(`${header}:`)) {
+            return {
+              ...opt,
+              description: opt.description ? `${header}: ${opt.description}` : header,
+            };
+          }
+          return opt;
+        });
+        options.push(...qOptions);
+      }
+    }
+    const question = qTexts.filter(Boolean).join('\n\n');
+    return { question, options };
+  }
+
+  const question = typeof record.question === 'string' ? record.question.trim() : '';
+  const options = extractOptions(record.options);
+
+  return { question, options };
+}
 
 // A hardcoded label map used to live here, keyed by four playbook names of one knowledge base
 // (`oim-ask`, `oim-explain-table`, `oim-trace-data-flow`, `oim-browse-manual`). None of them exist

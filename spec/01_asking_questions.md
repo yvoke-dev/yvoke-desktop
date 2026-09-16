@@ -17,7 +17,7 @@ behind it, and the work that produced it can be opened and read.
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
-| **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options, and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
+| **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
 | **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
 | **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
@@ -53,8 +53,9 @@ behind it, and the work that produced it can be opened and read.
   specialist, which in a multi-agent turn is the substance of the run.
 - **No trace line means there was nothing to show**, not that it is collapsed. A turn that called no
   tool and did no visible reasoning has no bar at all, and its token counts move into the footer.
-- **A question is displayed exactly as typed.** Only answers are rendered as formatted text; a
-  question containing code, markdown or a citation-shaped token appears verbatim.
+- **A user's prompt is displayed exactly as typed.** A question containing code, markdown
+  or a citation-shaped token appears verbatim. Answers and assistant clarifying questions
+  are rendered as formatted text.
 - **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right. In multi-agent mode, the active playbook badge is hidden because playbooks are defined strictly by the orchestrator profile.
 - **Composer controls are disabled while an answer generates or preflight checks.** When an answer is streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation configuration controls (agent mode selector, model selector, thinking effort selector) and context modifiers (playbook removal button, image attachments button, and prompt textarea) are disabled. Only the *Stop* button remains interactive during answer generation so the turn can be cancelled.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
@@ -216,4 +217,10 @@ behind it, and the work that produced it can be opened and read.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
+- **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
+  When an assistant call specifies multiple questions or multi-select choices, the questions are
+  presented together in the card, and the user provides a single selection or custom text answer for the turn.
+- **Option preview content is not rendered.** While clarification options display labels
+  and descriptions, optional preview attachments (such as code blocks or visual comparisons
+  declared in CLI schemas) are not rendered in the card.
 

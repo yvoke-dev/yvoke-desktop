@@ -211,5 +211,18 @@ describe('spec/ modular structure', () => {
     expect(installing).toContain('Version comparison requires a three-part numeric semantic version');
     expect(installing).toContain('Automatic background updates, background update notifications, or automatic downloading of new releases.');
   });
+
+  it('documents clarification formatting and single-response turn limit in 01_asking_questions.md', () => {
+    const askingQuestions = readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8');
+    expect(askingQuestions).toContain(
+      "**A user's prompt is displayed exactly as typed.** A question containing code, markdown\n  or a citation-shaped token appears verbatim. Answers and assistant clarifying questions\n  are rendered as formatted text.",
+    );
+    expect(askingQuestions).toContain(
+      '**Multi-question and multi-select clarification tools are not supported as separate interactive steps.**\n  When an assistant call specifies multiple questions or multi-select choices, the questions are\n  presented together in the card, and the user provides a single selection or custom text answer for the turn.',
+    );
+    expect(askingQuestions).toContain(
+      '**Option preview content is not rendered.** While clarification options display labels\n  and descriptions, optional preview attachments (such as code blocks or visual comparisons\n  declared in CLI schemas) are not rendered in the card.',
+    );
+  });
 });
 

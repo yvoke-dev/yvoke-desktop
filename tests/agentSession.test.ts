@@ -506,5 +506,103 @@ describe('error attribution across session events', () => {
     expect(updatedSession.playbookName).toBe('oim-customers');
     svc.closeAll();
   });
+
+  it('validates toolUseId and coerces answer in resolveClarification', () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    let resolvedValue: string | null = null;
+    svc.pendingClarifications.set('tool-1', (ans) => {
+      resolvedValue = ans;
+    });
+
+    // Invalid toolUseId: empty string or non-string should be a no-op
+    svc.resolveClarification('', 'valid answer');
+    expect(resolvedValue).toBeNull();
+    expect(svc.pendingClarifications.has('tool-1')).toBe(true);
+
+    svc.resolveClarification(null as any, 'valid answer');
+    expect(resolvedValue).toBeNull();
+    expect(svc.pendingClarifications.has('tool-1')).toBe(true);
+
+    // Wire clarification to thread
+    const threadClarifications = (svc as any).threadClarifications as Map<string, Set<string>>;
+    threadClarifications.set('thread-1', new Set(['tool-1']));
+
+    // Whitespace trimming
+    svc.resolveClarification('tool-1', '   trimmed answer   ');
+    expect(resolvedValue).toBe('trimmed answer');
+    expect(svc.pendingClarifications.has('tool-1')).toBe(false);
+    expect(threadClarifications.has('thread-1')).toBe(false);
+
+    // Non-string answer coercion
+    let resolvedValue2: string | null = null;
+    svc.pendingClarifications.set('tool-2', (ans) => {
+      resolvedValue2 = ans;
+    });
+    svc.resolveClarification('tool-2', null as any);
+    expect(resolvedValue2).toBe('');
+
+    let resolvedValue3: string | null = null;
+    svc.pendingClarifications.set('tool-3', (ans) => {
+      resolvedValue3 = ans;
+    });
+    svc.resolveClarification('tool-3', 123 as any);
+    expect(resolvedValue3).toBe('123');
+
+    svc.closeAll();
+  });
+
+  it('returns false when toolUseId is not pending, and true when resolved', () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    expect(svc.resolveClarification('', 'answer')).toBe(false);
+    expect(svc.resolveClarification(null as any, 'answer')).toBe(false);
+    expect(svc.resolveClarification('non-existent-tool-id', 'answer')).toBe(false);
+
+    svc.pendingClarifications.set('tool-pending-1', vi.fn());
+    expect(svc.resolveClarification('tool-pending-1', 'answer')).toBe(true);
+    expect(svc.pendingClarifications.has('tool-pending-1')).toBe(false);
+    // Resolving again should return false (already resolved / no longer pending)
+    expect(svc.resolveClarification('tool-pending-1', 'answer')).toBe(false);
+
+    svc.closeAll();
+  });
+
+  it('cancels pending clarifications when a turn crashes in consume()', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    let resolvedAnswer: string | null = null;
+    svc.pendingClarifications.set('tool-crash', (ans) => {
+      resolvedAnswer = ans;
+    });
+    // Wire clarification to thread
+    const threadClarifications = (svc as any).threadClarifications as Map<string, Set<string>>;
+    threadClarifications.set(meta.id, new Set(['tool-crash']));
+
+    h.nextQueryError = new Error('Turn exploded');
+
+    await svc.sendMessage(meta, 'Question that fails', {
+      injectBefore: TEXT['oim-schema'],
+      playbook: 'oim-schema',
+      playbookName: 'oim-schema',
+    });
+
+    // Wait for consume to hit error block
+    for (let i = 0; i < 50; i++) {
+      if (events.some((e) => e.kind === 'error')) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(events.some((e) => e.kind === 'error')).toBe(true);
+    // The clarification should have been cancelled with empty string
+    expect(resolvedAnswer).toBe('');
+    expect(svc.pendingClarifications.has('tool-crash')).toBe(false);
+    expect(threadClarifications.has(meta.id)).toBe(false);
+
+    svc.closeAll();
+  });
 });
 

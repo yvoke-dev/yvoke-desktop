@@ -1,8 +1,8 @@
-import type { ToolCallInfo } from '../../../shared/types';
+import { MCP_PREFIX_RE, type ToolCallInfo } from '../../../shared/types';
 
 /** Strip the `mcp__<server>__` namespace the SDK prefixes onto every server tool. */
 export function shortName(name: string): string {
-  return name.replace(/^mcp__[^_]+__/, '');
+  return name.replace(MCP_PREFIX_RE, '');
 }
 
 function firstString(input: unknown, keys: string[]): string | undefined {

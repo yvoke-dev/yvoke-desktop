@@ -1,6 +1,14 @@
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings } from '../../shared/types';
-import { builtinTool, DEFAULT_KB_TOOLS, MCP_SERVER_NAME, MCP_TOOL_PREFIX, qualifyTool } from '../../shared/types';
+import type { AppSettings, ClarificationOption } from '../../shared/types';
+import {
+  builtinTool,
+  DEFAULT_KB_TOOLS,
+  isClarificationTool,
+  MCP_SERVER_NAME,
+  MCP_TOOL_PREFIX,
+  normalizeClarifyingInput,
+  qualifyTool,
+} from '../../shared/types';
 import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX } from './computeTools';
 
 
@@ -215,9 +223,6 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
  */
 const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch'];
 
-/** Suffix match, because MCP tools arrive fully qualified (`mcp__yvoke__ask_clarifying_question`). */
-const NEVER_AUTO_APPROVE_SUFFIXES = ['ask_clarifying_question'];
-
 /**
  * The SDK's `allowedTools`: the grant from `buildAllowedTools` minus everything whose enforcement
  * or interception lives in `canUseTool`. Pass the FULL grant to `buildCanUseTool` — that is the
@@ -229,9 +234,7 @@ const NEVER_AUTO_APPROVE_SUFFIXES = ['ask_clarifying_question'];
  */
 export function buildAutoApproveTools(granted: string[]): string[] {
   return granted.filter(
-    (tool) =>
-      !NEVER_AUTO_APPROVE.includes(tool) &&
-      !NEVER_AUTO_APPROVE_SUFFIXES.some((suffix) => tool.endsWith(suffix)),
+    (tool) => !NEVER_AUTO_APPROVE.includes(tool) && !isClarificationTool(tool),
   );
 }
 
@@ -314,6 +317,9 @@ export function isToolAllowed(
   codeExecution?: boolean,
   delegation?: boolean
 ): boolean {
+  if (isClarificationTool(toolName)) {
+    return true;
+  }
   if (toolName.startsWith(MCP_TOOL_PREFIX)) {
     return true;
   }
@@ -356,7 +362,7 @@ export function isToolAllowed(
 export function buildCanUseTool(
   getSettings: () => AppSettings,
   threadId?: string,
-  onClarifyingQuestion?: (toolUseId: string, question: string, options: string[]) => Promise<string>,
+  onClarifyingQuestion?: (toolUseId: string, question: string, options: ClarificationOption[]) => Promise<string>,
   allowedTools?: string[],
   codeExecution?: boolean,
   delegation?: boolean
@@ -379,15 +385,27 @@ export function buildCanUseTool(
         message: `The tool "${toolName}" is not available in this application. Use the ${MCP_SERVER_NAME} knowledge-base tools instead.`,
       };
     }
-    const isClarify = toolName.endsWith('ask_clarifying_question');
-    const toolUseId = options?.toolUseID || (options as any)?.toolUseId;
-    if (isClarify && onClarifyingQuestion && toolUseId) {
-      const question = String(input.question || '');
-      const opts = Array.isArray(input.options) ? input.options.map(String) : [];
-      const answer = await onClarifyingQuestion(toolUseId, question, opts);
+
+    if (isClarificationTool(toolName)) {
+      const toolUseId = options?.toolUseID || (options as any)?.toolUseId;
+      if (onClarifyingQuestion && toolUseId) {
+        try {
+          const parsed = normalizeClarifyingInput(input);
+          const answer = await onClarifyingQuestion(toolUseId, parsed.question, parsed.options);
+          return {
+            behavior: 'deny',
+            message: `User answered: ${answer}`,
+          };
+        } catch {
+          return {
+            behavior: 'deny',
+            message: 'Clarifying questions cannot be asked in this execution context.',
+          };
+        }
+      }
       return {
         behavior: 'deny',
-        message: `User answered: ${answer}`,
+        message: 'Clarifying questions cannot be asked in this execution context.',
       };
     }
 

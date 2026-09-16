@@ -58,6 +58,8 @@ Before starting, ensure the required SDD subagents are defined for the session. 
 ## Phase 2: Planning Mode & Adversarial Plan Critique (Gate 1)
 1. **Adversarial Plan Attack (Gate 1)**: Before presenting the plan to the user, invoke `sdd_plan_critic` to attack the draft plan:
    - Cross-checks against all Known Pitfalls in `CLAUDE.md` / `.agents/AGENTS.md` § 6.
+   - Evaluates async action state machines & silent `void` no-ops (declaring recovery paths for success, rejection, and stale resolution).
+   - Upstream schema exhaustion: verifies all declared fields in external SDK/MCP/API schemas are handled or declared as intentional limits in `spec/`.
    - Evaluates multi-process security: contextBridge API boundaries, parameter validation on IPC channels.
    - Evaluates React 19 lifecycle: event listener cleanup, memory leaks.
    - Challenges over-engineering and tests whether the bug can be made *unrepresentable* instead of adding defensive code.
@@ -95,6 +97,7 @@ Before starting, ensure the required SDD subagents are defined for the session. 
    - **Large multi-system tasks (3+ Waves)**: Staged layered waves (e.g. State/Store -> IPC/Preload Bridge -> React UI -> Spec Update -> Audit) only when deep dependencies require staged review.
 3. **Adversarial Task & Test Critique (Gate 2)**: Invoke `sdd_task_critic` to attack the task list:
    - **Eliminates Happy-Path Test Syndrome**: Mandates that **every wave must include at least one explicit Negative / Failure Test** (e.g. malformed IPC args, corrupt JSON store recovery, network sync timeouts, bad tool input rejection).
+   - **Mandatory 3-Way Async Action Resolution Matrix**: Mandates tests verifying UI recovery across (1) success, (2) rejected IPC/network, and (3) stale/cancelled resolution whenever action states (`submitting`, `busy`, disabled controls) are introduced.
    - Verifies tests assert real state mutations rather than trivial assertions.
 4. **Task Artifact Generation (`task.md`)**: The task architect incorporates all negative tests and emits the hardened `task.md` in the brain directory:
     - **Wave N-1 (Spec Compliance)**: Update `spec/` capability chapter IF and ONLY IF the task alters user-observable behaviour, limits, defaults, or capabilities (per `spec/README.md`: "A change a user would notice must update the affected chapter... For a small, local fix, go straight to the code and its tests"). Internal test infrastructure, CI fixes, and pure refactorings must NOT touch `spec/`. Verify via `npm test -- tests/spec.test.ts`.
@@ -116,7 +119,7 @@ Execute each wave sequentially directly in the active workspace on the confirmed
    - **Test Mutation Proof**: A test does not count until you have seen it fail. Break the production code minimally to confirm RED, then restore by re-reading the original.
 2. **Adversarial Code & Resilience Review (Gate 3)**:
    Invoke `desktop_reviewer` in the workspace to audit `git diff`:
-   - Inspects for IPC parameter validation, contextBridge leaks, CSP compliance, React `useEffect` listener cleanups, type safety, and Known Pitfalls.
+   - Inspects for IPC parameter validation, silent `void` handlers on cancellable/expired actions, contextBridge leaks, CSP compliance, React `useEffect` listener cleanups, embedded Markdown styling/margins, regex deduplication (`MCP_PREFIX_RE`), spec contradiction search, type safety, and Known Pitfalls.
    - Probes for tainted input vulnerabilities (renderer IPC payloads, LLM outputs, sync responses).
    - Verifies test quality and confirms the test actually ran Red -> Green.
 3. **Remediation**:
