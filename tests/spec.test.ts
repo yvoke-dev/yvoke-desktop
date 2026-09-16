@@ -220,6 +220,9 @@ describe('spec/ modular structure', () => {
     expect(askingQuestions).toContain(
       '**Multi-question and multi-select clarification tools are not supported as separate interactive steps.**\n  When an assistant call specifies multiple questions or multi-select choices, the questions are\n  presented together in the card, and the user provides a single selection or custom text answer for the turn.',
     );
+    expect(askingQuestions).toContain(
+      '**Option preview content is not rendered.** While clarification options display labels\n  and descriptions, optional preview attachments (such as code blocks or visual comparisons\n  declared in CLI schemas) are not rendered in the card.',
+    );
   });
 });
 

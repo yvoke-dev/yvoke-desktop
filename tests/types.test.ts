@@ -107,6 +107,27 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       });
     });
 
+    it('extracts preview when present on an option object', () => {
+      const input = {
+        question: 'Select an approach',
+        options: [
+          { label: 'Option A', description: 'Desc A', preview: 'const a = 1;' },
+          { label: 'Option B', preview: '  const b = 2;  ' },
+          { label: 'Option C', preview: '   ' },
+          { label: 'Option D' },
+        ],
+      };
+      expect(normalizeClarifyingInput(input)).toEqual({
+        question: 'Select an approach',
+        options: [
+          { label: 'Option A', description: 'Desc A', preview: 'const a = 1;' },
+          { label: 'Option B', preview: 'const b = 2;' },
+          { label: 'Option C' },
+          { label: 'Option D' },
+        ],
+      });
+    });
+
     it('handles empty objects and malformed nested structures', () => {
       expect(normalizeClarifyingInput({})).toEqual({ question: '', options: [] });
       expect(normalizeClarifyingInput({ questions: [] })).toEqual({ question: '', options: [] });

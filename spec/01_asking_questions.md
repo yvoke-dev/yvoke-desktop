@@ -220,4 +220,7 @@ behind it, and the work that produced it can be opened and read.
 - **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
   When an assistant call specifies multiple questions or multi-select choices, the questions are
   presented together in the card, and the user provides a single selection or custom text answer for the turn.
+- **Option preview content is not rendered.** While clarification options display labels
+  and descriptions, optional preview attachments (such as code blocks or visual comparisons
+  declared in CLI schemas) are not rendered in the card.
 

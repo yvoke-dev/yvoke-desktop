@@ -483,6 +483,7 @@ export interface PlaybookValidation {
 export interface ClarificationOption {
   label: string;
   description?: string;
+  preview?: string;
 }
 
 /** Events streamed from the main process to the renderer while a turn runs. */
@@ -673,11 +674,16 @@ function extractOptions(rawOptions: unknown): ClarificationOption[] {
         if (typeof optRecord.label === 'string') {
           const label = optRecord.label.trim();
           if (label.length > 0) {
-            const desc =
+            const description =
               typeof optRecord.description === 'string' && optRecord.description.trim().length > 0
                 ? optRecord.description.trim()
                 : undefined;
-            options.push(desc !== undefined ? { label, description: desc } : { label });
+            const preview = typeof optRecord.preview === 'string' ? optRecord.preview.trim() : undefined;
+            options.push({
+              label,
+              ...(description ? { description } : {}),
+              ...(preview ? { preview } : {}),
+            });
           }
         }
       }
