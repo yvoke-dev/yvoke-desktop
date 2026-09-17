@@ -36,31 +36,28 @@ import {
 import { focusOnElement, resetFocus } from './video/camera';
 import { injectDemoCursor, glideMouse } from './video/cursor';
 import { stitchVideoAndAudio, FfmpegNotFoundError } from './video/stitch';
-import { synthesizeSpeech, pcmToWav, type SynthesizeResult } from './video/tts';
+import {
+  synthesizeSpeech,
+  pcmToWav,
+  combineSynthesizeResults,
+  type SynthesizeResult,
+} from './video/tts';
 import { generateSrt, type SubtitleCue } from './video/subtitles';
 
 // Ambient types for browser-context functions executed inside page.evaluate()
 declare const document: any;
 declare const window: any;
 
-// Automatically pick up configuration from .env.local or .env if present
-for (const envFile of ['.env.local', '.env']) {
-  const envPath = path.resolve(process.cwd(), envFile);
-  if (fs.existsSync(envPath)) {
-    const content = fs.readFileSync(envPath, 'utf8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-      if (match) {
-        const key = match[1];
-        let val = match[2].trim();
-        if (
-          (val.startsWith('"') && val.endsWith('"')) ||
-          (val.startsWith("'") && val.endsWith("'"))
-        ) {
-          val = val.slice(1, -1);
-        }
+function parseEnvFile(filePath: string): void {
+  if (!fs.existsSync(filePath)) return;
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#')) {
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx !== -1) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        const val = trimmed.slice(eqIdx + 1).trim();
         if (!process.env[key]) {
           process.env[key] = val;
         }
@@ -68,6 +65,9 @@ for (const envFile of ['.env.local', '.env']) {
     }
   }
 }
+
+parseEnvFile(path.resolve(process.cwd(), '.env.local'));
+parseEnvFile(path.resolve(process.cwd(), '.env'));
 
 export interface DemoOptions {
   skipTts: boolean;
@@ -94,15 +94,80 @@ export function parseArgs(): DemoOptions {
   return { skipTts, skipBackend, backendUrl, outputPath };
 }
 
+export const SCENE_1_SEGMENTS: { key: string; narration: string }[] = [
+  {
+    key: 'welcome',
+    narration: 'Welcome to Yvoke Desktop, the native AI assistant for deep enterprise engineering.',
+  },
+  {
+    key: 'sidebar',
+    narration:
+      'On the left, the sidebar organizes your conversation history into clear timeframes, with instant search across past discussions.',
+  },
+  {
+    key: 'profile',
+    narration:
+      'At the bottom, view your authenticated profile, security mode, and access application settings.',
+  },
+];
+
+export const SCENE_2_SEGMENTS: { key: string; narration: string }[] = [
+  {
+    key: 'intro',
+    narration: 'Opening Settings reveals full control over your environment.',
+  },
+  {
+    key: 'server',
+    narration: 'Under Server, configure backend endpoints and knowledge tools.',
+  },
+  {
+    key: 'models',
+    narration: 'Models lets you define Claude model versions and default thinking effort.',
+  },
+  {
+    key: 'agents',
+    narration: 'Agents configures multi-agent roles, turns, and review thresholds.',
+  },
+  {
+    key: 'webSearch',
+    narration: 'Web Search manages domain allowlists,',
+  },
+  {
+    key: 'appearance',
+    narration: 'Appearance customizes themes and density,',
+  },
+  {
+    key: 'advanced',
+    narration: 'and Advanced toggles automatic playbook validation.',
+  },
+];
+
+export const SCENE_3_SEGMENTS: { key: string; narration: string }[] = [
+  {
+    key: 'newConv',
+    narration: 'Starting a new conversation opens the main workspace.',
+  },
+  {
+    key: 'playbooks',
+    narration:
+      'The Playbook picker scopes the assistant to focused knowledge domains, from getting-started manuals to database migration history.',
+  },
+  {
+    key: 'composer',
+    narration:
+      'Below, the composer provides rich prompt input, image attachments, seamless single-agent or multi-agent mode selection, and granular model and thinking controls.',
+  },
+];
+
 export const SCENE_NARRATIONS = [
   // Scene 1: App & Sidebar Overview
-  'Welcome to Yvoke Desktop, the native AI assistant for deep enterprise engineering. On the left, the sidebar organizes your conversation history into clear timeframes, with instant search across past discussions. At the bottom, view your authenticated profile, security mode, and access application settings.',
+  SCENE_1_SEGMENTS.map((s) => s.narration).join(' '),
 
   // Scene 2: Settings Walkthrough
-  'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints and knowledge tools. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and review thresholds. Web Search manages domain allowlists, Appearance customizes themes and density, and Advanced toggles automatic playbook validation.',
+  SCENE_2_SEGMENTS.map((s) => s.narration).join(' '),
 
   // Scene 3: New Conversation, Playbooks & Composer
-  'Starting a new conversation opens the main workspace. The Playbook picker scopes the assistant to focused knowledge domains, from getting-started manuals to database migration history. Below, the composer provides rich prompt input, image attachments, seamless single-agent or multi-agent mode selection, and granular model and thinking controls.',
+  SCENE_3_SEGMENTS.map((s) => s.narration).join(' '),
 
   // Scene 4: Live Conversation 1: Playbook Validation Catch
   'Here, an engineer asks when the table POLPlaybook was introduced under the getting-started playbook. Yvoke immediately catches that table migration history belongs in database records, recommending oim-db-history before dispatching.',
@@ -191,7 +256,7 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'demo-thread-1': {
       id: 'demo-thread-1',
       title: 'POLPlaybook Introduction History',
-      model: 'claude-3-7-sonnet-20250219',
+      model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: new Date(now - 14400000).toISOString(),
       updatedAt: new Date(now - 10800000).toISOString(),
@@ -207,7 +272,7 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'demo-thread-2': {
       id: 'demo-thread-2',
       title: 'Value Templates & Search Hints',
-      model: 'claude-3-7-sonnet-20250219',
+      model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: new Date(now - 7200000).toISOString(),
       updatedAt: new Date(now - 5400000).toISOString(),
@@ -223,7 +288,7 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'demo-thread-3': {
       id: 'demo-thread-3',
       title: 'Database Schema Changes: 9.3.1 to 10.0',
-      model: 'claude-3-7-sonnet-20250219',
+      model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: new Date(now - 3600000).toISOString(),
       updatedAt: new Date(now - 1800000).toISOString(),
@@ -239,7 +304,7 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'demo-thread-4': {
       id: 'demo-thread-4',
       title: 'Connector Comparison: Standard vs CSV vs PowerShell',
-      model: 'claude-3-7-sonnet-20250219',
+      model: 'sonnet',
       thinkingLevel: 'medium',
       orchestratorProfile: 'oim-mas',
       createdAt: new Date(now - 900000).toISOString(),
@@ -560,9 +625,45 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
   // Synthesize TTS if enabled
   const sceneAudios: SynthesizeResult[] = [];
+  const scene1SegmentAudios = new Map<string, SynthesizeResult>();
+  const scene2SegmentAudios = new Map<string, SynthesizeResult>();
+  const scene3SegmentAudios = new Map<string, SynthesizeResult>();
+
   if (!options.skipTts) {
     console.log('\n[1/4] Synthesizing TTS voice narrations via Gemini...');
-    for (let i = 0; i < SCENE_NARRATIONS.length; i++) {
+
+    // Scene 1: Segmented
+    console.log(`  Scene 1/${SCENE_NARRATIONS.length} (App & Sidebar Overview, ${SCENE_1_SEGMENTS.length} segments)...`);
+    const s1Results: SynthesizeResult[] = [];
+    for (const seg of SCENE_1_SEGMENTS) {
+      const res = await synthesizeSpeech(seg.narration);
+      scene1SegmentAudios.set(seg.key, res);
+      s1Results.push(res);
+    }
+    sceneAudios.push(combineSynthesizeResults(s1Results));
+
+    // Scene 2: Segmented
+    console.log(`  Scene 2/${SCENE_NARRATIONS.length} (Settings Walkthrough, ${SCENE_2_SEGMENTS.length} segments)...`);
+    const s2Results: SynthesizeResult[] = [];
+    for (const seg of SCENE_2_SEGMENTS) {
+      const res = await synthesizeSpeech(seg.narration);
+      scene2SegmentAudios.set(seg.key, res);
+      s2Results.push(res);
+    }
+    sceneAudios.push(combineSynthesizeResults(s2Results));
+
+    // Scene 3: Segmented
+    console.log(`  Scene 3/${SCENE_NARRATIONS.length} (New Conversation & Composer, ${SCENE_3_SEGMENTS.length} segments)...`);
+    const s3Results: SynthesizeResult[] = [];
+    for (const seg of SCENE_3_SEGMENTS) {
+      const res = await synthesizeSpeech(seg.narration);
+      scene3SegmentAudios.set(seg.key, res);
+      s3Results.push(res);
+    }
+    sceneAudios.push(combineSynthesizeResults(s3Results));
+
+    // Scenes 4 to 8: Direct synthesis
+    for (let i = 3; i < SCENE_NARRATIONS.length; i++) {
       console.log(`  Scene ${i + 1}/${SCENE_NARRATIONS.length}...`);
       const res = await synthesizeSpeech(SCENE_NARRATIONS[i]);
       sceneAudios.push(res);
@@ -696,234 +797,21 @@ export async function runDemoVideoGenerator(): Promise<void> {
       sceneTimings.push({ startMs: sceneStartMs, endMs: sceneEndMs });
     };
 
-    // =========================================================================
-    // =========================================================================
-    // Scene 1: App & Sidebar Overview
-    // =========================================================================
-    await runSceneWithPadding(0, 'App & Sidebar Overview', async () => {
-      // Focus on the sidebar
-      const sidebar = appPage.locator('aside.thread-list').first();
-      if ((await sidebar.count()) > 0) {
-        await focusOnElement(appPage, sidebar, { zoomFactor: 1.05, durationMs: 400 });
+    const runSegment = async (
+      segAudioMap: Map<string, SynthesizeResult>,
+      key: string,
+      defaultDurationSec: number,
+      actionFn: () => Promise<void>,
+    ): Promise<void> => {
+      const tStart = Date.now();
+      await actionFn();
+      const segSec = segAudioMap.get(key)?.durationSeconds ?? defaultDurationSec;
+      const elapsedSec = (Date.now() - tStart) / 1000;
+      const remainingSec = segSec - elapsedSec;
+      if (remainingSec > 0) {
+        await appPage.waitForTimeout(remainingSec * 1000);
       }
-
-      // Hover over the header app title "YVOKE"
-      const appTitle = appPage.locator('.thread-list-header .app-title').first();
-      if ((await appTitle.count()) > 0) {
-        await glideMouse(appPage, appTitle, 20, { delayMs: 400 });
-      }
-
-      // Hover over the New Conversation button
-      const newBtn = appPage
-        .locator(
-          'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
-        )
-        .first();
-      if ((await newBtn.count()) > 0) {
-        await glideMouse(appPage, newBtn, 20, { delayMs: 500 });
-      }
-
-      // Glide through past conversation threads
-      const threadItems = appPage.locator('.thread-item');
-      const count = await threadItems.count();
-      if (count > 0) {
-        await glideMouse(appPage, threadItems.first(), 20, { delayMs: 600 });
-        if (count > 1) {
-          await glideMouse(appPage, threadItems.nth(1), 20, { delayMs: 600 });
-        }
-      }
-
-      // Glide to the search input in the sidebar
-      const searchInput = appPage
-        .locator('.thread-search input, input[placeholder*="Search"]')
-        .first();
-      if ((await searchInput.count()) > 0) {
-        await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 200 });
-        await searchInput.fill('POLPlaybook');
-        await appPage.waitForTimeout(700);
-        const searchClear = appPage.locator('.search-clear').first();
-        if ((await searchClear.count()) > 0) {
-          await glideMouse(appPage, searchClear, 20, { click: true, delayMs: 200 });
-        } else {
-          await searchInput.fill('');
-        }
-        await appPage.waitForTimeout(300);
-      }
-
-      // Glide to the footer: account chip and settings button
-      const accountChip = appPage.locator('.thread-list-footer .account-chip').first();
-      if ((await accountChip.count()) > 0) {
-        await glideMouse(appPage, accountChip, 20, { delayMs: 500 });
-      }
-
-      const settingsBtn = appPage
-        .locator('button[data-tip="Settings"], .settings-button')
-        .first();
-      if ((await settingsBtn.count()) > 0) {
-        await glideMouse(appPage, settingsBtn, 20, { delayMs: 500 });
-      }
-
-      await resetFocus(appPage, { durationMs: 400 });
-      await appPage.waitForTimeout(400);
-    });
-
-    // =========================================================================
-    // Scene 2: Settings Walkthrough
-    // =========================================================================
-    await runSceneWithPadding(1, 'Settings Walkthrough', async () => {
-      // Open Settings view
-      const settingsBtn = appPage
-        .locator('button[data-tip="Settings"], .settings-button')
-        .first();
-      if ((await settingsBtn.count()) > 0) {
-        await glideMouse(appPage, settingsBtn, 20, { click: true, delayMs: 250 });
-      }
-      await appPage
-        .locator('.settings-view')
-        .waitFor({ state: 'visible', timeout: 3000 })
-        .catch(() => {});
-      await appPage.waitForTimeout(600);
-
-      // Focus on Settings view
-      const settingsView = appPage.locator('.settings-view').first();
-      if ((await settingsView.count()) > 0) {
-        await focusOnElement(appPage, settingsView, { zoomFactor: 1.05, durationMs: 400 });
-      }
-
-      // Helper to click pane and hover over its main content
-      const visitPane = async (name: string, contentSelector?: string, waitMs = 1400) => {
-        const paneBtn = appPage
-          .locator('.settings-nav button.nav-pane')
-          .filter({ hasText: name })
-          .first();
-        if ((await paneBtn.count()) > 0) {
-          await glideMouse(appPage, paneBtn, 20, { click: true, delayMs: 200 });
-          await appPage.waitForTimeout(300);
-          if (contentSelector) {
-            const target = appPage.locator(contentSelector).first();
-            if ((await target.count()) > 0) {
-              await glideMouse(appPage, target, 20, { delayMs: 250 });
-            }
-          }
-          await appPage.waitForTimeout(waitMs);
-        }
-      };
-
-      // 1. Server pane
-      await visitPane('Server', '.settings-field input', 1600);
-
-      // 2. Models pane
-      await visitPane('Models', '.chip-list, .seg', 2000);
-
-      // 3. Agents pane
-      await visitPane('Agents', '.role-card, .cap-field', 2600);
-
-      // 4. Web search pane
-      await visitPane('Web search', '.domain-row, .settings-field', 1800);
-
-      // 5. Appearance pane
-      await visitPane('Appearance', '.theme-choice, .density-choice', 2000);
-
-      // 6. Advanced pane
-      await visitPane('Advanced', '.toggle-row, .settings-field', 1800);
-
-      // 7. About pane
-      await visitPane('About', '.about-grid, .about-section', 1200);
-
-      // Reset focus before closing
-      await resetFocus(appPage, { durationMs: 350 });
-
-      // Close Settings
-      const cancelBtn = appPage
-        .locator('.dialog-actions button')
-        .filter({ hasText: 'Cancel' })
-        .first();
-      if ((await cancelBtn.count()) > 0) {
-        await glideMouse(appPage, cancelBtn, 20, { click: true, delayMs: 200 });
-      } else if ((await settingsBtn.count()) > 0) {
-        await glideMouse(appPage, settingsBtn, 20, { click: true, delayMs: 200 });
-      }
-      await appPage.waitForTimeout(600);
-    });
-
-    // =========================================================================
-    // Scene 3: New Conversation, Playbooks & Composer
-    // =========================================================================
-    await runSceneWithPadding(2, 'New Conversation, Playbooks & Composer', async () => {
-      // Click "New" button in sidebar header
-      const newBtn = appPage
-        .locator(
-          'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
-        )
-        .first();
-      if ((await newBtn.count()) > 0) {
-        await glideMouse(appPage, newBtn, 20, { click: true, delayMs: 200 });
-      }
-      await appPage.waitForTimeout(600);
-
-      // Focus on Playbook Picker
-      const picker = appPage.locator('.picker, .picker-list').first();
-      if ((await picker.count()) > 0) {
-        await focusOnElement(appPage, picker, { zoomFactor: 1.1, durationMs: 400 });
-        const filterInput = appPage.locator('.picker-filter input').first();
-        if ((await filterInput.count()) > 0) {
-          await glideMouse(appPage, filterInput, 20, { delayMs: 250 });
-        }
-        const rows = appPage.locator('.picker-row');
-        const rowCount = await rows.count();
-        if (rowCount > 0) {
-          await glideMouse(appPage, rows.first(), 20, { delayMs: 450 });
-          if (rowCount > 1) {
-            await glideMouse(appPage, rows.nth(1), 20, { delayMs: 450 });
-          }
-        }
-        await appPage.waitForTimeout(800);
-      }
-
-      // Reset camera and focus on Composer at the bottom
-      await resetFocus(appPage, { durationMs: 300 });
-      const composer = appPage.locator('.composer').first();
-      if ((await composer.count()) > 0) {
-        await focusOnElement(appPage, composer, { zoomFactor: 1.2, durationMs: 400 });
-
-        const textarea = appPage.locator('.composer textarea').first();
-        if ((await textarea.count()) > 0) {
-          await glideMouse(appPage, textarea, 20, { delayMs: 300 });
-        }
-
-        const attachBtn = appPage.locator('.composer-attach-btn').first();
-        if ((await attachBtn.count()) > 0) {
-          await glideMouse(appPage, attachBtn, 20, { delayMs: 300 });
-        }
-
-        const modeSelect = appPage
-          .locator('select.composer-select[data-tip*="Multi-agent"]')
-          .first();
-        if ((await modeSelect.count()) > 0) {
-          await glideMouse(appPage, modeSelect, 20, { delayMs: 350 });
-        }
-
-        const modelSelect = appPage.locator('select.composer-select[data-tip="Model"]').first();
-        if ((await modelSelect.count()) > 0) {
-          await glideMouse(appPage, modelSelect, 20, { delayMs: 350 });
-        }
-
-        const thinkingSelect = appPage
-          .locator('select.composer-select[data-tip="Thinking effort"]')
-          .first();
-        if ((await thinkingSelect.count()) > 0) {
-          await glideMouse(appPage, thinkingSelect, 20, { delayMs: 350 });
-        }
-
-        const sendBtn = appPage.locator('button.composer-send').first();
-        if ((await sendBtn.count()) > 0) {
-          await glideMouse(appPage, sendBtn, 20, { delayMs: 400 });
-        }
-      }
-
-      await resetFocus(appPage, { durationMs: 400 });
-      await appPage.waitForTimeout(400);
-    });
+    };
 
     const selectSidebarThread = async (text: string): Promise<void> => {
       const thread = appPage.locator('.thread-item').filter({ hasText: text }).first();
@@ -939,6 +827,249 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await glideMouse(appPage, thread, 25, { click: true, delayMs: 200 });
       }
     };
+
+    // Pre-select the first conversation so the video opens showing the live, rich AI assistant workspace
+    await selectSidebarThread('POLPlaybook');
+    await appPage.waitForTimeout(600);
+
+    // =========================================================================
+    // Scene 1: App & Sidebar Overview
+    // =========================================================================
+    await runSceneWithPadding(0, 'App & Sidebar Overview', async () => {
+      // 1. Welcome - Show active live desktop app
+      await runSegment(scene1SegmentAudios, 'welcome', 4.0, async () => {
+        // App is already displaying POLPlaybook Introduction History with full chat view!
+        // Smoothly glide mouse across active message response and trace bar
+        const traceBar = appPage.locator('.trace-bar, .message').first();
+        if ((await traceBar.count()) > 0) {
+          await glideMouse(appPage, traceBar, 25, { delayMs: 400 });
+        }
+      });
+
+      // 2. Sidebar & Threads & Search
+      await runSegment(scene1SegmentAudios, 'sidebar', 6.5, async () => {
+        // Focus on the sidebar
+        const sidebar = appPage.locator('aside.thread-list').first();
+        if ((await sidebar.count()) > 0) {
+          await focusOnElement(appPage, sidebar, { zoomFactor: 1.05, durationMs: 400 });
+        }
+
+        // Hover over the header app title "YVOKE"
+        const appTitle = appPage.locator('.thread-list-header .app-title').first();
+        if ((await appTitle.count()) > 0) {
+          await glideMouse(appPage, appTitle, 20, { delayMs: 300 });
+        }
+
+        // Glide across past conversation threads
+        const threadItems = appPage.locator('.thread-item');
+        const count = await threadItems.count();
+        if (count > 0) {
+          await glideMouse(appPage, threadItems.first(), 20, { delayMs: 350 });
+          if (count > 1) {
+            await glideMouse(appPage, threadItems.nth(1), 20, { delayMs: 350 });
+          }
+        }
+
+        // Search input
+        const searchInput = appPage
+          .locator('.thread-search input, input[placeholder*="Search"]')
+          .first();
+        if ((await searchInput.count()) > 0) {
+          await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 200 });
+          await searchInput.fill('POLPlaybook');
+          await appPage.waitForTimeout(600);
+          const searchClear = appPage.locator('.search-clear').first();
+          if ((await searchClear.count()) > 0) {
+            await glideMouse(appPage, searchClear, 20, { click: true, delayMs: 200 });
+          } else {
+            await searchInput.fill('');
+          }
+          await appPage.waitForTimeout(200);
+        }
+      });
+
+      // 3. Profile & Settings
+      await runSegment(scene1SegmentAudios, 'profile', 5.0, async () => {
+        const accountChip = appPage.locator('.thread-list-footer .account-chip').first();
+        if ((await accountChip.count()) > 0) {
+          await glideMouse(appPage, accountChip, 20, { delayMs: 400 });
+        }
+
+        const settingsBtn = appPage
+          .locator('button[data-tip="Settings"], .settings-button')
+          .first();
+        if ((await settingsBtn.count()) > 0) {
+          await glideMouse(appPage, settingsBtn, 20, { delayMs: 400 });
+        }
+
+        await resetFocus(appPage, { durationMs: 350 });
+      });
+    });
+
+    // =========================================================================
+    // Scene 2: Settings Walkthrough
+    // =========================================================================
+    await runSceneWithPadding(1, 'Settings Walkthrough', async () => {
+      // Helper to click pane and hover over its main content
+      const visitPane = async (name: string, contentSelector?: string) => {
+        const paneBtn = appPage
+          .locator('.settings-nav button.nav-pane')
+          .filter({ hasText: name })
+          .first();
+        if ((await paneBtn.count()) > 0) {
+          await glideMouse(appPage, paneBtn, 20, { click: true, delayMs: 200 });
+          await appPage.waitForTimeout(200);
+          if (contentSelector) {
+            const target = appPage.locator(contentSelector).first();
+            if ((await target.count()) > 0) {
+              await glideMouse(appPage, target, 20, { delayMs: 200 });
+            }
+          }
+        }
+      };
+
+      // 1. Intro: "Opening Settings reveals full control over your environment."
+      await runSegment(scene2SegmentAudios, 'intro', 3.2, async () => {
+        const settingsBtn = appPage
+          .locator('button[data-tip="Settings"], .settings-button')
+          .first();
+        if ((await settingsBtn.count()) > 0) {
+          await glideMouse(appPage, settingsBtn, 20, { click: true, delayMs: 250 });
+        }
+        await appPage
+          .locator('.settings-view')
+          .waitFor({ state: 'visible', timeout: 3000 })
+          .catch(() => {});
+        const settingsView = appPage.locator('.settings-view').first();
+        if ((await settingsView.count()) > 0) {
+          await focusOnElement(appPage, settingsView, { zoomFactor: 1.05, durationMs: 400 });
+        }
+      });
+
+      // 2. Server: "Under Server, configure backend endpoints and knowledge tools."
+      await runSegment(scene2SegmentAudios, 'server', 3.5, async () => {
+        await visitPane('Server', '.settings-field input');
+      });
+
+      // 3. Models: "Models lets you define Claude model versions and default thinking effort."
+      await runSegment(scene2SegmentAudios, 'models', 4.2, async () => {
+        await visitPane('Models', '.chip-list, .seg');
+      });
+
+      // 4. Agents: "Agents configures multi-agent roles, turns, and review thresholds."
+      await runSegment(scene2SegmentAudios, 'agents', 4.0, async () => {
+        await visitPane('Agents', '.role-card, .cap-field');
+      });
+
+      // 5. Web search: "Web Search manages domain allowlists,"
+      await runSegment(scene2SegmentAudios, 'webSearch', 2.8, async () => {
+        await visitPane('Web search', '.domain-row, .settings-field');
+      });
+
+      // 6. Appearance: "Appearance customizes themes and density,"
+      await runSegment(scene2SegmentAudios, 'appearance', 2.8, async () => {
+        await visitPane('Appearance', '.theme-choice, .density-choice');
+      });
+
+      // 7. Advanced: "and Advanced toggles automatic playbook validation."
+      await runSegment(scene2SegmentAudios, 'advanced', 3.5, async () => {
+        await visitPane('Advanced', '.toggle-row, .settings-field');
+        await resetFocus(appPage, { durationMs: 350 });
+
+        // Close Settings
+        const cancelBtn = appPage
+          .locator('.dialog-actions button')
+          .filter({ hasText: 'Cancel' })
+          .first();
+        if ((await cancelBtn.count()) > 0) {
+          await glideMouse(appPage, cancelBtn, 20, { click: true, delayMs: 200 });
+        }
+      });
+    });
+
+    // =========================================================================
+    // Scene 3: New Conversation, Playbooks & Composer
+    // =========================================================================
+    await runSceneWithPadding(2, 'New Conversation, Playbooks & Composer', async () => {
+      // 1. New conversation
+      await runSegment(scene3SegmentAudios, 'newConv', 3.0, async () => {
+        const newBtn = appPage
+          .locator(
+            'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
+          )
+          .first();
+        if ((await newBtn.count()) > 0) {
+          await glideMouse(appPage, newBtn, 20, { click: true, delayMs: 200 });
+        }
+        await appPage.waitForTimeout(400);
+      });
+
+      // 2. Playbook picker
+      await runSegment(scene3SegmentAudios, 'playbooks', 6.0, async () => {
+        const picker = appPage.locator('.picker, .picker-list').first();
+        if ((await picker.count()) > 0) {
+          await focusOnElement(appPage, picker, { zoomFactor: 1.1, durationMs: 400 });
+          const filterInput = appPage.locator('.picker-filter input').first();
+          if ((await filterInput.count()) > 0) {
+            await glideMouse(appPage, filterInput, 20, { delayMs: 250 });
+          }
+          const rows = appPage.locator('.picker-row');
+          const rowCount = await rows.count();
+          if (rowCount > 0) {
+            await glideMouse(appPage, rows.first(), 20, { delayMs: 350 });
+            if (rowCount > 1) {
+              await glideMouse(appPage, rows.nth(1), 20, { delayMs: 350 });
+            }
+          }
+        }
+        await resetFocus(appPage, { durationMs: 300 });
+      });
+
+      // 3. Composer
+      await runSegment(scene3SegmentAudios, 'composer', 8.0, async () => {
+        const composer = appPage.locator('.composer').first();
+        if ((await composer.count()) > 0) {
+          await focusOnElement(appPage, composer, { zoomFactor: 1.2, durationMs: 400 });
+
+          const textarea = appPage.locator('.composer textarea').first();
+          if ((await textarea.count()) > 0) {
+            await glideMouse(appPage, textarea, 20, { delayMs: 300 });
+          }
+
+          const attachBtn = appPage.locator('.composer-attach-btn').first();
+          if ((await attachBtn.count()) > 0) {
+            await glideMouse(appPage, attachBtn, 20, { delayMs: 300 });
+          }
+
+          const modeSelect = appPage
+            .locator('select.composer-select[data-tip*="Multi-agent"]')
+            .first();
+          if ((await modeSelect.count()) > 0) {
+            await glideMouse(appPage, modeSelect, 20, { delayMs: 350 });
+          }
+
+          const modelSelect = appPage.locator('select.composer-select[data-tip="Model"]').first();
+          if ((await modelSelect.count()) > 0) {
+            await glideMouse(appPage, modelSelect, 20, { delayMs: 350 });
+          }
+
+          const thinkingSelect = appPage
+            .locator('select.composer-select[data-tip="Thinking effort"]')
+            .first();
+          if ((await thinkingSelect.count()) > 0) {
+            await glideMouse(appPage, thinkingSelect, 20, { delayMs: 350 });
+          }
+
+          const sendBtn = appPage.locator('button.composer-send').first();
+          if ((await sendBtn.count()) > 0) {
+            await glideMouse(appPage, sendBtn, 20, { delayMs: 400 });
+          }
+        }
+
+        await resetFocus(appPage, { durationMs: 400 });
+      });
+    });
+
 
     // =========================================================================
     // Scene 4: Live Conversation 1 (Playbook Validation Catch)
