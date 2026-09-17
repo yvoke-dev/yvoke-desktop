@@ -111,11 +111,19 @@ export function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000): Buffer {
   return Buffer.concat([header, pcmBuffer]);
 }
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+
 export interface SynthesizeOptions {
   apiKey?: string;
   voiceName?: string;
   model?: string;
   fetchFn?: typeof fetch;
+  cacheDir?: string | null;
+  maxRetries?: number;
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 export interface SynthesizeResult {
@@ -127,6 +135,7 @@ export interface SynthesizeResult {
 /**
  * Synthesizes speech from text using the Gemini Multimodal Audio API.
  * Never logs raw audio buffers or base64 data to stdout/stderr.
+ * Automatically caches synthesized audio to disk and retries on HTTP 429.
  */
 export async function synthesizeSpeech(
   text: string,
@@ -141,8 +150,39 @@ export async function synthesizeSpeech(
     options.model ??
     process.env.GEMINI_TTS_MODEL ??
     'gemini-3.1-flash-tts-preview';
+  const voiceName = options.voiceName ?? 'Puck';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const fetcher = options.fetchFn ?? fetch;
+
+  // 1. Disk caching check: default to temp dir for production, null when fetchFn is mocked
+  const cacheDir =
+    options.cacheDir !== undefined
+      ? options.cacheDir
+      : options.fetchFn
+        ? null
+        : path.join(os.tmpdir(), 'yvoke-tts-cache');
+
+  let cacheFilePath: string | null = null;
+  if (cacheDir) {
+    try {
+      if (!fs.existsSync(cacheDir)) {
+        fs.mkdirSync(cacheDir, { recursive: true });
+      }
+      const hash = crypto
+        .createHash('sha256')
+        .update(`${model}_${voiceName}_${text}`)
+        .digest('hex');
+      cacheFilePath = path.join(cacheDir, `${hash}.pcm`);
+      if (fs.existsSync(cacheFilePath)) {
+        const pcmBuffer = fs.readFileSync(cacheFilePath);
+        const durationSeconds = calculateAudioDuration(pcmBuffer.length);
+        const wavBuffer = pcmToWav(pcmBuffer);
+        return { pcmBuffer, wavBuffer, durationSeconds };
+      }
+    } catch {
+      cacheFilePath = null;
+    }
+  }
 
   const payload = {
     contents: [
@@ -155,78 +195,132 @@ export async function synthesizeSpeech(
       speechConfig: {
         voiceConfig: {
           prebuiltVoiceConfig: {
-            voiceName: options.voiceName ?? 'Puck',
+            voiceName,
           },
         },
       },
     },
   };
 
-  let response: Response;
-  try {
-    response = await fetcher(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-  } catch (err: any) {
-    const safeMsg = redactApiKey(err?.message ?? 'Network error');
-    throw new TtsSynthesisError(`TTS synthesis request failed: ${safeMsg}`);
-  }
+  const maxRetries = options.maxRetries ?? (options.fetchFn ? 0 : 3);
+  const sleep =
+    options.sleepFn ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
-  if (!response.ok) {
-    let errBody = '';
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let response: Response;
     try {
-      errBody = await response.text();
-    } catch {
-      errBody = response.statusText;
+      response = await fetcher(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      const safeMsg = redactApiKey(err?.message ?? 'Network error');
+      throw new TtsSynthesisError(`TTS synthesis request failed: ${safeMsg}`);
     }
-    const safeErrBody = redactApiKey(errBody);
 
-    // Prioritize 429 quota before any auth checks
-    if (response.status === 429) {
-      throw new TtsQuotaExceededError(
-        `TTS rate limit exceeded (HTTP 429): ${safeErrBody}`,
+    if (!response.ok) {
+      let errBody = '';
+      try {
+        errBody = await response.text();
+      } catch {
+        errBody = response.statusText;
+      }
+      const safeErrBody = redactApiKey(errBody);
+
+      // Prioritize 429 quota before any auth checks
+      if (response.status === 429) {
+        if (attempt < maxRetries) {
+          let delayMs = 15000;
+          const matchDetails = safeErrBody.match(/"retryDelay":\s*"(\d+)s"/i);
+          const matchMsg = safeErrBody.match(/retry in ([\d\.]+)s/i);
+          if (matchDetails) {
+            delayMs = parseInt(matchDetails[1], 10) * 1000;
+          } else if (matchMsg) {
+            delayMs = Math.ceil(parseFloat(matchMsg[1])) * 1000;
+          }
+          await sleep(delayMs);
+          continue;
+        }
+        throw new TtsQuotaExceededError(
+          `TTS rate limit exceeded (HTTP 429): ${safeErrBody}`,
+        );
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new TtsAuthenticationError(
+          `TTS authentication failed (HTTP ${response.status}): ${safeErrBody}`,
+        );
+      }
+      throw new TtsSynthesisError(
+        `TTS request failed with status ${response.status}: ${safeErrBody}`,
       );
     }
-    if (response.status === 401 || response.status === 403) {
-      throw new TtsAuthenticationError(
-        `TTS authentication failed (HTTP ${response.status}): ${safeErrBody}`,
+
+    let data: any;
+    try {
+      data = await response.json();
+    } catch (err: any) {
+      throw new TtsSynthesisError(`Failed to parse TTS JSON response: ${err.message}`);
+    }
+
+    if (!data?.candidates || data.candidates.length === 0) {
+      const reason = data?.promptFeedback?.blockReason ?? 'Empty candidates array';
+      throw new TtsSynthesisError(`TTS synthesis blocked or empty response: ${reason}`);
+    }
+
+    const part = data.candidates[0]?.content?.parts?.find((p: any) => p?.inlineData?.data);
+    if (!part?.inlineData?.data) {
+      const partsSummary = JSON.stringify(
+        data.candidates[0]?.content?.parts?.map((p: any) => ({
+          keys: Object.keys(p),
+          textSample: p.text ? p.text.slice(0, 80) : undefined,
+        })),
+      );
+      throw new TtsSynthesisError(
+        `TTS synthesis response did not contain audio inlineData. Received parts: ${partsSummary}`,
       );
     }
-    throw new TtsSynthesisError(
-      `TTS request failed with status ${response.status}: ${safeErrBody}`,
-    );
+
+    const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
+    const durationSeconds = calculateAudioDuration(pcmBuffer.length);
+    const wavBuffer = pcmToWav(pcmBuffer);
+
+    // Save to disk cache if path is valid
+    if (cacheFilePath) {
+      try {
+        fs.writeFileSync(cacheFilePath, pcmBuffer);
+      } catch {
+        // Ignore cache write failure
+      }
+    }
+
+    return {
+      pcmBuffer,
+      wavBuffer,
+      durationSeconds,
+    };
   }
 
-  let data: any;
-  try {
-    data = await response.json();
-  } catch (err: any) {
-    throw new TtsSynthesisError(`Failed to parse TTS JSON response: ${err.message}`);
+  throw new TtsSynthesisError('TTS synthesis failed after all retries');
+}
+
+/**
+ * Linearly concatenates multiple SynthesizeResult items into a unified SynthesizeResult.
+ */
+export function combineSynthesizeResults(results: SynthesizeResult[]): SynthesizeResult {
+  if (results.length === 0) {
+    const emptyPcm = Buffer.alloc(0);
+    return {
+      pcmBuffer: emptyPcm,
+      wavBuffer: pcmToWav(emptyPcm),
+      durationSeconds: 0,
+    };
   }
 
-  if (!data?.candidates || data.candidates.length === 0) {
-    const reason = data?.promptFeedback?.blockReason ?? 'Empty candidates array';
-    throw new TtsSynthesisError(`TTS synthesis blocked or empty response: ${reason}`);
-  }
-
-  const part = data.candidates[0]?.content?.parts?.find((p: any) => p?.inlineData?.data);
-  if (!part?.inlineData?.data) {
-    const partsSummary = JSON.stringify(
-      data.candidates[0]?.content?.parts?.map((p: any) => ({
-        keys: Object.keys(p),
-        textSample: p.text ? p.text.slice(0, 80) : undefined,
-      })),
-    );
-    throw new TtsSynthesisError(
-      `TTS synthesis response did not contain audio inlineData. Received parts: ${partsSummary}`,
-    );
-  }
-
-  const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
-  const durationSeconds = calculateAudioDuration(pcmBuffer.length);
+  const pcmBuffer = Buffer.concat(results.map((r) => r.pcmBuffer));
   const wavBuffer = pcmToWav(pcmBuffer);
+  const durationSeconds = calculateAudioDuration(pcmBuffer.length);
 
   return {
     pcmBuffer,
@@ -234,3 +328,4 @@ export async function synthesizeSpeech(
     durationSeconds,
   };
 }
+
