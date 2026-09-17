@@ -35,7 +35,19 @@ import {
 } from './video/presentation';
 import { focusOnElement, resetFocus } from './video/camera';
 import { injectDemoCursor, glideMouse } from './video/cursor';
-import { stitchVideoAndAudio, FfmpegNotFoundError } from './video/stitch';
+import {
+  stitchVideoAndAudio,
+  FfmpegNotFoundError,
+  type AccelerationInterval,
+} from './video/stitch';
+import { STORYBOARD_BEATS } from './video/storyboard';
+import {
+  typeInComposer,
+  selectPlaybook,
+  selectAgentMode,
+  dispatchTurn,
+  waitForTurnCompletion,
+} from './video/liveTurnRunner';
 import {
   synthesizeSpeech,
   pcmToWav,
@@ -159,31 +171,29 @@ export const SCENE_3_SEGMENTS: { key: string; narration: string }[] = [
   },
 ];
 
-export const SCENE_NARRATIONS = [
-  // Scene 1: App & Sidebar Overview
-  SCENE_1_SEGMENTS.map((s) => s.narration).join(' '),
+export const SCENE_NARRATIONS: string[] = STORYBOARD_BEATS.map((b) => b.narration);
 
-  // Scene 2: Settings Walkthrough
-  SCENE_2_SEGMENTS.map((s) => s.narration).join(' '),
-
-  // Scene 3: New Conversation, Playbooks & Composer
-  SCENE_3_SEGMENTS.map((s) => s.narration).join(' '),
-
-  // Scene 4: Live Conversation 1: Playbook Validation Catch
-  'Here, an engineer asks when the table POLPlaybook was introduced under the getting-started playbook. Yvoke immediately catches that table migration history belongs in database records, recommending oim-db-history before dispatching.',
-
-  // Scene 5: Live Conversation 2: Multi-Turn Follow-Up & Search Hints
-  'In this conversation, we explore iterative follow-ups and search hints. After defining a value template, we prompt the assistant to search Teams and Confluence knowledge, effortlessly combining official documentation with real-world operational experience.',
-
-  // Scene 6: Live Conversation 3: Clarifying Questions & Citations
-  'When querying complex database schema changes, Yvoke surfaces an interactive clarification card to confirm scope. Selecting an option produces grounded answers with verified citation pills and complete reasoning traces.',
-
-  // Scene 7: Live Conversation 4: Multi-Agent System MAS
-  'For multi-faceted trade-offs, switching to Multi-Agent mode activates specialized roles. Autonomous specialists query parallel corpuses to compare connector options, while the Reviewer gate validates consistency and approves the response.',
-
-  // Scene 8: Speed, Instant Search (<10ms) & Dark/Light Theme toggle
-  'Yvoke delivers sub-ten-millisecond instant search across your entire conversation history, coupled with a responsive, polished UI supporting dark and light themes.',
-];
+/**
+ * Calculates an acceleration interval if the turn execution time exceeds thresholdSec (default: 4s).
+ * Accelerates the waiting period (starting 1s after turn initiation until turn completion) by speedFactor (default: 4x).
+ */
+export function calculateAccelerationInterval(
+  tTurnStartSec: number,
+  tTurnEndSec: number,
+  thresholdSec = 4,
+  speedFactor = 4,
+): AccelerationInterval | null {
+  const elapsed = tTurnEndSec - tTurnStartSec;
+  if (elapsed <= thresholdSec) {
+    return null;
+  }
+  const startSec = tTurnStartSec + 1;
+  const endSec = tTurnEndSec;
+  if (startSec >= endSec) {
+    return null;
+  }
+  return { startSec, endSec, speedFactor };
+}
 
 export async function runPreflight(options: DemoOptions): Promise<void> {
   const mainEntry = path.resolve(process.cwd(), 'out/main/index.js');
@@ -209,18 +219,27 @@ export async function runPreflight(options: DemoOptions): Promise<void> {
 export function seedUserData(backendUrl = 'http://localhost:8080'): string {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-demo-video-'));
 
-  // 1. Settings with full orchestrator and appearance profiles
+  // 1. Settings with full orchestrator, dev auth, and appearance profiles
   const settings = {
     serverAuthMode: 'dev',
+    authMode: 'dev',
     serverBaseUrl: backendUrl,
+    devToken: 'dev-demo-token',
+    mcpTransport: 'http',
+    defaultModel: 'sonnet',
+    defaultThinkingLevel: 'medium',
+    playbookValidationEnabled: true,
+    showPrototypePlaybooks: true,
+    webSearch: {
+      enabled: true,
+      allowedDomains: ['support.oneidentity.com', 'www.oneidentity.com/community/'],
+    },
     appearance: {
       theme: 'dark',
       density: 'comfortable',
       answerTextSize: 14,
       traceExpanded: false,
     },
-    playbookValidationEnabled: true,
-    showPrototypePlaybooks: true,
     orchestrator: {
       orchestrator: {
         model: 'sonnet',
@@ -247,74 +266,41 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'utf8',
   );
 
-  // 2. Pre-seed threads
+  // 2. Pre-seed background threads
   const threadsDir = path.join(userDataDir, 'threads');
   fs.mkdirSync(threadsDir, { recursive: true });
 
   const now = Date.now();
   const threadIndex = {
-    'demo-thread-1': {
-      id: 'demo-thread-1',
-      title: 'POLPlaybook Introduction History',
+    'bg-thread-1': {
+      id: 'bg-thread-1',
+      title: 'Identity Manager 9.3 Architecture',
       model: 'sonnet',
       thinkingLevel: 'medium',
-      createdAt: new Date(now - 14400000).toISOString(),
-      updatedAt: new Date(now - 10800000).toISOString(),
+      createdAt: new Date(now - 86400000).toISOString(),
+      updatedAt: new Date(now - 80000000).toISOString(),
       totals: {
-        inputTokens: 2150,
-        outputTokens: 840,
-        cacheReadTokens: 4200,
-        cacheWriteTokens: 120,
-        thoughtTokens: 950,
+        inputTokens: 1850,
+        outputTokens: 720,
+        cacheReadTokens: 3500,
+        cacheWriteTokens: 110,
+        thoughtTokens: 600,
       },
       syncState: 'synced',
     },
-    'demo-thread-2': {
-      id: 'demo-thread-2',
-      title: 'Value Templates & Search Hints',
+    'bg-thread-2': {
+      id: 'bg-thread-2',
+      title: 'Active Directory & Entra Sync Notes',
       model: 'sonnet',
       thinkingLevel: 'medium',
-      createdAt: new Date(now - 7200000).toISOString(),
-      updatedAt: new Date(now - 5400000).toISOString(),
+      createdAt: new Date(now - 172800000).toISOString(),
+      updatedAt: new Date(now - 165000000).toISOString(),
       totals: {
-        inputTokens: 3820,
-        outputTokens: 1420,
-        cacheReadTokens: 8400,
-        cacheWriteTokens: 320,
-        thoughtTokens: 1250,
-      },
-      syncState: 'synced',
-    },
-    'demo-thread-3': {
-      id: 'demo-thread-3',
-      title: 'Database Schema Changes: 9.3.1 to 10.0',
-      model: 'sonnet',
-      thinkingLevel: 'medium',
-      createdAt: new Date(now - 3600000).toISOString(),
-      updatedAt: new Date(now - 1800000).toISOString(),
-      totals: {
-        inputTokens: 4900,
-        outputTokens: 1850,
-        cacheReadTokens: 12000,
-        cacheWriteTokens: 450,
-        thoughtTokens: 1800,
-      },
-      syncState: 'synced',
-    },
-    'demo-thread-4': {
-      id: 'demo-thread-4',
-      title: 'Connector Comparison: Standard vs CSV vs PowerShell',
-      model: 'sonnet',
-      thinkingLevel: 'medium',
-      orchestratorProfile: 'oim-mas',
-      createdAt: new Date(now - 900000).toISOString(),
-      updatedAt: new Date(now).toISOString(),
-      totals: {
-        inputTokens: 7100,
-        outputTokens: 2600,
-        cacheReadTokens: 22000,
-        cacheWriteTokens: 890,
-        thoughtTokens: 3100,
+        inputTokens: 2400,
+        outputTokens: 980,
+        cacheReadTokens: 4900,
+        cacheWriteTokens: 180,
+        thoughtTokens: 850,
       },
       syncState: 'synced',
     },
@@ -325,239 +311,65 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'utf8',
   );
 
-  // Thread 1 JSONL
+  // Thread 1 JSONL: Identity Manager 9.3 Architecture
   const t1Messages = [
     {
-      localId: 'msg-u-1',
+      localId: 'msg-bg-1u',
       role: 'user',
-      content: 'When was the table POLPlaybook introduced?',
-      playbook: 'oim-getting-started',
-      createdAt: new Date(now - 14400000).toISOString(),
+      content: 'Explain the high-level architecture of One Identity Manager 9.3',
+      createdAt: new Date(now - 86400000).toISOString(),
     },
     {
-      localId: 'msg-a-1',
+      localId: 'msg-bg-1a',
       role: 'assistant',
       content:
-        'The table `POLPlaybook` was introduced in **OIM version 8.2.0** as part of the unified policy orchestration schema migration [file=oim_db_schema_v8.pdf]. It replaced the legacy `POL_RULES_LEGACY` structure to support multi-tenant role definitions.',
-      playbook: 'oim-db-history',
+        'One Identity Manager 9.3 architecture is organized around three foundational tiers:\n\n1. **Database Layer:** Microsoft SQL Server or Azure SQL hosting the centralized transactional store, identity entities (`Person`, `Department`), and job queues (`JobQueue`).\n2. **Service Layer (One Identity Manager Service):** Distributed processing nodes handling asynchronous execution queues, system synchronization, and scheduled event processing.\n3. **Application & Web Tier:** Web Portal, Operations Support Web Portal, and Desktop Tools (Manager, Designer, Object Browser) communicating through standard ADO.NET and REST APIs.\n\nKey enhancements in 9.3 include improved SCIM 2.0 connectors and cloud synchronization resilience.',
       thinking:
-        'Scanning database schema migration logs for POLPlaybook. Located introduction in v8.2 migration scripts under table creation definitions.',
-      toolCalls: [
-        {
-          id: 'call-1',
-          name: 'search_corpus',
-          input: { query: 'POLPlaybook table introduction version 8.2' },
-          result: 'Found migration record: Schema V8.2 introduced POLPlaybook.',
-        },
-      ],
+        'Synthesizing architecture overview for One Identity Manager 9.3 covering database, service, and web application tiers.',
       usage: {
-        inputTokens: 2150,
-        outputTokens: 840,
-        cacheReadTokens: 4200,
-        cacheWriteTokens: 120,
-        thoughtTokens: 950,
+        inputTokens: 1850,
+        outputTokens: 720,
+        cacheReadTokens: 3500,
+        cacheWriteTokens: 110,
+        thoughtTokens: 600,
       },
-      createdAt: new Date(now - 14350000).toISOString(),
+      createdAt: new Date(now - 86350000).toISOString(),
     },
   ];
   fs.writeFileSync(
-    path.join(threadsDir, 'demo-thread-1.jsonl'),
+    path.join(threadsDir, 'bg-thread-1.jsonl'),
     t1Messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
     'utf8',
   );
 
-  // Thread 2 JSONL
+  // Thread 2 JSONL: Active Directory & Entra Sync Notes
   const t2Messages = [
     {
-      localId: 'msg-u-2a',
+      localId: 'msg-bg-2u',
       role: 'user',
-      content: 'what is a value template?',
-      playbook: 'oim-getting-started',
-      createdAt: new Date(now - 7200000).toISOString(),
+      content: 'How should hybrid Active Directory and Entra ID synchronization be configured?',
+      createdAt: new Date(now - 172800000).toISOString(),
     },
     {
-      localId: 'msg-a-2a',
+      localId: 'msg-bg-2a',
       role: 'assistant',
       content:
-        'A **Value Template** in One Identity Manager defines dynamic column calculations evaluated automatically upon object insertion or update [file=object_layer_guide.pdf]. Templates are expressed in VB.Net or C# and compile directly into the runtime object layer.',
-      playbook: 'oim-getting-started',
-      thinking: 'Explaining OIM Value Templates: purpose, evaluation trigger, and language syntax.',
-      usage: {
-        inputTokens: 1400,
-        outputTokens: 420,
-        cacheReadTokens: 3000,
-        cacheWriteTokens: 100,
-        thoughtTokens: 400,
-      },
-      createdAt: new Date(now - 7150000).toISOString(),
-    },
-    {
-      localId: 'msg-u-2b',
-      role: 'user',
-      content: 'check if you find any practical info in teams or confluence',
-      playbook: 'oim-getting-started',
-      createdAt: new Date(now - 5500000).toISOString(),
-    },
-    {
-      localId: 'msg-a-2b',
-      role: 'assistant',
-      content:
-        'Practical operational guidance retrieved from internal Teams and Confluence knowledge bases:\n\n1. **[Teams #oim-dev] Circular Reference Warning:** Chained value templates across foreign key relations can trigger recursion; always guard with `InResult` checks.\n2. **[Confluence Architecture] Overrides Flag:** Complex templates querying external tables should set the `Overrides` attribute to prevent redundant recalculation cycles.\n3. **[Support KB-4412] Bulk Import Null Handling:** Templates on `Person.CentralAccount` must handle null references during CSV bulk onboarding.',
-      playbook: 'oim-getting-started',
+        'For hybrid Active Directory and Microsoft Entra ID deployments in One Identity Manager:\n\n1. **Authoritative Source Mapping:** Keep on-premises AD as the primary provisioning target for employee identities via the standard Active Directory connector.\n2. **Entra ID Target System:** Configure the Microsoft Entra ID connector with delta-sync enabled to ingest cloud-only properties and licenses.\n3. **Account Correlation:** Use `UserPrincipalName` and `mail` as correlation rules to link `AADUser` records with existing `ADAccount` instances.\n4. **Conflict Handling:** Ensure password hash synchronization or pass-through authentication via Microsoft Entra Connect is properly aligned with OIM password policies.',
       thinking:
-        'Searching operational corpus (Teams channels and Confluence spaces) for real-world value template gotchas and edge cases.',
-      toolCalls: [
-        {
-          id: 'call-2',
-          name: 'search_corpus',
-          input: { query: 'value template circular reference overrides teams confluence' },
-          result: 'Retrieved 3 matching operational knowledge chunks.',
-        },
-      ],
+        'Providing best practices for hybrid AD and Entra ID identity synchronization and correlation rules.',
       usage: {
-        inputTokens: 2420,
-        outputTokens: 1000,
-        cacheReadTokens: 5400,
-        cacheWriteTokens: 220,
+        inputTokens: 2400,
+        outputTokens: 980,
+        cacheReadTokens: 4900,
+        cacheWriteTokens: 180,
         thoughtTokens: 850,
       },
-      createdAt: new Date(now - 5400000).toISOString(),
+      createdAt: new Date(now - 172750000).toISOString(),
     },
   ];
   fs.writeFileSync(
-    path.join(threadsDir, 'demo-thread-2.jsonl'),
+    path.join(threadsDir, 'bg-thread-2.jsonl'),
     t2Messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
-    'utf8',
-  );
-
-  // Thread 3 JSONL
-  const t3Messages = [
-    {
-      localId: 'msg-u-3',
-      role: 'user',
-      content: 'what database changes were done between 9.3.1 and 10.0?',
-      playbook: 'oim-db-history',
-      createdAt: new Date(now - 3600000).toISOString(),
-    },
-    {
-      localId: 'msg-a-3',
-      role: 'assistant',
-      content:
-        'Major database schema revisions between OIM 9.3.1 and 10.0 for **Identity & Authentication Tables**:\n\n1. **Person Table Migration:** Added `UID_Tenant` and `ExternalIdentityId` columns for multi-forest Entra ID federation [file=oim_v10_release_notes.pdf].\n2. **DialogUser Security:** Upgraded password hashing algorithm to Argon2id and deprecated legacy SHA-256 columns.\n3. **Audit Trails:** Added high-throughput temporal tracking tables with partitioned change logs.',
-      playbook: 'oim-db-history',
-      thinking:
-        'User selected Identity & Authentication Tables. Cross-referencing 9.3.1 and 10.0 schema diffs. Highlighting Person, DialogUser, and audit table changes.',
-      toolCalls: [
-        {
-          id: 'call-clarif-1',
-          name: 'AskUserQuestion',
-          input: {
-            question: 'Which subsystem schema changes would you like to inspect?',
-            options: [
-              {
-                label: 'Identity & Authentication Tables',
-                description: 'Changes to Person, DialogUser, and auth tokens',
-              },
-              {
-                label: 'Workflow & Attestation Tables',
-                description: 'Changes to PWOHelper, AttestationCase, and Approval policies',
-              },
-            ],
-          },
-          result: 'User answered: Identity & Authentication Tables',
-        },
-        {
-          id: 'call-db-diff',
-          name: 'search_corpus',
-          input: { query: 'database schema diff 9.3.1 10.0 Person DialogUser' },
-          result: 'Found 4 matching sections in schema migration documentation.',
-        },
-      ],
-      usage: {
-        inputTokens: 4900,
-        outputTokens: 1850,
-        cacheReadTokens: 12000,
-        cacheWriteTokens: 450,
-        thoughtTokens: 1800,
-      },
-      createdAt: new Date(now - 3550000).toISOString(),
-    },
-  ];
-  fs.writeFileSync(
-    path.join(threadsDir, 'demo-thread-3.jsonl'),
-    t3Messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
-    'utf8',
-  );
-
-  // Thread 4 JSONL
-  const t4Messages = [
-    {
-      localId: 'msg-u-4',
-      role: 'user',
-      content: 'compare standard vs csv vs PowerShell connector considering teams/confluence',
-      createdAt: new Date(now - 900000).toISOString(),
-    },
-    {
-      localId: 'msg-a-4',
-      role: 'assistant',
-      content:
-        '### Connector Architecture Evaluation & Trade-offs\n\n| Connector Type | Sync Mechanism | Throughput | Flexibility | Operational Fit |\n| :--- | :--- | :--- | :--- | :--- |\n| **Standard DB** | Native DB driver, delta tracking | Very High (<5s/batch) | Schema-bound | Core SQL/Oracle HR systems |\n| **CSV / Flat File** | Scheduled file batch ingest | Moderate (full scan) | Universal format | Legacy batch feeds |\n| **PowerShell** | REST / Graph API scripting | Latency-bound | Unlimited custom logic | Cloud apps (Entra, Slack, Jira) |\n\n#### Operational Insights from Teams & Confluence\n- **PowerShell Connector:** Confluence runbook specifies exponential backoff for HTTP 429 rate limits.\n- **CSV Ingestion:** Teams #oim-ops warns that BOM encoding mismatch can corrupt European character sets.\n\n*All recommendations verified against connector documentation and internal incident logs.*',
-      thinking:
-        'Orchestrating multi-agent analysis: Delegating standard and CSV evaluation to DB specialist, PowerShell and operational gotchas to Cloud specialist, and submitting synthesized draft to Reviewer for consistency validation.',
-      review: {
-        outcome: 'approved',
-        feedback:
-          'Verified: All connector throughput claims and operational caveats from Teams/Confluence are factually accurate.',
-        enforced: true,
-      },
-      toolCalls: [
-        {
-          id: 'call-mas-1',
-          name: 'Agent',
-          subagentType: 'specialist',
-          input: {
-            prompt: 'Analyze standard database connector and CSV synchronization performance',
-          },
-          result:
-            'Standard connector offers change-tracking via delta sync; CSV requires full table re-read.',
-        },
-        {
-          id: 'call-mas-2',
-          name: 'Agent',
-          subagentType: 'specialist',
-          input: {
-            prompt:
-              'Analyze PowerShell connector flexibility and security considerations from Teams discussions',
-          },
-          result:
-            'PowerShell connector supports custom REST/Graph endpoints but requires strict execution policy signing.',
-        },
-        {
-          id: 'call-mas-3',
-          name: 'Agent',
-          subagentType: 'reviewer',
-          input: { prompt: 'Verify connector architectural trade-offs for consistency' },
-          result: 'All connector comparison claims are accurate and properly contextualized.',
-          verdict: {
-            approved: true,
-            feedback:
-              'Approved: Factual consistency verified against vendor specs and Teams incidents.',
-          },
-        },
-      ],
-      usage: {
-        inputTokens: 7100,
-        outputTokens: 2600,
-        cacheReadTokens: 22000,
-        cacheWriteTokens: 890,
-        thoughtTokens: 3100,
-      },
-      createdAt: new Date(now - 850000).toISOString(),
-    },
-  ];
-  fs.writeFileSync(
-    path.join(threadsDir, 'demo-thread-4.jsonl'),
-    t4Messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
     'utf8',
   );
 
@@ -775,6 +587,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
     console.log('\n[4/4] Executing 6-scene choreographies...');
 
     const sceneTimings: { startMs: number; endMs: number }[] = [];
+    const accelerationIntervals: AccelerationInterval[] = [];
     const tVideoStart = Date.now();
 
     const runSceneWithPadding = async (
@@ -829,7 +642,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
     };
 
     // Pre-select the first conversation so the video opens showing the live, rich AI assistant workspace
-    await selectSidebarThread('POLPlaybook');
+    await selectSidebarThread('Identity Manager 9.3');
     await appPage.waitForTimeout(600);
 
     // =========================================================================
@@ -876,7 +689,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
           .first();
         if ((await searchInput.count()) > 0) {
           await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 200 });
-          await searchInput.fill('POLPlaybook');
+          await searchInput.fill('Identity');
           await appPage.waitForTimeout(600);
           const searchClear = appPage.locator('.search-clear').first();
           if ((await searchClear.count()) > 0) {
@@ -1071,107 +884,231 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
 
+    const startNewConversation = async (): Promise<void> => {
+      const newBtn = appPage
+        .locator(
+          'aside.thread-list button[data-tip="New conversation"], aside.thread-list .thread-list-header button.primary',
+        )
+        .first();
+      if ((await newBtn.count()) > 0) {
+        await glideMouse(appPage, newBtn, 20, { click: true, delayMs: 200 });
+        await appPage.waitForTimeout(300);
+      }
+    };
+
     // =========================================================================
-    // Scene 4: Live Conversation 1 (Playbook Validation Catch)
+    // Scene 4: Live Query 1 (Playbook Validation Catch)
     // =========================================================================
     await runSceneWithPadding(3, 'Playbook Validation Catch', async () => {
-      await selectSidebarThread('POLPlaybook');
-      await appPage.waitForTimeout(600);
+      await startNewConversation();
 
-      // Mount recommendation card
-      await appPage.evaluate(() => {
-        const container =
-          document.querySelector('.chat-view') || document.querySelector('.main-content');
-        if (container && !document.getElementById('demo-preflight-recommendation')) {
-          const card = document.createElement('div');
-          card.className = 'preflight-card';
-          card.id = 'demo-preflight-recommendation';
-          card.innerHTML = `
-            <div class="preflight-card-head">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-              Playbook recommendation
-            </div>
-            <div class="preflight-card-reason">Question queries table migration history. We recommend switching from oim-getting-started to oim-db-history.</div>
-            <div class="preflight-card-actions">
-              <button class="primary demo-switch-btn">Switch to oim-db-history</button>
-              <button class="demo-send-anyway-btn">Send anyway</button>
-            </div>
-          `;
-          container.insertBefore(card, container.firstChild);
+      // 1. Select initial playbook oim-getting-started
+      await selectPlaybook(appPage, 'oim-getting-started').catch(() => {});
+      await appPage.waitForTimeout(300);
+
+      // 2. Type user question
+      await typeInComposer(appPage, 'When was the table POLPlaybook introduced?');
+      await appPage.waitForTimeout(200);
+
+      // 3. Dispatch turn
+      const tTurnStart = (Date.now() - tVideoStart) / 1000;
+      await dispatchTurn(appPage);
+
+      // 4. Handle preflight recommendation card
+      const preflightCard = appPage
+        .locator('.preflight-card, #demo-preflight-recommendation')
+        .first();
+      let cardFound = false;
+      try {
+        await preflightCard.waitFor({ state: 'visible', timeout: 5000 });
+        cardFound = true;
+      } catch {
+        // Fallback for offline simulation if backend is not active
+        await appPage.evaluate(() => {
+          const container =
+            document.querySelector('.chat-view') || document.querySelector('.main-content');
+          if (container && !document.getElementById('demo-preflight-recommendation')) {
+            const card = document.createElement('div');
+            card.className = 'preflight-card';
+            card.id = 'demo-preflight-recommendation';
+            card.innerHTML = `
+              <div class="preflight-card-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                Playbook recommendation
+              </div>
+              <div class="preflight-card-reason">Question queries table migration history. We recommend switching from oim-getting-started to oim-db-history.</div>
+              <div class="preflight-card-actions">
+                <button class="primary demo-switch-btn">Switch to oim-db-history</button>
+                <button class="demo-send-anyway-btn">Send anyway</button>
+              </div>
+            `;
+            container.insertBefore(card, container.firstChild);
+          }
+        });
+        cardFound = true;
+      }
+
+      if (cardFound) {
+        const activeCard = appPage
+          .locator('.preflight-card, #demo-preflight-recommendation')
+          .first();
+        await focusOnElement(appPage, activeCard, { zoomFactor: 1.15, durationMs: 300 });
+        const switchBtn = activeCard.locator('.demo-switch-btn, button.primary').first();
+        if ((await switchBtn.count()) > 0) {
+          await glideMouse(appPage, switchBtn, 20, { click: true, delayMs: 250 });
         }
-      });
+        await appPage.evaluate(() =>
+          document.getElementById('demo-preflight-recommendation')?.remove(),
+        );
+        await resetFocus(appPage, { durationMs: 250 });
+      }
 
-      const card = appPage.locator('#demo-preflight-recommendation');
-      if ((await card.count()) > 0) {
-        await focusOnElement(appPage, card, { zoomFactor: 1.15 });
-        const switchBtn = card.locator('.demo-switch-btn');
-        await glideMouse(appPage, switchBtn, 20, { click: true, delayMs: 250 });
-        await appPage.evaluate(() => document.getElementById('demo-preflight-recommendation')?.remove());
-        await resetFocus(appPage);
+      // 5. Wait for turn completion
+      await waitForTurnCompletion(appPage, {
+        timeoutMs: options.skipBackend ? 4000 : 60000,
+      }).catch(() => {});
+      const tTurnEnd = (Date.now() - tVideoStart) / 1000;
+      const accel = calculateAccelerationInterval(tTurnStart, tTurnEnd);
+      if (accel) {
+        accelerationIntervals.push(accel);
       }
       await appPage.waitForTimeout(600);
     });
 
     // =========================================================================
-    // Scene 5: Live Conversation 2 (Multi-Turn Follow-Up & Search Hints)
+    // Scene 5: Live Query 2 (Multi-Turn Follow-Up & Search Hints)
     // =========================================================================
     await runSceneWithPadding(4, 'Multi-Turn Follow-Up & Search Hints', async () => {
-      await selectSidebarThread('Value Templates');
+      await startNewConversation();
+
+      // 1. Select playbook oim-getting-started
+      await selectPlaybook(appPage, 'oim-getting-started').catch(() => {});
+      await appPage.waitForTimeout(300);
+
+      // 2. First turn
+      await typeInComposer(appPage, 'what is a value template?');
+      const tTurn1Start = (Date.now() - tVideoStart) / 1000;
+      await dispatchTurn(appPage);
+      await waitForTurnCompletion(appPage, {
+        timeoutMs: options.skipBackend ? 4000 : 60000,
+      }).catch(() => {});
+      const tTurn1End = (Date.now() - tVideoStart) / 1000;
+      const accel1 = calculateAccelerationInterval(tTurn1Start, tTurn1End);
+      if (accel1) {
+        accelerationIntervals.push(accel1);
+      }
       await appPage.waitForTimeout(600);
 
+      // 3. Multi-turn follow-up with search hints
+      await typeInComposer(
+        appPage,
+        'check if you find any practical info in teams or confluence',
+      );
+      const tTurn2Start = (Date.now() - tVideoStart) / 1000;
+      await dispatchTurn(appPage);
+      await waitForTurnCompletion(appPage, {
+        timeoutMs: options.skipBackend ? 4000 : 60000,
+      }).catch(() => {});
+      const tTurn2End = (Date.now() - tVideoStart) / 1000;
+      const accel2 = calculateAccelerationInterval(tTurn2Start, tTurn2End);
+      if (accel2) {
+        accelerationIntervals.push(accel2);
+      }
+
+      // 4. Hover over response content & citations
       const msgs = appPage.locator('.message');
-      if ((await msgs.count()) >= 2) {
-        const turn2 = msgs.nth(1);
-        await glideMouse(appPage, turn2, 20, { delayMs: 200 });
-        const lastAnswer = msgs.last();
-        await focusOnElement(appPage, lastAnswer, { zoomFactor: 1.1 });
-        await appPage.waitForTimeout(1400);
-        await resetFocus(appPage);
+      if ((await msgs.count()) > 0) {
+        const lastMsg = msgs.last();
+        await focusOnElement(appPage, lastMsg, { zoomFactor: 1.08, durationMs: 300 });
+        await glideMouse(appPage, lastMsg, 20, { delayMs: 400 });
+        await resetFocus(appPage, { durationMs: 300 });
       }
       await appPage.waitForTimeout(600);
     });
 
     // =========================================================================
-    // Scene 6: Live Conversation 3 (Clarifying Questions & Citations)
+    // Scene 6: Live Query 3 (Clarifying Questions & Citations)
     // =========================================================================
     await runSceneWithPadding(5, 'Clarifying Questions & Citations', async () => {
-      await selectSidebarThread('Database Schema Changes');
-      await appPage.waitForTimeout(600);
+      await startNewConversation();
 
-      const clarifCard = appPage.locator('.clarifying-question-card, .clarified-badge').first();
-      if ((await clarifCard.count()) > 0) {
-        await focusOnElement(appPage, clarifCard, { zoomFactor: 1.15 });
-        await glideMouse(appPage, clarifCard, 20, { delayMs: 300 });
-        await resetFocus(appPage);
+      // 1. Select playbook oim-db-history
+      await selectPlaybook(appPage, 'oim-db-history').catch(() => {});
+      await appPage.waitForTimeout(300);
+
+      // 2. Type question
+      await typeInComposer(appPage, 'what database changes were done between 9.3.1 and 10.0?');
+      const tTurnStart = (Date.now() - tVideoStart) / 1000;
+      await dispatchTurn(appPage);
+
+      // 3. Clarifying questions interactive card handling
+      const clarifCard = appPage
+        .locator('.clarifying-question-card, .clarified-badge')
+        .first();
+      try {
+        await clarifCard.waitFor({ state: 'visible', timeout: 8000 });
+        await focusOnElement(appPage, clarifCard, { zoomFactor: 1.15, durationMs: 300 });
+        const optBtn = clarifCard
+          .locator('button, .clarifying-option')
+          .filter({ hasText: /Identity/i })
+          .first();
+        if ((await optBtn.count()) > 0) {
+          await glideMouse(appPage, optBtn, 20, { click: true, delayMs: 250 });
+        }
+        await resetFocus(appPage, { durationMs: 250 });
+      } catch {
+        // Model answered directly without clarification
       }
 
-      // Open citation modal
-      await appPage.evaluate(() => {
-        if (!document.querySelector('.citation-overlay')) {
-          const modal = document.createElement('div');
-          modal.className = 'citation-overlay';
-          modal.id = 'demo-citation-modal';
-          modal.innerHTML = `
-            <div class="citation-modal">
-              <div class="citation-modal-header">
-                <span class="citation-modal-title">Citation source · oim_v10_release_notes.pdf</span>
-                <button class="icon-button close-btn" data-tip="Close">✕</button>
-              </div>
-              <div class="citation-modal-body">
-                <div class="citation-section-heading">Section 4.2 · Identity Schema Migration</div>
-                <div class="citation-passage">
-                  <p>In version 10.0, the <code>Person</code> table schema includes multi-tenant attributes <code>UID_Tenant</code> and <code>ExternalIdentityId</code> to support hybrid cloud topologies.</p>
+      // 4. Wait for turn completion
+      await waitForTurnCompletion(appPage, {
+        timeoutMs: options.skipBackend ? 4000 : 60000,
+      }).catch(() => {});
+      const tTurnEnd = (Date.now() - tVideoStart) / 1000;
+      const accel = calculateAccelerationInterval(tTurnStart, tTurnEnd);
+      if (accel) {
+        accelerationIntervals.push(accel);
+      }
+
+      // 5. Open verified citation modal (real or visual preview)
+      const citationPill = appPage
+        .locator('.citation-pill, .citation-badge, a[href*="pdf"]')
+        .first();
+      if ((await citationPill.count()) > 0) {
+        await glideMouse(appPage, citationPill, 20, { click: true, delayMs: 250 });
+        await appPage.waitForTimeout(1200);
+        const closeBtn = appPage.locator('.citation-overlay .close-btn, .modal-close').first();
+        if ((await closeBtn.count()) > 0) {
+          await glideMouse(appPage, closeBtn, 20, { click: true, delayMs: 200 });
+        }
+      } else {
+        await appPage.evaluate(() => {
+          if (!document.querySelector('.citation-overlay')) {
+            const modal = document.createElement('div');
+            modal.className = 'citation-overlay';
+            modal.id = 'demo-citation-modal';
+            modal.innerHTML = `
+              <div class="citation-modal">
+                <div class="citation-modal-header">
+                  <span class="citation-modal-title">Citation source · oim_v10_release_notes.pdf</span>
+                  <button class="icon-button close-btn" data-tip="Close">✕</button>
+                </div>
+                <div class="citation-modal-body">
+                  <div class="citation-section-heading">Section 4.2 · Identity Schema Migration</div>
+                  <div class="citation-passage">
+                    <p>In version 10.0, the <code>Person</code> table schema includes multi-tenant attributes <code>UID_Tenant</code> and <code>ExternalIdentityId</code> to support hybrid cloud topologies.</p>
+                  </div>
                 </div>
               </div>
-            </div>
-          `;
-          document.body.appendChild(modal);
-        }
-      });
-      await appPage.waitForTimeout(1400);
-      await appPage.evaluate(() => document.getElementById('demo-citation-modal')?.remove());
+            `;
+            document.body.appendChild(modal);
+          }
+        });
+        await appPage.waitForTimeout(1400);
+        await appPage.evaluate(() => document.getElementById('demo-citation-modal')?.remove());
+      }
 
-      // Expand TraceBar
+      // 6. Inspect TraceBar
       const traceBar = appPage.locator('.trace-bar').first();
       if ((await traceBar.count()) > 0) {
         await glideMouse(appPage, traceBar, 20, { click: true, delayMs: 200 });
@@ -1181,12 +1118,34 @@ export async function runDemoVideoGenerator(): Promise<void> {
     });
 
     // =========================================================================
-    // Scene 7: Live Conversation 4 (Multi-Agent System MAS)
+    // Scene 7: Live Query 4 (Multi-Agent System MAS)
     // =========================================================================
     await runSceneWithPadding(6, 'Multi-Agent System MAS', async () => {
-      await selectSidebarThread('Connector Comparison');
-      await appPage.waitForTimeout(600);
+      await startNewConversation();
 
+      // 1. Switch composer agent mode dropdown to Multi-agent (orchestrator)
+      await selectAgentMode(appPage, 'orchestrator');
+      await appPage.waitForTimeout(300);
+
+      // 2. Type multi-agent comparison prompt
+      await typeInComposer(
+        appPage,
+        'Compare standard connector vs csv connector vs custom connector via PowerShell considering teams/confluence',
+      );
+      const tTurnStart = (Date.now() - tVideoStart) / 1000;
+      await dispatchTurn(appPage);
+
+      // 3. Wait for multi-agent completion
+      await waitForTurnCompletion(appPage, {
+        timeoutMs: options.skipBackend ? 5000 : 90000,
+      }).catch(() => {});
+      const tTurnEnd = (Date.now() - tVideoStart) / 1000;
+      const accel = calculateAccelerationInterval(tTurnStart, tTurnEnd);
+      if (accel) {
+        accelerationIntervals.push(accel);
+      }
+
+      // 4. Inspect subagent cards and reviewer badge
       const subagents = appPage.locator('.subagent-card');
       if ((await subagents.count()) > 0) {
         const firstHeader = subagents.first().locator('.subagent-card-header');
@@ -1218,7 +1177,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         .first();
       if ((await searchInput.count()) > 0) {
         await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 150 });
-        await searchInput.fill('POLPlaybook');
+        await searchInput.fill('Identity');
         await appPage.waitForTimeout(700);
 
         const searchClear = appPage.locator('.search-clear').first();
@@ -1304,6 +1263,8 @@ export async function runDemoVideoGenerator(): Promise<void> {
         duckingDb: -14,
         outputPath: options.outputPath,
         skipTts: options.skipTts,
+        accelerationIntervals:
+          accelerationIntervals.length > 0 ? accelerationIntervals : undefined,
       });
       console.log(`\nDemo video generated successfully at: ${options.outputPath}`);
     } catch (err) {

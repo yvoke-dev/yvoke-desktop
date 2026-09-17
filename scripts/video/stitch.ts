@@ -30,6 +30,19 @@ export class FfmpegExecutionError extends Error {
   }
 }
 
+export class InvalidIntervalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidIntervalError';
+  }
+}
+
+export interface AccelerationInterval {
+  startSec: number;
+  endSec: number;
+  speedFactor: number; // e.g. 4 for 4x speedup
+}
+
 export type RunnerFn = (
   cmd: string,
   args: string[],
@@ -130,11 +143,93 @@ export function generateConcatDemuxer(filePaths: string[]): string {
   return filePaths.map(escapeConcatPath).join('\n');
 }
 
+/**
+ * Builds an FFmpeg trim+setpts+concat video filter graph for dynamic time-remapping.
+ * Accelerates specific time intervals while preserving 1x playback for the rest.
+ * Throws InvalidIntervalError if timestamps are inverted, negative, or overlapping.
+ */
+export function buildAccelerationFilter(
+  intervals?: AccelerationInterval[],
+  totalDurationSec?: number,
+): string | null {
+  if (!intervals || intervals.length === 0) {
+    return null;
+  }
+
+  for (let i = 0; i < intervals.length; i++) {
+    const int = intervals[i];
+    if (!Number.isFinite(int.startSec) || int.startSec < 0) {
+      throw new InvalidIntervalError(
+        `Invalid startSec (${int.startSec}) at index ${i}. Must be a non-negative number.`,
+      );
+    }
+    if (!Number.isFinite(int.endSec) || int.startSec >= int.endSec) {
+      throw new InvalidIntervalError(
+        `Invalid interval [${int.startSec}, ${int.endSec}] at index ${i}. startSec must be strictly less than endSec.`,
+      );
+    }
+    if (!Number.isFinite(int.speedFactor) || int.speedFactor <= 0) {
+      throw new InvalidIntervalError(
+        `Invalid speedFactor (${int.speedFactor}) at index ${i}. Must be greater than 0.`,
+      );
+    }
+    if (i > 0 && int.startSec < intervals[i - 1].endSec) {
+      throw new InvalidIntervalError(
+        `Interval at index ${i} [${int.startSec}, ${int.endSec}] overlaps or is out of order with previous interval [${intervals[i - 1].startSec}, ${intervals[i - 1].endSec}].`,
+      );
+    }
+  }
+
+  const segments: string[] = [];
+  const segmentLabels: string[] = [];
+  let currentTime = 0;
+
+  for (let i = 0; i < intervals.length; i++) {
+    const int = intervals[i];
+    if (int.startSec > currentTime) {
+      const segIdx = segmentLabels.length;
+      segments.push(
+        `[0:v]trim=start=${currentTime}:end=${int.startSec},setpts=PTS-STARTPTS[v${segIdx}]`,
+      );
+      segmentLabels.push(`[v${segIdx}]`);
+      currentTime = int.startSec;
+    }
+
+    const segIdx = segmentLabels.length;
+    const ptsMultiplier = Number((1 / int.speedFactor).toFixed(6));
+    segments.push(
+      `[0:v]trim=start=${int.startSec}:end=${int.endSec},setpts=${ptsMultiplier}*(PTS-STARTPTS)[v${segIdx}]`,
+    );
+    segmentLabels.push(`[v${segIdx}]`);
+    currentTime = int.endSec;
+  }
+
+  if (totalDurationSec !== undefined) {
+    if (totalDurationSec > currentTime) {
+      const segIdx = segmentLabels.length;
+      segments.push(
+        `[0:v]trim=start=${currentTime}:end=${totalDurationSec},setpts=PTS-STARTPTS[v${segIdx}]`,
+      );
+      segmentLabels.push(`[v${segIdx}]`);
+    }
+  } else {
+    const segIdx = segmentLabels.length;
+    segments.push(`[0:v]trim=start=${currentTime},setpts=PTS-STARTPTS[v${segIdx}]`);
+    segmentLabels.push(`[v${segIdx}]`);
+  }
+
+  const concatFilter = `${segmentLabels.join('')}concat=n=${segmentLabels.length}:v=1:a=0[vaccel]`;
+  segments.push(concatFilter);
+
+  return segments.join(';');
+}
+
 export interface StitchOptions {
   videoPath: string | string[];
   audioPath?: string | null;
   backgroundMusicPath?: string | null;
   subtitlesPath?: string | null;
+  accelerationIntervals?: AccelerationInterval[];
   enableDucking?: boolean;
   duckingDb?: number; // default -14
   outputPath: string;
@@ -220,33 +315,70 @@ export async function stitchVideoAndAudio(options: StitchOptions): Promise<void>
         args.push('-i', options.videoPath);
       }
 
-      // Audio inputs & filter complex
-      if (hasAudio && options.audioPath && hasBgMusic && options.backgroundMusicPath) {
-        args.push('-i', options.audioPath);
-        args.push('-i', options.backgroundMusicPath);
+      // Check for acceleration intervals
+      const accelFilter = buildAccelerationFilter(options.accelerationIntervals);
 
-        if (currentEnableDucking) {
-          args.push(
-            '-filter_complex',
-            `[1:a]asplit[sc][voice];[2:a][sc]sidechaincompress=threshold=0.05:ratio=${duckRatio}:attack=20:release=300[bg];[voice][bg]amix=inputs=2:duration=longest:dropout_transition=2[aout]`,
-          );
-        } else {
-          args.push(
-            '-filter_complex',
-            '[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]',
-          );
+      if (accelFilter) {
+        let videoFilterComplex = accelFilter;
+        let finalVideoMap = '[vaccel]';
+
+        if (currentSubtitlesPath) {
+          const escaped = escapeFfmpegSubtitlePath(currentSubtitlesPath);
+          videoFilterComplex = `${accelFilter};[vaccel]subtitles='${escaped}'[vsub]`;
+          finalVideoMap = '[vsub]';
         }
-        args.push('-map', '0:v', '-map', '[aout]');
-      } else if (hasAudio && options.audioPath) {
-        args.push('-i', options.audioPath);
-      } else if (hasBgMusic && options.backgroundMusicPath) {
-        args.push('-i', options.backgroundMusicPath);
-      }
 
-      // Subtitles burning
-      if (currentSubtitlesPath) {
-        const escaped = escapeFfmpegSubtitlePath(currentSubtitlesPath);
-        args.push('-vf', `subtitles='${escaped}'`);
+        if (hasAudio && options.audioPath && hasBgMusic && options.backgroundMusicPath) {
+          args.push('-i', options.audioPath);
+          args.push('-i', options.backgroundMusicPath);
+
+          const audioComplex = currentEnableDucking
+            ? `[1:a]asplit[sc][voice];[2:a][sc]sidechaincompress=threshold=0.05:ratio=${duckRatio}:attack=20:release=300[bg];[voice][bg]amix=inputs=2:duration=longest:dropout_transition=2[aout]`
+            : `[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]`;
+
+          args.push('-filter_complex', `${videoFilterComplex};${audioComplex}`);
+          args.push('-map', finalVideoMap, '-map', '[aout]');
+        } else if (hasAudio && options.audioPath) {
+          args.push('-i', options.audioPath);
+          args.push('-filter_complex', videoFilterComplex);
+          args.push('-map', finalVideoMap, '-map', '1:a');
+        } else if (hasBgMusic && options.backgroundMusicPath) {
+          args.push('-i', options.backgroundMusicPath);
+          args.push('-filter_complex', videoFilterComplex);
+          args.push('-map', finalVideoMap, '-map', '1:a');
+        } else {
+          args.push('-filter_complex', videoFilterComplex);
+          args.push('-map', finalVideoMap);
+        }
+      } else {
+        // No acceleration filter (standard video input)
+        if (hasAudio && options.audioPath && hasBgMusic && options.backgroundMusicPath) {
+          args.push('-i', options.audioPath);
+          args.push('-i', options.backgroundMusicPath);
+
+          if (currentEnableDucking) {
+            args.push(
+              '-filter_complex',
+              `[1:a]asplit[sc][voice];[2:a][sc]sidechaincompress=threshold=0.05:ratio=${duckRatio}:attack=20:release=300[bg];[voice][bg]amix=inputs=2:duration=longest:dropout_transition=2[aout]`,
+            );
+          } else {
+            args.push(
+              '-filter_complex',
+              '[1:a][2:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]',
+            );
+          }
+          args.push('-map', '0:v', '-map', '[aout]');
+        } else if (hasAudio && options.audioPath) {
+          args.push('-i', options.audioPath);
+        } else if (hasBgMusic && options.backgroundMusicPath) {
+          args.push('-i', options.backgroundMusicPath);
+        }
+
+        // Subtitles burning
+        if (currentSubtitlesPath) {
+          const escaped = escapeFfmpegSubtitlePath(currentSubtitlesPath);
+          args.push('-vf', `subtitles='${escaped}'`);
+        }
       }
 
       // Universal MP4 flags
