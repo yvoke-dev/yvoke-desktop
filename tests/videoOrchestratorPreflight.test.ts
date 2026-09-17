@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
+import path from 'node:path';
 import {
   probeBackend,
   probeClaudeCli,
@@ -358,6 +359,104 @@ describe('videoOrchestratorPreflight', () => {
       expect(SCENE_NARRATIONS[0]).toBe(SCENE_1_SEGMENTS.map((s) => s.narration).join(' '));
       expect(SCENE_NARRATIONS[1]).toBe(SCENE_2_SEGMENTS.map((s) => s.narration).join(' '));
       expect(SCENE_NARRATIONS[2]).toBe(SCENE_3_SEGMENTS.map((s) => s.narration).join(' '));
+    });
+
+    it('synchronizes SCENE_NARRATIONS strictly with declarative STORYBOARD_BEATS', async () => {
+      const { SCENE_NARRATIONS } = await import('../scripts/generate-demo-video');
+      const { STORYBOARD_BEATS } = await import('../scripts/video/storyboard');
+      expect(SCENE_NARRATIONS).toEqual(STORYBOARD_BEATS.map((b) => b.narration));
+    });
+  });
+
+  describe('seedUserData', () => {
+    let createdDirs: string[] = [];
+
+    afterEach(() => {
+      for (const dir of createdDirs) {
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      createdDirs = [];
+    });
+
+    it('writes expected settings.json with dev auth mode, mcp transport, web search, and appearance', async () => {
+      const { seedUserData } = await import('../scripts/generate-demo-video');
+      const dir = seedUserData('http://localhost:9090');
+      createdDirs.push(dir);
+
+      const settingsPath = path.join(dir, 'settings.json');
+      expect(fs.existsSync(settingsPath)).toBe(true);
+
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      expect(settings.serverBaseUrl).toBe('http://localhost:9090');
+      expect(settings.serverAuthMode).toBe('dev');
+      expect(settings.authMode).toBe('dev');
+      expect(settings.devToken).toBe('dev-demo-token');
+      expect(settings.mcpTransport).toBe('http');
+      expect(settings.defaultModel).toBe('sonnet');
+      expect(settings.defaultThinkingLevel).toBe('medium');
+      expect(settings.playbookValidationEnabled).toBe(true);
+      expect(settings.webSearch).toEqual({
+        enabled: true,
+        allowedDomains: ['support.oneidentity.com', 'www.oneidentity.com/community/'],
+      });
+      expect(settings.appearance.theme).toBe('dark');
+      expect(settings.appearance.density).toBe('comfortable');
+    });
+
+    it('seeds exactly two background history threads and removes demo-thread mocks', async () => {
+      const { seedUserData } = await import('../scripts/generate-demo-video');
+      const dir = seedUserData();
+      createdDirs.push(dir);
+
+      const threadsDir = path.join(dir, 'threads');
+      const indexPath = path.join(threadsDir, 'index.json');
+      expect(fs.existsSync(indexPath)).toBe(true);
+
+      const threadIndex = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      const threadIds = Object.keys(threadIndex);
+
+      expect(threadIds).toEqual(['bg-thread-1', 'bg-thread-2']);
+      expect(threadIndex['bg-thread-1'].title).toBe('Identity Manager 9.3 Architecture');
+      expect(threadIndex['bg-thread-2'].title).toBe('Active Directory & Entra Sync Notes');
+
+      expect(fs.existsSync(path.join(threadsDir, 'bg-thread-1.jsonl'))).toBe(true);
+      expect(fs.existsSync(path.join(threadsDir, 'bg-thread-2.jsonl'))).toBe(true);
+
+      // Verify legacy mock threads do NOT exist
+      expect(fs.existsSync(path.join(threadsDir, 'demo-thread-1.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(threadsDir, 'demo-thread-2.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(threadsDir, 'demo-thread-3.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(threadsDir, 'demo-thread-4.jsonl'))).toBe(false);
+    });
+  });
+
+  describe('calculateAccelerationInterval', () => {
+    it('returns null when turn duration does not exceed threshold', async () => {
+      const { calculateAccelerationInterval } = await import('../scripts/generate-demo-video');
+      expect(calculateAccelerationInterval(10.0, 13.5)).toBeNull();
+      expect(calculateAccelerationInterval(10.0, 14.0)).toBeNull();
+    });
+
+    it('returns 4x acceleration interval starting 1s after turn start when duration > 4s', async () => {
+      const { calculateAccelerationInterval } = await import('../scripts/generate-demo-video');
+      const interval = calculateAccelerationInterval(10.0, 16.5);
+      expect(interval).toEqual({
+        startSec: 11.0,
+        endSec: 16.5,
+        speedFactor: 4,
+      });
+    });
+
+    it('supports custom threshold and speed factor', async () => {
+      const { calculateAccelerationInterval } = await import('../scripts/generate-demo-video');
+      const interval = calculateAccelerationInterval(20.0, 25.0, 3, 2);
+      expect(interval).toEqual({
+        startSec: 21.0,
+        endSec: 25.0,
+        speedFactor: 2,
+      });
     });
   });
 });

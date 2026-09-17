@@ -7,8 +7,11 @@ import {
   checkFfmpegInstalled,
   escapeConcatPath,
   generateConcatDemuxer,
+  buildAccelerationFilter,
+  InvalidIntervalError,
   FfmpegNotFoundError,
   FfmpegExecutionError,
+  type AccelerationInterval,
 } from '../scripts/video/stitch';
 
 describe('videoStitch', () => {
@@ -622,6 +625,164 @@ describe('videoStitch', () => {
       );
 
       warnSpy.mockRestore();
+    });
+  });
+
+  describe('buildAccelerationFilter and dynamic acceleration', () => {
+    it('returns null if intervals is undefined or empty', () => {
+      expect(buildAccelerationFilter([])).toBeNull();
+      expect(buildAccelerationFilter(undefined as any)).toBeNull();
+    });
+
+    it('builds trim+setpts+concat filter for a single interval', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 10, endSec: 30, speedFactor: 4 },
+      ];
+      const filter = buildAccelerationFilter(intervals);
+      expect(filter).toBe(
+        '[0:v]trim=start=0:end=10,setpts=PTS-STARTPTS[v0];[0:v]trim=start=10:end=30,setpts=0.25*(PTS-STARTPTS)[v1];[0:v]trim=start=30,setpts=PTS-STARTPTS[v2];[v0][v1][v2]concat=n=3:v=1:a=0[vaccel]',
+      );
+    });
+
+    it('builds filter correctly when interval starts at 0', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 0, endSec: 15, speedFactor: 2 },
+      ];
+      const filter = buildAccelerationFilter(intervals);
+      expect(filter).toBe(
+        '[0:v]trim=start=0:end=15,setpts=0.5*(PTS-STARTPTS)[v0];[0:v]trim=start=15,setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1:a=0[vaccel]',
+      );
+    });
+
+    it('builds filter for multiple non-overlapping intervals', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 10, endSec: 20, speedFactor: 4 },
+        { startSec: 40, endSec: 60, speedFactor: 2 },
+      ];
+      const filter = buildAccelerationFilter(intervals);
+      expect(filter).toBe(
+        '[0:v]trim=start=0:end=10,setpts=PTS-STARTPTS[v0];' +
+          '[0:v]trim=start=10:end=20,setpts=0.25*(PTS-STARTPTS)[v1];' +
+          '[0:v]trim=start=20:end=40,setpts=PTS-STARTPTS[v2];' +
+          '[0:v]trim=start=40:end=60,setpts=0.5*(PTS-STARTPTS)[v3];' +
+          '[0:v]trim=start=60,setpts=PTS-STARTPTS[v4];' +
+          '[v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[vaccel]',
+      );
+    });
+
+    it('respects totalDurationSec when it matches the last interval end', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 10, endSec: 30, speedFactor: 4 },
+      ];
+      const filter = buildAccelerationFilter(intervals, 30);
+      expect(filter).toBe(
+        '[0:v]trim=start=0:end=10,setpts=PTS-STARTPTS[v0];[0:v]trim=start=10:end=30,setpts=0.25*(PTS-STARTPTS)[v1];[v0][v1]concat=n=2:v=1:a=0[vaccel]',
+      );
+    });
+
+    it('respects totalDurationSec when it extends beyond the last interval', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 10, endSec: 30, speedFactor: 4 },
+      ];
+      const filter = buildAccelerationFilter(intervals, 50);
+      expect(filter).toBe(
+        '[0:v]trim=start=0:end=10,setpts=PTS-STARTPTS[v0];[0:v]trim=start=10:end=30,setpts=0.25*(PTS-STARTPTS)[v1];[0:v]trim=start=30:end=50,setpts=PTS-STARTPTS[v2];[v0][v1][v2]concat=n=3:v=1:a=0[vaccel]',
+      );
+    });
+
+    it('throws InvalidIntervalError for inverted timestamps (startSec >= endSec)', () => {
+      expect(() =>
+        buildAccelerationFilter([{ startSec: 20, endSec: 10, speedFactor: 2 }]),
+      ).toThrow(InvalidIntervalError);
+      expect(() =>
+        buildAccelerationFilter([{ startSec: 15, endSec: 15, speedFactor: 2 }]),
+      ).toThrow(InvalidIntervalError);
+    });
+
+    it('throws InvalidIntervalError for negative startSec', () => {
+      expect(() =>
+        buildAccelerationFilter([{ startSec: -5, endSec: 10, speedFactor: 2 }]),
+      ).toThrow(InvalidIntervalError);
+    });
+
+    it('throws InvalidIntervalError for non-positive speedFactor', () => {
+      expect(() =>
+        buildAccelerationFilter([{ startSec: 0, endSec: 10, speedFactor: 0 }]),
+      ).toThrow(InvalidIntervalError);
+      expect(() =>
+        buildAccelerationFilter([{ startSec: 0, endSec: 10, speedFactor: -1 }]),
+      ).toThrow(InvalidIntervalError);
+    });
+
+    it('throws InvalidIntervalError for overlapping intervals', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 10, endSec: 30, speedFactor: 2 },
+        { startSec: 25, endSec: 40, speedFactor: 4 },
+      ];
+      expect(() => buildAccelerationFilter(intervals)).toThrow(InvalidIntervalError);
+    });
+
+    it('throws InvalidIntervalError for unsorted intervals', () => {
+      const intervals: AccelerationInterval[] = [
+        { startSec: 40, endSec: 50, speedFactor: 2 },
+        { startSec: 10, endSec: 20, speedFactor: 4 },
+      ];
+      expect(() => buildAccelerationFilter(intervals)).toThrow(InvalidIntervalError);
+    });
+
+    it('integrates accelerationIntervals into stitchVideoAndAudio FFmpeg command', async () => {
+      let capturedArgs: string[] = [];
+      const mockRunner = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args.includes('-version')) {
+          return { code: 0, stdout: 'ffmpeg version 6.0', stderr: '' };
+        }
+        capturedArgs = args;
+        return { code: 0, stdout: '', stderr: '' };
+      });
+
+      await stitchVideoAndAudio({
+        videoPath: '/tmp/input.webm',
+        accelerationIntervals: [{ startSec: 10, endSec: 30, speedFactor: 4 }],
+        outputPath: '/tmp/output.mp4',
+        runner: mockRunner,
+      });
+
+      expect(capturedArgs).toContain('-filter_complex');
+      const fcIdx = capturedArgs.indexOf('-filter_complex');
+      const filterGraph = capturedArgs[fcIdx + 1];
+      expect(filterGraph).toContain('trim=start=0:end=10');
+      expect(filterGraph).toContain('setpts=0.25*(PTS-STARTPTS)');
+      expect(filterGraph).toContain('concat=n=3');
+      expect(filterGraph).toContain('[vaccel]');
+      expect(capturedArgs).toContain('-map');
+      expect(capturedArgs).toContain('[vaccel]');
+    });
+
+    it('pipes [vaccel] into subtitles filter when both acceleration and subtitles are configured', async () => {
+      let capturedArgs: string[] = [];
+      const mockRunner = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args.includes('-version')) {
+          return { code: 0, stdout: 'ffmpeg version 6.0', stderr: '' };
+        }
+        capturedArgs = args;
+        return { code: 0, stdout: '', stderr: '' };
+      });
+
+      await stitchVideoAndAudio({
+        videoPath: '/tmp/input.webm',
+        subtitlesPath: dummySubtitles,
+        accelerationIntervals: [{ startSec: 5, endSec: 15, speedFactor: 3 }],
+        outputPath: '/tmp/output.mp4',
+        runner: mockRunner,
+      });
+
+      expect(capturedArgs).toContain('-filter_complex');
+      const fcIdx = capturedArgs.indexOf('-filter_complex');
+      const filterGraph = capturedArgs[fcIdx + 1];
+      expect(filterGraph).toContain('[vaccel]');
+      expect(filterGraph).toContain('subtitles=');
+      expect(capturedArgs).toContain('-map');
+      expect(capturedArgs).toContain('[vsub]');
     });
   });
 });
