@@ -260,5 +260,136 @@ describe('videoTts', () => {
         expect(log).not.toContain('1234567812345678');
       }
     });
+
+    it('caches synthesized audio on disk and avoids redundant network calls', async () => {
+      const fs = await import('node:fs');
+      const os = await import('node:os');
+      const path = await import('node:path');
+      const tempCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-test-tts-cache-'));
+
+      try {
+        const apiKey = 'AIzaSyTestKey';
+        const fakePcmBase64 = Buffer.alloc(48000, 0x11).toString('base64');
+        const mockFetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue({
+            candidates: [
+              {
+                content: {
+                  parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: fakePcmBase64 } }],
+                },
+              },
+            ],
+          }),
+        });
+
+        // First call hits network
+        const res1 = await synthesizeSpeech('Cache test text', {
+          apiKey,
+          fetchFn: mockFetch,
+          cacheDir: tempCacheDir,
+        });
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(res1.durationSeconds).toBe(1.0);
+
+        // Second call with identical text reads from disk cache
+        const res2 = await synthesizeSpeech('Cache test text', {
+          apiKey,
+          fetchFn: mockFetch,
+          cacheDir: tempCacheDir,
+        });
+        expect(mockFetch).toHaveBeenCalledTimes(1); // not called again!
+        expect(res2.durationSeconds).toBe(1.0);
+        expect(res2.pcmBuffer.equals(res1.pcmBuffer)).toBe(true);
+      } finally {
+        fs.rmSync(tempCacheDir, { recursive: true, force: true });
+      }
+    });
+
+    it('retries on HTTP 429 when retryDelay is specified before succeeding', async () => {
+      const apiKey = 'AIzaSyTestKey';
+      const fakePcmBase64 = Buffer.alloc(48000, 0x22).toString('base64');
+      let callCount = 0;
+      const sleepMock = vi.fn().mockResolvedValue(undefined);
+
+      const mockFetch = vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {
+            ok: false,
+            status: 429,
+            statusText: 'Too Many Requests',
+            text: async () => JSON.stringify({
+              error: {
+                code: 429,
+                message: 'Quota exceeded',
+                details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1s' }],
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: fakePcmBase64 } }],
+                },
+              },
+            ],
+          }),
+        };
+      });
+
+      const res = await synthesizeSpeech('Retry 429 test', {
+        apiKey,
+        fetchFn: mockFetch,
+        cacheDir: null,
+        maxRetries: 2,
+        sleepFn: sleepMock,
+      });
+
+      expect(callCount).toBe(2);
+      expect(sleepMock).toHaveBeenCalledWith(1000);
+      expect(res.durationSeconds).toBe(1.0);
+    });
+  });
+
+  describe('combineSynthesizeResults', () => {
+    it('returns empty audio and zero duration for empty input array', async () => {
+      const { combineSynthesizeResults } = await import('../scripts/video/tts');
+      const combined = combineSynthesizeResults([]);
+      expect(combined.durationSeconds).toBe(0);
+      expect(combined.pcmBuffer.length).toBe(0);
+      expect(combined.wavBuffer.length).toBe(44); // just header
+    });
+
+    it('sequentially combines multiple SynthesizeResults summing durations and concatenating PCM', async () => {
+      const { combineSynthesizeResults } = await import('../scripts/video/tts');
+      const pcm1 = Buffer.alloc(48000, 1); // 1.0s
+      const pcm2 = Buffer.alloc(24000, 2); // 0.5s
+      const pcm3 = Buffer.alloc(72000, 3); // 1.5s
+
+      const r1 = { pcmBuffer: pcm1, wavBuffer: pcmToWav(pcm1), durationSeconds: 1.0 };
+      const r2 = { pcmBuffer: pcm2, wavBuffer: pcmToWav(pcm2), durationSeconds: 0.5 };
+      const r3 = { pcmBuffer: pcm3, wavBuffer: pcmToWav(pcm3), durationSeconds: 1.5 };
+
+      const combined = combineSynthesizeResults([r1, r2, r3]);
+      expect(combined.durationSeconds).toBe(3.0);
+      expect(combined.pcmBuffer.length).toBe(144000);
+      expect(combined.wavBuffer.length).toBe(44 + 144000);
+
+      // Verify sequential byte content
+      expect(combined.pcmBuffer[0]).toBe(1);
+      expect(combined.pcmBuffer[47999]).toBe(1);
+      expect(combined.pcmBuffer[48000]).toBe(2);
+      expect(combined.pcmBuffer[71999]).toBe(2);
+      expect(combined.pcmBuffer[72000]).toBe(3);
+      expect(combined.pcmBuffer[143999]).toBe(3);
+    });
   });
 });
+

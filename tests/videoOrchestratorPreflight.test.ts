@@ -334,6 +334,31 @@ describe('videoOrchestratorPreflight', () => {
         expect(narration.trim().length).toBeGreaterThan(20);
       }
     });
+
+    it('exports well-formed segmented scripts for Scenes 1, 2, and 3', async () => {
+      const {
+        SCENE_1_SEGMENTS,
+        SCENE_2_SEGMENTS,
+        SCENE_3_SEGMENTS,
+        SCENE_NARRATIONS,
+      } = await import('../scripts/generate-demo-video');
+
+      expect(SCENE_1_SEGMENTS.map((s) => s.key)).toEqual(['welcome', 'sidebar', 'profile']);
+      expect(SCENE_2_SEGMENTS.map((s) => s.key)).toEqual([
+        'intro',
+        'server',
+        'models',
+        'agents',
+        'webSearch',
+        'appearance',
+        'advanced',
+      ]);
+      expect(SCENE_3_SEGMENTS.map((s) => s.key)).toEqual(['newConv', 'playbooks', 'composer']);
+
+      expect(SCENE_NARRATIONS[0]).toBe(SCENE_1_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[1]).toBe(SCENE_2_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[2]).toBe(SCENE_3_SEGMENTS.map((s) => s.narration).join(' '));
+    });
   });
 });
 
