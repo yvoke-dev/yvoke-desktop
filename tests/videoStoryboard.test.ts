@@ -88,6 +88,34 @@ describe('videoStoryboard', () => {
       }
       expect(expectedStart).toBe(240); // 4 minutes
     });
+
+    it('defines rich subBeats for every single beat', () => {
+      for (const beat of STORYBOARD_BEATS) {
+        expect(beat.subBeats).toBeDefined();
+        expect(beat.subBeats!.length).toBeGreaterThanOrEqual(3);
+        for (const sub of beat.subBeats!) {
+          expect(sub.subId).toMatch(new RegExp(`^${beat.id}\\.\\d+$`));
+          expect(sub.narration.length).toBeGreaterThan(0);
+          expect(sub.visualAction.length).toBeGreaterThan(0);
+          expect(sub.uiTarget).toBeDefined();
+          expect(sub.visualState).toBeDefined();
+        }
+      }
+    });
+
+    it('ensures subBeats form a continuous timeline spanning the entire beat', () => {
+      for (const beat of STORYBOARD_BEATS) {
+        const beatRange = parseTimeRange(beat.timeRange);
+        let currentSec = beatRange.startSec;
+        for (const sub of beat.subBeats!) {
+          const subRange = parseTimeRange(sub.timeRange);
+          expect(subRange.startSec).toBe(currentSec);
+          expect(subRange.endSec).toBeGreaterThan(subRange.startSec);
+          currentSec = subRange.endSec;
+        }
+        expect(currentSec).toBe(beatRange.endSec);
+      }
+    });
   });
 
   describe('parseTimeRange', () => {
@@ -135,6 +163,21 @@ describe('videoStoryboard', () => {
         expect(md).toContain(beat.timeRange);
         expect(md).toContain(beat.id);
         expect(md).toContain(beat.execution);
+      }
+    });
+
+    it('renders the detailed planned storyboard breakdown section', () => {
+      const md = renderStoryboardMarkdown(STORYBOARD_BEATS);
+      expect(md).toContain('## Detailed Planned Storyboard Breakdown');
+      expect(md).toContain(
+        '| Sub-Beat Range | Spoken Narration Segment | Visual UI Action | UI Target Selector | Visual State |',
+      );
+      for (const beat of STORYBOARD_BEATS) {
+        expect(md).toContain(`### ${beat.id.toUpperCase()}: ${beat.title}`);
+        for (const sub of beat.subBeats!) {
+          expect(md).toContain(sub.timeRange);
+          expect(md).toContain(sub.narration);
+        }
       }
     });
   });
