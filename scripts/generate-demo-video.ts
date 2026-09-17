@@ -17,6 +17,13 @@
  * 6. Video stitching with sidechain audio ducking and ambient background music.
  * 7. Resilient teardown with 5s SIGKILL fallback and signal traps.
  */
+if (typeof process.loadEnvFile === 'function') {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // .env not present or unreadable
+  }
+}
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,7 +40,6 @@ import {
   showPresentationSlide,
   unmountPresentationOverlay,
 } from './video/presentation';
-import { focusOnElement, resetFocus } from './video/camera';
 import { injectDemoCursor, glideMouse } from './video/cursor';
 import {
   stitchVideoAndAudio,
@@ -130,7 +136,7 @@ export const SCENE_2_SEGMENTS: { key: string; narration: string }[] = [
   },
   {
     key: 'server',
-    narration: 'Under Server, configure backend endpoints and knowledge tools.',
+    narration: 'Under Server, configure backend endpoints, transport, and authentication.',
   },
   {
     key: 'models',
@@ -138,11 +144,11 @@ export const SCENE_2_SEGMENTS: { key: string; narration: string }[] = [
   },
   {
     key: 'agents',
-    narration: 'Agents configures multi-agent roles, turns, and review thresholds.',
+    narration: 'Agents configures multi-agent roles, turns, and automatic playbook validation.',
   },
   {
     key: 'webSearch',
-    narration: 'Web Search manages domain allowlists,',
+    narration: 'Web Search manages enterprise domain allowlists,',
   },
   {
     key: 'appearance',
@@ -150,7 +156,7 @@ export const SCENE_2_SEGMENTS: { key: string; narration: string }[] = [
   },
   {
     key: 'advanced',
-    narration: 'and Advanced toggles automatic playbook validation.',
+    narration: 'while Advanced and About display identity registration and version details.',
   },
 ];
 
@@ -216,11 +222,15 @@ export async function runPreflight(options: DemoOptions): Promise<void> {
   }
 }
 
-export function seedUserData(backendUrl = 'http://localhost:8080'): string {
+export function seedUserData(
+  backendUrl = 'http://localhost:8080',
+  options?: { cloneRealThreads?: boolean },
+): string {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-demo-video-'));
 
-  // 1. Settings with full orchestrator, dev auth, and appearance profiles
+  // 1. Settings strictly configured for local dev environment (Streamable HTTP + Dev token)
   const settings = {
+    settingsVersion: 1,
     serverAuthMode: 'dev',
     authMode: 'dev',
     serverBaseUrl: backendUrl,
@@ -229,7 +239,8 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     defaultModel: 'sonnet',
     defaultThinkingLevel: 'medium',
     playbookValidationEnabled: true,
-    showPrototypePlaybooks: true,
+    showPrototypePlaybooks: false,
+    imageDescriptionsEnabled: true,
     webSearch: {
       enabled: true,
       allowedDomains: ['support.oneidentity.com', 'www.oneidentity.com/community/'],
@@ -266,7 +277,29 @@ export function seedUserData(backendUrl = 'http://localhost:8080'): string {
     'utf8',
   );
 
-  // 2. Pre-seed background threads
+  // 2. Thread history: optionally clone real past conversation threads
+  const realDir = path.join(
+    process.env.HOME || os.homedir(),
+    'Library/Application Support/Yvoke - Desktop',
+  );
+  if (options?.cloneRealThreads && fs.existsSync(realDir)) {
+    try {
+      const searchIndex = path.join(realDir, 'search-index.json');
+      if (fs.existsSync(searchIndex)) {
+        fs.copyFileSync(searchIndex, path.join(userDataDir, 'search-index.json'));
+      }
+
+      const threadsDir = path.join(realDir, 'threads');
+      if (fs.existsSync(threadsDir)) {
+        fs.cpSync(threadsDir, path.join(userDataDir, 'threads'), { recursive: true });
+        return userDataDir;
+      }
+    } catch (e) {
+      console.warn('Could not copy real user threads, falling back to synthetic:', e);
+    }
+  }
+
+  // 3. Fallback: Pre-seed background threads if no real threads were cloned
   const threadsDir = path.join(userDataDir, 'threads');
   fs.mkdirSync(threadsDir, { recursive: true });
 
@@ -487,7 +520,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
   // Seed temp directory
   console.log('\n[2/4] Initializing isolated profile environment...');
-  const userDataDir = seedUserData(options.backendUrl);
+  const userDataDir = seedUserData(options.backendUrl, { cloneRealThreads: true });
   const recordingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-recordings-'));
 
   let electronApp: ElectronApplication | null = null;
@@ -553,31 +586,9 @@ export async function runDemoVideoGenerator(): Promise<void> {
     await appPage.waitForLoadState('domcontentloaded');
     await appPage.waitForTimeout(600);
 
-    // Safeguard browser context against esbuild/tsx __name injection & provide fallback prompts
+    // Safeguard browser context against esbuild/tsx __name injection
     await appPage.addInitScript(`
       window.__name = window.__name || function(t) { return t; };
-      if (window.api) {
-        const origListProfiles = window.api.listOrchestratorProfiles;
-        window.api.listOrchestratorProfiles = async () => {
-          try {
-            const res = await origListProfiles();
-            if (res && res.length > 0) return res;
-          } catch {}
-          return [{ name: 'oim-mas', description: 'OIM Multi-Agent System' }];
-        };
-        const origListPrompts = window.api.listPrompts;
-        window.api.listPrompts = async () => {
-          try {
-            const res = await origListPrompts();
-            if (res && res.length > 0) return res;
-          } catch {}
-          return [
-            { name: 'oim-getting-started', title: 'oim-getting-started', description: 'Getting Started' },
-            { name: 'oim-db-history', title: 'oim-db-history', description: 'Database History' },
-            { name: 'oim-full', title: 'oim-full', description: 'Full OIM Corpus' }
-          ];
-        };
-      }
     `);
     await appPage.evaluate('window.__name = window.__name || function(t) { return t; };');
 
@@ -626,8 +637,13 @@ export async function runDemoVideoGenerator(): Promise<void> {
       }
     };
 
-    const selectSidebarThread = async (text: string): Promise<void> => {
-      const thread = appPage.locator('.thread-item').filter({ hasText: text }).first();
+    const selectSidebarThread = async (text?: string): Promise<void> => {
+      let thread = text
+        ? appPage.locator('.thread-item').filter({ hasText: text }).first()
+        : appPage.locator('.thread-item').first();
+      if ((await thread.count()) === 0) {
+        thread = appPage.locator('.thread-item').first();
+      }
       if ((await thread.count()) > 0) {
         if (!(await thread.isVisible())) {
           const shutGroups = appPage.locator('.thread-group-label[aria-expanded="false"]');
@@ -642,7 +658,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
     };
 
     // Pre-select the first conversation so the video opens showing the live, rich AI assistant workspace
-    await selectSidebarThread('Identity Manager 9.3');
+    await selectSidebarThread();
     await appPage.waitForTimeout(600);
 
     // =========================================================================
@@ -651,7 +667,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
     await runSceneWithPadding(0, 'App & Sidebar Overview', async () => {
       // 1. Welcome - Show active live desktop app
       await runSegment(scene1SegmentAudios, 'welcome', 4.0, async () => {
-        // App is already displaying POLPlaybook Introduction History with full chat view!
+        // App is already displaying an active conversation with full chat view!
         // Smoothly glide mouse across active message response and trace bar
         const traceBar = appPage.locator('.trace-bar, .message').first();
         if ((await traceBar.count()) > 0) {
@@ -661,12 +677,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
       // 2. Sidebar & Threads & Search
       await runSegment(scene1SegmentAudios, 'sidebar', 6.5, async () => {
-        // Focus on the sidebar
-        const sidebar = appPage.locator('aside.thread-list').first();
-        if ((await sidebar.count()) > 0) {
-          await focusOnElement(appPage, sidebar, { zoomFactor: 1.05, durationMs: 400 });
-        }
-
         // Hover over the header app title "YVOKE"
         const appTitle = appPage.locator('.thread-list-header .app-title').first();
         if ((await appTitle.count()) > 0) {
@@ -689,7 +699,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
           .first();
         if ((await searchInput.count()) > 0) {
           await glideMouse(appPage, searchInput, 20, { click: true, delayMs: 200 });
-          await searchInput.fill('Identity');
+          await searchInput.fill('template');
           await appPage.waitForTimeout(600);
           const searchClear = appPage.locator('.search-clear').first();
           if ((await searchClear.count()) > 0) {
@@ -703,9 +713,16 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
       // 3. Profile & Settings
       await runSegment(scene1SegmentAudios, 'profile', 5.0, async () => {
-        const accountChip = appPage.locator('.thread-list-footer .account-chip').first();
+        const accountChip = appPage.locator('.thread-list-footer .account-chip, .account-mode').first();
         if ((await accountChip.count()) > 0) {
           await glideMouse(appPage, accountChip, 20, { delayMs: 400 });
+        }
+
+        const logoutBtn = appPage
+          .locator('button[data-tip*="Sign out"], .footer-actions button')
+          .first();
+        if ((await logoutBtn.count()) > 0) {
+          await glideMouse(appPage, logoutBtn, 20, { delayMs: 350 });
         }
 
         const settingsBtn = appPage
@@ -714,8 +731,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
         if ((await settingsBtn.count()) > 0) {
           await glideMouse(appPage, settingsBtn, 20, { delayMs: 400 });
         }
-
-        await resetFocus(appPage, { durationMs: 350 });
       });
     });
 
@@ -753,13 +768,9 @@ export async function runDemoVideoGenerator(): Promise<void> {
           .locator('.settings-view')
           .waitFor({ state: 'visible', timeout: 3000 })
           .catch(() => {});
-        const settingsView = appPage.locator('.settings-view').first();
-        if ((await settingsView.count()) > 0) {
-          await focusOnElement(appPage, settingsView, { zoomFactor: 1.05, durationMs: 400 });
-        }
       });
 
-      // 2. Server: "Under Server, configure backend endpoints and knowledge tools."
+      // 2. Server: "Under Server, configure backend endpoints, transport, and authentication."
       await runSegment(scene2SegmentAudios, 'server', 3.5, async () => {
         await visitPane('Server', '.settings-field input');
       });
@@ -769,25 +780,27 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await visitPane('Models', '.chip-list, .seg');
       });
 
-      // 4. Agents: "Agents configures multi-agent roles, turns, and review thresholds."
+      // 4. Agents: "Agents configures multi-agent roles, turns, and automatic playbook validation."
       await runSegment(scene2SegmentAudios, 'agents', 4.0, async () => {
-        await visitPane('Agents', '.role-card, .cap-field');
+        await visitPane('Agents', '.check-field input, .role-card');
       });
 
-      // 5. Web search: "Web Search manages domain allowlists,"
+      // 5. Web search: "Web Search manages enterprise domain allowlists,"
       await runSegment(scene2SegmentAudios, 'webSearch', 2.8, async () => {
         await visitPane('Web search', '.domain-row, .settings-field');
       });
 
       // 6. Appearance: "Appearance customizes themes and density,"
       await runSegment(scene2SegmentAudios, 'appearance', 2.8, async () => {
-        await visitPane('Appearance', '.theme-choice, .density-choice');
+        await visitPane('Appearance', '.theme-choices, .density-choice');
       });
 
-      // 7. Advanced: "and Advanced toggles automatic playbook validation."
+      // 7. Advanced: "while Advanced and About display identity registration and version details."
       await runSegment(scene2SegmentAudios, 'advanced', 3.5, async () => {
-        await visitPane('Advanced', '.toggle-row, .settings-field');
-        await resetFocus(appPage, { durationMs: 350 });
+        await visitPane('Advanced', '.settings-field input, .settings-note');
+        await appPage.waitForTimeout(400);
+        await visitPane('About', '.about-version-row');
+        await appPage.waitForTimeout(400);
 
         // Close Settings
         const cancelBtn = appPage
@@ -821,7 +834,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
       await runSegment(scene3SegmentAudios, 'playbooks', 6.0, async () => {
         const picker = appPage.locator('.picker, .picker-list').first();
         if ((await picker.count()) > 0) {
-          await focusOnElement(appPage, picker, { zoomFactor: 1.1, durationMs: 400 });
           const filterInput = appPage.locator('.picker-filter input').first();
           if ((await filterInput.count()) > 0) {
             await glideMouse(appPage, filterInput, 20, { delayMs: 250 });
@@ -835,15 +847,12 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
           }
         }
-        await resetFocus(appPage, { durationMs: 300 });
       });
 
       // 3. Composer
       await runSegment(scene3SegmentAudios, 'composer', 8.0, async () => {
         const composer = appPage.locator('.composer').first();
         if ((await composer.count()) > 0) {
-          await focusOnElement(appPage, composer, { zoomFactor: 1.2, durationMs: 400 });
-
           const textarea = appPage.locator('.composer textarea').first();
           if ((await textarea.count()) > 0) {
             await glideMouse(appPage, textarea, 20, { delayMs: 300 });
@@ -878,8 +887,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
             await glideMouse(appPage, sendBtn, 20, { delayMs: 400 });
           }
         }
-
-        await resetFocus(appPage, { durationMs: 400 });
       });
     });
 
@@ -952,7 +959,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
         const activeCard = appPage
           .locator('.preflight-card, #demo-preflight-recommendation')
           .first();
-        await focusOnElement(appPage, activeCard, { zoomFactor: 1.15, durationMs: 300 });
         const switchBtn = activeCard.locator('.demo-switch-btn, button.primary').first();
         if ((await switchBtn.count()) > 0) {
           await glideMouse(appPage, switchBtn, 20, { click: true, delayMs: 250 });
@@ -960,7 +966,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await appPage.evaluate(() =>
           document.getElementById('demo-preflight-recommendation')?.remove(),
         );
-        await resetFocus(appPage, { durationMs: 250 });
       }
 
       // 5. Wait for turn completion
@@ -1019,9 +1024,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
       const msgs = appPage.locator('.message');
       if ((await msgs.count()) > 0) {
         const lastMsg = msgs.last();
-        await focusOnElement(appPage, lastMsg, { zoomFactor: 1.08, durationMs: 300 });
         await glideMouse(appPage, lastMsg, 20, { delayMs: 400 });
-        await resetFocus(appPage, { durationMs: 300 });
       }
       await appPage.waitForTimeout(600);
     });
@@ -1047,7 +1050,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
         .first();
       try {
         await clarifCard.waitFor({ state: 'visible', timeout: 8000 });
-        await focusOnElement(appPage, clarifCard, { zoomFactor: 1.15, durationMs: 300 });
         const optBtn = clarifCard
           .locator('button, .clarifying-option')
           .filter({ hasText: /Identity/i })
@@ -1055,7 +1057,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
         if ((await optBtn.count()) > 0) {
           await glideMouse(appPage, optBtn, 20, { click: true, delayMs: 250 });
         }
-        await resetFocus(appPage, { durationMs: 250 });
       } catch {
         // Model answered directly without clarification
       }

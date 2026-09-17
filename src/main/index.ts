@@ -225,9 +225,34 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
     return next;
   });
 
-  const updateService = new UpdateService(() => app.getVersion());
+  const getAppVersion = (): string => {
+    const electronVersion = app.getVersion();
+    if (!app.isPackaged || electronVersion === process.versions.electron || electronVersion.startsWith('42.')) {
+      const candidates = [
+        path.resolve(__dirname, '../../package.json'),
+        path.resolve(app.getAppPath(), '../../package.json'),
+        path.resolve(process.cwd(), 'package.json'),
+        path.join(app.getAppPath(), 'package.json'),
+      ];
+      for (const pjPath of candidates) {
+        try {
+          if (fs.existsSync(pjPath)) {
+            const meta = JSON.parse(fs.readFileSync(pjPath, 'utf8'));
+            if (meta.name === 'yvoke-desktop' && typeof meta.version === 'string') {
+              return meta.version;
+            }
+          }
+        } catch {
+          // Check next candidate
+        }
+      }
+    }
+    return electronVersion;
+  };
 
-  handle(IpcChannels.appVersion, () => app.getVersion());
+  const updateService = new UpdateService(getAppVersion);
+
+  handle(IpcChannels.appVersion, () => getAppVersion());
   handle(IpcChannels.appCheckUpdate, () => updateService.checkForUpdates());
 
   handle(IpcChannels.promptsList, () => appCore.listPrompts());
