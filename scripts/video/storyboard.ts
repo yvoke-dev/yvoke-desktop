@@ -79,9 +79,9 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
     timeRange: '00:20 -> 00:48',
     title: 'Settings Walkthrough',
     narration:
-      'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints and knowledge tools. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and review thresholds. Web Search manages domain allowlists, Appearance customizes themes and density, and Advanced toggles automatic playbook validation.',
+      'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints, transport, and authentication. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and automatic playbook validation. Web Search manages enterprise domain allowlists, Appearance customizes themes and density, while Advanced and About display identity registration and version details.',
     visualAction:
-      'Click Settings gear icon, systematically tab through navigation sections (Server, Models, Agents, Web Search, Appearance, Advanced) highlighting critical configuration controls, return to main chat view.',
+      'Click Settings gear icon, systematically tab through navigation sections (Server, Models, Agents, Web Search, Appearance, Advanced, About) highlighting critical configuration controls, return to main chat view.',
     execution: 'real_app_ui',
   },
   {
