@@ -458,9 +458,14 @@ export class AppCore {
         });
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
+      // Demo-prefixed threads (used in test/demo recordings) are kept local and immune to server prune.
       const serverIds = new Set(conversations.map((c) => c.id));
       for (const local of this.threads.list()) {
-        if (!serverIds.has(local.id) && this.syncQueue.pendingCount(local.id) === 0) {
+        if (
+          !local.id.startsWith('demo-') &&
+          !serverIds.has(local.id) &&
+          this.syncQueue.pendingCount(local.id) === 0
+        ) {
           this.threads.delete(local.id);
         }
       }
