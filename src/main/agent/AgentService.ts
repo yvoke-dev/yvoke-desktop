@@ -427,7 +427,25 @@ export class AgentService {
     let q: Query | undefined;
     try {
       q = query({ prompt: 'ping', options });
-      await readSingleReply(q, 'login check');
+      const reply = await readSingleReply(q, 'login check');
+      if (/rate limit|allowance|usage limit|\b429\b/i.test(reply)) {
+        return {
+          status: 'rate_limited',
+          message: 'Claude subscription allowance or rate limit reached.',
+        };
+      }
+      if (isAuthError(reply)) {
+        return {
+          status: 'expired',
+          message: 'Session expired or not logged in. Run claude /login in a terminal.',
+        };
+      }
+      if (!reply.toLowerCase().includes('pong')) {
+        return {
+          status: 'error',
+          message: `Claude verification failed: unexpected reply: ${reply.slice(0, 100).trim()}`,
+        };
+      }
       return { status: 'ok', account: detectClaudeAccount() };
     } catch (err) {
       if (abortController.signal.aborted || err instanceof AbortError) {

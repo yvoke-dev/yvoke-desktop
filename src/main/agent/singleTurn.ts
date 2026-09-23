@@ -30,8 +30,12 @@ export class NoReplyError extends Error {
 export async function readSingleReply(q: Query, what: string): Promise<string> {
   for await (const message of q) {
     if (message.type !== 'result') continue;
-    if (message.subtype !== 'success') {
-      throw new Error(message.errors.join('; ') || message.subtype);
+    if (message.is_error || message.subtype !== 'success') {
+      const errDetail =
+        message.subtype === 'success'
+          ? (message.result?.trim() || 'Claude Code returned an error result')
+          : (message.errors?.filter(Boolean).join('; ') || message.subtype);
+      throw new Error(errDetail);
     }
     return message.result ?? '';
   }

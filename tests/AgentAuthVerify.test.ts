@@ -153,6 +153,98 @@ describe('AgentService.verifyClaudeCredentials', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('handles real SDK unauthenticated result (subtype success with is_error true) as expired', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: 'Not logged in · Please run /login',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('rejects unexpected model prose not containing pong as error', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'I am ready to help you with coding.',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'error',
+      message: 'Claude verification failed: unexpected reply: I am ready to help you with coding.',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('handles prose auth error without is_error flag as expired', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Invalid API key or authentication required: please run claude /login',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('handles prose rate limit without is_error flag as rate_limited', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '429 rate limit exceeded or usage limit reached',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'rate_limited',
+      message: 'Claude subscription allowance or rate limit reached.',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
   it('handles rate limit error properly', async () => {
     mockDetectCredentials.mockReturnValue('ok');
     const { iterator, close } = createFakeQuery({
