@@ -131,6 +131,7 @@ server.
   once on a fresh connection; establishing that connection has no ceiling of its own.
 - **Three conversations stay warm, softly.** Sending in a fourth closes the least recently used *idle*
   one — but if all three are mid-answer, nothing is evicted and a fourth session starts anyway.
+- **Mid-turn token expiry is unhandled.** MCP authentication headers are updated when a turn starts, not during tool execution. An exceptionally long turn or multi-stage review round exceeding the token's remaining buffer can lose knowledge-base access mid-answer.
 - **A turn that crashes leaves its runtime process behind.** The session is dropped without being shut
   down; only a clean close reclaims it.
 - **The calculator is arithmetic only** — a fixed list of functions and constants, expressions up to

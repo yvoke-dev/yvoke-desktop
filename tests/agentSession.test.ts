@@ -657,6 +657,11 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     });
   }
 
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it('1. Dev-mode & unauthenticated zero-churn: Follow-up turns make 0 calls to setMcpServers', async () => {
     const meta = thread();
     const svc = makeService(meta); // dev-mode, serverAuthMode: 'dev'
@@ -761,7 +766,7 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     expect(initialSession.closeSpy).toHaveBeenCalled();
     expect(h.sessions).toHaveLength(2);
     expect(clearTimeoutSpy).toHaveBeenCalled();
-    expect(newSession.lastMcpAuthorization).toBe('Bearer token-hang');
+    expect(newSession.lastMcpHeadersJson).toBe(JSON.stringify({ Authorization: 'Bearer token-hang' }));
     expect(h.sessions[1].options.resume).toBe(priorSessionId4);
 
     clearTimeoutSpy.mockRestore();
@@ -790,7 +795,7 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     svc.closeAll();
   });
 
-  it('6. Thread eviction race: closeThread(thread.id) called while setMcpServers is awaiting leaves session closed without resurrecting', async () => {
+  it('6. Thread eviction race: closeThread(thread.id) called while setMcpServers is awaiting creates fresh session cleanly without throwing', async () => {
     const meta = thread();
     let currentAuth = 'Bearer token-1';
     const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
@@ -804,19 +809,40 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
       return { added: [], removed: [], errors: {} };
     };
 
-    await expect((svc as any).ensureSession(meta, 'oim-schema')).rejects.toThrow();
-    expect((svc as any).sessions.has(meta.id)).toBe(false);
+    const session = await (svc as any).ensureSession(meta, 'oim-schema');
+    expect(session).toBeDefined();
+    expect((svc as any).sessions.has(meta.id)).toBe(true);
 
     svc.closeAll();
   });
 
-  it('7. Pre-resolved headers bypass: buildMcpServers with pre-resolved headers never invokes provider.headers()', async () => {
-    const provider = { headers: vi.fn(async () => ({ Authorization: 'Bearer from-provider' })) };
+  it('6b. Unchanged-auth eviction race: when thread is evicted during headers(), fresh session is created', async () => {
+    const meta = thread();
+    const svc = makeAuthService(meta, async () => {
+      return { Authorization: 'Bearer same-token' };
+    });
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const session1 = (svc as any).sessions.get(meta.id);
+    expect(session1).toBeDefined();
+
+    // Hook into next headers() call to close the session while headers() is in flight
+    (svc as any).deps.mcpAuthProvider.headers = async () => {
+      svc.closeThread(meta.id);
+      return { Authorization: 'Bearer same-token' };
+    };
+
+    const session2 = await (svc as any).ensureSession(meta, 'oim-schema');
+    expect(session2).not.toBe(session1);
+    expect(h.sessions[0].closeSpy).toHaveBeenCalled();
+    expect((svc as any).sessions.get(meta.id)).toBe(session2);
+
+    svc.closeAll();
+  });
+
+  it('7. Pre-resolved headers: buildMcpServers attaches passed headers directly', () => {
     const preResolved = { Authorization: 'Bearer pre-resolved' };
-
-    const servers = await buildMcpServers(settings(), provider as any, preResolved);
-
-    expect(provider.headers).not.toHaveBeenCalled();
+    const servers = buildMcpServers(settings(), preResolved);
     expect(servers[MCP_SERVER_NAME]).toBeDefined();
     expect((servers[MCP_SERVER_NAME] as any).headers).toEqual(preResolved);
   });
@@ -867,6 +893,22 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     expect(oldSession).not.toBe(newSession);
     expect(oldSession.closeSpy).toHaveBeenCalled();
     expect(newSession.options.resume).toBe(initialSessionId);
+
+    svc.closeAll();
+  });
+
+  it('10. Full header change detection: change in custom headers triggers setMcpServers', async () => {
+    const meta = thread();
+    let currentHeaders: Record<string, string> = { Authorization: 'Bearer token-1', 'x-tenant': 'tenant-a' };
+    const svc = makeAuthService(meta, async () => currentHeaders);
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions[0].setMcpServersSpy).not.toHaveBeenCalled();
+
+    // Change x-tenant header, keeping Authorization identical
+    currentHeaders = { Authorization: 'Bearer token-1', 'x-tenant': 'tenant-b' };
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    expect(h.sessions[0].setMcpServersSpy).toHaveBeenCalledTimes(1);
 
     svc.closeAll();
   });

@@ -203,8 +203,8 @@ interface ThreadSession {
   pendingUser?: ChatMessage;
   /** The playbook whose instructions are in this session's context, if any. */
   injectedPlaybook?: string;
-  /** Last resolved Authorization header value attached to MCP connection. */
-  lastMcpAuthorization?: string;
+  /** Last resolved MCP headers serialized to JSON for change detection. */
+  lastMcpHeadersJson?: string;
 }
 
 export interface AgentServiceDeps {
@@ -483,12 +483,17 @@ export class AgentService {
       } else {
         const headers = await this.deps.mcpAuthProvider.headers();
         resolvedHeaders = headers;
-        const hasAuthChanged = (headers.Authorization ?? '') !== (existing.lastMcpAuthorization ?? '');
+        const headersJson = JSON.stringify(headers);
+        const hasAuthChanged =
+          existing.lastMcpHeadersJson !== undefined
+            ? headersJson !== existing.lastMcpHeadersJson
+            : Object.keys(headers).length > 0;
+        let updateFailed = false;
+        let updateError: unknown = null;
+
         if (hasAuthChanged) {
-          let updateFailed = false;
-          let updateError: unknown = null;
           try {
-            const mcpServers = await buildMcpServers(this.deps.getSettings(), this.deps.mcpAuthProvider, headers);
+            const mcpServers = buildMcpServers(this.deps.getSettings(), headers);
             let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutPromise = new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
@@ -496,9 +501,11 @@ export class AgentService {
               }, 10_000);
             });
             try {
-              const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
-              if (result?.errors && result.errors[MCP_SERVER_NAME]) {
-                throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
+              if (typeof existing.query.setMcpServers === 'function') {
+                const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
+                if (result?.errors && result.errors[MCP_SERVER_NAME]) {
+                  throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
+                }
               }
             } finally {
               if (timer) clearTimeout(timer);
@@ -507,28 +514,27 @@ export class AgentService {
             updateFailed = true;
             updateError = err;
           }
+        }
 
-          // Ghost Session Guard: If this.sessions.get(thread.id) !== existing after the check, do not re-insert or resume.
-          if (this.sessions.get(thread.id) !== existing) {
-            log('agent', `Session for thread=${thread.id} was closed or replaced during MCP update; skipping resume`);
-            throw new Error(`Session for thread ${thread.id} was closed concurrently.`);
-          }
-
-          if (updateFailed) {
-            log(
-              'agent',
-              `Failed to update MCP servers dynamically for thread=${thread.id}: ${
-                updateError instanceof Error ? updateError.message : 'Update failed'
-              }`,
-            );
-            this.closeThread(thread.id);
-            // Fall through to recreate fresh session resuming thread.sessionId below
-          } else {
-            existing.lastMcpAuthorization = headers.Authorization;
-            existing.lastActiveAt = Date.now();
-            return existing;
-          }
+        // Verify session was not closed or replaced while awaiting headers or setMcpServers
+        const current = this.sessions.get(thread.id);
+        if (current !== existing) {
+          log('agent', `Session for thread=${thread.id} was closed or replaced during MCP check; using active or recreating`);
+          if (current) return current;
+          // Session was closed; fall through to recreate fresh session below
+        } else if (updateFailed) {
+          log(
+            'agent',
+            `Failed to update MCP servers dynamically for thread=${thread.id}: ${
+              updateError instanceof Error ? updateError.message : 'Update failed'
+            }`,
+          );
+          this.closeThread(thread.id);
+          this.deps.mcpAuthProvider.invalidate?.();
+          resolvedHeaders = undefined;
+          // Fall through to recreate fresh session resuming thread.sessionId below
         } else {
+          existing.lastMcpHeadersJson = headersJson;
           existing.lastActiveAt = Date.now();
           return existing;
         }
@@ -647,7 +653,7 @@ export class AgentService {
 
     const options: Options = {
       systemPrompt: orchestrator ? '' : systemPrompt,
-      mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider, resolvedHeaders),
+      mcpServers: buildMcpServers(settings, resolvedHeaders),
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
@@ -692,7 +698,7 @@ export class AgentService {
       lastActiveAt: Date.now(),
       playbookName,
       orchestratorProfile: thread.orchestratorProfile,
-      lastMcpAuthorization: resolvedHeaders.Authorization,
+      lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };
     this.sessions.set(thread.id, session);
     void this.consume(thread.id, session);

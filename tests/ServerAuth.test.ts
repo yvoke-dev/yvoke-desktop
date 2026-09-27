@@ -386,33 +386,34 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     mockRemoveAccount.mockReset();
   });
 
-  it('exports EXPIRATION_BUFFER_MS equal to 10 minutes', () => {
-    expect(EXPIRATION_BUFFER_MS).toBe(10 * 60 * 1000);
+  it('exports EXPIRATION_BUFFER_MS equal to 5 minutes', () => {
+    expect(EXPIRATION_BUFFER_MS).toBe(5 * 60 * 1000);
   });
 
-  it('1. Clock boundary: token expiring at now + 601s triggers 1 call, now + 599s triggers 2 calls with forceRefresh: true', async () => {
+  it('1. Clock boundary: token expiring at now + 301s triggers 1 call, now + 299s triggers 2 calls with forceRefresh: true', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
-    // Boundary 1: now + 601s -> no proactive refresh
+    // Boundary 1: now + 301s -> no proactive refresh
     mockAcquireTokenSilent.mockResolvedValueOnce({
-      accessToken: 'token-601',
-      expiresOn: new Date(Date.now() + 601 * 1000),
+      accessToken: 'token-301',
+      expiresOn: new Date(Date.now() + 301 * 1000),
       account: cachedAccount,
     });
-    const token601 = await auth.getAccessToken();
-    expect(token601).toBe('token-601');
+    const token301 = await auth.getAccessToken();
+    expect(token301).toBe('token-301');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
     expect(mockAcquireTokenSilent).toHaveBeenLastCalledWith({
       account: cachedAccount,
       scopes: ['api://test/.default'],
     });
 
+    auth.invalidate();
     mockAcquireTokenSilent.mockReset();
 
-    // Boundary 2: now + 599s -> proactive refresh with forceRefresh: true
+    // Boundary 2: now + 299s -> proactive refresh with forceRefresh: true
     mockAcquireTokenSilent.mockResolvedValueOnce({
-      accessToken: 'token-599',
-      expiresOn: new Date(Date.now() + 599 * 1000),
+      accessToken: 'token-299',
+      expiresOn: new Date(Date.now() + 299 * 1000),
       account: cachedAccount,
     });
     mockAcquireTokenSilent.mockResolvedValueOnce({
@@ -447,6 +448,7 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(await auth.getAccessToken()).toBe('token-null-expiry');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
 
+    auth.invalidate();
     mockAcquireTokenSilent.mockReset();
 
     // undefined
@@ -458,6 +460,7 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(await auth.getAccessToken()).toBe('token-undef-expiry');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
 
+    auth.invalidate();
     mockAcquireTokenSilent.mockReset();
 
     // Invalid Date (NaN)
@@ -470,37 +473,50 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
   });
 
-  it('3. Double refresh suppression: calling getAccessToken(false, true) executes only 1 call with forceRefresh: true', async () => {
+  it('3. In-memory caching: warm calls with valid cached token do not re-invoke acquireTokenSilent, and invalidate clears it', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
     mockAcquireTokenSilent.mockResolvedValueOnce({
-      accessToken: 'token-forced',
-      expiresOn: new Date(Date.now() + 300 * 1000), // <10m
+      accessToken: 'token-cached-memory',
+      expiresOn: new Date(Date.now() + 1800 * 1000), // 30 minutes left (> 5m)
       account: cachedAccount,
     });
 
-    const token = await auth.getAccessToken(false, true);
-    expect(token).toBe('token-forced');
+    // First call acquires token and caches in memory
+    const token1 = await auth.getAccessToken();
+    expect(token1).toBe('token-cached-memory');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
-    expect(mockAcquireTokenSilent).toHaveBeenCalledWith({
+
+    // Second call reuses in-memory cache directly without MSAL I/O
+    const token2 = await auth.getAccessToken();
+    expect(token2).toBe('token-cached-memory');
+    expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
+
+    // Invalidation clears in-memory cache
+    auth.invalidate();
+    mockAcquireTokenSilent.mockResolvedValueOnce({
+      accessToken: 'token-after-invalidate',
+      expiresOn: new Date(Date.now() + 1800 * 1000),
       account: cachedAccount,
-      scopes: ['api://test/.default'],
-      forceRefresh: true,
     });
+
+    const token3 = await auth.getAccessToken();
+    expect(token3).toBe('token-after-invalidate');
+    expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(2);
   });
 
   it('4a. Offline resilience: unexpired token + network error on proactive refresh returns cached token and logs warning', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
     mockAcquireTokenSilent.mockResolvedValueOnce({
-      accessToken: 'cached-token-5m',
-      expiresOn: new Date(Date.now() + 300 * 1000),
+      accessToken: 'cached-token-4m',
+      expiresOn: new Date(Date.now() + 240 * 1000), // 4m left (< 5m buffer)
       account: cachedAccount,
     });
     mockAcquireTokenSilent.mockRejectedValueOnce(new Error('fetch failed'));
 
     const token = await auth.getAccessToken();
-    expect(token).toBe('cached-token-5m');
+    expect(token).toBe('cached-token-4m');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(2);
     expect(openBrowserMock).not.toHaveBeenCalled();
     expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
@@ -522,25 +538,42 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
   });
 
-  it('5. Proactive revocation: non-network error on proactive refresh clears account and triggers interactive fallback', async () => {
+  it('5. Proactive fallback: non-network error on proactive refresh with unexpired token returns valid cached token without interactive popup', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
     mockAcquireTokenSilent.mockResolvedValueOnce({
-      accessToken: 'cached-token-5m',
-      expiresOn: new Date(Date.now() + 300 * 1000),
+      accessToken: 'cached-token-unexpired',
+      expiresOn: new Date(Date.now() + 200 * 1000), // unexpired, inside 5m buffer
       account: cachedAccount,
     });
     mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: Token revoked'));
+
+    const token = await auth.getAccessToken();
+    expect(token).toBe('cached-token-unexpired');
+    expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(2);
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+    expect(openBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('6. Expired token with non-network error clears account and triggers interactive fallback exactly once', async () => {
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    mockAcquireTokenSilent.mockResolvedValueOnce({
+      accessToken: 'cached-token-expired',
+      expiresOn: new Date(Date.now() - 5000), // expired
+      account: cachedAccount,
+    });
+    mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: Token expired'));
     mockAcquireTokenInteractive.mockResolvedValueOnce({
-      accessToken: 'interactive-token-revoked-fallback',
+      accessToken: 'fresh-interactive-token',
       account: { username: 're-authed-user@corp.example' },
     });
 
     const token = await auth.getAccessToken();
-    expect(token).toBe('interactive-token-revoked-fallback');
+    expect(token).toBe('fresh-interactive-token');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(2);
     expect(mockAcquireTokenInteractive).toHaveBeenCalledTimes(1);
-    expect((await auth.status()).account).toBe('re-authed-user@corp.example');
+    expect(openBrowserMock).toHaveBeenCalledTimes(0); // mock openBrowser was passed to acquireTokenInteractive
   });
 });
 

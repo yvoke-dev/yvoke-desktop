@@ -7,24 +7,24 @@ import { COMPUTE_SERVER_NAME } from './computeTools';
 export interface McpAuthProvider {
   /** Headers attached to the MCP connection; empty while /mcp/** ran open (pre-M19). */
   headers(): Promise<Record<string, string>>;
+  /** Invalidate cached auth credentials so next acquisition is fresh. */
+  invalidate?(): void;
 }
 
 export const NO_AUTH_PROVIDER: McpAuthProvider = {
   headers: async () => ({}),
 };
 
-export async function buildMcpServers(
+export function buildMcpServers(
   settings: AppSettings,
-  provider: McpAuthProvider,
-  headers?: Record<string, string>,
-): Promise<Record<string, McpServerConfig>> {
+  headers: Record<string, string>,
+): Record<string, McpServerConfig> {
   const url = `${settings.serverBaseUrl.replace(/\/+$/, '')}/mcp`;
-  const resolvedHeaders = headers ?? (await provider.headers());
   return {
     [MCP_SERVER_NAME]: {
       type: settings.mcpTransport,
       url,
-      ...(Object.keys(resolvedHeaders).length > 0 ? { headers: resolvedHeaders } : {}),
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
     },
     // Safe, in-process compute tools (calculate/statistics/date_diff). No shell/fs/network.
     [COMPUTE_SERVER_NAME]: buildComputeServer(),

@@ -32,8 +32,8 @@ other, and the app is useless without both.
 - **An expired session re-authenticates by itself.** A silent refresh is tried first; if that fails for
   any reason other than the network, the corporate sign-in opens automatically. A network failure is
   reported as a network failure rather than being mistaken for an expired session. Proactive silent
-  re-authentication applies continuously across warm conversations, synchronizing fresh credentials before
-  turns so long-lived sessions do not experience authentication drops.
+  re-authentication checks token validity before each turn on warm conversations, refreshing credentials
+  in-memory and updating MCP connection headers so idle sessions resume without authentication errors.
 - **Any server call refused as unauthorised is retried exactly once**, with a forced interactive
   sign-in.
 - **The token cache is encrypted with the operating system's keystore** where one is available.
@@ -46,6 +46,7 @@ other, and the app is useless without both.
 
 ## Limits
 
+- **Token refresh occurs at turn boundaries, not mid-turn.** Tokens are checked and proactively renewed before each user message starts. If an individual turn or multi-round review execution outlives the token's remaining validity buffer (typically 5 minutes), knowledge-base calls later in that same turn can still encounter a 401 token-expired error.
 - **"Signed in" only means an account was found in the cache.** This applies to the passive status shown upon startup; no token is tried until the first server call, so a session whose refresh expired months ago still shows the account name as signed in until something fails. By contrast, the on-demand *Check Credentials* action actively validates token acceptance against the server.
 - **Not being signed in is reported as "Server unreachable — showing cached conversations."** The
   banner names the wrong cause, and the fix it implies is the wrong fix.

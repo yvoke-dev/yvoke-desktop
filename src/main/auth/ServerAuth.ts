@@ -10,8 +10,8 @@ import type { McpAuthProvider } from '../agent/McpConnection';
 /** Token used while the server runs with APP_SECURITY_MOCK=true (any token accepted). */
 export const DEV_TOKEN = 'dev-local-token';
 
-/** Proactive token refresh threshold (10 minutes). */
-export const EXPIRATION_BUFFER_MS = 10 * 60 * 1000;
+/** Proactive token refresh threshold (5 minutes). */
+export const EXPIRATION_BUFFER_MS = 5 * 60 * 1000;
 
 /**
  * `verifyToken`'s result, carrying the live bearer. It is deliberately NOT the shared
@@ -98,6 +98,13 @@ export class ServerAuth implements McpAuthProvider {
   private cacheCorrupted = false;
   /** pcaKey the account was last hydrated for; `null` means "not hydrated yet". */
   private hydratedKey: string | null = null;
+  /** In-memory cached token to avoid blocking synchronous disk I/O and decryption on every warm turn. */
+  private cachedToken: { token: string; expiresAt: number } | null = null;
+
+  /** Invalidate in-memory token cache (e.g. after a 401 error). */
+  invalidate(): void {
+    this.cachedToken = null;
+  }
 
   constructor(
     private readonly getSettings: () => AppSettings,
@@ -148,6 +155,7 @@ export class ServerAuth implements McpAuthProvider {
     // Entra settings changed since the last build (or first build): rebuild the MSAL
     // app so it targets the current clientId/tenantId, and drop the stale account.
     this.account = null;
+    this.cachedToken = null;
     {
       const config: Configuration = {
         auth: {
@@ -188,11 +196,19 @@ export class ServerAuth implements McpAuthProvider {
     return this.getSettings().serverAuthMode === 'dev';
   }
 
-  async getAccessToken(forceInteractive = false, forceRefresh = false): Promise<string> {
+  async getAccessToken(forceInteractive = false): Promise<string> {
     try {
       if (this.isDevMode()) {
         return DEV_TOKEN;
       }
+
+      if (!forceInteractive && this.cachedToken) {
+        const remaining = this.cachedToken.expiresAt - Date.now();
+        if (remaining > EXPIRATION_BUFFER_MS) {
+          return this.cachedToken.token;
+        }
+      }
+
       await this.hydrateAccount();
       const scopes = [this.getSettings().entra.scope];
       const pca = this.getPca();
@@ -210,12 +226,10 @@ export class ServerAuth implements McpAuthProvider {
             const silent = await pca.acquireTokenSilent({
               account,
               scopes,
-              ...(forceRefresh ? { forceRefresh: true } : {}),
             });
             if (silent?.accessToken) {
               const expiresAt = silent?.expiresOn ? silent.expiresOn.getTime() : 0;
               if (
-                !forceRefresh &&
                 !isNaN(expiresAt) &&
                 expiresAt > 0 &&
                 expiresAt - Date.now() < EXPIRATION_BUFFER_MS
@@ -223,43 +237,33 @@ export class ServerAuth implements McpAuthProvider {
                 try {
                   const refreshed = await pca.acquireTokenSilent({ account, scopes, forceRefresh: true });
                   if (refreshed?.accessToken) {
+                    const refreshedExpiresAt = refreshed.expiresOn ? refreshed.expiresOn.getTime() : expiresAt;
                     this.account = refreshed.account ?? account;
+                    this.cachedToken = { token: refreshed.accessToken, expiresAt: refreshedExpiresAt };
                     return refreshed.accessToken;
                   }
                 } catch (proactiveErr) {
-                  if (isNetworkError(proactiveErr) && expiresAt > Date.now()) {
+                  if (expiresAt > Date.now()) {
                     log(
                       'auth',
-                      `Proactive token refresh failed with network error, falling back to cached token: ${
+                      `Proactive token refresh failed, falling back to cached token: ${
                         proactiveErr instanceof Error ? proactiveErr.message : String(proactiveErr)
                       }`,
                     );
                     this.account = silent.account ?? account;
+                    this.cachedToken = { token: silent.accessToken, expiresAt };
                     return silent.accessToken;
                   }
-                  this.account = null;
-                  if (isNetworkError(proactiveErr)) {
-                    throw proactiveErr;
-                  }
-                  try {
-                    const interactive = await pca.acquireTokenInteractive({
-                      scopes,
-                      openBrowser: this.openBrowser,
-                      successTemplate:
-                        '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
-                    });
-                    this.account = interactive.account;
-                    return interactive.accessToken;
-                  } catch (interactiveErr) {
-                    throw new Error('Authentication session expired or invalid. Please sign in again.');
-                  }
+                  throw proactiveErr;
                 }
               }
 
               this.account = silent.account ?? account;
+              this.cachedToken = { token: silent.accessToken, expiresAt };
               return silent.accessToken;
             }
           } catch (err) {
+            this.cachedToken = null;
             // The network being down is not a reason to prompt for a sign-in.
             if (isNetworkError(err)) {
               throw err;
@@ -276,6 +280,8 @@ export class ServerAuth implements McpAuthProvider {
                   '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
               });
               this.account = interactive.account;
+              const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
+              this.cachedToken = { token: interactive.accessToken, expiresAt };
               return interactive.accessToken;
             } catch (interactiveErr) {
               throw new Error('Authentication session expired or invalid. Please sign in again.');
@@ -284,17 +290,22 @@ export class ServerAuth implements McpAuthProvider {
         }
 
         this.account = null;
+        this.cachedToken = null;
         throw new Error('Authentication session expired or invalid. Please sign in again.');
       }
 
+      this.cachedToken = null;
       const interactive = await pca.acquireTokenInteractive({
         scopes,
         openBrowser: this.openBrowser,
         successTemplate: '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
       });
       this.account = interactive.account;
+      const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
+      this.cachedToken = { token: interactive.accessToken, expiresAt };
       return interactive.accessToken;
     } catch (err) {
+      this.cachedToken = null;
       throw new Error(tagAttributedError('Entra', err));
     }
   }
@@ -318,6 +329,7 @@ export class ServerAuth implements McpAuthProvider {
         await this.pca.getTokenCache().removeAccount(this.account);
       }
       this.account = null;
+      this.cachedToken = null;
     } catch (err) {
       throw new Error(tagAttributedError('Entra', err));
     }
