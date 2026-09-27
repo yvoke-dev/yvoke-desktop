@@ -1014,5 +1014,36 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
 
     svc.closeAll();
   });
+
+  it('11c. Failed MCP update when session became busy mid-wait does not close session and rejects without emitting error event', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    const initialSession = h.sessions[0];
+
+    currentAuth = 'Bearer token-race-update-failed';
+    // During the setMcpServers call, the session becomes busy (e.g. concurrent turn started) and the update fails
+    h.setMcpServersImpl = async () => {
+      const activeSession = (svc as any).sessions.get(meta.id);
+      if (activeSession) {
+        activeSession.busy = true;
+      }
+      return { added: [], removed: [], errors: { [MCP_SERVER_NAME]: 'Failed to connect' } };
+    };
+
+    const prevErrorEvents = events.filter((e) => e.kind === 'error');
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
+      'A turn is already running for this conversation.',
+    );
+    // Crucial: ensure no error event was emitted and active session was NOT closed mid-turn
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(prevErrorEvents.length);
+    expect(initialSession.closeSpy).not.toHaveBeenCalled();
+    expect((svc as any).sessions.get(meta.id)).toBeDefined();
+
+    svc.closeAll();
+  });
 });
 

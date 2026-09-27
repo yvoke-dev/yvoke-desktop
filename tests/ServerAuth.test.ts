@@ -407,6 +407,17 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     const token2 = await auth.getAccessToken();
     expect(token2).toBe('token-301');
     expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
+
+    // When token has <= 300s remaining (299s): in-memory cache is bypassed and MSAL is called
+    (auth as any).cachedToken.expiresAt = Date.now() + 299 * 1000;
+    mockAcquireTokenSilent.mockResolvedValueOnce({
+      accessToken: 'token-299-refreshed',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+    const token3 = await auth.getAccessToken();
+    expect(token3).toBe('token-299-refreshed');
+    expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(2);
   });
 
   it('2. Settings changes bypass cached token even if unexpired', async () => {

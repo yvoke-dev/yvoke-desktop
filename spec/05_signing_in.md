@@ -46,7 +46,7 @@ other, and the app is useless without both.
 
 ## Limits
 
-- **Token refresh occurs at turn boundaries, not mid-turn.** Tokens are checked and proactively renewed before each user message starts. If an individual turn or multi-round review execution outlives the token's remaining validity buffer (typically 5 minutes), knowledge-base calls later in that same turn can still encounter a 401 token-expired error.
+- **Token refresh occurs at turn boundaries, not mid-turn.** Tokens are checked and proactively renewed before each user message starts. A failed silent refresh during network errors reuses an unexpired cached token even when within the 5-minute buffer, so an offline session can still lose knowledge-base access mid-turn. Likewise, if an individual turn or multi-round review execution outlives the token's remaining validity buffer (typically 5 minutes), knowledge-base calls later in that same turn can still encounter a 401 token-expired error.
 - **"Signed in" only means an account was found in the cache.** This applies to the passive status shown upon startup; no token is tried until the first server call, so a session whose refresh expired months ago still shows the account name as signed in until something fails. By contrast, the on-demand *Check Credentials* action actively validates token acceptance against the server.
 - **Not being signed in is reported as "Server unreachable — showing cached conversations."** The
   banner names the wrong cause, and the fix it implies is the wrong fix.

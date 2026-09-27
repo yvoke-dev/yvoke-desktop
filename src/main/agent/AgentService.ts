@@ -35,6 +35,9 @@ import {
 /** The server-managed system prompt every turn runs under. */
 export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
 
+/** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
+export const MCP_UPDATE_TIMEOUT_MS = 10_000;
+
 /**
  * Path to the native Claude Code binary staged for this build target, or null in dev.
  *
@@ -496,7 +499,7 @@ export class AgentService {
             const timeoutPromise = new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
                 reject(new Error('Timed out updating MCP servers'));
-              }, 10_000);
+              }, MCP_UPDATE_TIMEOUT_MS);
             });
             try {
               const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
@@ -535,6 +538,9 @@ export class AgentService {
           }
           // Session was closed or replaced with different config; fall through to recreate below
         } else if (updateFailed) {
+          if (existing.busy) {
+            return existing;
+          }
           log(
             'agent',
             `Failed to update MCP servers dynamically for thread=${thread.id}: ${

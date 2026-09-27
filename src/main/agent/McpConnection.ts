@@ -11,10 +11,6 @@ export interface McpAuthProvider {
   invalidate?(): void;
 }
 
-export const NO_AUTH_PROVIDER: McpAuthProvider = {
-  headers: async () => ({}),
-};
-
 export function buildMcpServers(
   settings: AppSettings,
   headers: Record<string, string>,
