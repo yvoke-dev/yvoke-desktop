@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { ResultError } from './singleTurn';
 
 /**
  * Claude (model) authentication helpers. The app never handles claude.ai credentials
@@ -48,6 +49,45 @@ export function detectClaudeAccount(home: string = os.homedir()): string | undef
 
 export function isAuthError(message: string): boolean {
   return /invalid api key|not logged in|please run \/login|authentication|credential|oauth token|api key/i.test(message);
+}
+
+/**
+ * Classifies a Claude failure into a rate limit or auth expiration status, or returns undefined.
+ * Checks typed ResultError status first (429 -> rate_limited, 401/403 -> expired), then inspects
+ * error prose (rate-limit before auth, since a 429 body names the API key which isAuthError also matches).
+ */
+export function classifyClaudeFailure(
+  err: unknown,
+): { status: 'rate_limited' | 'expired'; message: string } | undefined {
+  if (err instanceof ResultError && err.status != null) {
+    if (err.status === 429) {
+      return {
+        status: 'rate_limited',
+        message: 'Claude subscription allowance or rate limit reached.',
+      };
+    }
+    if (err.status === 401 || err.status === 403) {
+      return {
+        status: 'expired',
+        message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      };
+    }
+  }
+  const text = typeof err === 'string' ? err : err instanceof Error ? err.message : String(err);
+  // Allowance first: a genuine 429 body names the API key, which isAuthError also matches.
+  if (/rate limit|allowance|usage limit|\b429\b/i.test(text)) {
+    return {
+      status: 'rate_limited',
+      message: 'Claude subscription allowance or rate limit reached.',
+    };
+  }
+  if (isAuthError(text)) {
+    return {
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    };
+  }
+  return undefined;
 }
 
 /**

@@ -5,8 +5,8 @@ import { AbortError, query, type Options, type Query, type SDKUserMessage } from
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
 import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
-import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
-import { NoReplyError, readSingleReply } from './singleTurn';
+import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
+import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
 import { VALIDATION_TIMEOUT_MS } from './playbookValidation';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
@@ -37,6 +37,9 @@ export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
 
 /** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
+
+/** Expected model response token during Claude credential verification. */
+export const PROBE_TOKEN = 'pong';
 
 /**
  * Path to the native Claude Code binary staged for this build target, or null in dev.
@@ -406,7 +409,7 @@ export class AgentService {
     const options: Options = {
       // A bare string replaces the Claude Code preset outright — the same isolation the other
       // single-turn probes rely on, and without it a "ping" drags the whole preset along.
-      systemPrompt: 'Reply with the single word: pong.',
+      systemPrompt: `Reply with the single word: ${PROBE_TOKEN}.`,
       tools: [],
       disallowedTools: ['Bash'],
       canUseTool: async () => ({ behavior: 'deny', message: 'No tools for verification' }),
@@ -428,22 +431,12 @@ export class AgentService {
     try {
       q = query({ prompt: 'ping', options });
       const reply = await readSingleReply(q, 'login check');
-      if (/rate limit|allowance|usage limit|\b429\b/i.test(reply)) {
-        return {
-          status: 'rate_limited',
-          message: 'Claude subscription allowance or rate limit reached.',
-        };
-      }
-      if (isAuthError(reply)) {
-        return {
-          status: 'expired',
-          message: 'Session expired or not logged in. Run claude /login in a terminal.',
-        };
-      }
-      if (!reply.toLowerCase().includes('pong')) {
+      const trimmed = reply.trim();
+      if (!trimmed.toLowerCase().includes(PROBE_TOKEN)) {
+        const preview = trimmed.length > 0 ? trimmed.slice(0, 100) : '(empty reply)';
         return {
           status: 'error',
-          message: `Claude verification failed: unexpected reply: ${reply.slice(0, 100).trim()}`,
+          message: `Claude verification failed: unexpected reply: ${preview}`,
         };
       }
       return { status: 'ok', account: detectClaudeAccount() };
@@ -451,25 +444,17 @@ export class AgentService {
       if (abortController.signal.aborted || err instanceof AbortError) {
         return { status: 'unreachable', message: 'Claude verification timed out' };
       }
-      const msg = err instanceof Error ? err.message : String(err);
       // A stream that closed with nothing in it says the subprocess failed, not that the login
       // did — and it must be settled by type, before any prose matching gets a chance at it.
       if (err instanceof NoReplyError) {
-        return { status: 'error', message: `Claude verification failed: ${msg}` };
+        return { status: 'error', message: `Claude verification failed: ${err.message}` };
       }
-      // Allowance first: a genuine 429 body names the API key, which isAuthError also matches.
-      if (/rate limit|allowance|usage limit|\b429\b/i.test(msg)) {
-        return {
-          status: 'rate_limited',
-          message: 'Claude subscription allowance or rate limit reached.',
-        };
+      const failure = classifyClaudeFailure(err);
+      if (failure) {
+        return failure;
       }
-      if (isAuthError(msg)) {
-        return {
-          status: 'expired',
-          message: 'Session expired or not logged in. Run claude /login in a terminal.',
-        };
-      }
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const msg = rawMsg.trim().slice(0, 200);
       return { status: 'error', message: `Claude verification failed: ${msg}` };
     } finally {
       clearTimeout(timer);
@@ -920,7 +905,7 @@ export class AgentService {
   ): void {
     const resultUsage = usageFromSdk(result.usage as unknown as Record<string, unknown>);
     const aborted = session.interrupted;
-    const isError = result.is_error === true;
+    const isError = isResultFailure(result);
 
     const resultCostUsd = (result as { total_cost_usd?: number }).total_cost_usd;
 

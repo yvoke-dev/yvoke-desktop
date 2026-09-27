@@ -741,6 +741,22 @@ describe('Image Attachments & Vision Support', () => {
       expect(desc).toBe('');
     });
 
+    it('returns empty string on a success result with is_error true without throwing', async () => {
+      sdkMock.handler = async () => ({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: 'API Error: 400 image too large',
+      });
+
+      const desc = await describeImage(
+        { id: 'img-err-is-error', mediaType: 'image/png', data: 'aGVsbG8=' },
+        { sandboxDir: sandbox() },
+      );
+
+      expect(desc).toBe('');
+    });
+
     it('returns empty string when the SDK fails to spawn at all', async () => {
       sdkMock.throwError = new Error('native binary failed to launch');
 

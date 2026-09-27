@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AbortError } from '@anthropic-ai/claude-agent-sdk';
+import { AbortError, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentServiceDeps } from '../src/main/agent/AgentService';
-import { isAuthError, LOGIN_INSTRUCTIONS } from '../src/main/agent/ClaudeAuth';
-import { NoReplyError } from '../src/main/agent/singleTurn';
+import { classifyClaudeFailure, isAuthError, LOGIN_INSTRUCTIONS } from '../src/main/agent/ClaudeAuth';
+import { NoReplyError, ResultError } from '../src/main/agent/singleTurn';
 
 const mockDetectCredentials = vi.fn();
 const mockDetectAccount = vi.fn();
@@ -28,8 +28,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
 const { AgentService } = await import('../src/main/agent/AgentService');
 
 function createFakeQuery(options: {
-  messages?: any[];
-  errorToThrow?: any;
+  messages?: Partial<SDKMessage>[];
+  errorToThrow?: unknown;
 }) {
   const close = vi.fn();
   const iterator = {
@@ -39,7 +39,7 @@ function createFakeQuery(options: {
       }
       if (options.messages) {
         for (const msg of options.messages) {
-          yield msg;
+          yield msg as unknown as SDKMessage;
         }
       }
     },
@@ -137,7 +137,8 @@ describe('AgentService.verifyClaudeCredentials', () => {
       messages: [
         {
           type: 'result',
-          subtype: 'error',
+          subtype: 'error_during_execution',
+          is_error: true,
           errors: ['Invalid API key or authentication session expired: please run /login'],
         },
       ],
@@ -199,15 +200,39 @@ describe('AgentService.verifyClaudeCredentials', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('handles prose auth error without is_error flag as expired', async () => {
+  it('handles SDK error result with non-auth text as error (pins is_error throw over ok)', async () => {
     mockDetectCredentials.mockReturnValue('ok');
     const { iterator, close } = createFakeQuery({
       messages: [
         {
           type: 'result',
           subtype: 'success',
-          is_error: false,
-          result: 'Invalid API key or authentication required: please run claude /login',
+          is_error: true,
+          result: 'API Error: 500 Internal Server Error pong',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'error',
+      message: 'Claude verification failed: API Error: 500 Internal Server Error pong',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('classifies SDK result with api_error_status 401 as expired even with non-standard body', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          api_error_status: 401,
+          result: 'Organization access revoked by administrator',
         },
       ],
     });
@@ -222,15 +247,16 @@ describe('AgentService.verifyClaudeCredentials', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('handles prose rate limit without is_error flag as rate_limited', async () => {
+  it('classifies SDK result with api_error_status 429 as rate_limited even with non-standard body', async () => {
     mockDetectCredentials.mockReturnValue('ok');
     const { iterator, close } = createFakeQuery({
       messages: [
         {
           type: 'result',
           subtype: 'success',
-          is_error: false,
-          result: '429 rate limit exceeded or usage limit reached',
+          is_error: true,
+          api_error_status: 429,
+          result: 'Too many requests for tenant',
         },
       ],
     });
@@ -245,13 +271,61 @@ describe('AgentService.verifyClaudeCredentials', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('handles rate limit error properly', async () => {
+  it('formats empty reply as (empty reply) when model produces whitespace-only response', async () => {
     mockDetectCredentials.mockReturnValue('ok');
     const { iterator, close } = createFakeQuery({
       messages: [
         {
           type: 'result',
-          subtype: 'error',
+          subtype: 'success',
+          is_error: false,
+          result: '   \n  ',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'error',
+      message: 'Claude verification failed: unexpected reply: (empty reply)',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('truncates very long unexpected error messages to 200 characters', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const longMsg = 'X'.repeat(500);
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          result: longMsg,
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'error',
+      message: `Claude verification failed: ${'X'.repeat(200)}`,
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('handles rate limit error properly with SDK result subtype', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
           errors: ['429 rate limit exceeded or usage limit reached'],
         },
       ],
@@ -390,5 +464,49 @@ describe('AgentService.verifyClaudeCredentials isolation', () => {
     const options = mockQuery.mock.calls[0][0].options;
     expect(typeof options.systemPrompt).toBe('string');
     expect(options.systemPrompt.length).toBeGreaterThan(0);
+  });
+});
+
+describe('classifyClaudeFailure', () => {
+  it('classifies ResultError with status 429 as rate_limited', () => {
+    const err = new ResultError('API error', 'success', 429);
+    expect(classifyClaudeFailure(err)).toEqual({
+      status: 'rate_limited',
+      message: 'Claude subscription allowance or rate limit reached.',
+    });
+  });
+
+  it('classifies ResultError with status 401 or 403 as expired', () => {
+    const err401 = new ResultError('Unauthorized', 'success', 401);
+    expect(classifyClaudeFailure(err401)).toEqual({
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    });
+
+    const err403 = new ResultError('Forbidden', 'success', 403);
+    expect(classifyClaudeFailure(err403)).toEqual({
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    });
+  });
+
+  it('falls back to regex inspection when status code is absent', () => {
+    const rateLimitErr = new ResultError('monthly usage limit reached', 'success');
+    expect(classifyClaudeFailure(rateLimitErr)).toEqual({
+      status: 'rate_limited',
+      message: 'Claude subscription allowance or rate limit reached.',
+    });
+
+    const authErr = new ResultError('Not logged in · Please run /login', 'success');
+    expect(classifyClaudeFailure(authErr)).toEqual({
+      status: 'expired',
+      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+    });
+  });
+
+  it('returns undefined for non-auth non-rate-limit errors', () => {
+    const err = new ResultError('API Error: 500 Internal Server Error', 'success', 500);
+    expect(classifyClaudeFailure(err)).toBeUndefined();
+    expect(classifyClaudeFailure(new Error('Network disconnected'))).toBeUndefined();
   });
 });
