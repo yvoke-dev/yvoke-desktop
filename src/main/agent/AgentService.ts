@@ -39,7 +39,7 @@ export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
 
 /** Expected model response token during Claude credential verification. */
-export const PROBE_TOKEN = 'pong';
+const PROBE_TOKEN = 'pong';
 
 /**
  * Path to the native Claude Code binary staged for this build target, or null in dev.
@@ -432,7 +432,7 @@ export class AgentService {
       q = query({ prompt: 'ping', options });
       const reply = await readSingleReply(q, 'login check');
       const trimmed = reply.trim();
-      if (!trimmed.toLowerCase().includes(PROBE_TOKEN)) {
+      if (!trimmed.toLowerCase().includes(PROBE_TOKEN.toLowerCase())) {
         const preview = trimmed.length > 0 ? trimmed.slice(0, 100) : '(empty reply)';
         return {
           status: 'error',

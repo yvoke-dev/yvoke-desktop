@@ -1,4 +1,4 @@
-import type { Query, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Query, SDKResultMessage, SDKResultSuccess } from '@anthropic-ai/claude-agent-sdk';
 
 /**
  * The stream closed before any result arrived — the subprocess died, the transport dropped, or
@@ -33,14 +33,21 @@ export class ResultError extends Error {
 }
 
 /**
- * Tests whether an SDK result message represents an execution failure.
+ * Type guard testing whether an SDK result message represents a successful, error-free execution.
  * The Claude Agent SDK emits `subtype: 'success'` with `is_error: true` when the Claude Code CLI
- * fails or encounters an unauthenticated turn, so checking `subtype !== 'success'` alone is insufficient.
+ * fails or encounters an unauthenticated turn, so checking `subtype === 'success'` alone is insufficient.
  */
-export function isResultFailure(
-  message: SDKResultMessage | { is_error?: boolean; subtype: string },
-): boolean {
-  return Boolean(message.is_error || message.subtype !== 'success');
+export function isResultSuccess(
+  message: SDKResultMessage,
+): message is SDKResultSuccess & { is_error: false } {
+  return message.subtype === 'success' && !message.is_error;
+}
+
+/**
+ * Tests whether an SDK result message represents an execution failure.
+ */
+export function isResultFailure(message: SDKResultMessage): boolean {
+  return !isResultSuccess(message);
 }
 
 /**
@@ -53,13 +60,13 @@ export function isResultFailure(
  * "max turns" outcome into a thrown error. Leaving the loop early runs the generator's own
  * teardown and lets the subtype be read as data.
  *
- * Throws `ResultError` when `isResultFailure` is true, carrying error details and `api_error_status`.
+ * Throws `ResultError` when `!isResultSuccess(message)` is true, carrying error details and `api_error_status`.
  * Throws `NoReplyError` if the stream closes without producing a result message.
  */
 export async function readSingleReply(q: Query, what: string): Promise<string> {
   for await (const message of q) {
     if (message.type !== 'result') continue;
-    if (isResultFailure(message)) {
+    if (!isResultSuccess(message)) {
       const errDetail =
         message.subtype === 'success'
           ? (message.result?.trim() || 'Claude Code returned an error result')
@@ -70,8 +77,9 @@ export async function readSingleReply(q: Query, what: string): Promise<string> {
           : undefined;
       throw new ResultError(errDetail, message.subtype, status);
     }
-    return message.subtype === 'success' ? (message.result ?? '') : '';
+    return message.result;
   }
   throw new NoReplyError(what);
 }
+
 

@@ -1,6 +1,6 @@
-import type { Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Query, SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { describe, expect, it } from 'vitest';
-import { NoReplyError, ResultError, isResultFailure, readSingleReply } from '../src/main/agent/singleTurn';
+import { NoReplyError, ResultError, isResultFailure, isResultSuccess, readSingleReply } from '../src/main/agent/singleTurn';
 
 function createMockQuery(messages: Partial<SDKMessage>[]): Query {
   return {
@@ -14,18 +14,27 @@ function createMockQuery(messages: Partial<SDKMessage>[]): Query {
 }
 
 describe('singleTurn', () => {
-  describe('isResultFailure', () => {
-    it('returns false for clean success result without error', () => {
-      expect(isResultFailure({ type: 'result', subtype: 'success', is_error: false })).toBe(false);
+  describe('isResultSuccess and isResultFailure', () => {
+    it('returns true / false for clean success result without error', () => {
+      const msg = { type: 'result', subtype: 'success', is_error: false } as unknown as SDKResultMessage;
+      expect(isResultSuccess(msg)).toBe(true);
+      expect(isResultFailure(msg)).toBe(false);
     });
 
-    it('returns true when subtype is success but is_error is true', () => {
-      expect(isResultFailure({ type: 'result', subtype: 'success', is_error: true })).toBe(true);
+    it('returns false / true when subtype is success but is_error is true', () => {
+      const msg = { type: 'result', subtype: 'success', is_error: true } as unknown as SDKResultMessage;
+      expect(isResultSuccess(msg)).toBe(false);
+      expect(isResultFailure(msg)).toBe(true);
     });
 
-    it('returns true when subtype is not success', () => {
-      expect(isResultFailure({ type: 'result', subtype: 'error_during_execution', is_error: false })).toBe(true);
-      expect(isResultFailure({ type: 'result', subtype: 'error_max_turns', is_error: true })).toBe(true);
+    it('returns false / true when subtype is not success', () => {
+      const execErr = { type: 'result', subtype: 'error_during_execution', is_error: false } as unknown as SDKResultMessage;
+      expect(isResultSuccess(execErr)).toBe(false);
+      expect(isResultFailure(execErr)).toBe(true);
+
+      const turnErr = { type: 'result', subtype: 'error_max_turns', is_error: true } as unknown as SDKResultMessage;
+      expect(isResultSuccess(turnErr)).toBe(false);
+      expect(isResultFailure(turnErr)).toBe(true);
     });
   });
 
