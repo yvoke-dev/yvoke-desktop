@@ -204,7 +204,7 @@ interface ThreadSession {
   /** The playbook whose instructions are in this session's context, if any. */
   injectedPlaybook?: string;
   /** Last resolved MCP headers serialized to JSON for change detection. */
-  lastMcpHeadersJson?: string;
+  lastMcpHeadersJson: string;
 }
 
 export interface AgentServiceDeps {
@@ -487,6 +487,7 @@ export class AgentService {
         const hasAuthChanged = headersJson !== existing.lastMcpHeadersJson;
         let updateFailed = false;
         let updateError: unknown = null;
+        let isAuthFailure = false;
 
         if (hasAuthChanged) {
           try {
@@ -500,7 +501,11 @@ export class AgentService {
             try {
               const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
               if (result?.errors && result.errors[MCP_SERVER_NAME]) {
-                throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
+                const errMsg = result.errors[MCP_SERVER_NAME];
+                if (/401|unauthori[sz]ed|token.*expired|invalid.*token/i.test(errMsg)) {
+                  isAuthFailure = true;
+                }
+                throw new Error(`MCP server update error: ${errMsg}`);
               }
             } finally {
               if (timer) clearTimeout(timer);
@@ -515,12 +520,18 @@ export class AgentService {
         const current = this.sessions.get(thread.id);
         if (current !== existing) {
           log('agent', `Session for thread=${thread.id} was closed or replaced during MCP check; verifying or recreating`);
-          if (
-            current &&
-            current.orchestratorProfile === thread.orchestratorProfile &&
-            current.playbookName === playbookName
-          ) {
-            return current;
+          if (current) {
+            if (
+              current.orchestratorProfile === thread.orchestratorProfile &&
+              current.playbookName === playbookName
+            ) {
+              return current;
+            }
+            if (current.busy) {
+              throw new Error('A turn is already running for this conversation.');
+            }
+            // Configuration mismatch on an idle session; close it before creating a replacement
+            this.closeThread(thread.id);
           }
           // Session was closed or replaced with different config; fall through to recreate below
         } else if (updateFailed) {
@@ -531,8 +542,10 @@ export class AgentService {
             }`,
           );
           this.closeThread(thread.id);
-          this.deps.mcpAuthProvider.invalidate?.();
-          resolvedHeaders = undefined;
+          if (isAuthFailure) {
+            this.deps.mcpAuthProvider.invalidate?.();
+            resolvedHeaders = undefined;
+          }
           // Fall through to recreate fresh session resuming thread.sessionId below
         } else {
           existing.lastMcpHeadersJson = headersJson;

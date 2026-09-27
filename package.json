@@ -21,6 +21,7 @@
     "spike:build": "tsx scripts/spike-orchestrator-build.ts",
     "spike:persist": "tsx scripts/spike-run-persist.ts",
     "spike:websearch": "tsx scripts/spike-websearch.ts",
+    "spike:reconnect": "tsx scripts/spike-mcp-reconnect.ts",
     "fetch:claude": "tsx scripts/fetch-claude-binary.ts",
     "dist:mac": "./scripts/check-signing-cert.sh && npm run fetch:claude -- mac-arm64 mac-x64 && electron-vite build && electron-builder --mac",
     "dist:win": "npm run fetch:claude -- win-x64 && electron-vite build && electron-builder --win"
