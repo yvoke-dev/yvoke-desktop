@@ -4,10 +4,14 @@ import { PublicClientApplication, type AccountInfo, type Configuration } from '@
 import type { AuthVerificationFailureReason } from '../../shared/types';
 import type { AppSettings } from '../../shared/types';
 import { isNetworkError, tagAttributedError } from '../../shared/error';
+import { log } from '../log';
 import type { McpAuthProvider } from '../agent/McpConnection';
 
 /** Token used while the server runs with APP_SECURITY_MOCK=true (any token accepted). */
 export const DEV_TOKEN = 'dev-local-token';
+
+/** Proactive token refresh threshold (10 minutes). */
+export const EXPIRATION_BUFFER_MS = 10 * 60 * 1000;
 
 /**
  * `verifyToken`'s result, carrying the live bearer. It is deliberately NOT the shared
@@ -184,7 +188,7 @@ export class ServerAuth implements McpAuthProvider {
     return this.getSettings().serverAuthMode === 'dev';
   }
 
-  async getAccessToken(forceInteractive = false): Promise<string> {
+  async getAccessToken(forceInteractive = false, forceRefresh = false): Promise<string> {
     try {
       if (this.isDevMode()) {
         return DEV_TOKEN;
@@ -203,8 +207,55 @@ export class ServerAuth implements McpAuthProvider {
 
         if (account) {
           try {
-            const silent = await pca.acquireTokenSilent({ account, scopes });
+            const silent = await pca.acquireTokenSilent({
+              account,
+              scopes,
+              ...(forceRefresh ? { forceRefresh: true } : {}),
+            });
             if (silent?.accessToken) {
+              const expiresAt = silent?.expiresOn ? silent.expiresOn.getTime() : 0;
+              if (
+                !forceRefresh &&
+                !isNaN(expiresAt) &&
+                expiresAt > 0 &&
+                expiresAt - Date.now() < EXPIRATION_BUFFER_MS
+              ) {
+                try {
+                  const refreshed = await pca.acquireTokenSilent({ account, scopes, forceRefresh: true });
+                  if (refreshed?.accessToken) {
+                    this.account = refreshed.account ?? account;
+                    return refreshed.accessToken;
+                  }
+                } catch (proactiveErr) {
+                  if (isNetworkError(proactiveErr) && expiresAt > Date.now()) {
+                    log(
+                      'auth',
+                      `Proactive token refresh failed with network error, falling back to cached token: ${
+                        proactiveErr instanceof Error ? proactiveErr.message : String(proactiveErr)
+                      }`,
+                    );
+                    this.account = silent.account ?? account;
+                    return silent.accessToken;
+                  }
+                  this.account = null;
+                  if (isNetworkError(proactiveErr)) {
+                    throw proactiveErr;
+                  }
+                  try {
+                    const interactive = await pca.acquireTokenInteractive({
+                      scopes,
+                      openBrowser: this.openBrowser,
+                      successTemplate:
+                        '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
+                    });
+                    this.account = interactive.account;
+                    return interactive.accessToken;
+                  } catch (interactiveErr) {
+                    throw new Error('Authentication session expired or invalid. Please sign in again.');
+                  }
+                }
+              }
+
               this.account = silent.account ?? account;
               return silent.accessToken;
             }

@@ -16,14 +16,15 @@ export const NO_AUTH_PROVIDER: McpAuthProvider = {
 export async function buildMcpServers(
   settings: AppSettings,
   provider: McpAuthProvider,
+  headers?: Record<string, string>,
 ): Promise<Record<string, McpServerConfig>> {
   const url = `${settings.serverBaseUrl.replace(/\/+$/, '')}/mcp`;
-  const headers = await provider.headers();
+  const resolvedHeaders = headers ?? (await provider.headers());
   return {
     [MCP_SERVER_NAME]: {
       type: settings.mcpTransport,
       url,
-      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(Object.keys(resolvedHeaders).length > 0 ? { headers: resolvedHeaders } : {}),
     },
     // Safe, in-process compute tools (calculate/statistics/date_diff). No shell/fs/network.
     [COMPUTE_SERVER_NAME]: buildComputeServer(),

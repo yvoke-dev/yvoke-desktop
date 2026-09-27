@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { NoReplyError, readSingleReply } from './singleTurn';
@@ -203,6 +203,8 @@ interface ThreadSession {
   pendingUser?: ChatMessage;
   /** The playbook whose instructions are in this session's context, if any. */
   injectedPlaybook?: string;
+  /** Last resolved Authorization header value attached to MCP connection. */
+  lastMcpAuthorization?: string;
 }
 
 export interface AgentServiceDeps {
@@ -468,6 +470,8 @@ export class AgentService {
 
   private async ensureSession(thread: ThreadMeta, playbookName?: string): Promise<ThreadSession> {
     const existing = this.sessions.get(thread.id);
+    let resolvedHeaders: Record<string, string> | undefined;
+
     if (existing) {
       if (existing.orchestratorProfile !== thread.orchestratorProfile || existing.playbookName !== playbookName) {
         log(
@@ -477,8 +481,57 @@ export class AgentService {
         );
         this.closeThread(thread.id);
       } else {
-        existing.lastActiveAt = Date.now();
-        return existing;
+        const headers = await this.deps.mcpAuthProvider.headers();
+        resolvedHeaders = headers;
+        const hasAuthChanged = (headers.Authorization ?? '') !== (existing.lastMcpAuthorization ?? '');
+        if (hasAuthChanged) {
+          let updateFailed = false;
+          let updateError: unknown = null;
+          try {
+            const mcpServers = await buildMcpServers(this.deps.getSettings(), this.deps.mcpAuthProvider, headers);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                reject(new Error('Timed out updating MCP servers'));
+              }, 10_000);
+            });
+            try {
+              const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
+              if (result?.errors && result.errors[MCP_SERVER_NAME]) {
+                throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
+              }
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          } catch (err) {
+            updateFailed = true;
+            updateError = err;
+          }
+
+          // Ghost Session Guard: If this.sessions.get(thread.id) !== existing after the check, do not re-insert or resume.
+          if (this.sessions.get(thread.id) !== existing) {
+            log('agent', `Session for thread=${thread.id} was closed or replaced during MCP update; skipping resume`);
+            throw new Error(`Session for thread ${thread.id} was closed concurrently.`);
+          }
+
+          if (updateFailed) {
+            log(
+              'agent',
+              `Failed to update MCP servers dynamically for thread=${thread.id}: ${
+                updateError instanceof Error ? updateError.message : 'Update failed'
+              }`,
+            );
+            this.closeThread(thread.id);
+            // Fall through to recreate fresh session resuming thread.sessionId below
+          } else {
+            existing.lastMcpAuthorization = headers.Authorization;
+            existing.lastActiveAt = Date.now();
+            return existing;
+          }
+        } else {
+          existing.lastActiveAt = Date.now();
+          return existing;
+        }
       }
     }
 
@@ -588,9 +641,13 @@ export class AgentService {
       this.deps.onSessionId(thread.id, '', undefined);
     }
 
+    if (!resolvedHeaders) {
+      resolvedHeaders = await this.deps.mcpAuthProvider.headers();
+    }
+
     const options: Options = {
       systemPrompt: orchestrator ? '' : systemPrompt,
-      mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider),
+      mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider, resolvedHeaders),
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
@@ -635,6 +692,7 @@ export class AgentService {
       lastActiveAt: Date.now(),
       playbookName,
       orchestratorProfile: thread.orchestratorProfile,
+      lastMcpAuthorization: resolvedHeaders.Authorization,
     };
     this.sessions.set(thread.id, session);
     void this.consume(thread.id, session);
