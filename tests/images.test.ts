@@ -1109,6 +1109,7 @@ describe('Image Attachments & Vision Support', () => {
         setMaxThinkingTokens: vi.fn(),
         interrupt: vi.fn(),
         close: vi.fn(),
+        setMcpServers: vi.fn().mockResolvedValue({ added: [], removed: [], errors: {} }),
       };
 
       const agent = new AgentService({
@@ -1155,6 +1156,7 @@ describe('Image Attachments & Vision Support', () => {
           push: (msg: any) => pushedMessages.push(msg),
           close: vi.fn(),
         },
+        lastMcpHeadersJson: '{}',
         model: 'sonnet',
         thinkingLevel: 'medium',
         busy: false,
@@ -1209,6 +1211,7 @@ describe('Image Attachments & Vision Support', () => {
         setMaxThinkingTokens: vi.fn(),
         interrupt: vi.fn(),
         close: vi.fn(),
+        setMcpServers: vi.fn().mockResolvedValue({ added: [], removed: [], errors: {} }),
       };
 
       const agent = new AgentService({
@@ -1254,6 +1257,7 @@ describe('Image Attachments & Vision Support', () => {
           push: (msg: any) => pushedMessages.push(msg),
           close: vi.fn(),
         },
+        lastMcpHeadersJson: '{}',
         model: 'sonnet',
         thinkingLevel: 'medium',
         busy: false,

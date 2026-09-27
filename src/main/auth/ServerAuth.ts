@@ -99,11 +99,19 @@ export class ServerAuth implements McpAuthProvider {
   /** pcaKey the account was last hydrated for; `null` means "not hydrated yet". */
   private hydratedKey: string | null = null;
   /** In-memory cached token to avoid blocking synchronous disk I/O and decryption on every warm turn. */
-  private cachedToken: { token: string; expiresAt: number } | null = null;
+  private cachedToken: {
+    token: string;
+    expiresAt: number;
+    pcaKey: string;
+    scope: string;
+  } | null = null;
+  /** Set by invalidate() so the next silent acquisition passes forceRefresh: true to MSAL. */
+  private forceNextRefresh = false;
 
-  /** Invalidate in-memory token cache (e.g. after a 401 error). */
+  /** Invalidate in-memory token cache and force next MSAL acquisition to refresh from Entra. */
   invalidate(): void {
     this.cachedToken = null;
+    this.forceNextRefresh = true;
   }
 
   constructor(
@@ -202,7 +210,19 @@ export class ServerAuth implements McpAuthProvider {
         return DEV_TOKEN;
       }
 
-      if (!forceInteractive && this.cachedToken) {
+      const settings = this.getSettings();
+      const currentKey = this.pcaKeyFor(settings);
+      const currentScope = settings.entra.scope;
+      const forceRefresh = this.forceNextRefresh;
+      this.forceNextRefresh = false;
+
+      if (
+        !forceInteractive &&
+        !forceRefresh &&
+        this.cachedToken &&
+        this.cachedToken.pcaKey === currentKey &&
+        this.cachedToken.scope === currentScope
+      ) {
         const remaining = this.cachedToken.expiresAt - Date.now();
         if (remaining > EXPIRATION_BUFFER_MS) {
           return this.cachedToken.token;
@@ -210,7 +230,7 @@ export class ServerAuth implements McpAuthProvider {
       }
 
       await this.hydrateAccount();
-      const scopes = [this.getSettings().entra.scope];
+      const scopes = [currentScope];
       const pca = this.getPca();
 
       if (!forceInteractive) {
@@ -226,43 +246,39 @@ export class ServerAuth implements McpAuthProvider {
             const silent = await pca.acquireTokenSilent({
               account,
               scopes,
+              ...(forceRefresh ? { forceRefresh: true } : {}),
             });
             if (silent?.accessToken) {
               const expiresAt = silent?.expiresOn ? silent.expiresOn.getTime() : 0;
-              if (
-                !isNaN(expiresAt) &&
-                expiresAt > 0 &&
-                expiresAt - Date.now() < EXPIRATION_BUFFER_MS
-              ) {
-                try {
-                  const refreshed = await pca.acquireTokenSilent({ account, scopes, forceRefresh: true });
-                  if (refreshed?.accessToken) {
-                    const refreshedExpiresAt = refreshed.expiresOn ? refreshed.expiresOn.getTime() : expiresAt;
-                    this.account = refreshed.account ?? account;
-                    this.cachedToken = { token: refreshed.accessToken, expiresAt: refreshedExpiresAt };
-                    return refreshed.accessToken;
-                  }
-                } catch (proactiveErr) {
-                  if (expiresAt > Date.now()) {
-                    log(
-                      'auth',
-                      `Proactive token refresh failed, falling back to cached token: ${
-                        proactiveErr instanceof Error ? proactiveErr.message : String(proactiveErr)
-                      }`,
-                    );
-                    this.account = silent.account ?? account;
-                    this.cachedToken = { token: silent.accessToken, expiresAt };
-                    return silent.accessToken;
-                  }
-                  throw proactiveErr;
-                }
-              }
-
               this.account = silent.account ?? account;
-              this.cachedToken = { token: silent.accessToken, expiresAt };
+              this.cachedToken = {
+                token: silent.accessToken,
+                expiresAt,
+                pcaKey: currentKey,
+                scope: currentScope,
+              };
               return silent.accessToken;
             }
           } catch (err) {
+            // If the silent refresh failed (e.g. transient network or Entra 5xx error), but
+            // our cached token has not yet reached its hard expiration time, continue using it
+            // rather than opening an unnecessary interactive sign-in window.
+            if (
+              !forceRefresh &&
+              this.cachedToken &&
+              this.cachedToken.pcaKey === currentKey &&
+              this.cachedToken.scope === currentScope &&
+              this.cachedToken.expiresAt > Date.now()
+            ) {
+              log(
+                'auth',
+                `Silent token refresh failed, falling back to valid cached token until ${new Date(
+                  this.cachedToken.expiresAt,
+                ).toISOString()}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return this.cachedToken.token;
+            }
+
             this.cachedToken = null;
             // The network being down is not a reason to prompt for a sign-in.
             if (isNetworkError(err)) {
@@ -281,7 +297,12 @@ export class ServerAuth implements McpAuthProvider {
               });
               this.account = interactive.account;
               const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
-              this.cachedToken = { token: interactive.accessToken, expiresAt };
+              this.cachedToken = {
+                token: interactive.accessToken,
+                expiresAt,
+                pcaKey: currentKey,
+                scope: currentScope,
+              };
               return interactive.accessToken;
             } catch (interactiveErr) {
               throw new Error('Authentication session expired or invalid. Please sign in again.');
@@ -302,7 +323,12 @@ export class ServerAuth implements McpAuthProvider {
       });
       this.account = interactive.account;
       const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
-      this.cachedToken = { token: interactive.accessToken, expiresAt };
+      this.cachedToken = {
+        token: interactive.accessToken,
+        expiresAt,
+        pcaKey: currentKey,
+        scope: currentScope,
+      };
       return interactive.accessToken;
     } catch (err) {
       this.cachedToken = null;

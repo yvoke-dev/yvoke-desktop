@@ -484,10 +484,7 @@ export class AgentService {
         const headers = await this.deps.mcpAuthProvider.headers();
         resolvedHeaders = headers;
         const headersJson = JSON.stringify(headers);
-        const hasAuthChanged =
-          existing.lastMcpHeadersJson !== undefined
-            ? headersJson !== existing.lastMcpHeadersJson
-            : Object.keys(headers).length > 0;
+        const hasAuthChanged = headersJson !== existing.lastMcpHeadersJson;
         let updateFailed = false;
         let updateError: unknown = null;
 
@@ -501,11 +498,9 @@ export class AgentService {
               }, 10_000);
             });
             try {
-              if (typeof existing.query.setMcpServers === 'function') {
-                const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
-                if (result?.errors && result.errors[MCP_SERVER_NAME]) {
-                  throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
-                }
+              const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
+              if (result?.errors && result.errors[MCP_SERVER_NAME]) {
+                throw new Error(`MCP server update error: ${result.errors[MCP_SERVER_NAME]}`);
               }
             } finally {
               if (timer) clearTimeout(timer);
@@ -519,9 +514,15 @@ export class AgentService {
         // Verify session was not closed or replaced while awaiting headers or setMcpServers
         const current = this.sessions.get(thread.id);
         if (current !== existing) {
-          log('agent', `Session for thread=${thread.id} was closed or replaced during MCP check; using active or recreating`);
-          if (current) return current;
-          // Session was closed; fall through to recreate fresh session below
+          log('agent', `Session for thread=${thread.id} was closed or replaced during MCP check; verifying or recreating`);
+          if (
+            current &&
+            current.orchestratorProfile === thread.orchestratorProfile &&
+            current.playbookName === playbookName
+          ) {
+            return current;
+          }
+          // Session was closed or replaced with different config; fall through to recreate below
         } else if (updateFailed) {
           log(
             'agent',
