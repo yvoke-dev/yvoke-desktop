@@ -99,44 +99,17 @@ async function main() {
   console.log(`[MCP Server] Listening on ${mcpUrl}`);
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-spike-reconnect-'));
-  const promptQueue: SDKUserMessage[] = [];
-  let queueResolver: (() => void) | null = null;
-  let queueClosed = false;
-
-  const asyncIterable = {
-    [Symbol.asyncIterator]() {
-      return {
-        async next(): Promise<IteratorResult<SDKUserMessage>> {
-          while (promptQueue.length === 0 && !queueClosed) {
-            await new Promise<void>((resolve) => {
-              queueResolver = resolve;
-            });
-          }
-          if (promptQueue.length > 0) {
-            return { value: promptQueue.shift()!, done: false };
-          }
-          return { value: undefined as any, done: true };
-        },
-      };
-    },
-  };
-
-  function pushUser(text: string) {
-    promptQueue.push({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
-      parent_tool_use_id: null,
-    });
-    if (queueResolver) {
-      const r: () => void = queueResolver;
-      queueResolver = null;
-      r();
-    }
+  let releasePrompt: (() => void) | undefined;
+  const promptHold = new Promise<void>((resolve) => {
+    releasePrompt = resolve;
+  });
+  async function* prompt(): AsyncGenerator<SDKUserMessage> {
+    await promptHold;
   }
 
   const binary = claudeBinaryPath();
   const q = query({
-    prompt: asyncIterable,
+    prompt: prompt(),
     options: {
       mcpServers: {
         yvoke: {
@@ -186,11 +159,7 @@ async function main() {
 
     console.log('✅ CLI Dynamic Reconnection SUCCESS: Bearer token-refreshed-456 was received by MCP server!');
   } finally {
-    queueClosed = true;
-    if (queueResolver) {
-      const r: () => void = queueResolver;
-      r();
-    }
+    releasePrompt?.();
     q.close();
     server.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
