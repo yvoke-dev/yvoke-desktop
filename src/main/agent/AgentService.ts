@@ -502,7 +502,7 @@ export class AgentService {
               const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
               if (result?.errors && result.errors[MCP_SERVER_NAME]) {
                 const errMsg = result.errors[MCP_SERVER_NAME];
-                if (/401|unauthori[sz]ed|token.*expired|invalid.*token/i.test(errMsg)) {
+                if (/\b401\b|unauthori[sz]ed|token.*expired|invalid.*token/i.test(errMsg)) {
                   isAuthFailure = true;
                 }
                 throw new Error(`MCP server update error: ${errMsg}`);
@@ -528,7 +528,7 @@ export class AgentService {
               return current;
             }
             if (current.busy) {
-              throw new Error('A turn is already running for this conversation.');
+              return current;
             }
             // Configuration mismatch on an idle session; close it before creating a replacement
             this.closeThread(thread.id);

@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { claudeBinaryPath } from '../src/main/agent/AgentService';
+import { claudeBinaryPath, debugEnv } from '../src/main/agent/AgentService';
 
 async function main() {
   console.log('--- Claude CLI Dynamic MCP Reconnect Spike ---');
@@ -150,14 +150,15 @@ async function main() {
       settingSources: [],
       cwd: tempDir,
       pathToClaudeCodeExecutable: binary ?? undefined,
+      env: debugEnv(),
+      persistSession: false,
+      strictMcpConfig: true,
     },
   });
 
   try {
-    pushUser('Hello, initialize tools.');
-
-    // Wait briefly for initial MCP connection
-    await new Promise((r) => setTimeout(r, 2000));
+    // Wait for initial MCP connection handshake to complete without running a model turn
+    await q.initializationResult();
 
     console.log('Received auth headers before reconnect:', receivedAuthHeaders);
     if (!receivedAuthHeaders.some((h) => h === 'Bearer token-initial-123')) {

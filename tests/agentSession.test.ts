@@ -759,6 +759,19 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     expect(h.sessions[2].options.resume).toBe(priorSessionId4);
     expect(invalidateMock).toHaveBeenCalledTimes(1); // not called again for 500
 
+    // Non-auth error with 401 in a port number (e.g. port 4010): word-anchor ensures no invalidate()
+    const priorSessionId5 = meta.sessionId;
+    currentAuth = 'Bearer token-5';
+    h.setMcpServersImpl = async () => ({
+      added: [],
+      removed: [],
+      errors: { [MCP_SERVER_NAME]: 'connect ECONNREFUSED 127.0.0.1:4010' },
+    });
+    await ask(svc, meta, 'Turn 5', 'oim-schema');
+    expect(h.sessions).toHaveLength(4);
+    expect(h.sessions[3].options.resume).toBe(priorSessionId5);
+    expect(invalidateMock).toHaveBeenCalledTimes(1); // not called for 4010
+
     svc.closeAll();
   });
 
@@ -937,7 +950,7 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     svc.closeAll();
   });
 
-  it('11a. Session replacement mid-wait with busy config-mismatched session rejects with turn already running error', async () => {
+  it('11a. Session replacement mid-wait with busy config-mismatched session rejects without emitting error event', async () => {
     const meta = thread();
     let currentAuth = 'Bearer token-1';
     const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
@@ -959,9 +972,12 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
       return { added: [], removed: [], errors: {} };
     };
 
-    await expect((svc as any).ensureSession(meta, 'oim-schema')).rejects.toThrow(
+    const prevErrorEvents = events.filter((e) => e.kind === 'error');
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
       'A turn is already running for this conversation.',
     );
+    // Crucial: ensure no error event was emitted to avoid wiping the active turn view in the UI
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(prevErrorEvents.length);
 
     svc.closeAll();
   });
