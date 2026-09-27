@@ -31,7 +31,9 @@ other, and the app is useless without both.
   API authenticate identically.
 - **An expired session re-authenticates by itself.** A silent refresh is tried first; if that fails for
   any reason other than the network, the corporate sign-in opens automatically. A network failure is
-  reported as a network failure rather than being mistaken for an expired session.
+  reported as a network failure rather than being mistaken for an expired session. Proactive silent
+  re-authentication applies continuously across warm conversations, synchronizing fresh credentials before
+  turns so long-lived sessions do not experience authentication drops.
 - **Any server call refused as unauthorised is retried exactly once**, with a forced interactive
   sign-in.
 - **The token cache is encrypted with the operating system's keystore** where one is available.

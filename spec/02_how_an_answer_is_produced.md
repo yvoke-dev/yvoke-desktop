@@ -80,9 +80,11 @@ server.
   leaving the run hanging.
 - **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
   allow-list and instructions take effect. When continuing under the same playbook, the session
-  remains warm and playbook instructions are not redundantly re-injected. When switching playbooks,
-  a fresh session is initialized with the new playbook's tools and instructions. Attempting to change
-  agent mode while a turn is already running is rejected.
+  remains warm and playbook instructions are not redundantly re-injected. Knowledge-base connection
+  credentials are automatically synchronized before each turn so that long-lived sessions transparently
+  retain access without requiring an app restart. When switching playbooks, a fresh session is initialized
+  with the new playbook's tools and instructions. Attempting to change agent mode while a turn is already
+  running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
