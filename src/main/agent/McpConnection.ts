@@ -7,18 +7,15 @@ import { COMPUTE_SERVER_NAME } from './computeTools';
 export interface McpAuthProvider {
   /** Headers attached to the MCP connection; empty while /mcp/** ran open (pre-M19). */
   headers(): Promise<Record<string, string>>;
+  /** Invalidate cached auth credentials so next acquisition is fresh. */
+  invalidate?(): void;
 }
 
-export const NO_AUTH_PROVIDER: McpAuthProvider = {
-  headers: async () => ({}),
-};
-
-export async function buildMcpServers(
+export function buildMcpServers(
   settings: AppSettings,
-  provider: McpAuthProvider,
-): Promise<Record<string, McpServerConfig>> {
+  headers: Record<string, string>,
+): Record<string, McpServerConfig> {
   const url = `${settings.serverBaseUrl.replace(/\/+$/, '')}/mcp`;
-  const headers = await provider.headers();
   return {
     [MCP_SERVER_NAME]: {
       type: settings.mcpTransport,

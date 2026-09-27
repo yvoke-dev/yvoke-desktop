@@ -2,7 +2,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, AppSettings, McpPromptInfo, OrchestratorProfile, ThreadMeta } from '../src/shared/types';
+import {
+  MCP_SERVER_NAME,
+  type AgentEvent,
+  type AppSettings,
+  type McpPromptInfo,
+  type OrchestratorProfile,
+  type ThreadMeta,
+} from '../src/shared/types';
+import { buildMcpServers } from '../src/main/agent/McpConnection';
 
 /**
  * Session lifecycle, against a stand-in for the Agent SDK.
@@ -17,9 +25,16 @@ import type { AgentEvent, AppSettings, McpPromptInfo, OrchestratorProfile, Threa
  * successful turn, which is all the service needs to advance its own state machine.
  */
 const h = vi.hoisted(() => ({
-  sessions: [] as { options: Record<string, unknown>; pushed: string[]; closed: boolean }[],
+  sessions: [] as {
+    options: Record<string, unknown>;
+    pushed: string[];
+    closed: boolean;
+    closeSpy: ReturnType<typeof vi.fn>;
+    setMcpServersSpy: ReturnType<typeof vi.fn>;
+  }[],
   nextQueryError: null as Error | null,
   nextQueryResult: null as Record<string, unknown> | null,
+  setMcpServersImpl: null as ((session: any, servers: any) => Promise<any>) | null,
 }));
 
 // Partial mock: only `query` is replaced. The rest is real, because the in-process compute server
@@ -33,7 +48,27 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
     prompt: AsyncIterable<{ message: { content: string } }>;
     options: Record<string, unknown>;
   }) => {
-    const session = { options, pushed: [] as string[], closed: false };
+    const closeSpy = vi.fn(() => {
+      session.closed = true;
+      if (waiting) {
+        const w = waiting;
+        waiting = null;
+        w({ value: undefined, done: true });
+      }
+    });
+    const setMcpServersSpy = vi.fn(async (servers: Record<string, any>) => {
+      if (h.setMcpServersImpl) {
+        return h.setMcpServersImpl(session, servers);
+      }
+      return { added: [], removed: [], errors: {} };
+    });
+    const session = {
+      options,
+      pushed: [] as string[],
+      closed: false,
+      closeSpy,
+      setMcpServersSpy,
+    };
     h.sessions.push(session);
     const id = h.sessions.length;
 
@@ -90,14 +125,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
       setModel: async () => undefined,
       setMaxThinkingTokens: async () => undefined,
       interrupt: async () => undefined,
-      close: () => {
-        session.closed = true;
-        if (waiting) {
-          const w = waiting;
-          waiting = null;
-          w({ value: undefined, done: true });
-        }
-      },
+      close: closeSpy,
+      setMcpServers: setMcpServersSpy,
     };
   };
   return { ...actual, query };
@@ -206,6 +235,7 @@ beforeEach(() => {
   h.sessions.length = 0;
   h.nextQueryError = null;
   h.nextQueryResult = null;
+  h.setMcpServersImpl = null;
   events = [];
   sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-agent-'));
 });
@@ -601,6 +631,417 @@ describe('error attribution across session events', () => {
     expect(resolvedAnswer).toBe('');
     expect(svc.pendingClarifications.has('tool-crash')).toBe(false);
     expect(threadClarifications.has(meta.id)).toBe(false);
+
+    svc.closeAll();
+  });
+});
+
+describe('McpConnection pre-resolved headers & AgentService dynamic header synchronization', () => {
+  function makeAuthService(
+    meta: ThreadMeta,
+    getHeaders: () => Promise<Record<string, string>>,
+    invalidate?: () => void,
+  ) {
+    return new AgentService({
+      getSettings: () => ({ ...settings(), serverAuthMode: 'entra' }),
+      mcpAuthProvider: { headers: getHeaders, ...(invalidate ? { invalidate } : {}) },
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId, profile) => {
+        meta.sessionId = sessionId;
+        meta.sessionProfile = profile;
+      },
+      onTurnPersist: () => undefined,
+      sandboxDir,
+      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+      getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
+    });
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('1. Dev-mode & unauthenticated zero-churn: Follow-up turns make 0 calls to setMcpServers', async () => {
+    const meta = thread();
+    const svc = makeService(meta); // dev-mode, serverAuthMode: 'dev'
+
+    await ask(svc, meta, 'First turn', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].setMcpServersSpy).not.toHaveBeenCalled();
+
+    await ask(svc, meta, 'Second turn', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].setMcpServersSpy).not.toHaveBeenCalled();
+
+    svc.closeAll();
+  });
+
+  it('2. Timer cleanup: Assert timeout timer is cancelled via clearTimeout on success and error paths', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    // Turn 1: initial session created
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+
+    // Success path: auth changes
+    clearTimeoutSpy.mockClear();
+    currentAuth = 'Bearer token-2';
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    expect(h.sessions[0].setMcpServersSpy).toHaveBeenCalledTimes(1);
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+
+    // Error path: auth changes, setMcpServers throws
+    clearTimeoutSpy.mockClear();
+    currentAuth = 'Bearer token-3';
+    h.setMcpServersImpl = async () => {
+      throw new Error('RPC error');
+    };
+    await ask(svc, meta, 'Turn 3', 'oim-schema');
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+
+    clearTimeoutSpy.mockRestore();
+    svc.closeAll();
+  });
+
+  it('3. Targeted server error disambiguation: errors for MCP_SERVER_NAME evicts and recreates; non-yvoke error does not evict; selective invalidate', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const invalidateMock = vi.fn();
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }), invalidateMock);
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const initialSession = h.sessions[0];
+
+    // Non-yvoke error: does NOT evict
+    currentAuth = 'Bearer token-2';
+    h.setMcpServersImpl = async () => ({
+      added: [],
+      removed: [],
+      errors: { other_compute: 'compute failed' },
+    });
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    expect(initialSession.closed).toBe(false);
+    expect(invalidateMock).not.toHaveBeenCalled();
+
+    // MCP_SERVER_NAME 401 error: evicts and recreates AND calls invalidate()
+    const priorSessionId3 = meta.sessionId;
+    currentAuth = 'Bearer token-3';
+    h.setMcpServersImpl = async () => ({
+      added: [],
+      removed: [],
+      errors: { [MCP_SERVER_NAME]: '401 Unauthorized' },
+    });
+    await ask(svc, meta, 'Turn 3', 'oim-schema');
+    expect(h.sessions).toHaveLength(2);
+    expect(initialSession.closeSpy).toHaveBeenCalled();
+    expect(h.sessions[1].options.resume).toBe(priorSessionId3);
+    expect(invalidateMock).toHaveBeenCalledTimes(1);
+
+    // MCP_SERVER_NAME non-auth error (e.g. 500 error): evicts and recreates, but does NOT call invalidate()
+    const priorSessionId4 = meta.sessionId;
+    currentAuth = 'Bearer token-4';
+    h.setMcpServersImpl = async () => ({
+      added: [],
+      removed: [],
+      errors: { [MCP_SERVER_NAME]: '500 Internal Server Error' },
+    });
+    await ask(svc, meta, 'Turn 4', 'oim-schema');
+    expect(h.sessions).toHaveLength(3);
+    expect(h.sessions[2].options.resume).toBe(priorSessionId4);
+    expect(invalidateMock).toHaveBeenCalledTimes(1); // not called again for 500
+
+    // Non-auth error with 401 in a port number (e.g. port 4010): word-anchor ensures no invalidate()
+    const priorSessionId5 = meta.sessionId;
+    currentAuth = 'Bearer token-5';
+    h.setMcpServersImpl = async () => ({
+      added: [],
+      removed: [],
+      errors: { [MCP_SERVER_NAME]: 'connect ECONNREFUSED 127.0.0.1:4010' },
+    });
+    await ask(svc, meta, 'Turn 5', 'oim-schema');
+    expect(h.sessions).toHaveLength(4);
+    expect(h.sessions[3].options.resume).toBe(priorSessionId5);
+    expect(invalidateMock).toHaveBeenCalledTimes(1); // not called for 4010
+
+    svc.closeAll();
+  });
+
+  it('4. Dynamic update timeout: setMcpServers hanging > 10s times out, timer cleaned up, session evicted and recreated without invalidating auth', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const invalidateMock = vi.fn();
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }), invalidateMock);
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const initialSession = h.sessions[0];
+    const priorSessionId4 = meta.sessionId;
+
+    currentAuth = 'Bearer token-hang';
+    h.setMcpServersImpl = () => new Promise(() => {}); // never resolves
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    clearTimeoutSpy.mockClear();
+
+    const ensurePromise = (svc as any).ensureSession(meta, 'oim-schema');
+    await vi.advanceTimersByTimeAsync(10_005);
+    const newSession = await ensurePromise;
+    vi.useRealTimers();
+
+    expect(initialSession.closeSpy).toHaveBeenCalled();
+    expect(h.sessions).toHaveLength(2);
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    expect(newSession.lastMcpHeadersJson).toBe(JSON.stringify({ Authorization: 'Bearer token-hang' }));
+    expect(h.sessions[1].options.resume).toBe(priorSessionId4);
+    expect(invalidateMock).not.toHaveBeenCalled();
+
+    clearTimeoutSpy.mockRestore();
+    svc.closeAll();
+  });
+
+  it('5. Subprocess crash: setMcpServers rejects with process crash error -> session evicted and recreated without invalidating auth', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const invalidateMock = vi.fn();
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }), invalidateMock);
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const initialSession = h.sessions[0];
+    const priorSessionId5 = meta.sessionId;
+
+    currentAuth = 'Bearer token-crash';
+    h.setMcpServersImpl = async () => {
+      throw new Error('Claude Code subprocess terminated unexpectedly (exit code 1)');
+    };
+
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    expect(h.sessions).toHaveLength(2);
+    expect(initialSession.closeSpy).toHaveBeenCalled();
+    expect(h.sessions[1].options.resume).toBe(priorSessionId5);
+    expect(invalidateMock).not.toHaveBeenCalled();
+
+    svc.closeAll();
+  });
+
+  it('6. Thread eviction race: closeThread(thread.id) called while setMcpServers is awaiting creates fresh session cleanly without throwing', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect((svc as any).sessions.has(meta.id)).toBe(true);
+
+    currentAuth = 'Bearer token-race';
+    h.setMcpServersImpl = async () => {
+      svc.closeThread(meta.id);
+      return { added: [], removed: [], errors: {} };
+    };
+
+    const session = await (svc as any).ensureSession(meta, 'oim-schema');
+    expect(session).toBeDefined();
+    expect((svc as any).sessions.has(meta.id)).toBe(true);
+
+    svc.closeAll();
+  });
+
+  it('6b. Unchanged-auth eviction race: when thread is evicted during headers(), fresh session is created', async () => {
+    const meta = thread();
+    const svc = makeAuthService(meta, async () => {
+      return { Authorization: 'Bearer same-token' };
+    });
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const session1 = (svc as any).sessions.get(meta.id);
+    expect(session1).toBeDefined();
+
+    // Hook into next headers() call to close the session while headers() is in flight
+    (svc as any).deps.mcpAuthProvider.headers = async () => {
+      svc.closeThread(meta.id);
+      return { Authorization: 'Bearer same-token' };
+    };
+
+    const session2 = await (svc as any).ensureSession(meta, 'oim-schema');
+    expect(session2).not.toBe(session1);
+    expect(h.sessions[0].closeSpy).toHaveBeenCalled();
+    expect((svc as any).sessions.get(meta.id)).toBe(session2);
+
+    svc.closeAll();
+  });
+
+  it('7. Pre-resolved headers: buildMcpServers attaches passed headers directly', () => {
+    const preResolved = { Authorization: 'Bearer pre-resolved' };
+    const servers = buildMcpServers(settings(), preResolved);
+    expect(servers[MCP_SERVER_NAME]).toBeDefined();
+    expect((servers[MCP_SERVER_NAME] as any).headers).toEqual(preResolved);
+  });
+
+  it('8. Bearer token non-leakage: Emitted logs do not contain the bearer token string', async () => {
+    const meta = thread();
+    const secretToken = 'secret-token-xyz-987654321';
+    let currentAuth = `Bearer ${secretToken}`;
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    const consoleLogSpy = vi.spyOn(console, 'log');
+    const consoleErrorSpy = vi.spyOn(console, 'error');
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+
+    currentAuth = `Bearer ${secretToken}-updated`;
+    h.setMcpServersImpl = async () => {
+      throw new Error('Dynamic update failed with error');
+    };
+
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+
+    const allEmittedLogs = [...consoleLogSpy.mock.calls, ...consoleErrorSpy.mock.calls].flat().join(' ');
+    expect(allEmittedLogs).not.toContain(secretToken);
+
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    svc.closeAll();
+  });
+
+  it('9. Anti-tautological eviction assertion: Assert oldSession !== newSession, oldSession.query.close was called, and newSession.options.resume === thread.sessionId', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    const oldSession = h.sessions[0];
+    const initialSessionId = meta.sessionId;
+
+    currentAuth = 'Bearer token-2';
+    h.setMcpServersImpl = async () => {
+      throw new Error('Subprocess killed');
+    };
+
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    const newSession = h.sessions[1];
+
+    expect(oldSession).not.toBe(newSession);
+    expect(oldSession.closeSpy).toHaveBeenCalled();
+    expect(newSession.options.resume).toBe(initialSessionId);
+
+    svc.closeAll();
+  });
+
+  it('10. Full header change detection: change in custom headers triggers setMcpServers', async () => {
+    const meta = thread();
+    let currentHeaders: Record<string, string> = { Authorization: 'Bearer token-1', 'x-tenant': 'tenant-a' };
+    const svc = makeAuthService(meta, async () => currentHeaders);
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions[0].setMcpServersSpy).not.toHaveBeenCalled();
+
+    // Change x-tenant header, keeping Authorization identical
+    currentHeaders = { Authorization: 'Bearer token-1', 'x-tenant': 'tenant-b' };
+    await ask(svc, meta, 'Turn 2', 'oim-schema');
+    expect(h.sessions[0].setMcpServersSpy).toHaveBeenCalledTimes(1);
+
+    svc.closeAll();
+  });
+
+  it('11a. Session replacement mid-wait with busy config-mismatched session rejects without emitting error event', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+
+    currentAuth = 'Bearer token-race-busy';
+    h.setMcpServersImpl = async () => {
+      const replacingSession: any = {
+        query: { close: vi.fn() },
+        queue: { close: vi.fn() },
+        orchestratorProfile: undefined,
+        playbookName: 'different-playbook',
+        busy: true,
+        lastMcpHeadersJson: '{}',
+      };
+      (svc as any).sessions.set(meta.id, replacingSession);
+      return { added: [], removed: [], errors: {} };
+    };
+
+    const prevErrorEvents = events.filter((e) => e.kind === 'error');
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
+      'A turn is already running for this conversation.',
+    );
+    // Crucial: ensure no error event was emitted to avoid wiping the active turn view in the UI
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(prevErrorEvents.length);
+
+    svc.closeAll();
+  });
+
+  it('11b. Session replacement mid-wait with idle config-mismatched session closes replaced session before recreating', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+
+    currentAuth = 'Bearer token-race-idle';
+    const replacingQueryCloseSpy = vi.fn();
+    const replacingQueueCloseSpy = vi.fn();
+    h.setMcpServersImpl = async () => {
+      const replacingSession: any = {
+        query: { close: replacingQueryCloseSpy },
+        queue: { close: replacingQueueCloseSpy },
+        orchestratorProfile: undefined,
+        playbookName: 'different-playbook',
+        busy: false,
+        lastMcpHeadersJson: '{}',
+      };
+      (svc as any).sessions.set(meta.id, replacingSession);
+      return { added: [], removed: [], errors: {} };
+    };
+
+    const newSession = await (svc as any).ensureSession(meta, 'oim-schema');
+    expect(replacingQueryCloseSpy).toHaveBeenCalledTimes(1);
+    expect(replacingQueueCloseSpy).toHaveBeenCalledTimes(1);
+    expect(newSession).toBeDefined();
+    expect(newSession.playbookName).toBe('oim-schema');
+
+    svc.closeAll();
+  });
+
+  it('11c. Failed MCP update when session became busy mid-wait does not close session and rejects without emitting error event', async () => {
+    const meta = thread();
+    let currentAuth = 'Bearer token-1';
+    const svc = makeAuthService(meta, async () => ({ Authorization: currentAuth }));
+
+    await ask(svc, meta, 'Turn 1', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    const initialSession = h.sessions[0];
+
+    currentAuth = 'Bearer token-race-update-failed';
+    // During the setMcpServers call, the session becomes busy (e.g. concurrent turn started) and the update fails
+    h.setMcpServersImpl = async () => {
+      const activeSession = (svc as any).sessions.get(meta.id);
+      if (activeSession) {
+        activeSession.busy = true;
+      }
+      return { added: [], removed: [], errors: { [MCP_SERVER_NAME]: 'Failed to connect' } };
+    };
+
+    const prevErrorEvents = events.filter((e) => e.kind === 'error');
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
+      'A turn is already running for this conversation.',
+    );
+    // Crucial: ensure no error event was emitted and active session was NOT closed mid-turn
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(prevErrorEvents.length);
+    expect(initialSession.closeSpy).not.toHaveBeenCalled();
+    expect((svc as any).sessions.get(meta.id)).toBeDefined();
 
     svc.closeAll();
   });

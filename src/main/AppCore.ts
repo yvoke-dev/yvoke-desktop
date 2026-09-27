@@ -177,7 +177,10 @@ export class AppCore {
     });
     // M19 flip: when serverAuthMode is 'entra' the same JWT goes to /mcp/**;
     // in dev mode the mock decoder accepts the static token as well.
-    const mcpAuthProvider = { headers: () => this.serverAuth.headers() };
+    const mcpAuthProvider = {
+      headers: () => this.serverAuth.headers(),
+      invalidate: () => this.serverAuth.invalidate(),
+    };
     this.mcpPrompts = new McpPrompts({ getSettings: () => this.settings.get(), auth: mcpAuthProvider });
     this.agent = new AgentService({
       getSettings: () => this.settings.get(),

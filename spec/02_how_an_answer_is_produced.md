@@ -80,9 +80,11 @@ server.
   leaving the run hanging.
 - **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
   allow-list and instructions take effect. When continuing under the same playbook, the session
-  remains warm and playbook instructions are not redundantly re-injected. When switching playbooks,
-  a fresh session is initialized with the new playbook's tools and instructions. Attempting to change
-  agent mode while a turn is already running is rejected.
+  remains warm and playbook instructions are not redundantly re-injected. Knowledge-base connection
+  credentials are automatically synchronized before each turn so that long-lived sessions transparently
+  retain access without requiring an app restart. When switching playbooks, a fresh session is initialized
+  with the new playbook's tools and instructions. Attempting to change agent mode while a turn is already
+  running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -129,6 +131,7 @@ server.
   once on a fresh connection; establishing that connection has no ceiling of its own.
 - **Three conversations stay warm, softly.** Sending in a fourth closes the least recently used *idle*
   one — but if all three are mid-answer, nothing is evicted and a fourth session starts anyway.
+- **Mid-turn token expiry is unhandled.** MCP authentication headers are updated when a turn starts, not during tool execution. An exceptionally long turn or multi-stage review round exceeding the token's remaining buffer can lose knowledge-base access mid-answer.
 - **A turn that crashes leaves its runtime process behind.** The session is dropped without being shut
   down; only a clean close reclaims it.
 - **The calculator is arithmetic only** — a fixed list of functions and constants, expressions up to

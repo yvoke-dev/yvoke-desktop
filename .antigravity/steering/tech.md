@@ -53,6 +53,9 @@ npm run typecheck
 # Run end-to-end spike query test (requires local server and active Claude Code credentials)
 npm run spike -- "your question"
 
+# Run CLI dynamic MCP reconnect probe
+npm run spike:reconnect
+
 # Bundle distribution files
 npm run dist:mac     # Package for macOS (unsigned release/*.zip)
 npm run dist:win     # Package for Windows (release/*.exe, release/*.zip)

@@ -4,10 +4,14 @@ import { PublicClientApplication, type AccountInfo, type Configuration } from '@
 import type { AuthVerificationFailureReason } from '../../shared/types';
 import type { AppSettings } from '../../shared/types';
 import { isNetworkError, tagAttributedError } from '../../shared/error';
+import { log } from '../log';
 import type { McpAuthProvider } from '../agent/McpConnection';
 
 /** Token used while the server runs with APP_SECURITY_MOCK=true (any token accepted). */
 export const DEV_TOKEN = 'dev-local-token';
+
+/** Proactive token refresh threshold (5 minutes). */
+export const EXPIRATION_BUFFER_MS = 5 * 60 * 1000;
 
 /**
  * `verifyToken`'s result, carrying the live bearer. It is deliberately NOT the shared
@@ -94,6 +98,21 @@ export class ServerAuth implements McpAuthProvider {
   private cacheCorrupted = false;
   /** pcaKey the account was last hydrated for; `null` means "not hydrated yet". */
   private hydratedKey: string | null = null;
+  /** In-memory cached token to avoid blocking synchronous disk I/O and decryption on every warm turn. */
+  private cachedToken: {
+    token: string;
+    expiresAt: number;
+    pcaKey: string;
+    scope: string;
+  } | null = null;
+  /** Set by invalidate() so the next silent acquisition passes forceRefresh: true to MSAL. */
+  private forceNextRefresh = false;
+
+  /** Invalidate in-memory token cache and force next MSAL acquisition to refresh from Entra. */
+  invalidate(): void {
+    this.cachedToken = null;
+    this.forceNextRefresh = true;
+  }
 
   constructor(
     private readonly getSettings: () => AppSettings,
@@ -144,6 +163,7 @@ export class ServerAuth implements McpAuthProvider {
     // Entra settings changed since the last build (or first build): rebuild the MSAL
     // app so it targets the current clientId/tenantId, and drop the stale account.
     this.account = null;
+    this.cachedToken = null;
     {
       const config: Configuration = {
         auth: {
@@ -189,8 +209,28 @@ export class ServerAuth implements McpAuthProvider {
       if (this.isDevMode()) {
         return DEV_TOKEN;
       }
+
+      const settings = this.getSettings();
+      const currentKey = this.pcaKeyFor(settings);
+      const currentScope = settings.entra.scope;
+      const forceRefresh = this.forceNextRefresh;
+      this.forceNextRefresh = false;
+
+      if (
+        !forceInteractive &&
+        !forceRefresh &&
+        this.cachedToken &&
+        this.cachedToken.pcaKey === currentKey &&
+        this.cachedToken.scope === currentScope
+      ) {
+        const remaining = this.cachedToken.expiresAt - Date.now();
+        if (remaining > EXPIRATION_BUFFER_MS) {
+          return this.cachedToken.token;
+        }
+      }
+
       await this.hydrateAccount();
-      const scopes = [this.getSettings().entra.scope];
+      const scopes = [currentScope];
       const pca = this.getPca();
 
       if (!forceInteractive) {
@@ -203,12 +243,43 @@ export class ServerAuth implements McpAuthProvider {
 
         if (account) {
           try {
-            const silent = await pca.acquireTokenSilent({ account, scopes });
+            const silent = await pca.acquireTokenSilent({
+              account,
+              scopes,
+              ...(forceRefresh ? { forceRefresh: true } : {}),
+            });
             if (silent?.accessToken) {
+              const expiresAt = silent?.expiresOn ? silent.expiresOn.getTime() : 0;
               this.account = silent.account ?? account;
+              this.cachedToken = {
+                token: silent.accessToken,
+                expiresAt,
+                pcaKey: currentKey,
+                scope: currentScope,
+              };
               return silent.accessToken;
             }
           } catch (err) {
+            // If the silent refresh failed (e.g. transient network or Entra 5xx error), but
+            // our cached token has not yet reached its hard expiration time, continue using it
+            // rather than opening an unnecessary interactive sign-in window.
+            if (
+              !forceRefresh &&
+              this.cachedToken &&
+              this.cachedToken.pcaKey === currentKey &&
+              this.cachedToken.scope === currentScope &&
+              this.cachedToken.expiresAt > Date.now()
+            ) {
+              log(
+                'auth',
+                `Silent token refresh failed, falling back to valid cached token until ${new Date(
+                  this.cachedToken.expiresAt,
+                ).toISOString()}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return this.cachedToken.token;
+            }
+
+            this.cachedToken = null;
             // The network being down is not a reason to prompt for a sign-in.
             if (isNetworkError(err)) {
               throw err;
@@ -225,6 +296,13 @@ export class ServerAuth implements McpAuthProvider {
                   '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
               });
               this.account = interactive.account;
+              const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
+              this.cachedToken = {
+                token: interactive.accessToken,
+                expiresAt,
+                pcaKey: currentKey,
+                scope: currentScope,
+              };
               return interactive.accessToken;
             } catch (interactiveErr) {
               throw new Error('Authentication session expired or invalid. Please sign in again.');
@@ -233,17 +311,27 @@ export class ServerAuth implements McpAuthProvider {
         }
 
         this.account = null;
+        this.cachedToken = null;
         throw new Error('Authentication session expired or invalid. Please sign in again.');
       }
 
+      this.cachedToken = null;
       const interactive = await pca.acquireTokenInteractive({
         scopes,
         openBrowser: this.openBrowser,
         successTemplate: '<html><body>Signed in. You can close this window and return to Yvoke - Desktop.</body></html>',
       });
       this.account = interactive.account;
+      const expiresAt = interactive.expiresOn ? interactive.expiresOn.getTime() : 0;
+      this.cachedToken = {
+        token: interactive.accessToken,
+        expiresAt,
+        pcaKey: currentKey,
+        scope: currentScope,
+      };
       return interactive.accessToken;
     } catch (err) {
+      this.cachedToken = null;
       throw new Error(tagAttributedError('Entra', err));
     }
   }
@@ -267,6 +355,7 @@ export class ServerAuth implements McpAuthProvider {
         await this.pca.getTokenCache().removeAccount(this.account);
       }
       this.account = null;
+      this.cachedToken = null;
     } catch (err) {
       throw new Error(tagAttributedError('Entra', err));
     }

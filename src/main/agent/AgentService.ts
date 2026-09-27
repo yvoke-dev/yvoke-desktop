@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_TOOL_PREFIX } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { NoReplyError, readSingleReply } from './singleTurn';
@@ -34,6 +34,9 @@ import {
 
 /** The server-managed system prompt every turn runs under. */
 export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+
+/** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
+export const MCP_UPDATE_TIMEOUT_MS = 10_000;
 
 /**
  * Path to the native Claude Code binary staged for this build target, or null in dev.
@@ -203,6 +206,8 @@ interface ThreadSession {
   pendingUser?: ChatMessage;
   /** The playbook whose instructions are in this session's context, if any. */
   injectedPlaybook?: string;
+  /** Last resolved MCP headers serialized to JSON for change detection. */
+  lastMcpHeadersJson: string;
 }
 
 export interface AgentServiceDeps {
@@ -468,6 +473,8 @@ export class AgentService {
 
   private async ensureSession(thread: ThreadMeta, playbookName?: string): Promise<ThreadSession> {
     const existing = this.sessions.get(thread.id);
+    let resolvedHeaders: Record<string, string> | undefined;
+
     if (existing) {
       if (existing.orchestratorProfile !== thread.orchestratorProfile || existing.playbookName !== playbookName) {
         log(
@@ -477,8 +484,80 @@ export class AgentService {
         );
         this.closeThread(thread.id);
       } else {
-        existing.lastActiveAt = Date.now();
-        return existing;
+        const headers = await this.deps.mcpAuthProvider.headers();
+        resolvedHeaders = headers;
+        const headersJson = JSON.stringify(headers);
+        const hasAuthChanged = headersJson !== existing.lastMcpHeadersJson;
+        let updateFailed = false;
+        let updateError: unknown = null;
+        let isAuthFailure = false;
+
+        if (hasAuthChanged) {
+          try {
+            const mcpServers = buildMcpServers(this.deps.getSettings(), headers);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                reject(new Error('Timed out updating MCP servers'));
+              }, MCP_UPDATE_TIMEOUT_MS);
+            });
+            try {
+              const result = await Promise.race([existing.query.setMcpServers(mcpServers), timeoutPromise]);
+              if (result?.errors && result.errors[MCP_SERVER_NAME]) {
+                const errMsg = result.errors[MCP_SERVER_NAME];
+                if (/\b401\b|unauthori[sz]ed|token.*expired|invalid.*token/i.test(errMsg)) {
+                  isAuthFailure = true;
+                }
+                throw new Error(`MCP server update error: ${errMsg}`);
+              }
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          } catch (err) {
+            updateFailed = true;
+            updateError = err;
+          }
+        }
+
+        // Verify session was not closed or replaced while awaiting headers or setMcpServers
+        const current = this.sessions.get(thread.id);
+        if (current !== existing) {
+          log('agent', `Session for thread=${thread.id} was closed or replaced during MCP check; verifying or recreating`);
+          if (current) {
+            if (
+              current.orchestratorProfile === thread.orchestratorProfile &&
+              current.playbookName === playbookName
+            ) {
+              return current;
+            }
+            if (current.busy) {
+              return current;
+            }
+            // Configuration mismatch on an idle session; close it before creating a replacement
+            this.closeThread(thread.id);
+          }
+          // Session was closed or replaced with different config; fall through to recreate below
+        } else if (updateFailed) {
+          if (existing.busy) {
+            return existing;
+          }
+          log(
+            'agent',
+            `Failed to update MCP servers dynamically for thread=${thread.id}: ${
+              updateError instanceof Error ? updateError.message : 'Update failed'
+            }`,
+          );
+          this.closeThread(thread.id);
+          if (isAuthFailure) {
+            this.deps.mcpAuthProvider.invalidate?.();
+            resolvedHeaders = undefined;
+          }
+          // Fall through to recreate fresh session resuming thread.sessionId below
+        } else {
+          existing.lastMcpHeadersJson = headersJson;
+          existing.lastActiveAt = Date.now();
+          return existing;
+        }
       }
     }
 
@@ -588,9 +667,13 @@ export class AgentService {
       this.deps.onSessionId(thread.id, '', undefined);
     }
 
+    if (!resolvedHeaders) {
+      resolvedHeaders = await this.deps.mcpAuthProvider.headers();
+    }
+
     const options: Options = {
       systemPrompt: orchestrator ? '' : systemPrompt,
-      mcpServers: await buildMcpServers(settings, this.deps.mcpAuthProvider),
+      mcpServers: buildMcpServers(settings, resolvedHeaders),
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
@@ -635,6 +718,7 @@ export class AgentService {
       lastActiveAt: Date.now(),
       playbookName,
       orchestratorProfile: thread.orchestratorProfile,
+      lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };
     this.sessions.set(thread.id, session);
     void this.consume(thread.id, session);
