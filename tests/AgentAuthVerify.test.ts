@@ -247,6 +247,54 @@ describe('AgentService.verifyClaudeCredentials', () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it('classifies SDK result with api_error_status 403 as expired with denied access message', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          api_error_status: 403,
+          result: 'Account suspended or forbidden',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'expired',
+      message: 'Claude denied access for this account. Try claude /login, or check your subscription.',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('does not classify 500 mentioning auth words as expired', async () => {
+    mockDetectCredentials.mockReturnValue('ok');
+    const { iterator, close } = createFakeQuery({
+      messages: [
+        {
+          type: 'result',
+          subtype: 'success',
+          is_error: true,
+          api_error_status: 500,
+          result: 'Internal server error: unable to load api key from vault',
+        },
+      ],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const result = await agentService.verifyClaudeCredentials('/tmp/test-sandbox');
+
+    expect(result).toEqual({
+      status: 'error',
+      message: 'Claude verification failed: Internal server error: unable to load api key from vault',
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
   it('classifies SDK result with api_error_status 429 as rate_limited even with non-standard body', async () => {
     mockDetectCredentials.mockReturnValue('ok');
     const { iterator, close } = createFakeQuery({
@@ -476,18 +524,25 @@ describe('classifyClaudeFailure', () => {
     });
   });
 
-  it('classifies ResultError with status 401 or 403 as expired', () => {
+  it('classifies ResultError with status 401 as expired with login message', () => {
     const err401 = new ResultError('Unauthorized', 'success', 401);
     expect(classifyClaudeFailure(err401)).toEqual({
       status: 'expired',
       message: 'Session expired or not logged in. Run claude /login in a terminal.',
     });
+  });
 
+  it('classifies ResultError with status 403 as expired with denied access message', () => {
     const err403 = new ResultError('Forbidden', 'success', 403);
     expect(classifyClaudeFailure(err403)).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude denied access for this account. Try claude /login, or check your subscription.',
     });
+  });
+
+  it('does not fall back to text matching when ResultError has another status code (e.g. 500)', () => {
+    const err500 = new ResultError('Internal error: invalid api key', 'success', 500);
+    expect(classifyClaudeFailure(err500)).toBeUndefined();
   });
 
   it('falls back to regex inspection when status code is absent', () => {

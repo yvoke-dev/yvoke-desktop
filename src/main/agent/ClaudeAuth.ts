@@ -53,8 +53,13 @@ export function isAuthError(message: string): boolean {
 
 /**
  * Classifies a Claude failure into a rate limit or auth expiration status, or returns undefined.
- * Checks typed ResultError status first (429 -> rate_limited, 401/403 -> expired), then inspects
- * error prose (rate-limit before auth, since a 429 body names the API key which isAuthError also matches).
+ * Checks typed ResultError status first:
+ * - 429 -> rate_limited
+ * - 401 -> expired (session expired / not logged in)
+ * - 403 -> expired (account or organization permission denied)
+ * When an explicit HTTP status is present on ResultError, it never falls through to prose regex
+ * matching (e.g. a 500 error whose body mentions "API key" is a server error, not expired auth).
+ * Falls back to prose regex only when no HTTP status is present (rate-limit before auth).
  */
 export function classifyClaudeFailure(
   err: unknown,
@@ -66,12 +71,21 @@ export function classifyClaudeFailure(
         message: 'Claude subscription allowance or rate limit reached.',
       };
     }
-    if (err.status === 401 || err.status === 403) {
+    if (err.status === 401) {
       return {
         status: 'expired',
         message: 'Session expired or not logged in. Run claude /login in a terminal.',
       };
     }
+    if (err.status === 403) {
+      return {
+        status: 'expired',
+        message: 'Claude denied access for this account. Try claude /login, or check your subscription.',
+      };
+    }
+    // Any other explicit HTTP status (e.g. 500, 502, 400) is definitive — do not fall through
+    // to text matching.
+    return undefined;
   }
   const text = typeof err === 'string' ? err : err instanceof Error ? err.message : String(err);
   // Allowance first: a genuine 429 body names the API key, which isAuthError also matches.
@@ -89,6 +103,7 @@ export function classifyClaudeFailure(
   }
   return undefined;
 }
+
 
 /**
  * Environment for the SDK subprocess: inherit everything except ANTHROPIC_API_KEY,
