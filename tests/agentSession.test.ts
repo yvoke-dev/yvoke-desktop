@@ -1047,3 +1047,87 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
   });
 });
 
+describe('completeTurn error handling with isResultFailure', () => {
+  it('treats SDK result with subtype "success" and is_error: true as a failed turn', async () => {
+    const meta = thread();
+    const onTurnPersist = vi.fn();
+    const svc = new AgentService({
+      getSettings: settings,
+      mcpAuthProvider: { headers: async () => ({}) } as never,
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId, profile) => {
+        meta.sessionId = sessionId;
+        meta.sessionProfile = profile;
+      },
+      onTurnPersist,
+      sandboxDir,
+      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+      getOrchestratorProfile: async () => undefined,
+    });
+
+    h.nextQueryResult = {
+      subtype: 'success',
+      is_error: true,
+      result: 'Not logged in · Please run /login',
+      usage: {},
+    };
+
+    await ask(svc, meta, 'Test query', 'oim-schema');
+
+    const completeEvents = events.filter((e) => e.kind === 'turn-complete');
+    expect(completeEvents).toHaveLength(1);
+    const complete = completeEvents[0] as Extract<AgentEvent, { kind: 'turn-complete' }>;
+    expect(complete.isError).toBe(true);
+    expect(complete.message.content).toBe('');
+    expect(complete.errorMessage).toBe('Claude: Not logged in · Please run /login');
+    expect(onTurnPersist).not.toHaveBeenCalled();
+
+    svc.closeAll();
+  });
+
+  it('treats SDK result with non-success subtype as a failed turn even when is_error is false', async () => {
+    const meta = thread();
+    const onTurnPersist = vi.fn();
+    const svc = new AgentService({
+      getSettings: settings,
+      mcpAuthProvider: { headers: async () => ({}) } as never,
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId, profile) => {
+        meta.sessionId = sessionId;
+        meta.sessionProfile = profile;
+      },
+      onTurnPersist,
+      sandboxDir,
+      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+      getOrchestratorProfile: async () => undefined,
+    });
+
+    h.nextQueryResult = {
+      subtype: 'error_during_execution',
+      is_error: false,
+      errors: ['Process crashed unexpectedly'],
+      usage: {},
+    };
+
+    await ask(svc, meta, 'Test query', 'oim-schema');
+
+    const completeEvents = events.filter((e) => e.kind === 'turn-complete');
+    expect(completeEvents).toHaveLength(1);
+    const complete = completeEvents[0] as Extract<AgentEvent, { kind: 'turn-complete' }>;
+    expect(complete.isError).toBe(true);
+    expect(complete.message.content).toBe('');
+    expect(complete.errorMessage).toBe('Claude: error_during_execution');
+    expect(onTurnPersist).not.toHaveBeenCalled();
+
+    svc.closeAll();
+  });
+});
+
