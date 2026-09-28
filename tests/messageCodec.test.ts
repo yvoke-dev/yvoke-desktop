@@ -4,7 +4,7 @@ import {
   parseStoredContent,
   serializeAssistantContent,
 } from '../src/main/store/messageCodec';
-import { qualifyTool } from '../src/shared/types';
+import { qualifyTool, REHYDRATED_TOOL_RESULT_PLACEHOLDER } from '../src/shared/types';
 import type { ChatMessage } from '../src/shared/types';
 
 describe('findArgsCloseParen', () => {
@@ -60,5 +60,11 @@ describe('serialize/parse round-trip', () => {
     expect(parsed.content).toBe('Just text, no markers.');
     expect(parsed.thinking).toBeUndefined();
     expect(parsed.toolCalls).toBeUndefined();
+  });
+
+  it('assigns REHYDRATED_TOOL_RESULT_PLACEHOLDER to parsed tool calls', () => {
+    const raw = '🔧 *Calling tool:* AskUserQuestion({"question":"Which env?"})\n\nConfigured.';
+    const parsed = parseStoredContent(raw);
+    expect(parsed.toolCalls?.[0].result).toBe(REHYDRATED_TOOL_RESULT_PLACEHOLDER);
   });
 });

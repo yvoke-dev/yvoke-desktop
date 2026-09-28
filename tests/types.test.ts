@@ -8,6 +8,10 @@ import {
   MCP_PREFIX_RE,
   normalizeClarifyingInput,
   qualifyTool,
+  REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+  clarificationAnswer,
+  clarificationState,
+  type ToolCallInfo,
 } from '../src/shared/types';
 
 describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
@@ -315,6 +319,106 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
         expect(
           hasValidClarificationAnswer("Clarifying question asked successfully. Waiting for user's response."),
         ).toBe(true);
+      });
+    });
+  });
+
+  describe('Task 3.1: Rehydration Placeholder & Unified State Helper', () => {
+    describe('REHYDRATED_TOOL_RESULT_PLACEHOLDER', () => {
+      it('equals expected placeholder text', () => {
+        expect(REHYDRATED_TOOL_RESULT_PLACEHOLDER).toBe('Completed (details logged locally)');
+      });
+    });
+
+    describe('clarificationAnswer', () => {
+      it('extracts trimmed answer from User answered: <answer>', () => {
+        expect(clarificationAnswer('User answered: prod')).toBe('prod');
+        expect(clarificationAnswer('User answered:  10.0 (most recent)  ')).toBe('10.0 (most recent)');
+        expect(clarificationAnswer('User answered: yes')).toBe('yes');
+      });
+
+      it('extracts multi-line answer from User answered:\n', () => {
+        expect(clarificationAnswer('User answered:\nLine 1\nLine 2')).toBe('Line 1\nLine 2');
+        expect(clarificationAnswer('User answered: \nLine 1\nLine 2')).toBe('Line 1\nLine 2');
+      });
+
+      it('returns "Answered (response saved in history)" for web success and rehydrated placeholder', () => {
+        expect(clarificationAnswer(CLARIFICATION_WEB_SUCCESS_MESSAGE)).toBe(
+          'Answered (response saved in history)',
+        );
+        expect(clarificationAnswer(REHYDRATED_TOOL_RESULT_PLACEHOLDER)).toBe(
+          'Answered (response saved in history)',
+        );
+      });
+
+      it('returns undefined for empty answers, missing space, errors, and non-strings', () => {
+        expect(clarificationAnswer(undefined)).toBeUndefined();
+        expect(clarificationAnswer(null)).toBeUndefined();
+        expect(clarificationAnswer('')).toBeUndefined();
+        expect(clarificationAnswer('   ')).toBeUndefined();
+        expect(clarificationAnswer(123)).toBeUndefined();
+        expect(clarificationAnswer({})).toBeUndefined();
+        expect(clarificationAnswer('User answered: ')).toBeUndefined();
+        expect(clarificationAnswer('User answered:   ')).toBeUndefined();
+        expect(clarificationAnswer('User answered:')).toBeUndefined();
+        expect(clarificationAnswer('user answered: prod')).toBeUndefined();
+        expect(clarificationAnswer('InputValidationError: options must have <= 4 items')).toBeUndefined();
+        expect(clarificationAnswer('Error: tool execution failed')).toBeUndefined();
+      });
+    });
+
+    describe('clarificationState', () => {
+      it('returns "pending" when call.result === undefined', () => {
+        const call: ToolCallInfo = { id: 'call-1', name: 'AskUserQuestion', input: {} };
+        expect(clarificationState(call)).toBe('pending');
+        expect(clarificationState({ ...call, result: undefined })).toBe('pending');
+      });
+
+      it('returns "answered" when clarificationAnswer(call.result) !== undefined', () => {
+        const call1: ToolCallInfo = { id: 'call-1', name: 'AskUserQuestion', input: {}, result: 'User answered: yes' };
+        expect(clarificationState(call1)).toBe('answered');
+
+        const call2: ToolCallInfo = {
+          id: 'call-2',
+          name: 'ask_clarifying_question',
+          input: {},
+          result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+        };
+        expect(clarificationState(call2)).toBe('answered');
+
+        const call3: ToolCallInfo = {
+          id: 'call-3',
+          name: 'AskUserQuestion',
+          input: {},
+          result: CLARIFICATION_WEB_SUCCESS_MESSAGE,
+        };
+        expect(clarificationState(call3)).toBe('answered');
+      });
+
+      it('returns "failed" otherwise', () => {
+        const call1: ToolCallInfo = {
+          id: 'call-1',
+          name: 'AskUserQuestion',
+          input: {},
+          result: 'User answered: ',
+        };
+        expect(clarificationState(call1)).toBe('failed');
+
+        const call2: ToolCallInfo = {
+          id: 'call-2',
+          name: 'AskUserQuestion',
+          input: {},
+          result: 'Error: aborted',
+        };
+        expect(clarificationState(call2)).toBe('failed');
+
+        const call3: ToolCallInfo = {
+          id: 'call-3',
+          name: 'AskUserQuestion',
+          input: {},
+          result: '',
+        };
+        expect(clarificationState(call3)).toBe('failed');
       });
     });
   });

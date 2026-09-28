@@ -17,8 +17,8 @@ import type {
 } from '../../../shared/types';
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
+  clarificationState,
   DEFAULT_APPEARANCE,
-  hasValidClarificationAnswer,
   isClarificationTool,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
@@ -70,41 +70,69 @@ interface PreflightCard {
   forPlaybook: string;
 }
 
+export type TurnPart =
+  | { kind: 'text'; text: string; isLive?: boolean }
+  | { kind: 'clarification'; call: ToolCallInfo }
+  | { kind: 'delegation'; call: ToolCallInfo };
+
 interface AssembledTurn {
   text: string;
   entries: TraceEntry[];
-  clarificationCalls: ToolCallInfo[];
-  delegationCalls: ToolCallInfo[];
+  parts: TurnPart[];
 }
 
 /**
- * Split one assistant turn into the four things the layout needs: the prose, the trace entries
- * (reasoning + tools + failed clarifications, collapsed), the active/completed clarification calls
- * (anchored chronologically at the top), and delegations.
+ * Split one assistant turn into the layout needs: the chronological rendered parts
+ * (interleaving text prose, inline clarification cards, and delegations as they appear across blocks),
+ * and the collapsed trace entries (reasoning + tools + failed/unanswered clarifications).
  */
-function assemble(blocks: MessageBlock[]): AssembledTurn {
+function assemble(blocks: MessageBlock[], activeClarificationId?: string): AssembledTurn {
   const texts: string[] = [];
   const entries: TraceEntry[] = [];
-  const clarificationCalls: ToolCallInfo[] = [];
-  const delegationCalls: ToolCallInfo[] = [];
+  const parts: TurnPart[] = [];
+
   for (const block of blocks) {
     if (block.thinking) entries.push({ kind: 'thinking', text: block.thinking });
+
+    const clarificationCalls: ToolCallInfo[] = [];
+    const delegationCalls: ToolCallInfo[] = [];
+
     for (const call of block.toolCalls ?? []) {
       if (isClarificationTool(call.name)) {
-        if (call.result === undefined || hasValidClarificationAnswer(call.result)) {
+        const state = clarificationState(call);
+        if (state === 'answered') {
+          clarificationCalls.push(call);
+        } else if (state === 'pending' && activeClarificationId === call.id) {
           clarificationCalls.push(call);
         } else {
           entries.push({ kind: 'tool', call: { ...call, isError: true } });
         }
       } else if (call.name === 'Agent' && call.subagentType !== undefined) {
+        // A delegation is identified by the runtime having attributed a sub-agent to it — translate.ts
+        // sets `subagentType` only in orchestrator mode — rather than by the thread's mode as it stands
+        // now. A conversation can be moved off its profile mid-thread, and stored orchestrated turns
+        // have to keep their cards when it is.
         delegationCalls.push(call);
       } else {
         entries.push({ kind: 'tool', call });
       }
     }
-    if (block.text) texts.push(block.text);
+
+    for (const call of clarificationCalls) {
+      parts.push({ kind: 'clarification', call });
+    }
+
+    if (block.text) {
+      texts.push(block.text);
+      parts.push({ kind: 'text', text: block.text });
+    }
+
+    for (const call of delegationCalls) {
+      parts.push({ kind: 'delegation', call });
+    }
   }
-  return { text: texts.join('\n\n'), entries, clarificationCalls, delegationCalls };
+
+  return { text: texts.join('\n\n'), entries, parts };
 }
 
 /**
@@ -635,16 +663,20 @@ export function ChatView(props: {
   }, [prompts, pickerFilter]);
 
   const liveTurnParts = useMemo(() => {
-    const assembled = assemble(liveTurn.blocks);
+    const assembled = assemble(liveTurn.blocks, liveTurn.clarifyingQuestion?.toolUseId);
     if (liveTurn.liveThinking) {
       assembled.entries.push({ kind: 'thinking', text: liveTurn.liveThinking });
+    }
+    const parts = [...assembled.parts];
+    if (liveTurn.liveText) {
+      parts.push({ kind: 'text', text: liveTurn.liveText, isLive: true });
     }
     // `liveText` is the block still streaming; `assembled.text` is every block already closed.
     // Both have to render, or a turn that emitted prose, called a tool, then resumed would drop
     // its first paragraph the moment the second one started arriving.
     const text = [assembled.text, liveTurn.liveText].filter(Boolean).join('\n\n');
-    return { ...assembled, text };
-  }, [liveTurn.blocks, liveTurn.liveThinking, liveTurn.liveText]);
+    return { ...assembled, parts, text };
+  }, [liveTurn.blocks, liveTurn.liveThinking, liveTurn.liveText, liveTurn.clarifyingQuestion?.toolUseId]);
 
   return (
     <div
@@ -856,35 +888,36 @@ export function ChatView(props: {
               </div>
             );
           }
-          const { text, entries, clarificationCalls, delegationCalls } = assemble(blocksOf(message));
+          const { text, entries, parts } = assemble(blocksOf(message), liveTurn.clarifyingQuestion?.toolUseId);
+          let firstTextRendered = false;
           return (
             <div key={message.localId} className="message assistant">
-              {clarificationCalls.map((call) => (
-                <ToolCallCard
-                  key={call.id}
-                  call={call}
-                  onClarificationSubmit={handleClarificationSubmit}
-                  activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                  onCitation={openCitation}
-                />
-              ))}
-              {text && (
-                <>
-                  <div className="answer-kicker">Answer</div>
-                  <div className="answer-body">
-                    <Markdown content={text} onCitation={openCitation} />
-                  </div>
-                </>
-              )}
-              {delegationCalls.map((call) => (
-                <ToolCallCard
-                  key={call.id}
-                  call={call}
-                  onClarificationSubmit={handleClarificationSubmit}
-                  activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                  onCitation={openCitation}
-                />
-              ))}
+              {parts.map((part, index) => {
+                if (part.kind === 'clarification' || part.kind === 'delegation') {
+                  return (
+                    <ToolCallCard
+                      key={part.call.id}
+                      call={part.call}
+                      onClarificationSubmit={handleClarificationSubmit}
+                      activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                      onCitation={openCitation}
+                    />
+                  );
+                }
+                if (part.kind === 'text') {
+                  const isFirst = !firstTextRendered;
+                  firstTextRendered = true;
+                  return (
+                    <React.Fragment key={`text-${index}`}>
+                      {isFirst && <div className="answer-kicker">Answer</div>}
+                      <div className="answer-body">
+                        <Markdown content={part.text} onCitation={openCitation} />
+                      </div>
+                    </React.Fragment>
+                  );
+                }
+                return null;
+              })}
               <TraceBar entries={entries} usage={message.usage} defaultOpen={traceExpanded} />
               <ReviewBadge review={message.review} />
               <div className="message-footer">
@@ -902,38 +935,41 @@ export function ChatView(props: {
 
         {liveTurn.running && (
           <div className="message assistant live">
-            {liveTurnParts.clarificationCalls.map((call) => (
-              <ToolCallCard
-                key={call.id}
-                call={call}
-                onClarificationSubmit={handleClarificationSubmit}
-                activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                onCitation={openCitation}
-              />
-            ))}
-            {liveTurnParts.text && (
-              <>
-                <div className="answer-kicker">Answer</div>
-                <div className="answer-body">
-                  <Markdown content={liveTurnParts.text} onCitation={openCitation} live />
-                </div>
-              </>
-            )}
-            {liveTurnParts.delegationCalls.map((call) => (
-              <ToolCallCard
-                key={call.id}
-                call={call}
-                onClarificationSubmit={handleClarificationSubmit}
-                activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                onCitation={openCitation}
-              />
-            ))}
+            {(() => {
+              let firstTextRendered = false;
+              return liveTurnParts.parts.map((part, index) => {
+                if (part.kind === 'clarification' || part.kind === 'delegation') {
+                  return (
+                    <ToolCallCard
+                      key={part.call.id}
+                      call={part.call}
+                      onClarificationSubmit={handleClarificationSubmit}
+                      activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                      onCitation={openCitation}
+                    />
+                  );
+                }
+                if (part.kind === 'text') {
+                  const isFirst = !firstTextRendered;
+                  firstTextRendered = true;
+                  return (
+                    <React.Fragment key={`live-text-${index}`}>
+                      {isFirst && <div className="answer-kicker">Answer</div>}
+                      <div className="answer-body">
+                        <Markdown content={part.text} onCitation={openCitation} live={part.isLive} />
+                      </div>
+                    </React.Fragment>
+                  );
+                }
+                return null;
+              });
+            })()}
             {/* Open while the turn runs so the work stays visible; the finished message then
                 renders it collapsed (or per the Appearance setting). */}
             <TraceBar entries={liveTurnParts.entries} defaultOpen />
             {!liveTurnParts.text &&
               liveTurnParts.entries.length === 0 &&
-              !liveTurnParts.clarificationCalls.some((c) => c.result === undefined) && (
+              liveTurn.clarifyingQuestion?.toolUseId === undefined && (
                 <div className="thinking-indicator">
                   <span className="dot" />
                   Working…

@@ -4,14 +4,15 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@
 import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
-import type {
-  AppSettings,
-  ChatMessage,
-  McpPromptInfo,
-  OrchestratorProfile,
-  PlaybookValidation,
-  PlaybookValidationRequest,
-  ThreadMeta,
+import {
+  REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+  type AppSettings,
+  type ChatMessage,
+  type McpPromptInfo,
+  type OrchestratorProfile,
+  type PlaybookValidation,
+  type PlaybookValidationRequest,
+  type ThreadMeta,
 } from '../../src/shared/types';
 
 /**
@@ -1556,7 +1557,17 @@ describe('deterministic platform shortcut labels', () => {
           },
         ],
       };
-      renderChat({ messages: [message] });
+      renderChat({
+        messages: [message],
+        liveTurn: {
+          ...IDLE,
+          clarifyingQuestion: {
+            toolUseId: 'call-1',
+            question: 'Which mode?',
+            options: [{ label: 'fast' }, { label: 'thorough' }],
+          },
+        },
+      });
       expect(screen.getByText('Which mode?')).toBeTruthy();
       expect(screen.getByText('Clarification required')).toBeTruthy();
     });
@@ -1888,6 +1899,100 @@ describe('deterministic platform shortcut labels', () => {
       fireEvent.change(textarea, { target: { value: 'Followup prompt' } });
       fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
       expect(onSend).toHaveBeenCalledWith('Followup prompt', undefined);
+    });
+
+    it('rehydrates clarification calls from parseStoredContent as answered with 0 failed steps', () => {
+      // Structure produced by parseStoredContent when reloading stored messages containing tool calls
+      const parsed = {
+        content: 'Configured environment.',
+        blocks: [
+          {
+            toolCalls: [
+              {
+                id: 'c-rehydrate-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick database environment' },
+                result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+              },
+            ],
+          },
+          {
+            text: 'Configured environment.',
+          },
+        ],
+        toolCalls: [
+          {
+            id: 'c-rehydrate-1',
+            name: 'AskUserQuestion',
+            input: { question: 'Pick database environment' },
+            result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+          },
+        ],
+        thinking: undefined,
+      };
+      const message: ChatMessage = {
+        localId: 'm-rehydrated',
+        createdAt: '',
+        role: 'assistant',
+        content: parsed.content,
+        blocks: parsed.blocks,
+        toolCalls: parsed.toolCalls,
+        thinking: parsed.thinking,
+      };
+
+      const { container } = renderChat({ messages: [message] });
+
+      expect(screen.getByText('Clarification provided')).toBeTruthy();
+      expect(screen.getByText(/Answered \(response saved in history\)/)).toBeTruthy();
+      const traceBar = container.querySelector('.trace-bar');
+      if (traceBar) {
+        expect(traceBar.textContent).not.toContain('failed');
+      }
+    });
+
+    it('renders blocks chronologically: intro text -> clarification card -> answer text -> trace', () => {
+      const message: ChatMessage = {
+        localId: 'm-chrono-order',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Found configs\n\nConfigured',
+        blocks: [
+          { text: 'Found configs' },
+          {
+            toolCalls: [
+              {
+                id: 'cq-chrono-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Deploy now?' },
+                result: 'User answered: yes',
+              },
+              {
+                id: 't-chrono-1',
+                name: 'search_corpus',
+                input: { query: 'verify' },
+                result: '[]',
+              },
+            ],
+          },
+          { text: 'Configured' },
+        ],
+      };
+
+      const { container } = renderChat({ messages: [message] });
+
+      const introText = screen.getByText('Found configs');
+      const clarifCard = container.querySelector('.clarifying-question-card')!;
+      const answerText = screen.getByText('Configured');
+      const traceBar = container.querySelector('.trace-bar')!;
+
+      expect(introText).toBeTruthy();
+      expect(clarifCard).toBeTruthy();
+      expect(answerText).toBeTruthy();
+      expect(traceBar).toBeTruthy();
+
+      expect(introText.compareDocumentPosition(clarifCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(clarifCard.compareDocumentPosition(answerText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(answerText.compareDocumentPosition(traceBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
   });
 });

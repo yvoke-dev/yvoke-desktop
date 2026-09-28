@@ -319,6 +319,102 @@ describe('SDK message translation', () => {
       ]);
       expect(ctx.toolCalls.find((c) => c.id === 'tu-norm-2')?.isError).toBe(true);
     });
+
+    it('inverts inner.isError to false when a sub-agent clarification tool receives is_error: true with a valid answer', () => {
+      const ctx = newTurnContext('t1', true);
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'del-1', name: 'Agent', input: { subagent_type: 'specialist', prompt: 'check' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'assistant',
+          parent_tool_use_id: 'del-1',
+          message: {
+            content: [{ type: 'tool_use', id: 'sub-cq-1', name: 'AskUserQuestion', input: { question: 'Which branch?' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'user',
+          parent_tool_use_id: 'del-1',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'sub-cq-1',
+                content: [{ type: 'text', text: 'User answered: main' }],
+                is_error: true,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const agentCall = ctx.agentCalls.get('del-1');
+      const inner = agentCall?.subagentBlocks?.flatMap((b) => b.toolCalls ?? []).find((c) => c.id === 'sub-cq-1');
+      expect(inner).toBeDefined();
+      expect(inner?.result).toBe('User answered: main');
+      expect(inner?.isError).toBe(false);
+    });
+
+    it('sets inner.isError to true when a sub-agent clarification tool receives an invalid answer with is_error: false', () => {
+      const ctx = newTurnContext('t1', true);
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'del-2', name: 'Agent', input: { subagent_type: 'specialist', prompt: 'check' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'assistant',
+          parent_tool_use_id: 'del-2',
+          message: {
+            content: [{ type: 'tool_use', id: 'sub-cq-2', name: 'AskUserQuestion', input: { question: 'Which branch?' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'user',
+          parent_tool_use_id: 'del-2',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'sub-cq-2',
+                content: [{ type: 'text', text: 'User answered: ' }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const agentCall = ctx.agentCalls.get('del-2');
+      const inner = agentCall?.subagentBlocks?.flatMap((b) => b.toolCalls ?? []).find((c) => c.id === 'sub-cq-2');
+      expect(inner).toBeDefined();
+      expect(inner?.result).toBe('User answered: ');
+      expect(inner?.isError).toBe(true);
+    });
   });
 });
 
