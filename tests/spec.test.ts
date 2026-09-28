@@ -223,6 +223,15 @@ describe('spec/ modular structure', () => {
     expect(askingQuestions).toContain(
       '**Option preview content is not rendered.** While clarification options display labels\n  and descriptions, optional preview attachments (such as code blocks or visual comparisons\n  declared in CLI schemas) are not rendered in the card.',
     );
+    expect(askingQuestions).toContain(
+      '**Clarifying questions sit chronologically above the answer prose.** In both live and finished\n  turns, a clarifying question card is rendered at the top of the assistant\'s turn — before the *Answer*\n  kicker and body prose.',
+    );
+    expect(askingQuestions).toContain(
+      '**Failed clarification tool calls fold into the trace rather than rendering as cards.** If a\n  clarification tool call fails (due to schema/input validation errors or execution failure without a valid\n  user answer), it does not render an inline card and never displays a completed *Clarification provided*\n  card with a checkmark. Instead, it is treated as a standard failed tool call in the trace bar (`N failed`).',
+    );
+    expect(askingQuestions).toContain(
+      'remaining at the top of the turn preceding the answer text.',
+    );
   });
 });
 
