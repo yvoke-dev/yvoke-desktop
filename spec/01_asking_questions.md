@@ -207,6 +207,10 @@ behind it, and the work that produced it can be opened and read.
   keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
   than just closing the list. There is no shortcut for new conversation, search, settings, delete or
   stop.
+- **Conversations restored from the server show every clarification as answered.** The remote sync
+  payload does not retain tool execution results or error states, storing only that a tool was called.
+  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying
+  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.
 
 ## Not supported
 

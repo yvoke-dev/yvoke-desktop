@@ -105,7 +105,7 @@ function assemble(blocks: MessageBlock[], activeClarificationId?: string): Assem
         } else if (state === 'pending' && activeClarificationId === call.id) {
           clarificationCalls.push(call);
         } else {
-          entries.push({ kind: 'tool', call: { ...call, isError: true } });
+          entries.push({ kind: 'tool', call: state === 'failed' ? { ...call, isError: true } : call });
         }
       } else if (call.name === 'Agent' && call.subagentType !== undefined) {
         // A delegation is identified by the runtime having attributed a sub-agent to it — translate.ts
@@ -133,6 +133,56 @@ function assemble(blocks: MessageBlock[], activeClarificationId?: string): Assem
   }
 
   return { text: texts.join('\n\n'), entries, parts };
+}
+
+/**
+ * Render the interleaved parts of an assistant turn (clarification cards, answer text, delegations)
+ * in chronological order, shared between finished history messages and live turns.
+ */
+function TurnPartsList({
+  parts,
+  activeClarificationId,
+  onClarificationSubmit,
+  onCitation,
+  live,
+}: {
+  parts: TurnPart[];
+  activeClarificationId?: string;
+  onClarificationSubmit: (answer: string) => void;
+  onCitation?: (ref: CitationRef) => void;
+  live?: boolean;
+}): React.JSX.Element {
+  let firstTextRendered = false;
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (part.kind === 'clarification' || part.kind === 'delegation') {
+          return (
+            <ToolCallCard
+              key={part.call.id}
+              call={part.call}
+              onClarificationSubmit={onClarificationSubmit}
+              activeClarificationId={activeClarificationId}
+              onCitation={onCitation}
+            />
+          );
+        }
+        if (part.kind === 'text') {
+          const isFirst = !firstTextRendered;
+          firstTextRendered = true;
+          return (
+            <React.Fragment key={`${live ? 'live-' : ''}text-${index}`}>
+              {isFirst && <div className="answer-kicker">Answer</div>}
+              <div className="answer-body">
+                <Markdown content={part.text} onCitation={onCitation} live={live && part.isLive} />
+              </div>
+            </React.Fragment>
+          );
+        }
+        return null;
+      })}
+    </>
+  );
 }
 
 /**
@@ -889,35 +939,14 @@ export function ChatView(props: {
             );
           }
           const { text, entries, parts } = assemble(blocksOf(message), liveTurn.clarifyingQuestion?.toolUseId);
-          let firstTextRendered = false;
           return (
             <div key={message.localId} className="message assistant">
-              {parts.map((part, index) => {
-                if (part.kind === 'clarification' || part.kind === 'delegation') {
-                  return (
-                    <ToolCallCard
-                      key={part.call.id}
-                      call={part.call}
-                      onClarificationSubmit={handleClarificationSubmit}
-                      activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                      onCitation={openCitation}
-                    />
-                  );
-                }
-                if (part.kind === 'text') {
-                  const isFirst = !firstTextRendered;
-                  firstTextRendered = true;
-                  return (
-                    <React.Fragment key={`text-${index}`}>
-                      {isFirst && <div className="answer-kicker">Answer</div>}
-                      <div className="answer-body">
-                        <Markdown content={part.text} onCitation={openCitation} />
-                      </div>
-                    </React.Fragment>
-                  );
-                }
-                return null;
-              })}
+              <TurnPartsList
+                parts={parts}
+                activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                onClarificationSubmit={handleClarificationSubmit}
+                onCitation={openCitation}
+              />
               <TraceBar entries={entries} usage={message.usage} defaultOpen={traceExpanded} />
               <ReviewBadge review={message.review} />
               <div className="message-footer">
@@ -935,35 +964,13 @@ export function ChatView(props: {
 
         {liveTurn.running && (
           <div className="message assistant live">
-            {(() => {
-              let firstTextRendered = false;
-              return liveTurnParts.parts.map((part, index) => {
-                if (part.kind === 'clarification' || part.kind === 'delegation') {
-                  return (
-                    <ToolCallCard
-                      key={part.call.id}
-                      call={part.call}
-                      onClarificationSubmit={handleClarificationSubmit}
-                      activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
-                      onCitation={openCitation}
-                    />
-                  );
-                }
-                if (part.kind === 'text') {
-                  const isFirst = !firstTextRendered;
-                  firstTextRendered = true;
-                  return (
-                    <React.Fragment key={`live-text-${index}`}>
-                      {isFirst && <div className="answer-kicker">Answer</div>}
-                      <div className="answer-body">
-                        <Markdown content={part.text} onCitation={openCitation} live={part.isLive} />
-                      </div>
-                    </React.Fragment>
-                  );
-                }
-                return null;
-              });
-            })()}
+            <TurnPartsList
+              parts={liveTurnParts.parts}
+              activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+              onClarificationSubmit={handleClarificationSubmit}
+              onCitation={openCitation}
+              live
+            />
             {/* Open while the turn runs so the work stays visible; the finished message then
                 renders it collapsed (or per the Appearance setting). */}
             <TraceBar entries={liveTurnParts.entries} defaultOpen />

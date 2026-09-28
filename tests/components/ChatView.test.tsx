@@ -1994,6 +1994,39 @@ describe('deterministic platform shortcut labels', () => {
       expect(clarifCard.compareDocumentPosition(answerText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(answerText.compareDocumentPosition(traceBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
+
+    it('pending clarification without activeClarificationId renders no card and does not mark step failed in trace', () => {
+      // Live turn where tool_use arrived before main emitted clarifying-question
+      const liveTurnWithPending: LiveTurn = {
+        running: true,
+        liveText: '',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'call-pending-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Which database?' },
+                result: undefined,
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: undefined,
+      };
+
+      const { container } = renderChat({ liveTurn: liveTurnWithPending });
+
+      // No card should be rendered before activeClarificationId is assigned
+      expect(container.querySelector('.clarifying-question-card')).toBeNull();
+
+      // TraceBar must not mark the pending step as failed
+      const traceBar = container.querySelector('.trace-bar');
+      expect(traceBar).toBeTruthy();
+      expect(traceBar!.textContent).not.toContain('failed');
+    });
   });
 });
 

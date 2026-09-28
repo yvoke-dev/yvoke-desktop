@@ -678,8 +678,6 @@ export function clarificationAnswer(result?: unknown): string | undefined {
   let answer: string | undefined;
   if (result.startsWith(CLARIFICATION_ANSWER_PREFIX)) {
     answer = result.slice(CLARIFICATION_ANSWER_PREFIX.length).trim();
-  } else if (result.startsWith('User answered:\n')) {
-    answer = result.slice('User answered:\n'.length).trim();
   }
   return answer && answer.length > 0 ? answer : undefined;
 }
@@ -694,10 +692,6 @@ export function clarificationState(call: ToolCallInfo): 'pending' | 'answered' |
   if (call.result === undefined) return 'pending';
   if (clarificationAnswer(call.result) !== undefined) return 'answered';
   return 'failed';
-}
-
-export function hasValidClarificationAnswer(result?: unknown): boolean {
-  return clarificationAnswer(result) !== undefined;
 }
 
 

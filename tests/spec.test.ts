@@ -232,6 +232,9 @@ describe('spec/ modular structure', () => {
     expect(askingQuestions).toContain(
       'remaining in place alongside the turn\'s prose.',
     );
+    expect(askingQuestions).toContain(
+      '**Conversations restored from the server show every clarification as answered.** The remote sync\n  payload does not retain tool execution results or error states, storing only that a tool was called.\n  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying\n  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.',
+    );
   });
 });
 
