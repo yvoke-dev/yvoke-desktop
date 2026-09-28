@@ -470,6 +470,108 @@ describe('playbook preflight', () => {
     await waitFor(() => expect(copyBtn?.getAttribute('data-tip')).toBe('Copied'));
   });
 
+  it('renders a copy button on assistant messages that copies message.content', async () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a1',
+        role: 'assistant',
+        content: 'Here is the database schema for IT Shop requests.',
+        blocks: [{ text: 'Here is the database schema for IT Shop requests.' }],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.getAttribute('data-tip')).toBe('Copy as Markdown');
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('Here is the database schema for IT Shop requests.'),
+    );
+    await waitFor(() => expect(copyBtn?.getAttribute('data-tip')).toBe('Copied'));
+  });
+
+  it('copies full message.content including review-flag warning on orchestrated turns where reviewer flagged the answer', async () => {
+    const baseText = 'Candidate answer produced by the team.';
+    const reviewWarning = '\n\n---\n*Note: This answer did not pass automated review after 2 attempts.*';
+    const fullContent = `${baseText}${reviewWarning}`;
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a2',
+        role: 'assistant',
+        content: fullContent,
+        blocks: [{ text: baseText }],
+        review: { outcome: 'rejected' },
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(fullContent));
+    expect(writeText).not.toHaveBeenCalledWith(baseText);
+  });
+
+  it('renders a copy button on assistant messages that carry message.content even when blocks are empty', async () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a3',
+        role: 'assistant',
+        content: 'Raw fallback text content.',
+        blocks: [],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Raw fallback text content.'));
+  });
+
+  it('omits copy button on assistant messages when message.content is empty', () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a4',
+        role: 'assistant',
+        content: '',
+        blocks: [],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeNull();
+  });
+
   it('does not auto-select any playbook when starting a new conversation', () => {
     const { container } = renderChat({ messages: [] });
     expect(container.querySelector('.active-playbook')).toBeNull();
