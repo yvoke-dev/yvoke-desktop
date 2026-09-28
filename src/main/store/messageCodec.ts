@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { MessageBlock, ToolCallInfo } from '../../shared/types';
+import { REHYDRATED_TOOL_RESULT_PLACEHOLDER } from '../../shared/types';
 
 /**
  * Encode/decode for the marker format used to round-trip an assistant turn's thinking and
@@ -109,7 +110,7 @@ export function parseStoredContent(rawContent: string): ParsedContent {
       }
       if (consumed >= 0) {
         blocks.push({
-          toolCalls: [{ id: randomUUID(), name, input, result: 'Completed (details logged locally)' }],
+          toolCalls: [{ id: randomUUID(), name, input, result: REHYDRATED_TOOL_RESULT_PLACEHOLDER }],
         });
         remaining = remaining.substring(consumed);
         continue;

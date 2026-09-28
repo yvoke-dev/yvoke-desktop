@@ -4,14 +4,15 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@
 import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
-import type {
-  AppSettings,
-  ChatMessage,
-  McpPromptInfo,
-  OrchestratorProfile,
-  PlaybookValidation,
-  PlaybookValidationRequest,
-  ThreadMeta,
+import {
+  REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+  type AppSettings,
+  type ChatMessage,
+  type McpPromptInfo,
+  type OrchestratorProfile,
+  type PlaybookValidation,
+  type PlaybookValidationRequest,
+  type ThreadMeta,
 } from '../../src/shared/types';
 
 /**
@@ -467,6 +468,108 @@ describe('playbook preflight', () => {
     fireEvent.click(copyBtn!);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('Which database table stores IT Shop requests?'));
     await waitFor(() => expect(copyBtn?.getAttribute('data-tip')).toBe('Copied'));
+  });
+
+  it('renders a copy button on assistant messages that copies message.content', async () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a1',
+        role: 'assistant',
+        content: 'Here is the database schema for IT Shop requests.',
+        blocks: [{ text: 'Here is the database schema for IT Shop requests.' }],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.getAttribute('data-tip')).toBe('Copy as Markdown');
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('Here is the database schema for IT Shop requests.'),
+    );
+    await waitFor(() => expect(copyBtn?.getAttribute('data-tip')).toBe('Copied'));
+  });
+
+  it('copies full message.content including review-flag warning on orchestrated turns where reviewer flagged the answer', async () => {
+    const baseText = 'Candidate answer produced by the team.';
+    const reviewWarning = '\n\n---\n*Note: This answer did not pass automated review after 2 attempts.*';
+    const fullContent = `${baseText}${reviewWarning}`;
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a2',
+        role: 'assistant',
+        content: fullContent,
+        blocks: [{ text: baseText }],
+        review: { outcome: 'rejected' },
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(fullContent));
+    expect(writeText).not.toHaveBeenCalledWith(baseText);
+  });
+
+  it('renders a copy button on assistant messages that carry message.content even when blocks are empty', async () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a3',
+        role: 'assistant',
+        content: 'Raw fallback text content.',
+        blocks: [],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector<HTMLButtonElement>(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeTruthy();
+
+    fireEvent.click(copyBtn!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Raw fallback text content.'));
+  });
+
+  it('omits copy button on assistant messages when message.content is empty', () => {
+    const existingMessages: ChatMessage[] = [
+      {
+        localId: 'a4',
+        role: 'assistant',
+        content: '',
+        blocks: [],
+        createdAt: '',
+      },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const assistantMessage = container.querySelector('.message.assistant');
+    expect(assistantMessage).toBeTruthy();
+
+    const copyBtn = assistantMessage?.querySelector(
+      '.message-actions button[aria-label="Copy as Markdown"]',
+    );
+    expect(copyBtn).toBeNull();
   });
 
   it('does not auto-select any playbook when starting a new conversation', () => {
@@ -1537,26 +1640,32 @@ describe('deterministic platform shortcut labels', () => {
       expect(textarea.placeholder).not.toContain('to send');
     });
 
-    it('renders AskUserQuestion as an inline clarification card rather than folding into trace', () => {
-      const message: ChatMessage = {
-        localId: 'm1',
-        createdAt: '',
-        role: 'assistant',
-        content: 'Please answer:',
-        blocks: [
-          {
-            text: 'Please answer:',
-            toolCalls: [
-              {
-                id: 'call-1',
-                name: 'AskUserQuestion',
-                input: { question: 'Which mode?', options: ['fast', 'thorough'] },
-              },
-            ],
+    it('renders AskUserQuestion as an inline clarification card rather than folding into trace in a live turn', () => {
+      renderChat({
+        messages: [],
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: 'Please answer:',
+              toolCalls: [
+                {
+                  id: 'call-1',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Which mode?', options: ['fast', 'thorough'] },
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'call-1',
+            question: 'Which mode?',
+            options: [{ label: 'fast' }, { label: 'thorough' }],
           },
-        ],
-      };
-      renderChat({ messages: [message] });
+        },
+      });
       expect(screen.getByText('Which mode?')).toBeTruthy();
       expect(screen.getByText('Clarification required')).toBeTruthy();
     });
@@ -1666,6 +1775,375 @@ describe('deterministic platform shortcut labels', () => {
       errorSpy.mockRestore();
     });
   });
+
+  describe('Task 1.7: ChatView Chronological Layout, Trace Routing, and Ghost Block Elimination', () => {
+    it('renders exactly one inline clarification card, folds failed call into TraceBar, and places card above answer', () => {
+      const message: ChatMessage = {
+        localId: 'm-ghost',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Configured for 10.0.',
+        blocks: [
+          {
+            text: 'Configured for 10.0.',
+            toolCalls: [
+              {
+                id: 'call-failed',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick a version from this huge list' },
+                result: 'InputValidationError: options must have <= 4 items',
+                isError: true,
+              },
+              {
+                id: 'call-success',
+                name: 'AskUserQuestion',
+                input: { question: 'Which version?' },
+                result: 'User answered: 10.0 (most recent)',
+              },
+            ],
+          },
+        ],
+      };
+      const { container } = renderChat({ messages: [message] });
+
+      const cards = container.querySelectorAll('.clarifying-question-card');
+      expect(cards).toHaveLength(1);
+      expect(screen.getByText(/10\.0 \(most recent\)/)).toBeTruthy();
+
+      // Failed clarification folded into TraceBar
+      const traceBar = container.querySelector('.trace-bar');
+      expect(traceBar).toBeTruthy();
+      expect(traceBar?.textContent).toContain('1 failed');
+
+      // Inline card strictly precedes answer-kicker and answer-body
+      const card = cards[0];
+      const kicker = container.querySelector('.answer-kicker')!;
+      const body = container.querySelector('.answer-body')!;
+      expect(card.compareDocumentPosition(kicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(card.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('places answered clarification card chronologically above streaming answer body in live turn', () => {
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: 'Drafting the final response...',
+          liveThinking: '',
+          blocks: [
+            {
+              text: '',
+              toolCalls: [
+                {
+                  id: 'cq-live-done',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Target env?' },
+                  result: 'User answered: staging',
+                },
+              ],
+            },
+          ],
+        },
+      });
+      const card = container.querySelector('.clarifying-question-card')!;
+      const body = container.querySelector('.answer-body')!;
+      expect(card).toBeTruthy();
+      expect(body).toBeTruthy();
+      expect(card.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('suppresses the "Working…" thinking indicator in live turn when awaiting clarification', () => {
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: '',
+              toolCalls: [
+                {
+                  id: 'cq-unanswered',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Please choose an option' },
+                  result: undefined,
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'cq-unanswered',
+            question: 'Please choose an option',
+            options: [],
+          },
+        },
+      });
+      expect(screen.getByText('Clarification required')).toBeTruthy();
+      expect(container.querySelector('.thinking-indicator')).toBeNull();
+    });
+
+    it('renders turn elements in order: clarification card -> answer body -> delegation card -> TraceBar', () => {
+      const message: ChatMessage = {
+        localId: 'm-orch',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Composed answer text.',
+        blocks: [
+          {
+            text: 'Composed answer text.',
+            toolCalls: [
+              {
+                id: 'c-order-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Proceed?' },
+                result: 'User answered: yes',
+              },
+              {
+                id: 'd-order-1',
+                name: 'Agent',
+                subagentType: 'specialist',
+                input: { prompt: 'Verify data' },
+                result: 'Data verified',
+              },
+              {
+                id: 't-order-1',
+                name: 'search_corpus',
+                input: { query: 'test' },
+                result: '[]',
+              },
+            ],
+          },
+        ],
+      };
+      const { container } = renderChat({ messages: [message] });
+
+      const clarifCard = container.querySelector('.clarifying-question-card')!;
+      const kicker = container.querySelector('.answer-kicker')!;
+      const body = container.querySelector('.answer-body')!;
+      const subagentCard = container.querySelector('.subagent-card')!;
+      const traceBar = container.querySelector('.trace-bar')!;
+
+      expect(clarifCard).toBeTruthy();
+      expect(kicker).toBeTruthy();
+      expect(body).toBeTruthy();
+      expect(subagentCard).toBeTruthy();
+      expect(traceBar).toBeTruthy();
+
+      expect(clarifCard.compareDocumentPosition(kicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(kicker.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(body.compareDocumentPosition(subagentCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(subagentCard.compareDocumentPosition(traceBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('unblocks composer textarea and restores placeholder when clarification resolves', async () => {
+      const initialTurn: LiveTurn = {
+        running: true,
+        liveText: '',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'cq-unblock-test',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick' },
+                result: undefined,
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: {
+          toolUseId: 'cq-unblock-test',
+          question: 'Pick',
+          options: [],
+        },
+      };
+
+      const { container, rerender } = renderChat({
+        prompts: [],
+        liveTurn: initialTurn,
+      });
+
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe('Awaiting clarification…');
+      expect(textarea.disabled).toBe(true);
+
+      // Simulate clarification resolved and turn finished: clarifyingQuestion undefined, running false
+      const resolvedTurn: LiveTurn = {
+        ...initialTurn,
+        running: false,
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'cq-unblock-test',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick' },
+                result: 'User answered: choice',
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: undefined,
+      };
+
+      rerender(chat({ prompts: [], liveTurn: resolvedTurn }));
+
+      await waitFor(() => {
+        expect(textarea.placeholder).not.toBe('Awaiting clarification…');
+      });
+      expect(textarea.disabled).toBe(false);
+      fireEvent.change(textarea, { target: { value: 'Followup prompt' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+      expect(onSend).toHaveBeenCalledWith('Followup prompt', undefined);
+    });
+
+    it('renders rehydrated clarification calls with placeholder result as answered with 0 failed steps', () => {
+      // Message shape produced when rehydrating stored messages containing tool calls
+      const parsed = {
+        content: 'Configured environment.',
+        blocks: [
+          {
+            toolCalls: [
+              {
+                id: 'c-rehydrate-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick database environment' },
+                result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+              },
+            ],
+          },
+          {
+            text: 'Configured environment.',
+          },
+        ],
+        toolCalls: [
+          {
+            id: 'c-rehydrate-1',
+            name: 'AskUserQuestion',
+            input: { question: 'Pick database environment' },
+            result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+          },
+        ],
+        thinking: undefined,
+      };
+      const message: ChatMessage = {
+        localId: 'm-rehydrated',
+        createdAt: '',
+        role: 'assistant',
+        content: parsed.content,
+        blocks: parsed.blocks,
+        toolCalls: parsed.toolCalls,
+        thinking: parsed.thinking,
+      };
+
+      const { container } = renderChat({ messages: [message] });
+
+      expect(screen.getByText('Clarification provided')).toBeTruthy();
+      expect(screen.getByText(/Answered \(response saved in history\)/)).toBeTruthy();
+      const traceBar = container.querySelector('.trace-bar');
+      if (traceBar) {
+        expect(traceBar.textContent).not.toContain('failed');
+      }
+    });
+
+    it('renders blocks chronologically: intro text -> clarification card -> answer text -> trace', () => {
+      const message: ChatMessage = {
+        localId: 'm-chrono-order',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Found configs\n\nConfigured',
+        blocks: [
+          { text: 'Found configs' },
+          {
+            toolCalls: [
+              {
+                id: 'cq-chrono-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Deploy now?' },
+                result: 'User answered: yes',
+              },
+              {
+                id: 't-chrono-1',
+                name: 'search_corpus',
+                input: { query: 'verify' },
+                result: '[]',
+              },
+            ],
+          },
+          { text: 'Configured' },
+        ],
+      };
+
+      const { container } = renderChat({ messages: [message] });
+
+      const introText = screen.getByText('Found configs');
+      const clarifCard = container.querySelector('.clarifying-question-card')!;
+      const answerText = screen.getByText('Configured');
+      const traceBar = container.querySelector('.trace-bar')!;
+
+      expect(introText).toBeTruthy();
+      expect(clarifCard).toBeTruthy();
+      expect(answerText).toBeTruthy();
+      expect(traceBar).toBeTruthy();
+
+      expect(introText.compareDocumentPosition(clarifCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(clarifCard.compareDocumentPosition(answerText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(answerText.compareDocumentPosition(traceBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('pending clarification without activeClarificationId renders no card and does not mark step failed in trace', () => {
+      // Live turn where tool_use arrived before main emitted clarifying-question
+      const liveTurnWithPending: LiveTurn = {
+        running: true,
+        liveText: '',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'call-pending-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Which database?' },
+                result: undefined,
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: undefined,
+      };
+
+      const { container } = renderChat({ liveTurn: liveTurnWithPending });
+
+      // No card should be rendered before activeClarificationId is assigned
+      expect(container.querySelector('.clarifying-question-card')).toBeNull();
+
+      // TraceBar must not mark the pending step as failed
+      const traceBar = container.querySelector('.trace-bar');
+      expect(traceBar).toBeTruthy();
+      expect(traceBar!.textContent).not.toContain('failed');
+    });
+
+    it('renders mermaid diagrams in closed blocks of a running live turn as streaming source text', () => {
+      const liveTurnWithClosedBlock: LiveTurn = {
+        running: true,
+        liveText: 'Streaming answer continuation...',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '```mermaid\nflowchart TD\n  A --> B\n```',
+            toolCalls: [],
+          },
+        ],
+      };
+
+      const { container } = renderChat({ liveTurn: liveTurnWithClosedBlock });
+
+      // While turn is running, diagrams in earlier closed blocks must remain streaming source text
+      expect(container.querySelector('.mermaid-streaming')).toBeTruthy();
+      expect(container.querySelector('.mermaid-diagram-container')).toBeNull();
+    });
+  });
 });
-
-

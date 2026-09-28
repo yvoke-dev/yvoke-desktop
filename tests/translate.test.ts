@@ -120,4 +120,300 @@ describe('SDK message translation', () => {
       },
     ]);
   });
+
+  describe('Task 1.3: Clarification effectiveIsError handling in translateMessage', () => {
+    it('inverts error flag for valid clarification answers even if SDK reports is_error: true', () => {
+      const ctx = newTurnContext('t1');
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'clarif-1', name: 'AskUserQuestion', input: { question: 'Pick env' } }],
+          },
+        }),
+        ctx,
+      );
+
+      const events = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'clarif-1',
+                content: [{ type: 'text', text: 'User answered: prod' }],
+                is_error: true, // SDK denied tool with message
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      expect(events).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'clarif-1', result: 'User answered: prod', isError: false },
+      ]);
+      const call = ctx.toolCalls.find((c) => c.id === 'clarif-1');
+      expect(call?.result).toBe('User answered: prod');
+      expect(call?.isError).toBe(false);
+    });
+
+    it('marks validation errors as errors even if SDK reports is_error: false', () => {
+      const ctx = newTurnContext('t1');
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'clarif-2', name: 'ask_clarifying_question', input: { question: 'Pick' } },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const errorPayload = 'InputValidationError: options must have <= 4 items';
+      const events = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'clarif-2',
+                content: [{ type: 'text', text: errorPayload }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      expect(events).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'clarif-2', result: errorPayload, isError: true },
+      ]);
+      const call = ctx.toolCalls.find((c) => c.id === 'clarif-2');
+      expect(call?.result).toBe(errorPayload);
+      expect(call?.isError).toBe(true);
+    });
+
+    it('marks empty/cancelled clarification answers as isError: true', () => {
+      const ctx = newTurnContext('t1');
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'clarif-3', name: 'AskUserQuestion', input: {} }],
+          },
+        }),
+        ctx,
+      );
+
+      const events = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'clarif-3',
+                content: [{ type: 'text', text: 'User answered: ' }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      expect(events).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'clarif-3', result: 'User answered: ', isError: true },
+      ]);
+      const call = ctx.toolCalls.find((c) => c.id === 'clarif-3');
+      expect(call?.result).toBe('User answered: ');
+      expect(call?.isError).toBe(true);
+    });
+
+    it('gracefully passes through tool_result for unmatched toolUseId without throwing', () => {
+      const ctx = newTurnContext('t1');
+      const events = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'unmatched-id',
+                content: [{ type: 'text', text: 'orphan result' }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      expect(events).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'unmatched-id', result: 'orphan result', isError: false },
+      ]);
+      expect(ctx.toolCalls).toHaveLength(0);
+    });
+
+    it('passes through incoming is_error unmodified for non-clarification tools', () => {
+      const ctx = newTurnContext('t1');
+      const corpusTool = qualifyTool('search_corpus');
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'tu-norm-1', name: corpusTool, input: {} },
+              { type: 'tool_use', id: 'tu-norm-2', name: corpusTool, input: {} },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const events1 = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'tu-norm-1',
+                content: [{ type: 'text', text: 'success result' }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+      expect(events1).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'tu-norm-1', result: 'success result', isError: false },
+      ]);
+      expect(ctx.toolCalls.find((c) => c.id === 'tu-norm-1')?.isError).toBe(false);
+
+      const events2 = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'tu-norm-2',
+                content: [{ type: 'text', text: 'failed result' }],
+                is_error: true,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+      expect(events2).toEqual([
+        { kind: 'tool-result', threadId: 't1', toolUseId: 'tu-norm-2', result: 'failed result', isError: true },
+      ]);
+      expect(ctx.toolCalls.find((c) => c.id === 'tu-norm-2')?.isError).toBe(true);
+    });
+
+    it('inverts inner.isError to false when a sub-agent clarification tool receives is_error: true with a valid answer', () => {
+      const ctx = newTurnContext('t1', true);
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'del-1', name: 'Agent', input: { subagent_type: 'specialist', prompt: 'check' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'assistant',
+          parent_tool_use_id: 'del-1',
+          message: {
+            content: [{ type: 'tool_use', id: 'sub-cq-1', name: 'AskUserQuestion', input: { question: 'Which branch?' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'user',
+          parent_tool_use_id: 'del-1',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'sub-cq-1',
+                content: [{ type: 'text', text: 'User answered: main' }],
+                is_error: true,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const agentCall = ctx.agentCalls.get('del-1');
+      const inner = agentCall?.subagentBlocks?.flatMap((b) => b.toolCalls ?? []).find((c) => c.id === 'sub-cq-1');
+      expect(inner).toBeDefined();
+      expect(inner?.result).toBe('User answered: main');
+      expect(inner?.isError).toBe(false);
+    });
+
+    it('sets inner.isError to true when a sub-agent clarification tool receives an invalid answer with is_error: false', () => {
+      const ctx = newTurnContext('t1', true);
+      translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'tool_use', id: 'del-2', name: 'Agent', input: { subagent_type: 'specialist', prompt: 'check' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'assistant',
+          parent_tool_use_id: 'del-2',
+          message: {
+            content: [{ type: 'tool_use', id: 'sub-cq-2', name: 'AskUserQuestion', input: { question: 'Which branch?' } }],
+          },
+        }),
+        ctx,
+      );
+
+      translateMessage(
+        msg({
+          type: 'user',
+          parent_tool_use_id: 'del-2',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'sub-cq-2',
+                content: [{ type: 'text', text: 'User answered: ' }],
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+
+      const agentCall = ctx.agentCalls.get('del-2');
+      const inner = agentCall?.subagentBlocks?.flatMap((b) => b.toolCalls ?? []).find((c) => c.id === 'sub-cq-2');
+      expect(inner).toBeDefined();
+      expect(inner?.result).toBe('User answered: ');
+      expect(inner?.isError).toBe(true);
+    });
+  });
 });

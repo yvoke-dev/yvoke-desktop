@@ -1323,6 +1323,10 @@ h6 {
   gap: 12px;
 }
 
+.message.assistant > .clarifying-question-card:first-child {
+  margin-top: 0;
+}
+
 .clarifying-question-card .card-header {
   display: flex;
   align-items: center;

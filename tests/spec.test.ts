@@ -223,6 +223,18 @@ describe('spec/ modular structure', () => {
     expect(askingQuestions).toContain(
       '**Option preview content is not rendered.** While clarification options display labels\n  and descriptions, optional preview attachments (such as code blocks or visual comparisons\n  declared in CLI schemas) are not rendered in the card.',
     );
+    expect(askingQuestions).toContain(
+      '**Clarifying questions sit chronologically alongside the turn\'s prose in the order they occurred.**\n  In both live and finished turns, clarifying question cards are rendered in block-level chronological order\n  alongside surrounding prose.',
+    );
+    expect(askingQuestions).toContain(
+      '**Failed clarification tool calls fold into the trace rather than rendering as cards.** If a\n  clarification tool call fails (due to schema/input validation errors or execution failure without a valid\n  user answer), it does not render an inline card and never displays a completed *Clarification provided*\n  card with a checkmark. Instead, it is treated as a standard failed tool call in the trace bar (`N failed`).',
+    );
+    expect(askingQuestions).toContain(
+      '*Clarification provided* with the answer, remaining in place alongside the turn\'s prose.',
+    );
+    expect(askingQuestions).toContain(
+      '**Conversations restored from the server show every clarification as answered.** The remote sync\n  payload does not retain tool execution results or error states, storing only that a tool was called.\n  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying\n  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.',
+    );
   });
 });
 

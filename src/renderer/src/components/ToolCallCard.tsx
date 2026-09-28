@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
-import { isClarificationTool, normalizeClarifyingInput } from '../../../shared/types';
+import {
+  clarificationAnswer,
+  clarificationState,
+  isClarificationTool,
+  normalizeClarifyingInput,
+} from '../../../shared/types';
 import { SubagentCard } from './SubagentCard';
 import { Markdown } from './Markdown';
 import { CheckIcon, HelpIcon, SendIcon } from './icons';
@@ -32,19 +37,13 @@ export function ToolCallCard(props: {
     return null;
   }
 
-  const done = call.result !== undefined;
+  const state = clarificationState(call);
+  if (state === 'failed') {
+    // Failed or cancelled clarification — ChatView folds this into the trace instead.
+    return null;
+  }
 
-  const getAnswerText = (result: string | undefined): string => {
-    if (!result) return '';
-    const prefix = 'User answered: ';
-    if (result.startsWith(prefix)) {
-      return result.substring(prefix.length);
-    }
-    if (result === "Clarifying question asked successfully. Waiting for user's response.") {
-      return 'Answered (response saved in history)';
-    }
-    return result;
-  };
+  const done = state === 'answered';
 
   const { question, options } = normalizeClarifyingInput(call.input);
   const isActive = !done && activeClarificationId === call.id;
@@ -62,7 +61,7 @@ export function ToolCallCard(props: {
   };
 
   if (done) {
-    const answerText = getAnswerText(call.result);
+    const answerText = clarificationAnswer(call.result) ?? '';
     return (
       <div className="clarifying-question-card answered">
         <div className="card-header">

@@ -1,5 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, MessageBlock, ReviewStatus, ToolCallInfo, UsageTotals } from '../../shared/types';
+import { clarificationState, isClarificationTool } from '../../shared/types';
 
 /** In-stream tool_use name for a delegation (the allow-list token is 'Task'; see orchestration.ts). */
 const DELEGATE_TOOL_NAME = 'Agent';
@@ -317,17 +318,22 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
           const inner = agentCall?.subagentBlocks?.flatMap((b) => b.toolCalls ?? []).find((c) => c.id === toolUseId);
           if (inner) {
             inner.result = result;
-            inner.isError = isError;
+            inner.isError = isClarificationTool(inner.name)
+              ? clarificationState({ ...inner, result }) !== 'answered'
+              : isError;
           }
           continue;
         }
 
         const call = ctx.toolCalls.find((c) => c.id === toolUseId);
+        const effectiveIsError = call && isClarificationTool(call.name)
+          ? clarificationState({ ...call, result }) !== 'answered'
+          : isError;
         if (call) {
           call.result = result;
-          call.isError = isError;
+          call.isError = effectiveIsError;
         }
-        events.push({ kind: 'tool-result', threadId: ctx.threadId, toolUseId, result, isError });
+        events.push({ kind: 'tool-result', threadId: ctx.threadId, toolUseId, result, isError: effectiveIsError });
 
         // A completed delegation: surface a specialist-complete / reviewer-verdict event in orchestrator mode.
         if (ctx.orchestratorMode && call?.name === DELEGATE_TOOL_NAME) {

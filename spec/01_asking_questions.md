@@ -17,7 +17,7 @@ behind it, and the work that produced it can be opened and read.
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
-| **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer. |
+| **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears chronologically alongside the turn's prose in the order it occurred, with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer, remaining in place alongside the turn's prose. |
 | **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
 | **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
@@ -51,6 +51,17 @@ behind it, and the work that produced it can be opened and read.
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
   specialist, which in a multi-agent turn is the substance of the run.
+- **Clarifying questions sit chronologically alongside the turn's prose in the order they occurred.**
+  In both live and finished turns, clarifying question cards are rendered in block-level chronological order
+  alongside surrounding prose. Any text in earlier blocks preceding the question appears before the card, and response
+  text following it appears after, maintaining chronological fidelity across the turn without layout jumping
+  as blocks stream.
+- **Failed clarification tool calls fold into the trace rather than rendering as cards.** If a
+  clarification tool call fails (due to schema/input validation errors or execution failure without a valid
+  user answer), it does not render an inline card and never displays a completed *Clarification provided*
+  card with a checkmark. Instead, it is treated as a standard failed tool call in the trace bar (`N failed`).
+  Only an active clarification awaiting input or a clarification completed with a valid user answer is
+  rendered inline.
 - **No trace line means there was nothing to show**, not that it is collapsed. A turn that called no
   tool and did no visible reasoning has no bar at all, and its token counts move into the footer.
 - **A user's prompt is displayed exactly as typed.** A question containing code, markdown
@@ -196,6 +207,10 @@ behind it, and the work that produced it can be opened and read.
   keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
   than just closing the list. There is no shortcut for new conversation, search, settings, delete or
   stop.
+- **Conversations restored from the server show every clarification as answered.** The remote sync
+  payload does not retain tool execution results or error states, storing only that a tool was called.
+  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying
+  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.
 
 ## Not supported
 

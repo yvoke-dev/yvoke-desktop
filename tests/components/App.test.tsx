@@ -533,5 +533,66 @@ describe('App conversation switching with in-progress turn', () => {
     expect(warnSpy).toHaveBeenCalledWith('Failed to patch thread:', expect.any(Error));
     warnSpy.mockRestore();
   });
+
+  it('Task 3.5: clears liveTurn.clarifyingQuestion and restores composer placeholder on tool-result for matching toolUseId', async () => {
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+    // Start a turn and dispatch assistant-block with clarification tool call
+    emitAgent({ kind: 'turn-start', threadId: 'thread-1' });
+    emitAgent({
+      kind: 'assistant-block',
+      threadId: 'thread-1',
+      text: '',
+      toolCalls: [
+        {
+          id: 'tu-clarif-1',
+          name: 'AskUserQuestion',
+          input: { question: 'Which branch?' },
+        },
+      ],
+    });
+
+    // Dispatch clarifying-question event
+    emitAgent({
+      kind: 'clarifying-question',
+      threadId: 'thread-1',
+      toolUseId: 'tu-clarif-1',
+      question: 'Which branch?',
+      options: [{ label: 'main' }],
+    });
+
+    const textarea = container.querySelector('textarea')!;
+    await waitFor(() => {
+      expect(textarea.placeholder).toBe('Awaiting clarification…');
+    });
+    expect(screen.getByText('Clarification required')).toBeTruthy();
+
+    // Dispatch tool-result for a NON-matching toolUseId -> clarifyingQuestion must NOT be cleared
+    emitAgent({
+      kind: 'tool-result',
+      threadId: 'thread-1',
+      toolUseId: 'other-tool-id',
+      result: 'some other result',
+      isError: false,
+    });
+
+    expect(textarea.placeholder).toBe('Awaiting clarification…');
+
+    // Dispatch tool-result for the MATCHING toolUseId -> clarifyingQuestion must be cleared!
+    emitAgent({
+      kind: 'tool-result',
+      threadId: 'thread-1',
+      toolUseId: 'tu-clarif-1',
+      result: 'User answered: main',
+      isError: false,
+    });
+
+    await waitFor(() => {
+      expect(textarea.placeholder).not.toBe('Awaiting clarification…');
+    });
+  });
 });
 

@@ -661,6 +661,40 @@ export function isClarificationTool(toolName: string): boolean {
   return bare === 'ask_clarifying_question' || bare === 'AskUserQuestion';
 }
 
+export const CLARIFICATION_ANSWER_PREFIX = 'User answered: ';
+export const CLARIFICATION_WEB_SUCCESS_MESSAGE = "Clarifying question asked successfully. Waiting for user's response.";
+export const REHYDRATED_TOOL_RESULT_PLACEHOLDER = 'Completed (details logged locally)';
+
+/**
+ * Extract the user answer string from a completed clarification tool result.
+ * Returns the trimmed answer, 'Answered (response saved in history)' for web/rehydrated results,
+ * or undefined if the result is not a valid answer (e.g. error, empty, or non-string).
+ */
+export function clarificationAnswer(result?: unknown): string | undefined {
+  if (typeof result !== 'string') return undefined;
+  if (result === CLARIFICATION_WEB_SUCCESS_MESSAGE || result === REHYDRATED_TOOL_RESULT_PLACEHOLDER) {
+    return 'Answered (response saved in history)';
+  }
+  let answer: string | undefined;
+  if (result.startsWith(CLARIFICATION_ANSWER_PREFIX)) {
+    answer = result.slice(CLARIFICATION_ANSWER_PREFIX.length).trim();
+  }
+  return answer && answer.length > 0 ? answer : undefined;
+}
+
+/**
+ * Determine the unified status of a clarification tool call.
+ * - 'pending': call has not completed (result === undefined)
+ * - 'answered': completed with a valid user answer or rehydrated placeholder
+ * - 'failed': completed with an error, empty response, or cancelled
+ */
+export function clarificationState(call: ToolCallInfo): 'pending' | 'answered' | 'failed' {
+  if (call.result === undefined) return 'pending';
+  if (clarificationAnswer(call.result) !== undefined) return 'answered';
+  return 'failed';
+}
+
+
 function extractOptions(rawOptions: unknown): ClarificationOption[] {
   const options: ClarificationOption[] = [];
   if (Array.isArray(rawOptions)) {
