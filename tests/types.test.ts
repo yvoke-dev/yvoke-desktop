@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CLARIFICATION_ANSWER_PREFIX,
+  CLARIFICATION_WEB_SUCCESS_MESSAGE,
   DEFAULT_KB_TOOLS,
+  hasValidClarificationAnswer,
   isClarificationTool,
   MCP_PREFIX_RE,
   normalizeClarifyingInput,
@@ -242,4 +245,78 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(qualifyTool('mcp__custom_server__AskUserQuestion')).toBe('AskUserQuestion');
     });
   });
+
+  describe('Task 1.1: hasValidClarificationAnswer', () => {
+    it('exports expected constants', () => {
+      expect(CLARIFICATION_ANSWER_PREFIX).toBe('User answered: ');
+      expect(CLARIFICATION_WEB_SUCCESS_MESSAGE).toBe(
+        "Clarifying question asked successfully. Waiting for user's response.",
+      );
+    });
+
+    describe('Negative & Boundary Tests', () => {
+      it('returns false for undefined, null, empty string, and whitespace-only strings', () => {
+        expect(hasValidClarificationAnswer(undefined)).toBe(false);
+        expect(hasValidClarificationAnswer(null)).toBe(false);
+        expect(hasValidClarificationAnswer('')).toBe(false);
+        expect(hasValidClarificationAnswer('   ')).toBe(false);
+        expect(hasValidClarificationAnswer('\t\n ')).toBe(false);
+      });
+
+      it('returns false for runtime non-strings', () => {
+        expect(hasValidClarificationAnswer(123 as unknown as string)).toBe(false);
+        expect(hasValidClarificationAnswer({} as unknown as string)).toBe(false);
+        expect(hasValidClarificationAnswer(true as unknown as string)).toBe(false);
+        expect(hasValidClarificationAnswer(['User answered: prod'] as unknown as string)).toBe(false);
+      });
+
+      it('returns false for cancelled clarifications with empty answer prefix', () => {
+        expect(hasValidClarificationAnswer('User answered: ')).toBe(false);
+        expect(hasValidClarificationAnswer('User answered:   ')).toBe(false);
+        expect(hasValidClarificationAnswer('User answered: \n \t ')).toBe(false);
+      });
+
+      it('returns false for partial / missing whitespace prefixes', () => {
+        expect(hasValidClarificationAnswer('User answered:')).toBe(false);
+        expect(hasValidClarificationAnswer('User answered')).toBe(false);
+        expect(hasValidClarificationAnswer('user answered: prod')).toBe(false);
+      });
+
+      it('returns false for CLI validation errors and tool crashes', () => {
+        expect(hasValidClarificationAnswer('InputValidationError: options must have <= 4 items')).toBe(false);
+        expect(hasValidClarificationAnswer('Error: tool execution failed')).toBe(false);
+        expect(hasValidClarificationAnswer('TypeError: Cannot read properties of undefined')).toBe(false);
+      });
+
+      it('returns false for policy refusal messages', () => {
+        expect(hasValidClarificationAnswer('Clarifying questions cannot be asked in this execution context.')).toBe(false);
+      });
+
+      it('returns false for arbitrary non-matching prefixes', () => {
+        expect(hasValidClarificationAnswer('Answer: prod')).toBe(false);
+        expect(hasValidClarificationAnswer('Response: dev')).toBe(false);
+        expect(hasValidClarificationAnswer('User response: prod')).toBe(false);
+      });
+    });
+
+    describe('Positive Tests', () => {
+      it('returns true for valid answers', () => {
+        expect(hasValidClarificationAnswer('User answered: prod')).toBe(true);
+        expect(hasValidClarificationAnswer('User answered: 10.0 (most recent)')).toBe(true);
+        expect(hasValidClarificationAnswer('User answered: yes')).toBe(true);
+      });
+
+      it('returns true for valid multi-line answers', () => {
+        expect(hasValidClarificationAnswer('User answered:\nLine 1\nLine 2')).toBe(true);
+        expect(hasValidClarificationAnswer('User answered: \nLine 1\nLine 2')).toBe(true);
+      });
+
+      it('returns true for exact web success message', () => {
+        expect(
+          hasValidClarificationAnswer("Clarifying question asked successfully. Waiting for user's response."),
+        ).toBe(true);
+      });
+    });
+  });
 });
+

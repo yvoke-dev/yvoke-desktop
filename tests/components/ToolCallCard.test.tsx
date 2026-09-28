@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ToolCallCard } from '../../src/renderer/src/components/ToolCallCard';
+import { describeArgs } from '../../src/renderer/src/components/toolNames';
 import type { ToolCallInfo } from '../../src/shared/types';
 
 afterEach(() => cleanup());
@@ -225,5 +226,148 @@ describe('ToolCallCard', () => {
 
     expect(input.value).toBe('my retryable answer');
   });
+
+  describe('Task 1.5: ToolCallCard Safe Guard & Ghost Block Prevention', () => {
+    it('renders nothing when clarification result contains an error string', () => {
+      const call: ToolCallInfo = {
+        id: 'fail-1',
+        name: 'AskUserQuestion',
+        input: { question: 'Which version?' },
+        result: 'InputValidationError: options must have <= 4 items',
+        isError: true,
+      };
+      const { container } = render(<ToolCallCard call={call} />);
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders nothing when clarification result is cancelled/empty', () => {
+      const call: ToolCallInfo = {
+        id: 'fail-2',
+        name: 'AskUserQuestion',
+        input: { question: 'Which version?' },
+        result: 'User answered: ',
+        isError: true,
+      };
+      const { container } = render(<ToolCallCard call={call} />);
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders completed card with answer text for valid clarification result', () => {
+      const call: ToolCallInfo = {
+        id: 'ok-1',
+        name: 'AskUserQuestion',
+        input: { question: 'Which version?' },
+        result: 'User answered: prod',
+      };
+      render(<ToolCallCard call={call} />);
+      expect(screen.getByText('Clarification provided')).toBeTruthy();
+      expect(screen.getByText(/prod/)).toBeTruthy();
+    });
+
+    it('clears custom input value upon successful submission', async () => {
+      const onSubmit = vi.fn().mockResolvedValue(undefined);
+      const call: ToolCallInfo = {
+        id: 'submit-ok',
+        name: 'AskUserQuestion',
+        input: { question: 'Any comment?' },
+      };
+      const { container } = render(
+        <ToolCallCard call={call} activeClarificationId="submit-ok" onClarificationSubmit={onSubmit} />,
+      );
+
+      const input = container.querySelector<HTMLInputElement>('input[type="text"]')!;
+      const sendButton = container.querySelector<HTMLButtonElement>('button.primary')!;
+
+      fireEvent.change(input, { target: { value: 'here is my answer' } });
+      fireEvent.click(sendButton);
+
+      await waitFor(() => {
+        expect(onSubmit).toHaveBeenCalledWith('here is my answer');
+      });
+      await waitFor(() => {
+        expect(input.value).toBe('');
+      });
+    });
+
+    it('resets submitting state and keeps input and buttons interactive when submission rejects', async () => {
+      const onSubmit = vi.fn().mockRejectedValue(new Error('Clarification is no longer active'));
+      const call: ToolCallInfo = {
+        id: 'submit-reject',
+        name: 'AskUserQuestion',
+        input: { question: 'Any comment?' },
+      };
+      const { container } = render(
+        <ToolCallCard call={call} activeClarificationId="submit-reject" onClarificationSubmit={onSubmit} />,
+      );
+
+      const input = container.querySelector<HTMLInputElement>('input[type="text"]')!;
+      const sendButton = container.querySelector<HTMLButtonElement>('button.primary')!;
+
+      fireEvent.change(input, { target: { value: 'attempted answer' } });
+      fireEvent.click(sendButton);
+
+      await waitFor(() => {
+        expect(sendButton.disabled).toBe(false);
+      });
+      expect(input.disabled).toBe(false);
+    });
+  });
+
+  describe('Task 1.5: describeArgs for Clarification Tools', () => {
+    it('extracts question from flat input shape', () => {
+      const call: ToolCallInfo = {
+        id: 't-flat',
+        name: 'AskUserQuestion',
+        input: { question: 'Which version?' },
+      };
+      expect(describeArgs(call)).toBe('Which version?');
+    });
+
+    it('extracts question from nested CLI input shape', () => {
+      const call: ToolCallInfo = {
+        id: 't-nested',
+        name: 'AskUserQuestion',
+        input: { questions: [{ question: 'Which database version?' }] },
+      };
+      expect(describeArgs(call)).toBe('Which database version?');
+    });
+
+    it('truncates question strings exceeding 72 characters with an ellipsis', () => {
+      const longQuestion = 'This is an extremely long clarifying question designed to verify that the truncate helper caps at 72 chars';
+      const call: ToolCallInfo = {
+        id: 't-long',
+        name: 'ask_clarifying_question',
+        input: { question: longQuestion },
+      };
+      const result = describeArgs(call);
+      expect(result).toBeDefined();
+      expect(result!.length).toBeLessThanOrEqual(72);
+      expect(result!.endsWith('…')).toBe(true);
+    });
+
+    it('returns undefined for empty or whitespace-only questions', () => {
+      const call1: ToolCallInfo = {
+        id: 't-empty-1',
+        name: 'AskUserQuestion',
+        input: { question: '' },
+      };
+      expect(describeArgs(call1)).toBeUndefined();
+
+      const call2: ToolCallInfo = {
+        id: 't-empty-2',
+        name: 'AskUserQuestion',
+        input: { question: '   \n  \t ' },
+      };
+      expect(describeArgs(call2)).toBeUndefined();
+
+      const call3: ToolCallInfo = {
+        id: 't-empty-3',
+        name: 'AskUserQuestion',
+        input: { questions: [{ question: '   ' }] },
+      };
+      expect(describeArgs(call3)).toBeUndefined();
+    });
+  });
 });
+
 

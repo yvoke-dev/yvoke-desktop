@@ -1666,6 +1666,231 @@ describe('deterministic platform shortcut labels', () => {
       errorSpy.mockRestore();
     });
   });
+
+  describe('Task 1.7: ChatView Chronological Layout, Trace Routing, and Ghost Block Elimination', () => {
+    it('renders exactly one inline clarification card, folds failed call into TraceBar, and places card above answer', () => {
+      const message: ChatMessage = {
+        localId: 'm-ghost',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Configured for 10.0.',
+        blocks: [
+          {
+            text: 'Configured for 10.0.',
+            toolCalls: [
+              {
+                id: 'call-failed',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick a version from this huge list' },
+                result: 'InputValidationError: options must have <= 4 items',
+                isError: true,
+              },
+              {
+                id: 'call-success',
+                name: 'AskUserQuestion',
+                input: { question: 'Which version?' },
+                result: 'User answered: 10.0 (most recent)',
+              },
+            ],
+          },
+        ],
+      };
+      const { container } = renderChat({ messages: [message] });
+
+      const cards = container.querySelectorAll('.clarifying-question-card');
+      expect(cards).toHaveLength(1);
+      expect(screen.getByText(/10\.0 \(most recent\)/)).toBeTruthy();
+
+      // Failed clarification folded into TraceBar
+      const traceBar = container.querySelector('.trace-bar');
+      expect(traceBar).toBeTruthy();
+      expect(traceBar?.textContent).toContain('1 failed');
+
+      // Inline card strictly precedes answer-kicker and answer-body
+      const card = cards[0];
+      const kicker = container.querySelector('.answer-kicker')!;
+      const body = container.querySelector('.answer-body')!;
+      expect(card.compareDocumentPosition(kicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(card.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('places answered clarification card chronologically above streaming answer body in live turn', () => {
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: 'Drafting the final response...',
+          liveThinking: '',
+          blocks: [
+            {
+              text: '',
+              toolCalls: [
+                {
+                  id: 'cq-live-done',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Target env?' },
+                  result: 'User answered: staging',
+                },
+              ],
+            },
+          ],
+        },
+      });
+      const card = container.querySelector('.clarifying-question-card')!;
+      const body = container.querySelector('.answer-body')!;
+      expect(card).toBeTruthy();
+      expect(body).toBeTruthy();
+      expect(card.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('suppresses the "Working…" thinking indicator in live turn when awaiting clarification', () => {
+      const { container } = renderChat({
+        liveTurn: {
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: '',
+              toolCalls: [
+                {
+                  id: 'cq-unanswered',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Please choose an option' },
+                  result: undefined,
+                },
+              ],
+            },
+          ],
+          clarifyingQuestion: {
+            toolUseId: 'cq-unanswered',
+            question: 'Please choose an option',
+            options: [],
+          },
+        },
+      });
+      expect(screen.getByText('Clarification required')).toBeTruthy();
+      expect(container.querySelector('.thinking-indicator')).toBeNull();
+    });
+
+    it('renders turn elements in order: clarification card -> answer body -> delegation card -> TraceBar', () => {
+      const message: ChatMessage = {
+        localId: 'm-orch',
+        createdAt: '',
+        role: 'assistant',
+        content: 'Composed answer text.',
+        blocks: [
+          {
+            text: 'Composed answer text.',
+            toolCalls: [
+              {
+                id: 'c-order-1',
+                name: 'AskUserQuestion',
+                input: { question: 'Proceed?' },
+                result: 'User answered: yes',
+              },
+              {
+                id: 'd-order-1',
+                name: 'Agent',
+                subagentType: 'specialist',
+                input: { prompt: 'Verify data' },
+                result: 'Data verified',
+              },
+              {
+                id: 't-order-1',
+                name: 'search_corpus',
+                input: { query: 'test' },
+                result: '[]',
+              },
+            ],
+          },
+        ],
+      };
+      const { container } = renderChat({ messages: [message] });
+
+      const clarifCard = container.querySelector('.clarifying-question-card')!;
+      const kicker = container.querySelector('.answer-kicker')!;
+      const body = container.querySelector('.answer-body')!;
+      const subagentCard = container.querySelector('.subagent-card')!;
+      const traceBar = container.querySelector('.trace-bar')!;
+
+      expect(clarifCard).toBeTruthy();
+      expect(kicker).toBeTruthy();
+      expect(body).toBeTruthy();
+      expect(subagentCard).toBeTruthy();
+      expect(traceBar).toBeTruthy();
+
+      expect(clarifCard.compareDocumentPosition(kicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(kicker.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(body.compareDocumentPosition(subagentCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(subagentCard.compareDocumentPosition(traceBar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('unblocks composer textarea and restores placeholder when clarification resolves', async () => {
+      const initialTurn: LiveTurn = {
+        running: true,
+        liveText: '',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'cq-unblock-test',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick' },
+                result: undefined,
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: {
+          toolUseId: 'cq-unblock-test',
+          question: 'Pick',
+          options: [],
+        },
+      };
+
+      const { container, rerender } = renderChat({
+        prompts: [],
+        liveTurn: initialTurn,
+      });
+
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.placeholder).toBe('Awaiting clarification…');
+      expect(textarea.disabled).toBe(true);
+
+      // Simulate clarification resolved and turn finished: clarifyingQuestion undefined, running false
+      const resolvedTurn: LiveTurn = {
+        ...initialTurn,
+        running: false,
+        blocks: [
+          {
+            text: '',
+            toolCalls: [
+              {
+                id: 'cq-unblock-test',
+                name: 'AskUserQuestion',
+                input: { question: 'Pick' },
+                result: 'User answered: choice',
+              },
+            ],
+          },
+        ],
+        clarifyingQuestion: undefined,
+      };
+
+      rerender(chat({ prompts: [], liveTurn: resolvedTurn }));
+
+      await waitFor(() => {
+        expect(textarea.placeholder).not.toBe('Awaiting clarification…');
+      });
+      expect(textarea.disabled).toBe(false);
+      fireEvent.change(textarea, { target: { value: 'Followup prompt' } });
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+      expect(onSend).toHaveBeenCalledWith('Followup prompt', undefined);
+    });
+  });
 });
+
 
 

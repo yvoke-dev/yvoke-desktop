@@ -1,4 +1,4 @@
-import { MCP_PREFIX_RE, type ToolCallInfo } from '../../../shared/types';
+import { isClarificationTool, MCP_PREFIX_RE, normalizeClarifyingInput, type ToolCallInfo } from '../../../shared/types';
 
 /** Strip the `mcp__<server>__` namespace the SDK prefixes onto every server tool. */
 export function shortName(name: string): string {
@@ -30,6 +30,14 @@ function truncate(text: string, max = 72): string {
  * server tool degrades to "its first string argument" rather than to nothing.
  */
 export function describeArgs(call: ToolCallInfo): string | undefined {
+  if (isClarificationTool(call.name)) {
+    const { question } = normalizeClarifyingInput(call.input);
+    if (question && question.trim().length > 0) {
+      return truncate(question);
+    }
+    return undefined;
+  }
+
   const tool = shortName(call.name);
   const byTool: Record<string, string[]> = {
     search_corpus: ['query', 'q'],

@@ -220,6 +220,10 @@ export default function App(): React.JSX.Element {
               ...prev,
               [event.threadId]: {
                 ...current,
+                clarifyingQuestion:
+                  current.clarifyingQuestion?.toolUseId === event.toolUseId
+                    ? undefined
+                    : current.clarifyingQuestion,
                 blocks: current.blocks.map((b) => ({
                   ...b,
                   toolCalls: b.toolCalls.map((c) =>

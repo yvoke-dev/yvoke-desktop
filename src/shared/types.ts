@@ -661,6 +661,21 @@ export function isClarificationTool(toolName: string): boolean {
   return bare === 'ask_clarifying_question' || bare === 'AskUserQuestion';
 }
 
+export const CLARIFICATION_ANSWER_PREFIX = 'User answered: ';
+export const CLARIFICATION_WEB_SUCCESS_MESSAGE = "Clarifying question asked successfully. Waiting for user's response.";
+
+export function hasValidClarificationAnswer(result?: unknown): boolean {
+  if (typeof result !== 'string') return false;
+  if (result.startsWith(CLARIFICATION_ANSWER_PREFIX)) {
+    return result.slice(CLARIFICATION_ANSWER_PREFIX.length).trim().length > 0;
+  }
+  if (result.startsWith('User answered:\n')) {
+    return result.slice('User answered:\n'.length).trim().length > 0;
+  }
+  return result === CLARIFICATION_WEB_SUCCESS_MESSAGE;
+}
+
+
 function extractOptions(rawOptions: unknown): ClarificationOption[] {
   const options: ClarificationOption[] = [];
   if (Array.isArray(rawOptions)) {

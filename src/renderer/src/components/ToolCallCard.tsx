@@ -1,6 +1,12 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
-import { isClarificationTool, normalizeClarifyingInput } from '../../../shared/types';
+import {
+  CLARIFICATION_ANSWER_PREFIX,
+  CLARIFICATION_WEB_SUCCESS_MESSAGE,
+  hasValidClarificationAnswer,
+  isClarificationTool,
+  normalizeClarifyingInput,
+} from '../../../shared/types';
 import { SubagentCard } from './SubagentCard';
 import { Markdown } from './Markdown';
 import { CheckIcon, HelpIcon, SendIcon } from './icons';
@@ -32,18 +38,25 @@ export function ToolCallCard(props: {
     return null;
   }
 
+  if (call.result !== undefined && !hasValidClarificationAnswer(call.result)) {
+    // Failed or cancelled clarification — ChatView folds this into the trace instead.
+    return null;
+  }
+
   const done = call.result !== undefined;
 
   const getAnswerText = (result: string | undefined): string => {
     if (!result) return '';
-    const prefix = 'User answered: ';
-    if (result.startsWith(prefix)) {
-      return result.substring(prefix.length);
+    if (result.startsWith(CLARIFICATION_ANSWER_PREFIX)) {
+      return result.substring(CLARIFICATION_ANSWER_PREFIX.length);
     }
-    if (result === "Clarifying question asked successfully. Waiting for user's response.") {
+    if (result.startsWith('User answered:\n')) {
+      return result.substring('User answered:\n'.length);
+    }
+    if (result === CLARIFICATION_WEB_SUCCESS_MESSAGE) {
       return 'Answered (response saved in history)';
     }
-    return result;
+    return '';
   };
 
   const { question, options } = normalizeClarifyingInput(call.input);

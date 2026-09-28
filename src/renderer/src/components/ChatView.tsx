@@ -18,6 +18,7 @@ import type {
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   DEFAULT_APPEARANCE,
+  hasValidClarificationAnswer,
   isClarificationTool,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
@@ -47,22 +48,6 @@ function formatTokens(n: number): string {
   return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
 }
 
-/**
- * Two kinds of tool call are NOT evidence and must not be folded into the trace:
- * a clarifying question is a control the user has to answer, and a delegation is the substance
- * of an orchestrated turn. Everything else is the run's working-out.
- */
-function isInlineCall(call: ToolCallInfo): boolean {
-  // A delegation is identified by the runtime having attributed a sub-agent to it — translate.ts
-  // sets `subagentType` only in orchestrator mode — rather than by the thread's mode as it stands
-  // now. A conversation can be moved off its profile mid-thread, and stored orchestrated turns
-  // have to keep their cards when it is.
-  return (
-    (call.name === 'Agent' && call.subagentType !== undefined) ||
-    isClarificationTool(call.name)
-  );
-}
-
 function logError(...args: unknown[]): void {
   console.error(...args);
 }
@@ -88,26 +73,38 @@ interface PreflightCard {
 interface AssembledTurn {
   text: string;
   entries: TraceEntry[];
-  inlineCalls: ToolCallInfo[];
+  clarificationCalls: ToolCallInfo[];
+  delegationCalls: ToolCallInfo[];
 }
 
 /**
- * Split one assistant turn into the three things the layout needs: the prose (which goes first,
- * always), the trace entries (reasoning + tools, collapsed), and the calls that stay inline.
+ * Split one assistant turn into the four things the layout needs: the prose, the trace entries
+ * (reasoning + tools + failed clarifications, collapsed), the active/completed clarification calls
+ * (anchored chronologically at the top), and delegations.
  */
 function assemble(blocks: MessageBlock[]): AssembledTurn {
   const texts: string[] = [];
   const entries: TraceEntry[] = [];
-  const inlineCalls: ToolCallInfo[] = [];
+  const clarificationCalls: ToolCallInfo[] = [];
+  const delegationCalls: ToolCallInfo[] = [];
   for (const block of blocks) {
     if (block.thinking) entries.push({ kind: 'thinking', text: block.thinking });
     for (const call of block.toolCalls ?? []) {
-      if (isInlineCall(call)) inlineCalls.push(call);
-      else entries.push({ kind: 'tool', call });
+      if (isClarificationTool(call.name)) {
+        if (call.result === undefined || hasValidClarificationAnswer(call.result)) {
+          clarificationCalls.push(call);
+        } else {
+          entries.push({ kind: 'tool', call: { ...call, isError: true } });
+        }
+      } else if (call.name === 'Agent' && call.subagentType !== undefined) {
+        delegationCalls.push(call);
+      } else {
+        entries.push({ kind: 'tool', call });
+      }
     }
     if (block.text) texts.push(block.text);
   }
-  return { text: texts.join('\n\n'), entries, inlineCalls };
+  return { text: texts.join('\n\n'), entries, clarificationCalls, delegationCalls };
 }
 
 /**
@@ -859,9 +856,18 @@ export function ChatView(props: {
               </div>
             );
           }
-          const { text, entries, inlineCalls } = assemble(blocksOf(message));
+          const { text, entries, clarificationCalls, delegationCalls } = assemble(blocksOf(message));
           return (
             <div key={message.localId} className="message assistant">
+              {clarificationCalls.map((call) => (
+                <ToolCallCard
+                  key={call.id}
+                  call={call}
+                  onClarificationSubmit={handleClarificationSubmit}
+                  activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                  onCitation={openCitation}
+                />
+              ))}
               {text && (
                 <>
                   <div className="answer-kicker">Answer</div>
@@ -870,7 +876,7 @@ export function ChatView(props: {
                   </div>
                 </>
               )}
-              {inlineCalls.map((call) => (
+              {delegationCalls.map((call) => (
                 <ToolCallCard
                   key={call.id}
                   call={call}
@@ -896,6 +902,15 @@ export function ChatView(props: {
 
         {liveTurn.running && (
           <div className="message assistant live">
+            {liveTurnParts.clarificationCalls.map((call) => (
+              <ToolCallCard
+                key={call.id}
+                call={call}
+                onClarificationSubmit={handleClarificationSubmit}
+                activeClarificationId={liveTurn.clarifyingQuestion?.toolUseId}
+                onCitation={openCitation}
+              />
+            ))}
             {liveTurnParts.text && (
               <>
                 <div className="answer-kicker">Answer</div>
@@ -904,7 +919,7 @@ export function ChatView(props: {
                 </div>
               </>
             )}
-            {liveTurnParts.inlineCalls.map((call) => (
+            {liveTurnParts.delegationCalls.map((call) => (
               <ToolCallCard
                 key={call.id}
                 call={call}
@@ -916,12 +931,14 @@ export function ChatView(props: {
             {/* Open while the turn runs so the work stays visible; the finished message then
                 renders it collapsed (or per the Appearance setting). */}
             <TraceBar entries={liveTurnParts.entries} defaultOpen />
-            {!liveTurnParts.text && liveTurnParts.entries.length === 0 && (
-              <div className="thinking-indicator">
-                <span className="dot" />
-                Working…
-              </div>
-            )}
+            {!liveTurnParts.text &&
+              liveTurnParts.entries.length === 0 &&
+              !liveTurnParts.clarificationCalls.some((c) => c.result === undefined) && (
+                <div className="thinking-indicator">
+                  <span className="dot" />
+                  Working…
+                </div>
+              )}
           </div>
         )}
       </div>
