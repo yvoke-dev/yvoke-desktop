@@ -417,4 +417,3 @@ describe('SDK message translation', () => {
     });
   });
 });
-

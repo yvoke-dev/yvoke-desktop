@@ -118,6 +118,8 @@ function assemble(blocks: MessageBlock[], activeClarificationId?: string): Assem
       }
     }
 
+    // Intra-block layout decision: clarification cards render at the top of their block
+    // (above any prose in the same block), while delegation cards are placed below.
     for (const call of clarificationCalls) {
       parts.push({ kind: 'clarification', call });
     }
@@ -938,7 +940,7 @@ export function ChatView(props: {
               </div>
             );
           }
-          const { text, entries, parts } = assemble(blocksOf(message), liveTurn.clarifyingQuestion?.toolUseId);
+          const { entries, parts } = assemble(blocksOf(message), liveTurn.clarifyingQuestion?.toolUseId);
           return (
             <div key={message.localId} className="message assistant">
               <TurnPartsList
@@ -954,7 +956,7 @@ export function ChatView(props: {
                     would have nowhere to go, so the footer picks them up. */}
                 {message.usage && entries.length === 0 ? <UsageLine usage={message.usage} /> : <span />}
                 <span className="message-actions">
-                  {text && <CopyButton text={text} />}
+                  {message.content && <CopyButton text={message.content} />}
                   <FeedbackControls message={message} onFeedback={onFeedback} />
                 </span>
               </div>

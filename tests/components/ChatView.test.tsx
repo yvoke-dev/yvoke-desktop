@@ -1538,29 +1538,25 @@ describe('deterministic platform shortcut labels', () => {
       expect(textarea.placeholder).not.toContain('to send');
     });
 
-    it('renders AskUserQuestion as an inline clarification card rather than folding into trace', () => {
-      const message: ChatMessage = {
-        localId: 'm1',
-        createdAt: '',
-        role: 'assistant',
-        content: 'Please answer:',
-        blocks: [
-          {
-            text: 'Please answer:',
-            toolCalls: [
-              {
-                id: 'call-1',
-                name: 'AskUserQuestion',
-                input: { question: 'Which mode?', options: ['fast', 'thorough'] },
-              },
-            ],
-          },
-        ],
-      };
+    it('renders AskUserQuestion as an inline clarification card rather than folding into trace in a live turn', () => {
       renderChat({
-        messages: [message],
+        messages: [],
         liveTurn: {
-          ...IDLE,
+          running: true,
+          liveText: '',
+          liveThinking: '',
+          blocks: [
+            {
+              text: 'Please answer:',
+              toolCalls: [
+                {
+                  id: 'call-1',
+                  name: 'AskUserQuestion',
+                  input: { question: 'Which mode?', options: ['fast', 'thorough'] },
+                },
+              ],
+            },
+          ],
           clarifyingQuestion: {
             toolUseId: 'call-1',
             question: 'Which mode?',
@@ -1901,8 +1897,8 @@ describe('deterministic platform shortcut labels', () => {
       expect(onSend).toHaveBeenCalledWith('Followup prompt', undefined);
     });
 
-    it('rehydrates clarification calls from parseStoredContent as answered with 0 failed steps', () => {
-      // Structure produced by parseStoredContent when reloading stored messages containing tool calls
+    it('renders rehydrated clarification calls with placeholder result as answered with 0 failed steps', () => {
+      // Message shape produced when rehydrating stored messages containing tool calls
       const parsed = {
         content: 'Configured environment.',
         blocks: [
@@ -2049,6 +2045,3 @@ describe('deterministic platform shortcut labels', () => {
     });
   });
 });
-
-
-

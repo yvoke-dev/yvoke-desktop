@@ -53,7 +53,7 @@ behind it, and the work that produced it can be opened and read.
   specialist, which in a multi-agent turn is the substance of the run.
 - **Clarifying questions sit chronologically alongside the turn's prose in the order they occurred.**
   In both live and finished turns, clarifying question cards are rendered in block-level chronological order
-  alongside any surrounding prose. Any text preceding the question appears before the card, and response
+  alongside surrounding prose. Any text in earlier blocks preceding the question appears before the card, and response
   text following it appears after, maintaining chronological fidelity across the turn without layout jumping
   as blocks stream.
 - **Failed clarification tool calls fold into the trace rather than rendering as cards.** If a
