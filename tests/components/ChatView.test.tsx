@@ -2027,6 +2027,26 @@ describe('deterministic platform shortcut labels', () => {
       expect(traceBar).toBeTruthy();
       expect(traceBar!.textContent).not.toContain('failed');
     });
+
+    it('renders mermaid diagrams in closed blocks of a running live turn as streaming source text', () => {
+      const liveTurnWithClosedBlock: LiveTurn = {
+        running: true,
+        liveText: 'Streaming answer continuation...',
+        liveThinking: '',
+        blocks: [
+          {
+            text: '```mermaid\nflowchart TD\n  A --> B\n```',
+            toolCalls: [],
+          },
+        ],
+      };
+
+      const { container } = renderChat({ liveTurn: liveTurnWithClosedBlock });
+
+      // While turn is running, diagrams in earlier closed blocks must remain streaming source text
+      expect(container.querySelector('.mermaid-streaming')).toBeTruthy();
+      expect(container.querySelector('.mermaid-diagram-container')).toBeNull();
+    });
   });
 });
 

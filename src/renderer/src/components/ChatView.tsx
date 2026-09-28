@@ -71,7 +71,7 @@ interface PreflightCard {
 }
 
 export type TurnPart =
-  | { kind: 'text'; text: string; isLive?: boolean }
+  | { kind: 'text'; text: string }
   | { kind: 'clarification'; call: ToolCallInfo }
   | { kind: 'delegation'; call: ToolCallInfo };
 
@@ -148,7 +148,7 @@ function TurnPartsList({
 }: {
   parts: TurnPart[];
   activeClarificationId?: string;
-  onClarificationSubmit: (answer: string) => void;
+  onClarificationSubmit?: (answer: string) => void | Promise<void>;
   onCitation?: (ref: CitationRef) => void;
   live?: boolean;
 }): React.JSX.Element {
@@ -174,7 +174,7 @@ function TurnPartsList({
             <React.Fragment key={`${live ? 'live-' : ''}text-${index}`}>
               {isFirst && <div className="answer-kicker">Answer</div>}
               <div className="answer-body">
-                <Markdown content={part.text} onCitation={onCitation} live={live && part.isLive} />
+                <Markdown content={part.text} onCitation={onCitation} live={live} />
               </div>
             </React.Fragment>
           );
@@ -719,7 +719,7 @@ export function ChatView(props: {
     }
     const parts = [...assembled.parts];
     if (liveTurn.liveText) {
-      parts.push({ kind: 'text', text: liveTurn.liveText, isLive: true });
+      parts.push({ kind: 'text', text: liveTurn.liveText });
     }
     // `liveText` is the block still streaming; `assembled.text` is every block already closed.
     // Both have to render, or a turn that emitted prose, called a tool, then resumed would drop
