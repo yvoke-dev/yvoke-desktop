@@ -17,9 +17,11 @@ import { fileTokenCache } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
 import { UpdateService } from './UpdateService';
+import { getMainWindowOptions, isHeadless, resolveUserDataDir } from './bootstrap';
 
 let core: AppCore | null = null;
 let mainWindow: BrowserWindow | null = null;
+let headless = false;
 
 // The origin the renderer is loaded from. Any navigation or IPC that does not
 // match this origin is treated as untrusted.
@@ -126,28 +128,30 @@ function createWindow(): void {
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
   const devIcon = devIconPath();
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 900,
-    minHeight: 600,
-    title: 'Yvoke - Desktop',
-    // Windows/Linux read the window icon from here; macOS uses the dock icon set below.
-    ...(devIcon && !isMac ? { icon: devIcon } : {}),
-    // Painted before the renderer's first frame; without it a cold start flashes white.
-    backgroundColor: canvasColor(),
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
-      : isWindows
-        ? { titleBarStyle: 'hidden' as const, titleBarOverlay: titleBarOverlayColors() }
-        : {}),
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
+  mainWindow = new BrowserWindow(
+    getMainWindowOptions(headless, {
+      width: 1280,
+      height: 860,
+      minWidth: 900,
+      minHeight: 600,
+      title: 'Yvoke - Desktop',
+      // Windows/Linux read the window icon from here; macOS uses the dock icon set below.
+      ...(devIcon && !isMac ? { icon: devIcon } : {}),
+      // Painted before the renderer's first frame; without it a cold start flashes white.
+      backgroundColor: canvasColor(),
+      ...(isMac
+        ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
+        : isWindows
+          ? { titleBarStyle: 'hidden' as const, titleBarOverlay: titleBarOverlayColors() }
+          : {}),
+      webPreferences: {
+        preload: path.join(__dirname, '../preload/index.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    }),
+  );
 
   const origin = appOrigin();
 
@@ -282,19 +286,26 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   });
 }
 
-const gotLock = app.requestSingleInstanceLock();
+const userDataDir = resolveUserDataDir(process.env.YVOKE_USER_DATA_DIR, app.getPath('userData'));
+app.setPath('userData', userDataDir);
+headless = isHeadless(process.env.YVOKE_HEADLESS);
+if (headless) {
+  app.commandLine.appendSwitch('disable-gpu');
+}
+
+const gotLock = headless ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
+  console.error(`[main] Failed to acquire single instance lock for userData: ${userDataDir}`);
   app.quit();
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+      if (!headless) mainWindow.focus();
     }
   });
 
   void app.whenReady().then(async () => {
-    const userDataDir = app.getPath('userData');
     await initFileLogging(userDataDir);
     const canEncrypt = safeStorage.isEncryptionAvailable();
     log(
@@ -322,7 +333,7 @@ if (!gotLock) {
     // right; doing it after would reintroduce the cold-start flash this is here to prevent.
     applyTheme(core.settings.get().appearance?.theme ?? DEFAULT_APPEARANCE.theme);
     const devIcon = devIconPath();
-    if (devIcon) app.dock?.setIcon(devIcon);
+    if (devIcon && !headless) app.dock?.setIcon(devIcon);
     // Fires when the OS appearance changes under themeSource 'system' (and on an explicit
     // switch), which is what keeps the native frame from staying light around a dark app.
     nativeTheme.on('updated', syncWindowChrome);
@@ -334,7 +345,7 @@ if (!gotLock) {
   });
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (process.platform !== 'darwin' || headless) app.quit();
   });
 
   app.on(
