@@ -251,10 +251,14 @@ export function getLogBufferForTesting(): readonly string[] {
 export const MAX_CONSOLE_LINE_LENGTH = 8192;
 
 function printToConsole(printer: (msg: string) => void, text: string): void {
-  if (text.length > MAX_CONSOLE_LINE_LENGTH) {
-    printer(`${text.slice(0, MAX_CONSOLE_LINE_LENGTH)}… [truncated ${text.length - MAX_CONSOLE_LINE_LENGTH} chars]`);
-  } else {
-    printer(text);
+  try {
+    if (text.length > MAX_CONSOLE_LINE_LENGTH) {
+      printer(`${text.slice(0, MAX_CONSOLE_LINE_LENGTH)}… [truncated ${text.length - MAX_CONSOLE_LINE_LENGTH} chars]`);
+    } else {
+      printer(text);
+    }
+  } catch {
+    // EPIPE occurs when parent process closes stdout/stderr pipes. Ignore silently.
   }
 }
 

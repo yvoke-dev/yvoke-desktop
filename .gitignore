@@ -24,6 +24,8 @@ yarn-error.log*
 coverage/
 *.lcov
 .nyc_output/
+/e2e-report/
+/test-results/
 
 # Editor & OS settings
 .DS_Store
@@ -41,9 +43,15 @@ Thumbs.db
 .env.test.local
 .env.production.local
 scripts/git-*
+scripts/*.local.*
+scripts/local-*
+
+# Demo artifacts
+artifacts/
 
 # Optional git worktrees
 .worktrees/
 
 # Claude Code local settings
 .claude/settings.local.json
+
