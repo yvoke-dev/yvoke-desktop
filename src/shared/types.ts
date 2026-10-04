@@ -77,6 +77,11 @@ export interface AppSettings {
    */
   playbookValidationEnabled?: boolean;
   /**
+   * Playbooks for which preflight validation is bypassed. Deployment configuration shipped with
+   * the app (from settings.json), immutable from user settings.
+   */
+  playbookValidationExcludedPlaybooks?: string[];
+  /**
    * Whether prototypes (playbooks AND multi-agent profiles marked with prototype = true) should be
    * visible and selectable. False by default. The key keeps its original name so an existing
    * settings.json still loads; it governs both catalogues.
@@ -478,6 +483,27 @@ export interface PlaybookValidation {
   suggestedPlaybookName?: string;
   /** Display title for `suggestedPlaybookName`, resolved main-side so the card needs no lookup. */
   suggestedPlaybookTitle?: string;
+}
+
+/**
+ * Whether a playbook matches any entry in the excludedPlaybooks deployment configuration.
+ * Compares case-insensitively and whitespace-trimmed against either playbook `name` or `title`.
+ */
+export function isPlaybookValidationExcluded(
+  playbook: { name: string; title?: string },
+  excludedPlaybooks?: readonly string[],
+): boolean {
+  if (!excludedPlaybooks || excludedPlaybooks.length === 0) return false;
+  const targetName = playbook.name.trim().toLowerCase();
+  const targetTitle = playbook.title?.trim().toLowerCase();
+  for (const raw of excludedPlaybooks) {
+    if (typeof raw !== 'string') continue;
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === targetName) return true;
+    if (targetTitle && entry === targetTitle) return true;
+  }
+  return false;
 }
 
 export interface ClarificationOption {
