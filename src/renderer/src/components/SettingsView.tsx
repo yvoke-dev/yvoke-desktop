@@ -398,7 +398,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     try {
       // onSave rejects if the main process rejects the update (e.g. a non-https serverBaseUrl);
       // keep the panel open and surface the message instead of failing silently.
-      await props.onSave(draft);
+      const { playbookValidationExcludedPlaybooks: _omitted, ...payload } = draft;
+      await props.onSave(payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -571,6 +572,25 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   </span>
                 </span>
               </label>
+              <div className="settings-field">
+                <span className="settings-field-label">Playbooks excluded from check</span>
+                {draft.playbookValidationExcludedPlaybooks && draft.playbookValidationExcludedPlaybooks.length > 0 ? (
+                  <ul className="settings-domain-list">
+                    {draft.playbookValidationExcludedPlaybooks.map((name, i) => (
+                      <li key={`${name}-${i}`}>
+                        <code>{name}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="settings-hint" role="status">
+                    None configured; all playbooks are preflighted before sending.
+                  </p>
+                )}
+                <p className="settings-hint">
+                  Deployment configuration: edit settings.json in the application directory to change this list.
+                </p>
+              </div>
               <label className="check-field">
                 <input
                   type="checkbox"

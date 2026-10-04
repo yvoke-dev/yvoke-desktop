@@ -452,6 +452,163 @@ describe('playbook preflight', () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith('Different area question', 'oim-schema'));
   });
 
+  describe('excluded playbook preflight bypass', () => {
+    it('bypasses preflight with zero latency, never setting checking to true, and validatePlaybook is called 0 times', () => {
+      const { container } = renderChat({
+        settings: settings({ playbookValidationExcludedPlaybooks: ['oim-getting-started'] }),
+      });
+      ask(container, 'How do I onboard?', 'Getting started');
+
+      expect(validatePlaybook).not.toHaveBeenCalled();
+      expect(container.querySelector('.preflight-checking')).toBeNull();
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('How do I onboard?', 'oim-getting-started');
+    });
+
+    it('retires standing recommendation card when switching to excluded playbook and sending', async () => {
+      validatePlaybook.mockResolvedValue({
+        plausible: false,
+        reason: 'Getting started does not fit this query.',
+        suggestedPlaybookName: 'oim-schema',
+        suggestedPlaybookTitle: 'Schema',
+      });
+      const { container } = renderChat({
+        settings: settings({ playbookValidationExcludedPlaybooks: ['oim-schema'] }),
+      });
+
+      // Send with Getting started -> triggers recommendation card
+      ask(container, 'What schema exists?', 'Getting started');
+      await waitFor(() =>
+        expect(screen.getByText('Getting started does not fit this query.')).toBeTruthy(),
+      );
+      expect(validatePlaybook).toHaveBeenCalledTimes(1);
+      expect(onSend).not.toHaveBeenCalled();
+
+      // Switch to Schema via autocomplete and send
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '/schema' } });
+      fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+      fireEvent.change(textarea, { target: { value: 'Now asking schema directly' } });
+      fireEvent.click(container.querySelector('.composer-send')!);
+
+      // Standing recommendation card must be retired immediately, validatePlaybook not called for B
+      expect(screen.queryByText('Getting started does not fit this query.')).toBeNull();
+      expect(validatePlaybook).toHaveBeenCalledTimes(1);
+      expect(onSend).toHaveBeenCalledWith('Now asking schema directly', 'oim-schema');
+    });
+
+    it('bypasses preflight validation when playbook title matches exclusion entry', () => {
+      const { container } = renderChat({
+        settings: settings({ playbookValidationExcludedPlaybooks: ['Getting started'] }),
+      });
+      ask(container, 'How do I onboard?', 'Getting started');
+
+      expect(validatePlaybook).not.toHaveBeenCalled();
+      expect(onSend).toHaveBeenCalledWith('How do I onboard?', 'oim-getting-started');
+    });
+
+    it('forwards attachments to onSend and cleans up draft and attachment state on excluded send', async () => {
+      const originalFileReader = window.FileReader;
+      try {
+        class MockFileReader {
+          result: string | ArrayBuffer | null = null;
+          onload: (() => void) | null = null;
+          onerror: (() => void) | null = null;
+          readAsDataURL() {
+            this.result = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+            setTimeout(() => this.onload?.(), 0);
+          }
+        }
+        window.FileReader = MockFileReader as unknown as typeof FileReader;
+
+        const { container } = renderChat({
+          settings: settings({ playbookValidationExcludedPlaybooks: ['oim-getting-started'] }),
+        });
+        const textarea = container.querySelector('textarea')!;
+
+        // Pick Getting started playbook
+        const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+          r.textContent?.includes('Getting started'),
+        );
+        fireEvent.click(row!);
+
+        // Attach an image
+        const file = new File(['fake'], 'diagram.png', { type: 'image/png' });
+        fireEvent.paste(textarea, {
+          clipboardData: {
+            items: [{ type: 'image/png', getAsFile: () => file }],
+          },
+        });
+
+        await waitFor(() => {
+          expect(container.querySelector('.composer-attachments')).not.toBeNull();
+        });
+
+        // Type question and send
+        fireEvent.change(textarea, { target: { value: 'Explain this diagram' } });
+        fireEvent.click(container.querySelector('.composer-send')!);
+
+        expect(validatePlaybook).not.toHaveBeenCalled();
+        expect(onSend).toHaveBeenCalledWith(
+          'Explain this diagram',
+          'oim-getting-started',
+          expect.arrayContaining([
+            expect.objectContaining({
+              name: 'diagram.png',
+              mediaType: 'image/png',
+            }),
+          ]),
+        );
+
+        // State cleanup verification
+        expect(textarea.value).toBe('');
+        expect(container.querySelector('.composer-attachments')).toBeNull();
+      } finally {
+        window.FileReader = originalFileReader;
+      }
+    });
+
+    it('bypasses preflight when switching from one playbook to an excluded playbook mid-thread', () => {
+      const existingMessages: ChatMessage[] = [
+        { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+        { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+      ];
+      const { container } = renderChat({
+        messages: existingMessages,
+        settings: settings({ playbookValidationExcludedPlaybooks: ['oim-schema'] }),
+      });
+
+      // Switch playbook via autocomplete to excluded playbook (oim-schema)
+      const textarea = container.querySelector('textarea')!;
+      fireEvent.change(textarea, { target: { value: '/schema' } });
+      fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+
+      // Type question and submit
+      fireEvent.change(textarea, { target: { value: 'Show me schema tables' } });
+      fireEvent.click(container.querySelector('.composer-send')!);
+
+      // Validation is bypassed completely
+      expect(validatePlaybook).not.toHaveBeenCalled();
+      expect(onSend).toHaveBeenCalledWith('Show me schema tables', 'oim-schema');
+    });
+
+    it('still executes preflight validation for non-excluded playbooks', async () => {
+      const { container } = renderChat({
+        settings: settings({ playbookValidationExcludedPlaybooks: ['other-playbook'] }),
+      });
+      ask(container, 'How do I onboard?', 'Getting started');
+
+      await waitFor(() =>
+        expect(validatePlaybook).toHaveBeenCalledWith({
+          threadId: 't1',
+          text: 'How do I onboard?',
+          promptName: 'oim-getting-started',
+        }),
+      );
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith('How do I onboard?', 'oim-getting-started'));
+    });
+  });
+
   it('renders a copy button on user messages that copies the question text', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Which database table stores IT Shop requests?', createdAt: '' },
