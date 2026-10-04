@@ -588,7 +588,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   </p>
                 )}
                 <p className="settings-hint">
-                  Deployment configuration: edit settings.json in the application directory to change this list.
+                  Set per deployment and shipped with the app — so this list is shown rather than edited, and an update arrives with the next release.
                 </p>
               </div>
               <label className="check-field">

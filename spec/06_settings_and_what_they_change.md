@@ -33,8 +33,7 @@ configuration: whatever ships as the build's defaults, the user can change.
   The domain list is the one setting that reaches a running conversation immediately.
 - **Playbooks excluded from preflight validation are deployment configuration.** The build's bundled
   settings file defines which playbooks skip preflight validation. The list is displayed read-only under
-  the Agents pane, and saving settings never freezes or alters the list in the user's profile, mirroring
-  the web search domain list.
+  the Agents pane, and the deployment file always wins on load, so existing user profiles pick up updated exclusions automatically on startup without requiring a migration.
 - **The theme's *System* setting stays live.** It keeps following the operating system for as long as
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.

@@ -109,7 +109,7 @@ function reconcileWebSearch(
  * the update is merged, so a renderer-supplied value could never survive anyway — listing it would
  * imply a control that does not exist.
  */
-export const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
+const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
   'serverBaseUrl',
   'mcpTransport',
   'serverAuthMode',
@@ -189,17 +189,10 @@ export class SettingsStore {
           ? { ...projectDefaults.orchestrator, ...raw.orchestrator }
           : projectDefaults.orchestrator,
         appearance: { ...DEFAULT_APPEARANCE, ...(projectDefaults.appearance ?? {}), ...(raw.appearance ?? {}) },
-        playbookValidationExcludedPlaybooks: Array.isArray(projectDefaults.playbookValidationExcludedPlaybooks)
-          ? projectDefaults.playbookValidationExcludedPlaybooks
-          : [],
+        playbookValidationExcludedPlaybooks: projectDefaults.playbookValidationExcludedPlaybooks,
       };
     } catch {
-      return {
-        ...projectDefaults,
-        playbookValidationExcludedPlaybooks: Array.isArray(projectDefaults.playbookValidationExcludedPlaybooks)
-          ? projectDefaults.playbookValidationExcludedPlaybooks
-          : [],
-      };
+      return { ...projectDefaults };
     }
   }
 

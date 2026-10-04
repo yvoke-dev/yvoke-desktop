@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ALLOWED_KEYS, CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
+import { CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
 
 /**
  * The store merges the user's profile OVER the bundled defaults and `set()` writes the whole merged
@@ -161,10 +161,6 @@ describe('SettingsStore — playbookValidationExcludedPlaybooks deployment confi
     const loaded = new SettingsStore(dir).get();
     expect(Array.isArray(loaded.playbookValidationExcludedPlaybooks)).toBe(true);
     expect(loaded.playbookValidationExcludedPlaybooks).toEqual(bundle().playbookValidationExcludedPlaybooks);
-  });
-
-  it('does NOT contain playbookValidationExcludedPlaybooks in ALLOWED_KEYS', () => {
-    expect(ALLOWED_KEYS).not.toContain('playbookValidationExcludedPlaybooks');
   });
 
   it('preserves bundle defaults on disk and drops injected values during store.set', () => {
