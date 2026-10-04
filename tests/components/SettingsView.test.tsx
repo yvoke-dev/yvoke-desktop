@@ -813,7 +813,7 @@ describe('SettingsView', () => {
       ).toBeTruthy();
       expect(
         screen.getByText(
-          'Deployment configuration: edit settings.json in the application directory to change this list.',
+          'Set per deployment and shipped with the app — so this list is shown rather than edited, and an update arrives with the next release.',
         ),
       ).toBeTruthy();
     });
@@ -834,7 +834,7 @@ describe('SettingsView', () => {
       ).toBeTruthy();
       expect(
         screen.getByText(
-          'Deployment configuration: edit settings.json in the application directory to change this list.',
+          'Set per deployment and shipped with the app — so this list is shown rather than edited, and an update arrives with the next release.',
         ),
       ).toBeTruthy();
     });

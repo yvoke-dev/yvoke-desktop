@@ -614,31 +614,45 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
     expect(validatorSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('Fail-open guards: returns PASSES without calling prompts or validator on empty text, missing promptName, disabled setting, or orchestrator thread', async () => {
+  it('returns PASSES without calling prompts or validator when promptName is empty', async () => {
     const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
     const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
 
-    // 1. Empty promptName
-    const r1 = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: '' });
-    expect(r1).toEqual({ plausible: true });
+    const result = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: '' });
+    expect(result).toEqual({ plausible: true });
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
 
-    // 2. Empty text
-    const r2 = await appCore.validatePlaybook({ threadId: singleThreadId, text: '', promptName: 'oim-schema' });
-    expect(r2).toEqual({ plausible: true });
+  it('returns PASSES without calling prompts or validator when text is empty or whitespace', async () => {
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
 
-    // 3. Whitespace text
-    const r3 = await appCore.validatePlaybook({ threadId: singleThreadId, text: '   \n  ', promptName: 'oim-schema' });
-    expect(r3).toEqual({ plausible: true });
+    const rEmpty = await appCore.validatePlaybook({ threadId: singleThreadId, text: '', promptName: 'oim-schema' });
+    expect(rEmpty).toEqual({ plausible: true });
 
-    // 4. Validation disabled
+    const rWhitespace = await appCore.validatePlaybook({ threadId: singleThreadId, text: '   \n  ', promptName: 'oim-schema' });
+    expect(rWhitespace).toEqual({ plausible: true });
+
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns PASSES without calling prompts or validator when playbookValidationEnabled is false', async () => {
     vi.spyOn(appCore.settings, 'get').mockReturnValue({
       ...DEFAULT_SETTINGS,
       playbookValidationEnabled: false,
     });
-    const r4 = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: 'oim-schema' });
-    expect(r4).toEqual({ plausible: true });
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
 
-    // 5. Orchestrator thread
+    const result = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: 'oim-schema' });
+    expect(result).toEqual({ plausible: true });
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns PASSES without calling prompts or validator when thread is in orchestrator mode', async () => {
     const orchThreadId = 'thread-orch-val';
     appCore.threads.upsert({
       id: orchThreadId,
@@ -651,13 +665,21 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
       syncState: 'synced',
       orchestratorProfile: 'OIM',
     });
-    const r5 = await appCore.validatePlaybook({ threadId: orchThreadId, text: 'Hello', promptName: 'oim-schema' });
-    expect(r5).toEqual({ plausible: true });
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
 
-    // 6. Unknown thread
-    const r6 = await appCore.validatePlaybook({ threadId: 'unknown-thread', text: 'Hello', promptName: 'oim-schema' });
-    expect(r6).toEqual({ plausible: true });
+    const result = await appCore.validatePlaybook({ threadId: orchThreadId, text: 'Hello', promptName: 'oim-schema' });
+    expect(result).toEqual({ plausible: true });
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
 
+  it('returns PASSES without calling prompts or validator when thread is unknown', async () => {
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
+
+    const result = await appCore.validatePlaybook({ threadId: 'unknown-thread', text: 'Hello', promptName: 'oim-schema' });
+    expect(result).toEqual({ plausible: true });
     expect(listPromptsSpy).not.toHaveBeenCalled();
     expect(validatorSpy).not.toHaveBeenCalled();
   });
