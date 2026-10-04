@@ -783,4 +783,108 @@ describe('SettingsView', () => {
       }).not.toThrow();
     });
   });
+
+  describe('playbooks excluded from validation', () => {
+    it('renders empty state note when playbookValidationExcludedPlaybooks is empty', () => {
+      render(
+        <SettingsView
+          settings={{ ...settings, playbookValidationExcludedPlaybooks: [] }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Agents');
+      expect(
+        screen.getByText('None configured; all playbooks are preflighted before sending.'),
+      ).toBeTruthy();
+      expect(
+        screen.getByText(
+          'Deployment configuration: edit settings.json in the application directory to change this list.',
+        ),
+      ).toBeTruthy();
+    });
+
+    it('renders empty state note resiliently when playbookValidationExcludedPlaybooks is undefined', () => {
+      const undefinedSettings = { ...settings };
+      delete (undefinedSettings as any).playbookValidationExcludedPlaybooks;
+      render(
+        <SettingsView
+          settings={undefinedSettings}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Agents');
+      expect(
+        screen.getByText('None configured; all playbooks are preflighted before sending.'),
+      ).toBeTruthy();
+      expect(
+        screen.getByText(
+          'Deployment configuration: edit settings.json in the application directory to change this list.',
+        ),
+      ).toBeTruthy();
+    });
+
+    it('renders code chips when playbookValidationExcludedPlaybooks is populated', () => {
+      render(
+        <SettingsView
+          settings={{
+            ...settings,
+            playbookValidationExcludedPlaybooks: ['general-chat', 'triage-playbook'],
+          }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Agents');
+      expect(
+        screen.queryByText('None configured; all playbooks are preflighted before sending.'),
+      ).toBeNull();
+      expect(screen.getByText('general-chat')).toBeTruthy();
+      expect(screen.getByText('triage-playbook')).toBeTruthy();
+      const codeElements = screen
+        .getByText('Playbooks excluded from check')
+        .closest('.settings-field')!
+        .querySelectorAll('ul.settings-domain-list code');
+      expect(codeElements.length).toBe(2);
+      expect(codeElements[0].textContent).toBe('general-chat');
+      expect(codeElements[1].textContent).toBe('triage-playbook');
+    });
+
+    it('enforces read-only immobility with no input, button, or edit controls in the excluded section', () => {
+      render(
+        <SettingsView
+          settings={{
+            ...settings,
+            playbookValidationExcludedPlaybooks: ['general-chat'],
+          }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Agents');
+      const excludedSection = screen
+        .getByText('Playbooks excluded from check')
+        .closest('.settings-field')!;
+      expect(excludedSection.querySelectorAll('input, button, select, textarea').length).toBe(0);
+    });
+
+    it('omits playbookValidationExcludedPlaybooks from onSave payload', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      render(
+        <SettingsView
+          settings={{
+            ...settings,
+            playbookValidationExcludedPlaybooks: ['general-chat'],
+          }}
+          onSave={onSave}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      const payload = onSave.mock.calls[0][0];
+      expect('playbookValidationExcludedPlaybooks' in payload).toBe(false);
+    });
+  });
 });
