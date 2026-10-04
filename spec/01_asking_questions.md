@@ -92,6 +92,10 @@ behind it, and the work that produced it can be opened and read.
 - **A recommendation belongs to the composer, not the conversation.** Switching conversations retires
   the check and clears the card, and a verdict that arrives late for a conversation the user has left
   is dropped rather than applied.
+- **Playbooks excluded by deployment configuration skip the check entirely.** When the selected playbook
+  matches the deployment's exclusion list, the question is dispatched immediately without preflight delay,
+  without showing a checking progress indicator, and retiring any recommendation card standing from a previously
+  selected playbook.
 - **A source marker is a bare id, shown short.** The server instructs the assistant to write the
   source's id in brackets — `[274b9610-9148-4621-a5a1-089e807210c1]` — with no prefix, no numbering
   and no reference list. The pill is labelled with the first eight characters, so an answer that

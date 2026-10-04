@@ -116,7 +116,8 @@ server.
   (model, thinking effort, agent mode) and playbook controls are disabled while a check runs, so the verdict
   and turn run under the selected model.
 - **The check is skipped when there is nothing to compare against** — fewer than two playbooks offered,
-  an unreachable server, a playbook the picker does not list, or a multi-agent conversation.
+  an unreachable server, a playbook the picker does not list, a multi-agent conversation, or when the
+  selected playbook is configured in the deployment's validation exclusion list.
 - **A playbook whose constraints cannot be resolved runs with the full default tool set and no
   code-execution restriction.** Nothing is logged when the playbook is simply absent from the server's
   list, and nothing is shown either way — a playbook that meant to narrow the assistant silently
