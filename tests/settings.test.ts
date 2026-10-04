@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
+import { ALLOWED_KEYS, CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
 
 /**
  * The store merges the user's profile OVER the bundled defaults and `set()` writes the whole merged
@@ -114,3 +114,68 @@ describe('SettingsStore — versioned defaults', () => {
     expect(new SettingsStore(dir).get().webSearch.enabled).toBe(shipped);
   });
 });
+
+describe('SettingsStore — playbookValidationExcludedPlaybooks deployment configuration', () => {
+  let dir: string;
+  const bundle = (): ReturnType<SettingsStore['get']> => new SettingsStore(dir).get();
+  const writeProfile = (raw: Record<string, unknown>): void =>
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(raw));
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-settings-excl-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reflects bundle defaults on a fresh profile', () => {
+    const loaded = bundle();
+    expect(Array.isArray(loaded.playbookValidationExcludedPlaybooks)).toBe(true);
+    expect(loaded.playbookValidationExcludedPlaybooks).toEqual(DEFAULT_SETTINGS.playbookValidationExcludedPlaybooks);
+  });
+
+  it('overwrites stale or injected stored profile values with bundle defaults on load', () => {
+    writeProfile({
+      ...DEFAULT_SETTINGS,
+      settingsVersion: CURRENT_SETTINGS_VERSION,
+      playbookValidationExcludedPlaybooks: ['injected-playbook', 'stale-playbook'],
+    });
+    const loaded = new SettingsStore(dir).get();
+    expect(loaded.playbookValidationExcludedPlaybooks).toEqual(bundle().playbookValidationExcludedPlaybooks);
+    expect(loaded.playbookValidationExcludedPlaybooks).not.toContain('injected-playbook');
+  });
+
+  it('preserves bundle defaults upon corrupt JSON recovery', () => {
+    fs.writeFileSync(path.join(dir, 'settings.json'), '{ invalid json string');
+    const loaded = new SettingsStore(dir).get();
+    expect(Array.isArray(loaded.playbookValidationExcludedPlaybooks)).toBe(true);
+    expect(loaded.playbookValidationExcludedPlaybooks).toEqual(DEFAULT_SETTINGS.playbookValidationExcludedPlaybooks);
+  });
+
+  it('sanitizes non-array stored value to an array on load', () => {
+    writeProfile({
+      ...DEFAULT_SETTINGS,
+      settingsVersion: CURRENT_SETTINGS_VERSION,
+      playbookValidationExcludedPlaybooks: 'not-an-array',
+    });
+    const loaded = new SettingsStore(dir).get();
+    expect(Array.isArray(loaded.playbookValidationExcludedPlaybooks)).toBe(true);
+    expect(loaded.playbookValidationExcludedPlaybooks).toEqual(bundle().playbookValidationExcludedPlaybooks);
+  });
+
+  it('does NOT contain playbookValidationExcludedPlaybooks in ALLOWED_KEYS', () => {
+    expect(ALLOWED_KEYS).not.toContain('playbookValidationExcludedPlaybooks');
+  });
+
+  it('preserves bundle defaults on disk and drops injected values during store.set', () => {
+    const store = new SettingsStore(dir);
+    const shipped = store.get().playbookValidationExcludedPlaybooks;
+    store.set({ playbookValidationExcludedPlaybooks: ['hacked-playbook'] } as any);
+    expect(store.get().playbookValidationExcludedPlaybooks).toEqual(shipped);
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    expect(onDisk.playbookValidationExcludedPlaybooks).toEqual(shipped);
+    expect(onDisk.playbookValidationExcludedPlaybooks).not.toContain('hacked-playbook');
+  });
+});
+

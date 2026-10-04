@@ -3,6 +3,7 @@ import {
   buildValidatorSystemPrompt,
   parseValidation,
 } from '../src/main/agent/playbookValidation';
+import { isPlaybookValidationExcluded } from '../src/shared/types';
 import type { McpPromptInfo } from '../src/shared/types';
 
 function playbook(name: string, title = name, description = ''): McpPromptInfo {
@@ -118,3 +119,64 @@ describe('parseValidation', () => {
     expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
   });
 });
+
+describe('isPlaybookValidationExcluded', () => {
+  it('returns true on exact slug match and exact title match', () => {
+    const excluded = ['general-chat', 'Triage Assistant'];
+    expect(isPlaybookValidationExcluded({ name: 'general-chat', title: 'General Chat' }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'triage-slug', title: 'Triage Assistant' }, excluded)).toBe(true);
+  });
+
+  it('performs case-insensitive slug and title matching', () => {
+    const excluded = ['General-Chat', 'TRIAGE ASSISTANT'];
+    expect(isPlaybookValidationExcluded({ name: 'general-chat', title: 'Other' }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'other', title: 'triage assistant' }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'GENERAL-CHAT' }, ['general-chat'])).toBe(true);
+  });
+
+  it('performs symmetric trimming of whitespace on targets and exclusion entries', () => {
+    const excluded = ['  general-chat  ', ' Triage '];
+    expect(isPlaybookValidationExcluded({ name: 'general-chat' }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: '  general-chat  ' }, ['general-chat'])).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'other', title: '  Triage  ' }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'other', title: 'Triage' }, ['  triage  '])).toBe(true);
+  });
+
+  it('enforces substring isolation (substrings do not match)', () => {
+    const excluded = ['chat'];
+    expect(isPlaybookValidationExcluded({ name: 'general-chat' }, excluded)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'chat-help' }, excluded)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'other', title: 'chat helper' }, excluded)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'chat' }, ['general-chat'])).toBe(false);
+  });
+
+  it('resiliently handles undefined or missing title', () => {
+    const excluded = ['triage'];
+    expect(isPlaybookValidationExcluded({ name: 'triage', title: undefined }, excluded)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: 'other', title: undefined }, excluded)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'other' }, excluded)).toBe(false);
+  });
+
+  it('filters malformed and non-string entries safely', () => {
+    const malformed = [
+      null as unknown as string,
+      undefined as unknown as string,
+      42 as unknown as string,
+      true as unknown as string,
+      '',
+      '   ',
+      'valid-slug',
+    ];
+    expect(isPlaybookValidationExcluded({ name: 'valid-slug' }, malformed)).toBe(true);
+    expect(isPlaybookValidationExcluded({ name: '42' }, malformed)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: '' }, malformed)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'other' }, malformed)).toBe(false);
+  });
+
+  it('returns false for empty or null/undefined exclusion lists', () => {
+    expect(isPlaybookValidationExcluded({ name: 'general-chat' }, [])).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'general-chat' }, undefined)).toBe(false);
+    expect(isPlaybookValidationExcluded({ name: 'general-chat' }, null as unknown as string[])).toBe(false);
+  });
+});
+

@@ -23,6 +23,7 @@
   },
   "maxTurns": 25,
   "playbookValidationEnabled": true,
+  "playbookValidationExcludedPlaybooks": [],
   "orchestrator": {
     "orchestrator": {
       "model": "sonnet",
