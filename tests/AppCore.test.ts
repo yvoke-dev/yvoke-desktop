@@ -4,7 +4,9 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import type { ThreadMeta } from '../src/shared/types';
+import type { McpPromptInfo, ThreadMeta } from '../src/shared/types';
+import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
+import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
 
 describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
   let tmpDir: string;
@@ -497,4 +499,168 @@ describe('AppCore.drain', () => {
     expect(drainThreadsSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+  const singleThreadId = 'thread-single-val';
+
+  const mockPrompts: McpPromptInfo[] = [
+    { name: 'general-chat', title: 'General Chat', description: 'Chat playbook', arguments: [] },
+    { name: 'triage-slug', title: 'Triage Assistant', description: 'Triage playbook', arguments: [] },
+    { name: 'oim-schema', title: 'Schema Explorer', description: 'Schema playbook', arguments: [] },
+  ];
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-val-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+    appCore.threads.upsert({
+      id: singleThreadId,
+      title: 'Validation Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    });
+  });
+
+  afterEach(async () => {
+    await appCore.drain();
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('Stage 1 Fast-Path bypass: returns PASSES without calling listPrompts or listOrchestratorProfiles', async () => {
+    vi.spyOn(appCore.settings, 'get').mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      playbookValidationExcludedPlaybooks: ['general-chat'],
+    });
+
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const listProfilesSpy = vi.spyOn(appCore, 'listOrchestratorProfiles');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
+
+    const result = await appCore.validatePlaybook({
+      threadId: singleThreadId,
+      text: 'How do I start?',
+      promptName: 'general-chat',
+    });
+
+    expect(result).toEqual({ plausible: true });
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(listProfilesSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
+
+  it('Stage 2 Resolved Title Match: returns PASSES without calling validatePlaybookSelection when candidate matches by title', async () => {
+    vi.spyOn(appCore.settings, 'get').mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      playbookValidationExcludedPlaybooks: ['Triage Assistant'],
+    });
+
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts').mockResolvedValue(mockPrompts);
+    const listProfilesSpy = vi.spyOn(appCore, 'listOrchestratorProfiles').mockResolvedValue([]);
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
+
+    const result = await appCore.validatePlaybook({
+      threadId: singleThreadId,
+      text: 'Incoming ticket issue',
+      promptName: 'triage-slug',
+    });
+
+    expect(result).toEqual({ plausible: true });
+    expect(listPromptsSpy).toHaveBeenCalledTimes(1);
+    expect(listProfilesSpy).toHaveBeenCalledTimes(1);
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
+
+  it('Stage 2 Negative Path: proceeds to validator when neither slug nor title is excluded', async () => {
+    vi.spyOn(appCore.settings, 'get').mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      playbookValidationExcludedPlaybooks: ['other-playbook'],
+    });
+
+    vi.spyOn(appCore, 'listPrompts').mockResolvedValue(mockPrompts);
+    vi.spyOn(appCore, 'listOrchestratorProfiles').mockResolvedValue([]);
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection').mockResolvedValue({
+      plausible: false,
+      reason: 'Schema questions should use Schema Explorer',
+      suggestedPlaybookName: 'oim-schema',
+      suggestedPlaybookTitle: 'Schema Explorer',
+    });
+
+    const result = await appCore.validatePlaybook({
+      threadId: singleThreadId,
+      text: 'Check column definitions in Person table',
+      promptName: 'triage-slug',
+    });
+
+    expect(result).toEqual({
+      plausible: false,
+      reason: 'Schema questions should use Schema Explorer',
+      suggestedPlaybookName: 'oim-schema',
+      suggestedPlaybookTitle: 'Schema Explorer',
+    });
+    expect(validatorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('Fail-open guards: returns PASSES without calling prompts or validator on empty text, missing promptName, disabled setting, or orchestrator thread', async () => {
+    const listPromptsSpy = vi.spyOn(appCore, 'listPrompts');
+    const validatorSpy = vi.spyOn(PlaybookValidator, 'validatePlaybookSelection');
+
+    // 1. Empty promptName
+    const r1 = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: '' });
+    expect(r1).toEqual({ plausible: true });
+
+    // 2. Empty text
+    const r2 = await appCore.validatePlaybook({ threadId: singleThreadId, text: '', promptName: 'oim-schema' });
+    expect(r2).toEqual({ plausible: true });
+
+    // 3. Whitespace text
+    const r3 = await appCore.validatePlaybook({ threadId: singleThreadId, text: '   \n  ', promptName: 'oim-schema' });
+    expect(r3).toEqual({ plausible: true });
+
+    // 4. Validation disabled
+    vi.spyOn(appCore.settings, 'get').mockReturnValue({
+      ...DEFAULT_SETTINGS,
+      playbookValidationEnabled: false,
+    });
+    const r4 = await appCore.validatePlaybook({ threadId: singleThreadId, text: 'Hello', promptName: 'oim-schema' });
+    expect(r4).toEqual({ plausible: true });
+
+    // 5. Orchestrator thread
+    const orchThreadId = 'thread-orch-val';
+    appCore.threads.upsert({
+      id: orchThreadId,
+      title: 'Orchestrator Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    });
+    const r5 = await appCore.validatePlaybook({ threadId: orchThreadId, text: 'Hello', promptName: 'oim-schema' });
+    expect(r5).toEqual({ plausible: true });
+
+    // 6. Unknown thread
+    const r6 = await appCore.validatePlaybook({ threadId: 'unknown-thread', text: 'Hello', promptName: 'oim-schema' });
+    expect(r6).toEqual({ plausible: true });
+
+    expect(listPromptsSpy).not.toHaveBeenCalled();
+    expect(validatorSpy).not.toHaveBeenCalled();
+  });
+});
+
 

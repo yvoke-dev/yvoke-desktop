@@ -25,6 +25,7 @@ import type {
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   controlPlaybookNames,
+  isPlaybookValidationExcluded,
   isUserSelectablePlaybook,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -257,6 +258,16 @@ export class AppCore {
     const question = request.text?.trim() ?? '';
     if (!question || !request.promptName) return PASSES;
 
+    // Fast-path (Stage 1): evaluate slug match before listing prompts or profiles
+    if (
+      isPlaybookValidationExcluded(
+        { name: request.promptName },
+        settings.playbookValidationExcludedPlaybooks,
+      )
+    ) {
+      return PASSES;
+    }
+
     const [prompts, profiles] = await Promise.all([
       this.listPrompts(),
       this.listOrchestratorProfiles(),
@@ -269,6 +280,11 @@ export class AppCore {
     const selected = candidates.find((p) => p.name === request.promptName);
     // Nothing to compare against: the server was unreachable, or this is the only playbook there is.
     if (!selected || candidates.length < 2) return PASSES;
+
+    // Stage 2 (Candidate Title Match): evaluate resolved candidate against exclusion list
+    if (isPlaybookValidationExcluded(selected, settings.playbookValidationExcludedPlaybooks)) {
+      return PASSES;
+    }
 
     return validatePlaybookSelection({
       question,

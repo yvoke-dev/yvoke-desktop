@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   maxTurns: 0,
   playbookValidationEnabled: true,
+  playbookValidationExcludedPlaybooks: [],
   imageDescriptionsEnabled: true,
   showPrototypePlaybooks: false,
   orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,
@@ -61,6 +62,9 @@ function loadProjectDefaults(): AppSettings {
           ? { ...DEFAULT_SETTINGS.orchestrator, ...raw.orchestrator }
           : DEFAULT_SETTINGS.orchestrator,
         appearance: { ...DEFAULT_APPEARANCE, ...(raw.appearance ?? {}) },
+        playbookValidationExcludedPlaybooks: Array.isArray(raw.playbookValidationExcludedPlaybooks)
+          ? raw.playbookValidationExcludedPlaybooks
+          : DEFAULT_SETTINGS.playbookValidationExcludedPlaybooks,
       };
     }
   } catch {
@@ -105,7 +109,7 @@ function reconcileWebSearch(
  * the update is merged, so a renderer-supplied value could never survive anyway — listing it would
  * imply a control that does not exist.
  */
-const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
+export const ALLOWED_KEYS: ReadonlyArray<keyof AppSettings> = [
   'serverBaseUrl',
   'mcpTransport',
   'serverAuthMode',
@@ -185,9 +189,17 @@ export class SettingsStore {
           ? { ...projectDefaults.orchestrator, ...raw.orchestrator }
           : projectDefaults.orchestrator,
         appearance: { ...DEFAULT_APPEARANCE, ...(projectDefaults.appearance ?? {}), ...(raw.appearance ?? {}) },
+        playbookValidationExcludedPlaybooks: Array.isArray(projectDefaults.playbookValidationExcludedPlaybooks)
+          ? projectDefaults.playbookValidationExcludedPlaybooks
+          : [],
       };
     } catch {
-      return { ...projectDefaults };
+      return {
+        ...projectDefaults,
+        playbookValidationExcludedPlaybooks: Array.isArray(projectDefaults.playbookValidationExcludedPlaybooks)
+          ? projectDefaults.playbookValidationExcludedPlaybooks
+          : [],
+      };
     }
   }
 
@@ -216,6 +228,7 @@ export class SettingsStore {
         ? { ...this.cache.orchestrator, ...update.orchestrator }
         : this.cache.orchestrator,
       appearance: { ...DEFAULT_APPEARANCE, ...this.cache.appearance, ...(update.appearance ?? {}) },
+      playbookValidationExcludedPlaybooks: this.cache.playbookValidationExcludedPlaybooks ?? [],
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2));
