@@ -12,11 +12,11 @@ import {
 
 describe('videoStoryboard', () => {
   describe('STORYBOARD_BEATS definition', () => {
-    it('defines exactly 8 storyboard beats', () => {
-      expect(STORYBOARD_BEATS).toHaveLength(8);
+    it('defines exactly 7 storyboard beats', () => {
+      expect(STORYBOARD_BEATS).toHaveLength(7);
     });
 
-    it('defines correct sequential beats with IDs scene-1 through scene-8', () => {
+    it('defines correct sequential beats with IDs scene-1 through scene-7', () => {
       const ids = STORYBOARD_BEATS.map((b) => b.id);
       expect(ids).toEqual([
         'scene-1',
@@ -26,7 +26,6 @@ describe('videoStoryboard', () => {
         'scene-5',
         'scene-6',
         'scene-7',
-        'scene-8',
       ]);
     });
 
@@ -38,7 +37,6 @@ describe('videoStoryboard', () => {
       expect(STORYBOARD_BEATS[4].execution).toBe('real_live_turn');
       expect(STORYBOARD_BEATS[5].execution).toBe('real_live_turn');
       expect(STORYBOARD_BEATS[6].execution).toBe('real_live_turn');
-      expect(STORYBOARD_BEATS[7].execution).toBe('real_app_ui');
     });
 
     it('configures Scene 4 with Playbook validation turnConfig', () => {
@@ -52,7 +50,7 @@ describe('videoStoryboard', () => {
     it('configures Scene 5 with follow-up & search hints turnConfig', () => {
       const beat = STORYBOARD_BEATS[4];
       expect(beat.turnConfig).toBeDefined();
-      expect(beat.turnConfig?.playbook).toBe('oim-getting-started');
+      expect(beat.turnConfig?.playbook).toBe('oim-full');
       expect(beat.turnConfig?.prompt).toBe('what is a value template?');
       expect(beat.turnConfig?.followUp).toBe(
         'check if you find any practical info in teams or confluence',
@@ -64,7 +62,7 @@ describe('videoStoryboard', () => {
       expect(beat.turnConfig).toBeDefined();
       expect(beat.turnConfig?.playbook).toBe('oim-db-history');
       expect(beat.turnConfig?.prompt).toBe(
-        'what database changes were done between 9.3.1 and 10.0?',
+        'what database changes were done for the AOB module between 9.3.1 and 10.0?',
       );
       expect(beat.turnConfig?.expectClarification).toBe(true);
     });
@@ -78,7 +76,7 @@ describe('videoStoryboard', () => {
       expect(beat.turnConfig?.prompt).toContain('teams/confluence');
     });
 
-    it('has continuous, unbroken timeline from 00:00 to 04:00 (240s total)', () => {
+    it('has continuous, unbroken timeline from 00:00 to 03:50 (230s total)', () => {
       let expectedStart = 0;
       for (const beat of STORYBOARD_BEATS) {
         const { startSec, endSec } = parseTimeRange(beat.timeRange);
@@ -86,7 +84,7 @@ describe('videoStoryboard', () => {
         expect(endSec).toBeGreaterThan(startSec);
         expectedStart = endSec;
       }
-      expect(expectedStart).toBe(240); // 4 minutes
+      expect(expectedStart).toBe(230); // 3 minutes 50 seconds
     });
 
     it('defines rich subBeats for every single beat', () => {
@@ -157,7 +155,7 @@ describe('videoStoryboard', () => {
       expect(md).toContain('| :--- | :--- | :--- | :--- | :--- |');
     });
 
-    it('includes all 8 beats in the table rows', () => {
+    it('includes all 7 beats in the table rows', () => {
       const md = renderStoryboardMarkdown(STORYBOARD_BEATS);
       for (const beat of STORYBOARD_BEATS) {
         expect(md).toContain(beat.timeRange);
@@ -191,14 +189,13 @@ describe('videoStoryboard', () => {
       expect(srt).toContain('4\n00:01:10,000 --> 00:01:45,000');
       expect(srt).toContain('5\n00:01:45,000 --> 00:02:20,000');
       expect(srt).toContain('6\n00:02:20,000 --> 00:02:55,000');
-      expect(srt).toContain('7\n00:02:55,000 --> 00:03:40,000');
-      expect(srt).toContain('8\n00:03:40,000 --> 00:04:00,000');
+      expect(srt).toContain('7\n00:02:55,000 --> 00:03:50,000');
     });
 
     it('matches spoken narration in SRT cues', () => {
       const srt = generateStoryboardSrt(STORYBOARD_BEATS);
       expect(srt).toContain(STORYBOARD_BEATS[0].narration);
-      expect(srt).toContain(STORYBOARD_BEATS[7].narration);
+      expect(srt).toContain(STORYBOARD_BEATS[6].narration);
     });
   });
 

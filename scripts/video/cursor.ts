@@ -47,6 +47,7 @@ export async function injectDemoCursor(page: Page): Promise<void> {
 export interface GlideOptions {
   click?: boolean;
   delayMs?: number;
+  optional?: boolean;
 }
 
 /**
@@ -64,6 +65,9 @@ export async function glideMouse(
 
   const box = await locator.boundingBox();
   if (!box) {
+    if (options.optional) {
+      return;
+    }
     const selectorDesc =
       typeof targetLocator === 'string'
         ? targetLocator
@@ -84,7 +88,11 @@ export async function glideMouse(
 
   if (options.click) {
     if (typeof locator.click === 'function') {
-      await locator.click();
+      await Promise.resolve(locator.click({ timeout: 3000 })).catch(async () => {
+        if (typeof (page.mouse as any).click === 'function') {
+          await (page.mouse as any).click(targetX, targetY);
+        }
+      });
     } else if (typeof (page.mouse as any).click === 'function') {
       await (page.mouse as any).click(targetX, targetY);
     }

@@ -79,25 +79,25 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
     timeRange: '00:00 -> 00:20',
     title: 'App & Sidebar Overview',
     narration:
-      'Welcome to Yvoke Desktop, the native AI assistant for deep enterprise engineering. On the left, the sidebar organizes your conversation history into clear timeframes, with instant search across past discussions. At the bottom, view your authenticated profile, security mode, and access application settings.',
+      'Welcome to Yvoke Desktop, the local AI workspace grounded in your enterprise knowledge base. On the left, the sidebar organizes your conversation history into clear timeframes, with instant search across past discussions. Along the bottom, check your active account, with quick access to Settings.',
     visualAction:
       'Launch application, highlight sidebar timeline buckets (Today, Previous 7 days), glide over authenticated profile indicator and server connection status.',
     execution: 'real_app_ui',
     subBeats: [
       {
         subId: 'scene-1.1',
-        timeRange: '00:00 -> 00:05',
+        timeRange: '00:00 -> 00:07',
         narration:
-          'Welcome to Yvoke Desktop, the native AI assistant for deep enterprise engineering.',
+          'Welcome to Yvoke Desktop, the local AI workspace grounded in your enterprise knowledge base.',
         visualAction:
-          'Launch application in Full HD displaying active conversation. Glide demo cursor across active message response and thought trace pill.',
+          'Launch application in 720p HD displaying active conversation. Glide demo cursor across active message response and thought trace pill.',
         uiTarget: '.chat-view, .message.assistant, .trace-bar',
         visualState:
           'Main workspace active in dark mode with pre-loaded conversation thread and model response visible.',
       },
       {
         subId: 'scene-1.2',
-        timeRange: '00:05 -> 00:10',
+        timeRange: '00:07 -> 00:12',
         narration:
           'On the left, the sidebar organizes your conversation history into clear timeframes,',
         visualAction:
@@ -108,7 +108,7 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
       },
       {
         subId: 'scene-1.3',
-        timeRange: '00:10 -> 00:15',
+        timeRange: '00:12 -> 00:15',
         narration: 'with instant search across past discussions.',
         visualAction:
           'Focus sidebar search input, type query "template", observe instant filtering across threads, then click clear.',
@@ -120,7 +120,7 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
         subId: 'scene-1.4',
         timeRange: '00:15 -> 00:20',
         narration:
-          'At the bottom, view your authenticated profile, security mode, and access application settings.',
+          'Along the bottom, check your active account, with quick access to Settings.',
         visualAction:
           'Glide down to sidebar footer, hovering over authenticated user email, security chip (🔒 dev · v1.2.2), sign-out icon, and Settings gear button.',
         uiTarget: '.thread-list-footer, .account-chip, button[data-tip="Settings"]',
@@ -134,9 +134,9 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
     timeRange: '00:20 -> 00:48',
     title: 'Settings Walkthrough',
     narration:
-      'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints, transport, and authentication. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and automatic playbook validation. Web Search manages enterprise domain allowlists, Appearance customizes themes and density, while Advanced and About display identity registration and version details.',
+      'Opening Settings reveals full control over your environment. Under Server, configure backend endpoints, transport, and authentication. Models lets you define Claude model versions and default thinking effort. Agents configures multi-agent roles, turns, and automatic playbook validation. Web Search toggles web access while displaying the allowed domains, Appearance customizes themes and density, while About lets you verify your credentials and check for updates.',
     visualAction:
-      'Click Settings gear icon, systematically tab through navigation sections (Server, Models, Agents, Web Search, Appearance, Advanced, About) highlighting critical configuration controls, return to main chat view.',
+      'Click Settings gear icon, systematically tab through navigation sections (Server, Models, Agents, Web Search, Appearance, About), click check for updates and verify credentials, then close settings.',
     execution: 'real_app_ui',
     subBeats: [
       {
@@ -165,7 +165,7 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
         narration:
           'Models lets you define Claude model versions and default thinking effort.',
         visualAction:
-          'Click Models tab. Cursor glides over Claude 3.5 Sonnet / Opus selector chips and thinking effort radio options.',
+          'Click Models tab. Cursor glides over Claude Sonnet / Opus selector chips and thinking effort radio options.',
         uiTarget: '.settings-nav button.nav-pane:has-text("Models"), .chip-list, .seg',
         visualState:
           'Models configuration active showing Sonnet selected and thinking effort controls.',
@@ -184,15 +184,15 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
       {
         subId: 'scene-2.5',
         timeRange: '00:36 -> 00:40',
-        narration: 'Web Search manages enterprise domain allowlists,',
+        narration: 'Web Search toggles web access while displaying the allowed domains,',
         visualAction:
-          'Click Web search tab. Inspect enterprise domain allowlist rows (support.oneidentity.com).',
+          'Click Web search tab. View the web tools toggle and inspect the enforced enterprise domain allowlist rows (support.oneidentity.com).',
         uiTarget: '.settings-nav button.nav-pane:has-text("Web search"), .domain-row',
         visualState: 'Web search pane showing enterprise domain allowlist entries.',
       },
       {
         subId: 'scene-2.6',
-        timeRange: '00:40 -> 00:44',
+        timeRange: '00:40 -> 00:43',
         narration: 'Appearance customizes themes and density,',
         visualAction:
           'Click Appearance tab. Glide across Dark, Light, System theme choices and layout density controls.',
@@ -203,15 +203,15 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
       },
       {
         subId: 'scene-2.7',
-        timeRange: '00:44 -> 00:48',
+        timeRange: '00:43 -> 00:48',
         narration:
-          'while Advanced and About display identity registration and version details.',
+          'while About lets you verify your credentials and check for updates.',
         visualAction:
-          'Click Advanced tab (inspecting dev token notes), click About tab (verifying version 1.2.2), then click Cancel button to exit.',
+          'Click About tab, click Check for Updates and wait for status, click Check Credentials and wait for verification badges, then click Cancel to return to workspace.',
         uiTarget:
-          '.settings-nav button.nav-pane:has-text("Advanced"), .about-version-row, .dialog-actions button:has-text("Cancel")',
+          '.settings-nav button.nav-pane:has-text("About"), .check-updates-btn, .check-credentials-btn, .dialog-actions button:has-text("Cancel")',
         visualState:
-          'True version v1.2.2 displayed; modal closes returning to main workspace.',
+          'About pane active with verified update and credential badges; modal closes returning to main workspace.',
       },
     ],
   },
@@ -265,9 +265,9 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
     timeRange: '01:10 -> 01:45',
     title: 'Live Query 1 — Playbook Validation',
     narration:
-      'Here, an engineer asks when the table POLPlaybook was introduced under the getting-started playbook. Yvoke immediately catches that table migration history belongs in database records, recommending oim-db-history before dispatching.',
+      'Here, a consultant asks when the table POLPlaybook was introduced under the getting-started playbook. Yvoke determines that the selected playbook should not be used for this question, and it recommends using the oim-db-history playbook instead. Now, we wait for the response as Yvoke queries the database history and streams the answer.',
     visualAction:
-      'Select oim-getting-started playbook, enter prompt "When was the table POLPlaybook introduced?", submit query, trigger preflight recommendation card, accept recommendation switching to oim-db-history, stream response.',
+      'Select oim-getting-started playbook, enter prompt "When was the table POLPlaybook introduced?", submit query, trigger preflight recommendation card, accept recommendation switching to oim-db-history, wait for completed streamed response.',
     execution: 'real_live_turn',
     turnConfig: {
       playbook: 'oim-getting-started',
@@ -279,58 +279,59 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
         subId: 'scene-4.1',
         timeRange: '01:10 -> 01:18',
         narration:
-          'Here, an engineer asks when the table POLPlaybook was introduced under the getting-started playbook.',
+          'Here, a consultant asks when the table POLPlaybook was introduced under the getting-started playbook.',
         visualAction:
-          'Select oim-getting-started playbook. Type query "When was the table POLPlaybook introduced?" into composer.',
-        uiTarget: '.composer textarea, .playbook-pill',
+          'Select oim-getting-started playbook. Type query "When was the table POLPlaybook introduced?" into composer and click Send.',
+        uiTarget: '.picker-row, .active-playbook, .composer textarea, button.composer-send',
         visualState:
-          'Composer contains user query with oim-getting-started playbook active.',
+          'Composer contains user query with oim-getting-started playbook active, send button clicked.',
       },
       {
         subId: 'scene-4.2',
-        timeRange: '01:18 -> 01:26',
+        timeRange: '01:18 -> 01:25',
         narration:
-          'Yvoke immediately catches that table migration history belongs in database records,',
+          'Yvoke determines that the selected playbook should not be used for this question, and',
         visualAction:
-          'Click Send (or ⌘↵). Playbook validation preflight detects mismatch and renders amber recommendation banner.',
-        uiTarget: 'button.composer-send, .preflight-card',
+          'Preflight validation runs and displays amber recommendation card with reason and suggested playbook.',
+        uiTarget: '.preflight-checking, .preflight-card, .preflight-card-reason',
         visualState:
-          'Preflight recommendation card appears: "Question queries table migration history. We recommend switching from oim-getting-started to oim-db-history."',
+          'Amber recommendation card visible explaining table migration history belongs in database records.',
       },
       {
         subId: 'scene-4.3',
-        timeRange: '01:26 -> 01:34',
-        narration: 'recommending oim-db-history before dispatching.',
+        timeRange: '01:25 -> 01:31',
+        narration: 'it recommends using the oim-db-history playbook instead.',
         visualAction:
-          'Glide cursor to recommendation card and click "Switch to oim-db-history" button. Card dismisses and query dispatches with corrected playbook.',
-        uiTarget: '.preflight-card button.primary, .demo-switch-btn',
+          'Glide cursor to recommendation card and click "Switch to Database History" button to accept the selection.',
+        uiTarget: '.preflight-card button.primary',
         visualState:
-          'Playbook automatically switches to oim-db-history; live turn execution starts.',
+          'Card dismisses, composer playbook switches to oim-db-history, live turn dispatches.',
       },
       {
         subId: 'scene-4.4',
-        timeRange: '01:34 -> 01:45',
+        timeRange: '01:31 -> 01:45',
         narration:
-          '[Turn Processing & Response Streaming]',
+          'Now, we wait for the response as Yvoke queries the database history and streams the answer.',
         visualAction:
-          'Live query executes against Claude SDK. Thinking trace streams, and authoritative response details the schema migration version where POLPlaybook was added.',
-        uiTarget: '.message.assistant, .trace-bar, .markdown-body',
+          'Wait until the response is finished and the Send button reappears from Stop. Cursor glides over TraceBar and streaming answer.',
+        uiTarget:
+          'button.danger.composer-send, button.primary.composer-send, .trace-bar, .message.assistant',
         visualState:
-          'Assistant response rendered with schema version details and TraceBar showing tool calls.',
+          'Turn completes, Stop button reverts to Send, assistant response renders with schema version details.',
       },
     ],
   },
   {
     id: 'scene-5',
     timeRange: '01:45 -> 02:20',
-    title: 'Live Query 2 — Follow-Up & Search Hints',
+    title: 'Live Query 2 — Follow-Up, Citations & Search Hints',
     narration:
-      'In this conversation, we explore iterative follow-ups and search hints. After defining a value template, we prompt the assistant to search Teams and Confluence knowledge, effortlessly combining official documentation with real-world operational experience.',
+      'In this conversation, we explore iterative follow-ups and search hints. Now, we wait for the response as Yvoke queries the manuals and streams the explanation. Notice that every statement that comes from documentation is cited. Clicking a citation link reveals the exact source passage from the manual. Next, we prompt the assistant to search Teams and Confluence knowledge, effortlessly combining official documentation with real-world operational experience as Yvoke completes the answer.',
     visualAction:
-      'Submit initial question "what is a value template?", await answer, submit multi-turn follow-up with search hints for Teams and Confluence, inspect citations and operational knowledge synthesis.',
+      'Submit initial question "what is a value template?", await answer, click citation link to inspect source modal, close citation modal, submit multi-turn follow-up with search hints for Teams and Confluence, await completed response.',
     execution: 'real_live_turn',
     turnConfig: {
-      playbook: 'oim-getting-started',
+      playbook: 'oim-full',
       prompt: 'what is a value template?',
       followUp: 'check if you find any practical info in teams or confluence',
     },
@@ -341,38 +342,52 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
         narration:
           'In this conversation, we explore iterative follow-ups and search hints.',
         visualAction:
-          'Start new conversation, select oim-getting-started. Type prompt "what is a value template?" into composer.',
-        uiTarget: 'button[data-tip="New conversation"], .composer textarea',
+          'Start new conversation, select oim-full. Type prompt "what is a value template?" into composer, click Send, and if preflight recommendation card appears, click "Send anyway".',
+        uiTarget:
+          'button[data-tip="New conversation"], .composer textarea, button.composer-send, .preflight-card button',
         visualState:
-          'Composer filled with initial technical inquiry in getting-started domain.',
+          'Composer filled with initial technical inquiry under oim-full, preflight checked, send anyway clicked.',
       },
       {
         subId: 'scene-5.2',
-        timeRange: '01:52 -> 02:02',
-        narration: 'After defining a value template,',
+        timeRange: '01:52 -> 02:00',
+        narration:
+          'Now, we wait for the response as Yvoke queries the manuals and streams the explanation.',
         visualAction:
-          'Click Send. Model streams architectural explanation of Value Templates, calculation formulas, and column dependencies.',
-        uiTarget: 'button.composer-send, .message.assistant',
+          'Wait until first turn completes (Stop button disappears, Send button reappears). Cursor hovers over the streamed response.',
+        uiTarget: 'button.danger.composer-send, button.primary.composer-send, .message.assistant',
         visualState:
-          'Assistant message displays formal value template documentation and code examples.',
+          'Assistant message displays formal value template documentation and formula definitions.',
       },
       {
         subId: 'scene-5.3',
-        timeRange: '02:02 -> 02:11',
-        narration: 'we prompt the assistant to search Teams and Confluence knowledge,',
+        timeRange: '02:00 -> 02:07',
+        narration:
+          'Notice that every statement that comes from documentation is cited. Clicking a citation link reveals the exact source passage from the manual.',
         visualAction:
-          'Type follow-up query: "check if you find any practical info in teams or confluence". Click Send.',
-        uiTarget: '.composer textarea, button.composer-send',
-        visualState: 'Follow-up question dispatched in multi-turn conversation thread.',
+          'Cursor clicks citation link. Citation source overlay modal opens displaying manual title and excerpt. Window remains open for 5 seconds for viewer inspection. Cursor clicks Close (✕).',
+        uiTarget: 'button.citation-link, .citation-overlay, .citation-modal-header button',
+        visualState:
+          'Citation modal renders exact manual excerpt for 5 seconds, then cleanly closes back to the thread.',
       },
       {
         subId: 'scene-5.4',
-        timeRange: '02:11 -> 02:20',
+        timeRange: '02:07 -> 02:13',
         narration:
-          'effortlessly combining official documentation with real-world operational experience.',
+          'Next, we prompt the assistant to search Teams and Confluence knowledge,',
         visualAction:
-          'Model invokes enterprise search tools, synthesizing internal team discussions, known caveats, and deployment tips.',
-        uiTarget: '.message.assistant:last-child, .citation-pill',
+          'Cursor scrolls message thread smoothly to the bottom. Type follow-up query: "check if you find any practical info in teams or confluence" into composer. Click Send.',
+        uiTarget: '.messages, .composer textarea, button.composer-send',
+        visualState: 'Thread scrolled to bottom, follow-up question dispatched in multi-turn conversation thread.',
+      },
+      {
+        subId: 'scene-5.5',
+        timeRange: '02:13 -> 02:20',
+        narration:
+          'effortlessly combining official documentation with real-world operational experience as Yvoke completes the answer.',
+        visualAction:
+          'Model invokes enterprise search tools. Wait until second turn completes and Send button reappears. Cursor inspects synthesized tips and caveats.',
+        uiTarget: '.message.assistant:last-child, button.primary.composer-send',
         visualState:
           'Comprehensive response synthesizing official documentation and real-world operational insights.',
       },
@@ -381,56 +396,49 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
   {
     id: 'scene-6',
     timeRange: '02:20 -> 02:55',
-    title: 'Live Query 3 — Clarifying Questions & Citations',
+    title: 'Live Query 3 — Clarifying Questions & Disambiguation',
     narration:
-      'When querying complex database schema changes, Yvoke surfaces an interactive clarification card to confirm scope. Selecting an option produces grounded answers with verified citation pills and complete reasoning traces.',
+      'When an ambiguous query is made, Yvoke surfaces an interactive clarification card to confirm scope. Selecting an option narrows the query to the chosen domain, streaming the relevant table and column modifications. Opening the trace reveals the underlying tool calls and database queries executed to retrieve the schema history.',
     visualAction:
-      'Submit query "what database changes were done between 9.3.1 and 10.0?" under oim-db-history, observe Clarification Required interactive card, click "Identity & Authentication Tables" option, inspect verified citation pill, open citation modal, view TraceBar reasoning steps.',
+      'Submit query "what database changes were done for the AOB module between 9.3.1 and 10.0?" under oim-db-history, observe Clarification Required interactive card, click domain option button, wait for streaming response to finish, then click TraceBar to expand and inspect the tool calls.',
     execution: 'real_live_turn',
     turnConfig: {
       playbook: 'oim-db-history',
-      prompt: 'what database changes were done between 9.3.1 and 10.0?',
+      prompt: 'what database changes were done for the AOB module between 9.3.1 and 10.0?',
       expectClarification: true,
     },
     subBeats: [
       {
         subId: 'scene-6.1',
-        timeRange: '02:20 -> 02:28',
+        timeRange: '02:20 -> 02:29',
         narration:
-          'When querying complex database schema changes, Yvoke surfaces an interactive clarification card to confirm scope.',
+          'When an ambiguous query is made, Yvoke surfaces an interactive clarification card to confirm scope.',
         visualAction:
-          'Start new thread under oim-db-history. Type "what database changes were done between 9.3.1 and 10.0?" and send. Clarifying question card renders.',
-        uiTarget: '.composer textarea, .clarifying-question-card',
+          'Start new conversation under oim-db-history. Type "what database changes were done for the AOB module between 9.3.1 and 10.0?" into composer and send. Trace block collapses immediately upon appearance, keeping the interface uncluttered while the Clarification Required card renders with selectable domain options.',
+        uiTarget: '.composer textarea, button.composer-send, .clarifying-question-card',
         visualState:
           'Interactive Clarification Required card displays domain options to narrow down schema scope.',
       },
       {
         subId: 'scene-6.2',
-        timeRange: '02:28 -> 02:37',
-        narration: 'Selecting an option produces grounded answers',
+        timeRange: '02:29 -> 02:43',
+        narration:
+          'Selecting an option narrows the query to the chosen domain, streaming the relevant table and column modifications.',
         visualAction:
-          'Cursor clicks "Identity & Authentication Tables" option button. Card resolves to green confirmed badge and targeted query streams.',
-        uiTarget: '.clarifying-question-card button, .clarified-badge',
+          'Cursor clicks the domain option button (e.g. "Schema changes in release 10.0"). Card resolves to green confirmed badge ("Clarification provided"), and the focused schema change table streams while trace stays collapsed and thread auto-scrolls.',
+        uiTarget:
+          '.clarifying-question-card button.option-button, .clarified-badge, .message.assistant',
         visualState:
-          'Clarification pill marked resolved; assistant streams focused schema migration tables.',
+          'Clarification resolved; assistant streams focused schema migration tables with auto-scroll.',
       },
       {
         subId: 'scene-6.3',
-        timeRange: '02:37 -> 02:46',
-        narration: 'with verified citation pills',
+        timeRange: '02:43 -> 02:55',
+        narration:
+          'Opening the trace reveals the underlying tool calls and database queries executed to retrieve the schema history.',
         visualAction:
-          'Cursor glides to citation pill, clicks to open Citation Overlay modal, inspects PDF source excerpt and section heading, then closes modal.',
-        uiTarget: '.citation-pill, .citation-overlay, .modal-close',
-        visualState:
-          'Modal displays verified release notes excerpt, proving zero hallucination, then closes.',
-      },
-      {
-        subId: 'scene-6.4',
-        timeRange: '02:46 -> 02:55',
-        narration: 'and complete reasoning traces.',
-        visualAction:
-          'Cursor clicks TraceBar below message to inspect step-by-step reasoning tokens, tool invocations, and execution latency.',
-        uiTarget: '.trace-bar, .trace-step',
+          'With the response complete, cursor glides to the collapsed TraceBar and clicks to open it, inspecting the executed database history tool calls and reasoning steps.',
+        uiTarget: 'button.trace-bar, .trace-body, .trace-step',
         visualState:
           'TraceBar accordion expands displaying sequential tool execution trace.',
       },
@@ -438,24 +446,24 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
   },
   {
     id: 'scene-7',
-    timeRange: '02:55 -> 03:40',
+    timeRange: '02:55 -> 03:50',
     title: 'Live Query 4 — Multi-Agent System (MAS)',
     narration:
-      'For multi-faceted trade-offs, switching to Multi-Agent mode activates specialized roles. Autonomous specialists query parallel corpuses to compare connector options, while the Reviewer gate validates consistency and approves the response.',
+      'When queries span multiple knowledge areas and rigorous review is essential, Multi-Agent mode coordinates specialized roles. Specialists investigate each connector architecture in parallel, while an independent Reviewer gate guards against hallucinations and approves the synthesized response. Thank you for watching this overview of Yvoke Desktop. Experience grounded, verifiable intelligence across your knowledge base.',
     visualAction:
-      'Start fresh thread with isolated session, switch composer agent mode dropdown to Multi-agent (orchestrator), submit connector comparison query, observe Specialist subagent cards execute concurrently, view Reviewer validation pass and approved review badge.',
+      'Start fresh thread with isolated session, switch composer agent mode dropdown to Multi-agent (orchestrator), submit connector comparison query, observe Specialist subagent cards execute concurrently, view Reviewer validation pass and approved review badge, then conclude with outro.',
     execution: 'real_live_turn',
     turnConfig: {
       mode: 'orchestrator',
       prompt:
-        'Compare standard connector vs csv connector vs custom connector via PowerShell considering teams/confluence',
+        'Compare standard connector vs csv connector vs custom connector via PowerShell considering also teams/confluence.',
     },
     subBeats: [
       {
         subId: 'scene-7.1',
         timeRange: '02:55 -> 03:04',
         narration:
-          'For multi-faceted trade-offs, switching to Multi-Agent mode activates specialized roles.',
+          'When queries span multiple knowledge areas and rigorous review is essential, Multi-Agent mode coordinates specialized roles.',
         visualAction:
           'Start new conversation. In composer, change agent mode dropdown from "Single-agent" to "Multi-agent (orchestrator)".',
         uiTarget: 'select.composer-select[data-tip*="agent"]',
@@ -466,9 +474,9 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
         subId: 'scene-7.2',
         timeRange: '03:04 -> 03:15',
         narration:
-          'Autonomous specialists query parallel corpuses to compare connector options,',
+          'Specialists investigate each connector architecture in parallel,',
         visualAction:
-          'Type complex prompt: "Compare standard connector vs csv connector vs custom connector via PowerShell considering teams/confluence". Dispatch turn.',
+          'Type prompt: "Compare standard connector vs csv connector vs custom connector via PowerShell considering also teams/confluence.". Dispatch turn. Orchestrator spawns parallel specialist subagent cards.',
         uiTarget: '.composer textarea, button.composer-send',
         visualState:
           'Turn dispatched. Orchestrator initiates execution plan and spawns parallel subagents.',
@@ -476,9 +484,9 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
       {
         subId: 'scene-7.3',
         timeRange: '03:15 -> 03:28',
-        narration: 'while the Reviewer gate validates consistency',
+        narration: 'while an independent Reviewer gate guards against hallucinations',
         visualAction:
-          'Subagent cards appear in parallel. Cursor inspects Specialist card headers, then watches Reviewer verification card start consistency audit.',
+          'Subagent cards run parallel investigations across manuals and enterprise notes. Reviewer card activates and performs adversarial consistency and hallucination verification pass.',
         uiTarget: '.subagent-card, .subagent-card-header',
         visualState:
           'Specialist agent cards show parallel execution; Reviewer card performs adversarial verification pass.',
@@ -486,55 +494,23 @@ export const STORYBOARD_BEATS: StoryboardBeat[] = [
       {
         subId: 'scene-7.4',
         timeRange: '03:28 -> 03:40',
-        narration: 'and approves the response.',
+        narration: 'and approves the synthesized response.',
         visualAction:
-          'Reviewer gate passes verification without hallucinations. Green verified review badge appears alongside final comprehensive connector comparison table.',
-        uiTarget: '.review-badge, .message.assistant .markdown-body table',
+          'Reviewer gate passes verification without hallucinations. Green verified review badge appears on Reviewer card. Cursor inspects a Specialist card and the Reviewer card, then hovers over the final comprehensive connector comparison table.',
+        uiTarget: '.subagent-card .verdict-badge.approved, .message.assistant .markdown-body table',
         visualState:
           'Reviewer badge stamped "Approved by Reviewer"; rich markdown comparison table displayed.',
       },
-    ],
-  },
-  {
-    id: 'scene-8',
-    timeRange: '03:40 -> 04:00',
-    title: 'Instant Search & Theme Toggle',
-    narration:
-      'Yvoke delivers sub-ten-millisecond instant search across your entire conversation history, coupled with a responsive, polished UI supporting dark and light themes.',
-    visualAction:
-      'Focus sidebar search box, type instant query ("POLPlaybook" / "connector"), verify instant search hit highlight (<10ms), clear search, toggle theme between dark and light, conclude video.',
-    execution: 'real_app_ui',
-    subBeats: [
       {
-        subId: 'scene-8.1',
-        timeRange: '03:40 -> 03:48',
+        subId: 'scene-7.5',
+        timeRange: '03:40 -> 03:50',
         narration:
-          'Yvoke delivers sub-ten-millisecond instant search across your entire conversation history,',
+          'Thank you for watching this overview of Yvoke Desktop. Experience grounded, verifiable intelligence across your knowledge base.',
         visualAction:
-          'Focus sidebar search box, type "Identity", observe instantaneous thread matching and snippet highlighting (<10ms), click clear.',
-        uiTarget: '.thread-search input, .search-clear',
+          'Cursor glides smoothly to resting position in the center, view settles over the clean workspace, and the video concludes.',
+        uiTarget: '.chat-view, .app-body',
         visualState:
-          'Instant search results filter in under 10ms with matched highlights, then clear cleanly.',
-      },
-      {
-        subId: 'scene-8.2',
-        timeRange: '03:48 -> 03:55',
-        narration:
-          'coupled with a responsive, polished UI supporting dark and light themes.',
-        visualAction:
-          'Toggle theme to Light mode. Entire UI re-themes cleanly with high contrast tokens and zero flicker.',
-        uiTarget: ':root[data-theme="light"]',
-        visualState:
-          'Full app renders in Light mode with crisp typography and theme variables.',
-      },
-      {
-        subId: 'scene-8.3',
-        timeRange: '03:55 -> 04:00',
-        narration: '[Outro & Transition to Dark Mode]',
-        visualAction:
-          'Toggle theme back to default Dark mode. Cursor moves to center. Video concludes cleanly.',
-        uiTarget: ':root[data-theme="dark"]',
-        visualState: 'Dark mode restored; smooth outro conclusion.',
+          'Clean resting state showcasing final verified answer; smooth outro conclusion.',
       },
     ],
   },
@@ -547,7 +523,7 @@ export function renderStoryboardMarkdown(beats: StoryboardBeat[] = STORYBOARD_BE
   const lines: string[] = [
     '# Yvoke Desktop Demo Video Storyboard',
     '',
-    'Comprehensive 8-scene walkthrough synchronized between spoken voiceover narration, visual UI actions, and live agent execution modes.',
+    'Comprehensive 7-scene walkthrough synchronized between spoken voiceover narration, visual UI actions, and live agent execution modes.',
     '',
     '## High-Level Scene Overview',
     '',

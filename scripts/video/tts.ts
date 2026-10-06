@@ -149,7 +149,7 @@ export async function synthesizeSpeech(
   const model =
     options.model ??
     process.env.GEMINI_TTS_MODEL ??
-    'gemini-3.1-flash-tts-preview';
+    'gemini-3.8-flash-tts';
   const voiceName = options.voiceName ?? 'Puck';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const fetcher = options.fetchFn ?? fetch;
@@ -174,9 +174,11 @@ export async function synthesizeSpeech(
         .digest('hex');
       cacheFilePath = path.join(cacheDir, `${hash}.pcm`);
       if (fs.existsSync(cacheFilePath)) {
-        const pcmBuffer = fs.readFileSync(cacheFilePath);
-        const durationSeconds = calculateAudioDuration(pcmBuffer.length);
-        const wavBuffer = pcmToWav(pcmBuffer);
+        const fileBuffer = fs.readFileSync(cacheFilePath);
+        const { pcmBuffer: purePcm, sampleRate } = extractPcmFromAudioBuffer(fileBuffer);
+        const pcmBuffer = applyMicroFade(purePcm, 5, sampleRate);
+        const durationSeconds = calculateAudioDuration(pcmBuffer.length, sampleRate);
+        const wavBuffer = pcmToWav(pcmBuffer, sampleRate);
         return { pcmBuffer, wavBuffer, durationSeconds };
       }
     } catch {
@@ -282,18 +284,21 @@ export async function synthesizeSpeech(
       );
     }
 
-    const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
-    const durationSeconds = calculateAudioDuration(pcmBuffer.length);
-    const wavBuffer = pcmToWav(pcmBuffer);
+    const rawBuffer = Buffer.from(part.inlineData.data, 'base64');
+    const { pcmBuffer: purePcm, sampleRate } = extractPcmFromAudioBuffer(rawBuffer);
 
-    // Save to disk cache if path is valid
+    // Save pure PCM to disk cache if path is valid
     if (cacheFilePath) {
       try {
-        fs.writeFileSync(cacheFilePath, pcmBuffer);
+        fs.writeFileSync(cacheFilePath, purePcm);
       } catch {
         // Ignore cache write failure
       }
     }
+
+    const pcmBuffer = applyMicroFade(purePcm, 5, sampleRate);
+    const durationSeconds = calculateAudioDuration(pcmBuffer.length, sampleRate);
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate);
 
     return {
       pcmBuffer,
@@ -328,4 +333,150 @@ export function combineSynthesizeResults(results: SynthesizeResult[]): Synthesiz
     durationSeconds,
   };
 }
+
+/**
+ * Generates a zero-filled PCM buffer corresponding to a given duration.
+ * Ensures the buffer length is an even number for 16-bit audio.
+ */
+export function createSilencePcm(
+  durationSec: number,
+  sampleRate = 24000,
+  numChannels = 1,
+  bitsPerSample = 16,
+): Buffer {
+  if (durationSec <= 0) {
+    return Buffer.alloc(0);
+  }
+  const bytesPerSample = bitsPerSample / 8;
+  const byteRate = sampleRate * numChannels * bytesPerSample;
+  let byteLength = Math.round(durationSec * byteRate);
+  if (byteLength % 2 !== 0) {
+    byteLength += 1;
+  }
+  return Buffer.alloc(byteLength, 0);
+}
+
+/**
+ * Creates a SynthesizeResult containing pure silence of the specified duration.
+ */
+export function createSilenceResult(durationSec: number, sampleRate = 24000): SynthesizeResult {
+  const pcmBuffer = createSilencePcm(durationSec, sampleRate);
+  const wavBuffer = pcmToWav(pcmBuffer, sampleRate);
+  const durationSeconds = calculateAudioDuration(pcmBuffer.length, sampleRate);
+  return {
+    pcmBuffer,
+    wavBuffer,
+    durationSeconds,
+  };
+}
+
+/**
+ * Extends a SynthesizeResult with trailing silence up to targetDurationSec.
+ * If current duration is already >= targetDurationSec, returns original unchanged.
+ */
+export function padSynthesizeResult(
+  result: SynthesizeResult,
+  targetDurationSec: number,
+  sampleRate = 24000,
+): SynthesizeResult {
+  if (result.durationSeconds >= targetDurationSec) {
+    return result;
+  }
+  const neededSec = targetDurationSec - result.durationSeconds;
+  const silencePcm = createSilencePcm(neededSec, sampleRate);
+  const pcmBuffer = Buffer.concat([result.pcmBuffer, silencePcm]);
+  const wavBuffer = pcmToWav(pcmBuffer, sampleRate);
+  const durationSeconds = calculateAudioDuration(pcmBuffer.length, sampleRate);
+  return {
+    pcmBuffer,
+    wavBuffer,
+    durationSeconds,
+  };
+}
+
+/**
+ * Extracts pure raw PCM audio samples from an audio buffer.
+ * If the buffer contains a RIFF/WAVE container (as returned by Gemini Multimodal Audio API),
+ * this locates the 'data' chunk and returns only the genuine PCM audio bytes,
+ * stripping the 44-byte RIFF/WAVE header and any trailing metadata chunks
+ * (such as C2PA provenance / SynthID digital source type metadata).
+ * If the buffer is already raw PCM, it returns the buffer intact.
+ */
+export function extractPcmFromAudioBuffer(
+  buffer: Buffer,
+): { pcmBuffer: Buffer; sampleRate: number } {
+  if (
+    buffer.length < 12 ||
+    buffer.toString('ascii', 0, 4) !== 'RIFF' ||
+    buffer.toString('ascii', 8, 12) !== 'WAVE'
+  ) {
+    return { pcmBuffer: buffer, sampleRate: 24000 };
+  }
+
+  let offset = 12;
+  let sampleRate = 24000;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+
+    if (chunkId === 'fmt ') {
+      if (offset + 16 <= buffer.length) {
+        sampleRate = buffer.readUInt32LE(offset + 12);
+      }
+    } else if (chunkId === 'data') {
+      const dataStart = offset + 8;
+      const dataEnd = Math.min(buffer.length, dataStart + chunkSize);
+      const pcmBuffer = buffer.subarray(dataStart, dataEnd);
+      return { pcmBuffer, sampleRate };
+    }
+
+    offset += 8 + chunkSize;
+    // Word align per RIFF standard
+    if (chunkSize % 2 !== 0) {
+      offset++;
+    }
+  }
+
+  return { pcmBuffer: buffer, sampleRate };
+}
+
+/**
+ * Applies a short linear fade-in and fade-out to a 16-bit mono PCM buffer
+ * to eliminate pops, clicks, and boundary discontinuities.
+ */
+export function applyMicroFade(
+  pcmBuffer: Buffer,
+  fadeMs = 5,
+  sampleRate = 24000,
+): Buffer {
+  if (pcmBuffer.length < 4) return pcmBuffer;
+  const numSamples = Math.floor(pcmBuffer.length / 2);
+  const fadeSamples = Math.min(
+    Math.floor(numSamples / 2),
+    Math.round((fadeMs / 1000) * sampleRate),
+  );
+  if (fadeSamples <= 0) return pcmBuffer;
+
+  const result = Buffer.from(pcmBuffer);
+
+  // Fade in
+  for (let i = 0; i < fadeSamples; i++) {
+    const factor = i / fadeSamples;
+    const sample = result.readInt16LE(i * 2);
+    result.writeInt16LE(Math.round(sample * factor), i * 2);
+  }
+
+  // Fade out
+  for (let i = 0; i < fadeSamples; i++) {
+    const factor = i / fadeSamples;
+    const sampleIndex = numSamples - 1 - i;
+    const sample = result.readInt16LE(sampleIndex * 2);
+    result.writeInt16LE(Math.round(sample * factor), sampleIndex * 2);
+  }
+
+  return result;
+}
+
+
 

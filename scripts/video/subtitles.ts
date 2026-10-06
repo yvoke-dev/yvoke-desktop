@@ -1,6 +1,7 @@
 /**
  * SRT subtitle generation and FFmpeg path escaping for automated demo videos.
  */
+import type { AccelerationInterval } from './stitch';
 
 export interface SubtitleCue {
   startTimeMs: number;
@@ -104,3 +105,57 @@ export function escapeFfmpegSubtitlePath(filePath: string): string {
     .replace(/'/g, "\\'")
     .replace(/ /g, '\\ ');
 }
+
+/**
+ * Remaps a timestamp (in seconds) through a set of sorted, non-overlapping acceleration intervals.
+ * Returns the corresponding timestamp in the accelerated video timeline.
+ */
+export function remapTimestamp(timeSec: number, intervals?: AccelerationInterval[]): number {
+  if (!intervals || intervals.length === 0 || !Number.isFinite(timeSec)) {
+    return timeSec;
+  }
+  let remapped = timeSec;
+  for (const interval of intervals) {
+    if (timeSec <= interval.startSec) {
+      break;
+    }
+    const intervalDuration = interval.endSec - interval.startSec;
+    const acceleratedDuration = intervalDuration / interval.speedFactor;
+    const timeSaved = intervalDuration - acceleratedDuration;
+
+    if (timeSec >= interval.endSec) {
+      remapped -= timeSaved;
+    } else {
+      const elapsedInInterval = timeSec - interval.startSec;
+      const acceleratedElapsed = elapsedInInterval / interval.speedFactor;
+      const partialSaved = elapsedInInterval - acceleratedElapsed;
+      remapped -= partialSaved;
+      break;
+    }
+  }
+  return remapped;
+}
+
+/**
+ * Remaps an array of SubtitleCue timestamps to match the accelerated video timeline.
+ */
+export function remapSubtitleCues(
+  cues: SubtitleCue[],
+  intervals?: AccelerationInterval[],
+): SubtitleCue[] {
+  if (!intervals || intervals.length === 0) {
+    return cues;
+  }
+  return cues.map((cue) => {
+    const startSec = remapTimestamp(cue.startTimeMs / 1000, intervals);
+    const endSec = remapTimestamp(cue.endTimeMs / 1000, intervals);
+    const startTimeMs = Math.max(0, Math.round(startSec * 1000));
+    const endTimeMs = Math.max(startTimeMs + 100, Math.round(endSec * 1000));
+    return {
+      ...cue,
+      startTimeMs,
+      endTimeMs,
+    };
+  });
+}
+

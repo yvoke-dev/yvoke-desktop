@@ -65,7 +65,9 @@ async function main(): Promise<void> {
   assert(orch.tools?.includes('Task') === true, 'orchestrator can delegate (Task)');
   assert(rev.prompt.includes('APPROVED') && rev.prompt.includes('REJECTED'), 'reviewer adapter defines verdict tokens');
   assert(
-    JSON.stringify(rev.tools) === JSON.stringify([qualifyTool('verify_citations'), qualifyTool('get_section')]),
+    rev.tools?.includes(qualifyTool('verify_citations')) === true &&
+      rev.tools?.includes('ToolSearch') === true &&
+      rev.tools?.includes(qualifyTool('get_section')) === false,
     'reviewer is validate-only',
   );
   assert(allowedTools.includes('Task') && allowedTools.includes(qualifyTool('search_corpus')), 'allow-list unions Task + specialist tools');

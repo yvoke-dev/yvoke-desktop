@@ -94,10 +94,12 @@ describe('bare id citations', () => {
     expect(container.querySelector('code button')).toBeNull();
   });
 
-  it('does not linkify a truncated id — 8 hex characters is also ordinary prose', () => {
-    const { container } = render(<Markdown content="Error code [decade00]." onCitation={vi.fn()} />);
-    expect(container.querySelector('button.citation-link')).toBeNull();
-    expect(container.textContent).toContain('[decade00]');
+  it('renders an 8-hex-character bare citation id as a clickable pill', () => {
+    const onCitation = vi.fn();
+    render(<Markdown content="Practical info found in thread [b85dfca2]." onCitation={onCitation} />);
+    const pill = screen.getByRole('button', { name: '[b85dfca2]' });
+    fireEvent.click(pill);
+    expect(onCitation).toHaveBeenCalledWith({ id: 'b85dfca2' });
   });
 
   it('keeps a bare id and a [N] marker in one sentence apart', () => {

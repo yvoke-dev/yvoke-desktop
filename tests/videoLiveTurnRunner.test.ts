@@ -289,6 +289,45 @@ describe('videoLiveTurnRunner', () => {
       expect(res.durationMs).toBeGreaterThanOrEqual(0);
     });
 
+    it('does not resolve early when clarifying question card is already answered', async () => {
+      let pollCount = 0;
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector === '.clarifying-question-card:not(.answered)') {
+          return { count: vi.fn().mockResolvedValue(0) };
+        }
+        if (selector.includes('.clarifying-question-card')) {
+          // Broader selector incorrectly matches answered card in DOM
+          return {
+            count: vi.fn().mockResolvedValue(1),
+            isVisible: vi.fn().mockResolvedValue(true),
+          };
+        }
+        if (selector.includes('danger')) {
+          return {
+            count: vi.fn().mockImplementation(async () => (pollCount++ === 0 ? 1 : 0)),
+            isVisible: vi.fn().mockImplementation(async () => pollCount <= 1),
+          };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isEnabled: vi.fn().mockResolvedValue(true),
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      const res = await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+      });
+
+      expect(res.durationMs).toBeGreaterThanOrEqual(0);
+      expect(pollCount).toBeGreaterThanOrEqual(1);
+    });
+
     it('throws TurnTimeoutError when turn does not complete within timeoutMs', async () => {
       // Turn stays running (stop button always visible)
       (mockPage.locator as any).mockImplementation((selector: string) => {
@@ -310,5 +349,174 @@ describe('videoLiveTurnRunner', () => {
         }),
       ).rejects.toThrow(TurnTimeoutError);
     });
+
+    it('automatically collapses expanded trace bar when visible', async () => {
+      let pollCount = 0;
+      const mockTraceClick = vi.fn().mockResolvedValue(undefined);
+
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector.includes('trace-bar[aria-expanded="true"]')) {
+          return {
+            count: vi.fn().mockResolvedValue(1),
+            isVisible: vi.fn().mockResolvedValue(true),
+            click: mockTraceClick,
+          };
+        }
+        if (selector.includes('danger')) {
+          return {
+            count: vi.fn().mockImplementation(async () => (pollCount++ === 0 ? 1 : 0)),
+            isVisible: vi.fn().mockImplementation(async () => pollCount <= 1),
+          };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+      });
+
+      expect(mockTraceClick).toHaveBeenCalled();
+    });
+
+    it('periodically scrolls to the bottom while waiting for turn', async () => {
+      let pollCount = 0;
+      const mockEvaluate = vi.fn().mockResolvedValue(undefined);
+      mockPage.evaluate = mockEvaluate;
+
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector.includes('danger')) {
+          return {
+            count: vi.fn().mockImplementation(async () => (pollCount++ === 0 ? 1 : 0)),
+            isVisible: vi.fn().mockImplementation(async () => pollCount <= 1),
+          };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+        autoScrollIntervalMs: 5,
+      });
+
+      expect(mockEvaluate).toHaveBeenCalled();
+    });
+
+    it('waits until reviewer card is mounted when requireReviewer is true', async () => {
+      let pollCount = 0;
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector.includes('danger') || selector.includes('live')) {
+          return { count: vi.fn().mockResolvedValue(0), isVisible: vi.fn().mockResolvedValue(false) };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        if (selector.includes('verdict-badge') || selector.includes('Reviewer') || selector.includes('reviewer')) {
+          // Reviewer card only mounts after 3 polls
+          return {
+            count: vi.fn().mockImplementation(async () => (pollCount++ >= 3 ? 1 : 0)),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      const res = await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+        requireReviewer: true,
+      });
+
+      expect(res.durationMs).toBeGreaterThanOrEqual(0);
+      expect(pollCount).toBeGreaterThanOrEqual(3);
+    });
+
+    it('waits until custom selector is mounted when requireSelector is provided', async () => {
+      let pollCount = 0;
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector.includes('danger') || selector.includes('live')) {
+          return { count: vi.fn().mockResolvedValue(0), isVisible: vi.fn().mockResolvedValue(false) };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        if (selector === '.custom-complete-table') {
+          return {
+            count: vi.fn().mockImplementation(async () => (pollCount++ >= 2 ? 1 : 0)),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      const res = await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+        requireSelector: '.custom-complete-table',
+      });
+
+      expect(res.durationMs).toBeGreaterThanOrEqual(0);
+      expect(pollCount).toBeGreaterThanOrEqual(2);
+    });
+
+    it('requires debounced stability across consecutive polls before resolving', async () => {
+      let pollCount = 0;
+      // Poll 0: stopBtn visible
+      // Poll 1: stopBtn not visible (flicker)
+      // Poll 2: stopBtn visible again!
+      // Poll 3: stopBtn not visible
+      // Poll 4: stopBtn not visible (stable)
+      (mockPage.locator as any).mockImplementation((selector: string) => {
+        if (selector.includes('danger')) {
+          const isStop = pollCount === 0 || pollCount === 2;
+          return {
+            count: vi.fn().mockImplementation(async () => {
+              pollCount++;
+              return isStop ? 1 : 0;
+            }),
+            isVisible: vi.fn().mockImplementation(async () => isStop),
+          };
+        }
+        if (selector.includes('composer-send')) {
+          return {
+            first: vi.fn().mockReturnValue({
+              isVisible: vi.fn().mockResolvedValue(true),
+            }),
+          };
+        }
+        return { count: vi.fn().mockResolvedValue(0) };
+      });
+
+      const res = await waitForTurnCompletion(mockPage as Page, {
+        timeoutMs: 2000,
+        pollIntervalMs: 10,
+        minConsecutiveDone: 2,
+      });
+
+      expect(res.durationMs).toBeGreaterThanOrEqual(0);
+      expect(pollCount).toBeGreaterThanOrEqual(4);
+    });
   });
 });
+
