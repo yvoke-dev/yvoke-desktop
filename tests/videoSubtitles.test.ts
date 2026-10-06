@@ -3,6 +3,8 @@ import {
   formatSrtTimestamp,
   generateSrt,
   escapeFfmpegSubtitlePath,
+  remapTimestamp,
+  remapSubtitleCues,
   InvalidCueError,
   type SubtitleCue,
 } from '../scripts/video/subtitles';
@@ -215,6 +217,99 @@ describe('videoSubtitles', () => {
       expect(escaped).toBe(
         "C\\:\\\\Users\\\\John\\ Doe\\'s\\ Desktop\\\\demo\\:presentation\\ final.srt",
       );
+    });
+  });
+
+  describe('remapTimestamp', () => {
+    it('returns the same timestamp when intervals is undefined or empty', () => {
+      expect(remapTimestamp(15.5)).toBe(15.5);
+      expect(remapTimestamp(15.5, [])).toBe(15.5);
+    });
+
+    it('leaves timestamps before the acceleration interval unchanged', () => {
+      const intervals = [{ startSec: 20, endSec: 220, speedFactor: 10 }];
+      expect(remapTimestamp(10, intervals)).toBe(10);
+      expect(remapTimestamp(20, intervals)).toBe(20);
+    });
+
+    it('scales timestamps within the acceleration interval by speedFactor', () => {
+      const intervals = [{ startSec: 20, endSec: 220, speedFactor: 10 }];
+      // At 70s (50s into the interval), accelerated elapsed is 5s -> 25s
+      expect(remapTimestamp(70, intervals)).toBeCloseTo(25);
+      // At 120s (100s into interval), accelerated elapsed is 10s -> 30s
+      expect(remapTimestamp(120, intervals)).toBeCloseTo(30);
+      // At 220s (end of interval, 200s duration / 10 = 20s), accelerated time is 40s
+      expect(remapTimestamp(220, intervals)).toBeCloseTo(40);
+    });
+
+    it('shifts timestamps after the acceleration interval by the total time saved', () => {
+      const intervals = [{ startSec: 20, endSec: 220, speedFactor: 10 }];
+      // Time saved is 200 - 20 = 180s.
+      // At 230s, accelerated time is 230 - 180 = 50s.
+      expect(remapTimestamp(230, intervals)).toBeCloseTo(50);
+      // At 250s, accelerated time is 250 - 180 = 70s.
+      expect(remapTimestamp(250, intervals)).toBeCloseTo(70);
+    });
+
+    it('handles multiple non-overlapping acceleration intervals sequentially', () => {
+      const intervals = [
+        { startSec: 10, endSec: 30, speedFactor: 2 }, // 20s -> 10s (saves 10s)
+        { startSec: 50, endSec: 90, speedFactor: 4 }, // 40s -> 10s (saves 30s)
+      ];
+      // Before first interval
+      expect(remapTimestamp(5, intervals)).toBe(5);
+      // Inside first interval: at 20s (10s in), 10 + 5 = 15s
+      expect(remapTimestamp(20, intervals)).toBeCloseTo(15);
+      // Between intervals: at 40s, 40 - 10 = 30s
+      expect(remapTimestamp(40, intervals)).toBeCloseTo(30);
+      // Inside second interval: at 70s (20s into 2nd interval), 30s from 1st shift + 10s baseline + 5s = 45s
+      // Specifically: startSec is 50. Shifted startSec is 40. Elapsed is 20 / 4 = 5. Result: 45.
+      expect(remapTimestamp(70, intervals)).toBeCloseTo(45);
+      // After second interval: total saved = 10 + 30 = 40s. At 100s -> 60s
+      expect(remapTimestamp(100, intervals)).toBeCloseTo(60);
+    });
+  });
+
+  describe('remapSubtitleCues', () => {
+    it('returns original cues when intervals is undefined or empty', () => {
+      const cues: SubtitleCue[] = [
+        { startTimeMs: 1000, endTimeMs: 4000, text: 'Hello' },
+      ];
+      expect(remapSubtitleCues(cues)).toEqual(cues);
+      expect(remapSubtitleCues(cues, [])).toEqual(cues);
+    });
+
+    it('remaps subtitle cue timestamps accurately across an acceleration interval', () => {
+      const intervals = [{ startSec: 20, endSec: 220, speedFactor: 10 }];
+      const cues: SubtitleCue[] = [
+        { startTimeMs: 5000, endTimeMs: 8000, text: 'Before acceleration' },
+        { startTimeMs: 230000, endTimeMs: 235000, text: 'After acceleration' },
+      ];
+
+      const remapped = remapSubtitleCues(cues, intervals);
+
+      // Cue before acceleration is unchanged
+      expect(remapped[0]).toEqual({
+        startTimeMs: 5000,
+        endTimeMs: 8000,
+        text: 'Before acceleration',
+      });
+
+      // Cue after acceleration is shifted backwards by 180,000 ms (180s)
+      expect(remapped[1]).toEqual({
+        startTimeMs: 50000,
+        endTimeMs: 55000,
+        text: 'After acceleration',
+      });
+    });
+
+    it('guarantees endTimeMs is strictly greater than startTimeMs', () => {
+      const intervals = [{ startSec: 10, endSec: 20, speedFactor: 100 }];
+      const cues: SubtitleCue[] = [
+        { startTimeMs: 10000, endTimeMs: 10010, text: 'Very short cue inside fast interval' },
+      ];
+      const remapped = remapSubtitleCues(cues, intervals);
+      expect(remapped[0].endTimeMs).toBeGreaterThan(remapped[0].startTimeMs);
     });
   });
 });

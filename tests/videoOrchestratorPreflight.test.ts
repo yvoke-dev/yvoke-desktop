@@ -306,10 +306,67 @@ describe('videoOrchestratorPreflight', () => {
     });
   });
 
+  describe('parseArgs', () => {
+    it('parses default CLI options when no arguments provided', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      const opts = parseArgs([]);
+      expect(opts.skipTts).toBe(false);
+      expect(opts.skipBackend).toBe(false);
+      expect(opts.backendUrl).toBe('http://localhost:8080');
+      expect(opts.outputPath).toContain('artifacts/yvoke-desktop-demo.mp4');
+      expect(opts.maxScenes).toBeUndefined();
+    });
+
+    it('parses --max-scenes and --scenes flags correctly', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      expect(parseArgs(['--max-scenes', '2']).maxScenes).toBe(2);
+      expect(parseArgs(['--scenes', '1,2']).maxScenes).toBe(2);
+      expect(parseArgs(['--scenes', '3']).maxScenes).toBe(3);
+      expect(parseArgs(['--skip-backend', '--max-scenes', '1']).skipBackend).toBe(true);
+      expect(parseArgs(['--skip-backend', '--max-scenes', '1']).maxScenes).toBe(1);
+    });
+
+    it('parses --scene flag correctly for single-scene generation', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      expect(parseArgs(['--scene', '6']).singleScene).toBe(6);
+      expect(parseArgs(['--scene', '1']).singleScene).toBe(1);
+    });
+
+    it('parses --skip-scene and --scenes array correctly', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      expect(parseArgs(['--skip-scene', '2']).scenes).toEqual([1, 3, 4, 5, 6, 7]);
+      expect(parseArgs(['--scenes', '1,3,7']).scenes).toEqual([1, 3, 7]);
+    });
+
+    it('parses named scene presets and preserves custom scene ordering', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      expect(parseArgs(['--scenes', 'all']).scenes).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      expect(parseArgs(['--scenes', 'without-settings']).scenes).toEqual([1, 3, 4, 5, 6, 7]);
+      expect(parseArgs(['--scenes', 'no-settings']).scenes).toEqual([1, 3, 4, 5, 6, 7]);
+      expect(parseArgs(['--scenes', 'without-settings-and-clarification']).scenes).toEqual([1, 3, 4, 5, 7]);
+      expect(parseArgs(['--scenes', 'no-clarification']).scenes).toEqual([1, 3, 4, 5, 7]);
+      expect(parseArgs(['--scenes', '3,1,5,4']).scenes).toEqual([3, 1, 5, 4]);
+    });
+
+    it('parses --model and --thinking parameters with opus and low as defaults', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      const defaultOpts = parseArgs([]);
+      expect(defaultOpts.model).toBe('opus');
+      expect(defaultOpts.thinking).toBe('low');
+
+      const customOpts = parseArgs(['--model', 'sonnet', '--thinking', 'medium']);
+      expect(customOpts.model).toBe('sonnet');
+      expect(customOpts.thinking).toBe('medium');
+
+      const masOpts = parseArgs(['--mas-model', 'haiku']);
+      expect(masOpts.model).toBe('haiku');
+    });
+  });
+
   describe('SCENE_NARRATIONS', () => {
-    it('defines 8 dedicated scenes with correlated app and settings tours', async () => {
+    it('defines 7 dedicated scenes with correlated app and settings tours', async () => {
       const { SCENE_NARRATIONS } = await import('../scripts/generate-demo-video');
-      expect(SCENE_NARRATIONS).toHaveLength(8);
+      expect(SCENE_NARRATIONS).toHaveLength(7);
 
       // Scene 1: App & Sidebar Overview
       expect(SCENE_NARRATIONS[0]).toMatch(/sidebar/i);
@@ -336,15 +393,24 @@ describe('videoOrchestratorPreflight', () => {
       }
     });
 
-    it('exports well-formed segmented scripts for Scenes 1, 2, and 3', async () => {
+    it('exports well-formed segmented scripts for Scenes 1, 2, 3, 4, 5, 6, and 7', async () => {
       const {
         SCENE_1_SEGMENTS,
         SCENE_2_SEGMENTS,
         SCENE_3_SEGMENTS,
+        SCENE_4_SEGMENTS,
+        SCENE_5_SEGMENTS,
+        SCENE_6_SEGMENTS,
+        SCENE_7_SEGMENTS,
         SCENE_NARRATIONS,
       } = await import('../scripts/generate-demo-video');
 
-      expect(SCENE_1_SEGMENTS.map((s) => s.key)).toEqual(['welcome', 'sidebar', 'profile']);
+      expect(SCENE_1_SEGMENTS.map((s) => s.key)).toEqual([
+        'welcome',
+        'sidebar',
+        'search',
+        'profile',
+      ]);
       expect(SCENE_2_SEGMENTS.map((s) => s.key)).toEqual([
         'intro',
         'server',
@@ -352,13 +418,33 @@ describe('videoOrchestratorPreflight', () => {
         'agents',
         'webSearch',
         'appearance',
-        'advanced',
+        'about',
       ]);
       expect(SCENE_3_SEGMENTS.map((s) => s.key)).toEqual(['newConv', 'playbooks', 'composer']);
+      expect(SCENE_4_SEGMENTS.map((s) => s.key)).toEqual(['ask', 'catch', 'recommend', 'response']);
+      expect(SCENE_5_SEGMENTS.map((s) => s.key)).toEqual([
+        'ask',
+        'response1',
+        'citations',
+        'followup',
+        'response2',
+      ]);
+      expect(SCENE_6_SEGMENTS.map((s) => s.key)).toEqual(['ask', 'option', 'trace']);
+      expect(SCENE_7_SEGMENTS.map((s) => s.key)).toEqual([
+        'mode',
+        'prompt',
+        'review',
+        'approval',
+        'outro',
+      ]);
 
       expect(SCENE_NARRATIONS[0]).toBe(SCENE_1_SEGMENTS.map((s) => s.narration).join(' '));
       expect(SCENE_NARRATIONS[1]).toBe(SCENE_2_SEGMENTS.map((s) => s.narration).join(' '));
       expect(SCENE_NARRATIONS[2]).toBe(SCENE_3_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[3]).toBe(SCENE_4_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[4]).toBe(SCENE_5_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[5]).toBe(SCENE_6_SEGMENTS.map((s) => s.narration).join(' '));
+      expect(SCENE_NARRATIONS[6]).toBe(SCENE_7_SEGMENTS.map((s) => s.narration).join(' '));
     });
 
     it('synchronizes SCENE_NARRATIONS strictly with declarative STORYBOARD_BEATS', async () => {
@@ -394,8 +480,8 @@ describe('videoOrchestratorPreflight', () => {
       expect(settings.authMode).toBe('dev');
       expect(settings.devToken).toBe('dev-demo-token');
       expect(settings.mcpTransport).toBe('http');
-      expect(settings.defaultModel).toBe('sonnet');
-      expect(settings.defaultThinkingLevel).toBe('medium');
+      expect(settings.defaultModel).toBe('opus');
+      expect(settings.defaultThinkingLevel).toBe('low');
       expect(settings.playbookValidationEnabled).toBe(true);
       expect(settings.webSearch).toEqual({
         enabled: true,

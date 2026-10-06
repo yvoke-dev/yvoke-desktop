@@ -5,6 +5,12 @@ import {
   pcmToWav,
   synthesizeSpeech,
   redactApiKey,
+  createSilencePcm,
+  createSilenceResult,
+  padSynthesizeResult,
+  extractPcmFromAudioBuffer,
+  applyMicroFade,
+  type SynthesizeResult,
   InvalidPcmDataError,
   TtsSynthesisError,
   TtsQuotaExceededError,
@@ -391,5 +397,137 @@ describe('videoTts', () => {
       expect(combined.pcmBuffer[143999]).toBe(3);
     });
   });
+
+  describe('createSilencePcm and createSilenceResult', () => {
+    it('returns empty buffer for non-positive duration', () => {
+      expect(createSilencePcm(0).length).toBe(0);
+      expect(createSilencePcm(-1).length).toBe(0);
+    });
+
+    it('generates zero-filled PCM buffer with even byte length corresponding to duration', () => {
+      const pcm1s = createSilencePcm(1.0);
+      expect(pcm1s.length).toBe(48000);
+      expect(pcm1s.every((b) => b === 0)).toBe(true);
+
+      const pcmHalf = createSilencePcm(0.5);
+      expect(pcmHalf.length).toBe(24000);
+      expect(pcmHalf.length % 2).toBe(0);
+    });
+
+    it('creates a complete SynthesizeResult with WAV header for silence', () => {
+      const res = createSilenceResult(1.5);
+      expect(res.durationSeconds).toBe(1.5);
+      expect(res.pcmBuffer.length).toBe(72000);
+      expect(res.wavBuffer.length).toBe(44 + 72000);
+    });
+  });
+
+  describe('padSynthesizeResult', () => {
+    it('returns original result if duration is already >= target', () => {
+      const pcm = Buffer.alloc(48000, 1);
+      const original: SynthesizeResult = {
+        pcmBuffer: pcm,
+        wavBuffer: pcmToWav(pcm),
+        durationSeconds: 1.0,
+      };
+
+      const padded = padSynthesizeResult(original, 0.8);
+      expect(padded).toBe(original);
+      expect(padded.durationSeconds).toBe(1.0);
+    });
+
+    it('appends silence PCM and updates duration to target when target > duration', () => {
+      const pcm = Buffer.alloc(48000, 5); // 1.0s of data
+      const original: SynthesizeResult = {
+        pcmBuffer: pcm,
+        wavBuffer: pcmToWav(pcm),
+        durationSeconds: 1.0,
+      };
+
+      const padded = padSynthesizeResult(original, 2.5); // Pad to 2.5s
+      expect(padded.durationSeconds).toBe(2.5);
+      expect(padded.pcmBuffer.length).toBe(120000); // 2.5 * 48000
+      expect(padded.wavBuffer.length).toBe(44 + 120000);
+
+      // Verify original content preserved at beginning, zero silence at end
+      expect(padded.pcmBuffer[0]).toBe(5);
+      expect(padded.pcmBuffer[47999]).toBe(5);
+      expect(padded.pcmBuffer[48000]).toBe(0);
+      expect(padded.pcmBuffer[119999]).toBe(0);
+    });
+  });
+
+  describe('extractPcmFromAudioBuffer', () => {
+    it('returns raw buffer directly if it does not contain RIFF/WAVE header', () => {
+      const raw = Buffer.alloc(100, 42);
+      const res = extractPcmFromAudioBuffer(raw);
+      expect(res.pcmBuffer).toBe(raw);
+      expect(res.sampleRate).toBe(24000);
+    });
+
+    it('strips RIFF/WAVE 44-byte header and trailing C2PA metadata chunk', () => {
+      // Build a synthetic RIFF container with fmt, data, and C2PA metadata chunks
+      const pcmData = Buffer.alloc(480, 0x55); // Pure audio PCM
+      const c2paMetadata = Buffer.from('C2PA provenance digitalSourceType watermark data 123456');
+
+      // fmt chunk
+      const fmtChunk = Buffer.alloc(24);
+      fmtChunk.write('fmt ', 0, 4, 'ascii');
+      fmtChunk.writeUInt32LE(16, 4); // Subchunk1Size = 16
+      fmtChunk.writeUInt16LE(1, 8); // AudioFormat = 1 (PCM)
+      fmtChunk.writeUInt16LE(1, 10); // NumChannels = 1
+      fmtChunk.writeUInt32LE(24000, 12); // SampleRate = 24000
+      fmtChunk.writeUInt32LE(48000, 16); // ByteRate = 48000
+      fmtChunk.writeUInt16LE(2, 20); // BlockAlign = 2
+      fmtChunk.writeUInt16LE(16, 22); // BitsPerSample = 16
+
+      // data chunk
+      const dataHeader = Buffer.alloc(8);
+      dataHeader.write('data', 0, 4, 'ascii');
+      dataHeader.writeUInt32LE(pcmData.length, 4);
+
+      // C2PA chunk
+      const c2paHeader = Buffer.alloc(8);
+      c2paHeader.write('C2PA', 0, 4, 'ascii');
+      c2paHeader.writeUInt32LE(c2paMetadata.length, 4);
+
+      const body = Buffer.concat([fmtChunk, dataHeader, pcmData, c2paHeader, c2paMetadata]);
+
+      // RIFF header
+      const riffHeader = Buffer.alloc(12);
+      riffHeader.write('RIFF', 0, 4, 'ascii');
+      riffHeader.writeUInt32LE(body.length + 4, 4);
+      riffHeader.write('WAVE', 8, 4, 'ascii');
+
+      const fullWavWithMetadata = Buffer.concat([riffHeader, body]);
+
+      const extracted = extractPcmFromAudioBuffer(fullWavWithMetadata);
+      expect(extracted.sampleRate).toBe(24000);
+      expect(extracted.pcmBuffer.length).toBe(pcmData.length);
+      expect(extracted.pcmBuffer).toEqual(pcmData);
+      expect(extracted.pcmBuffer.includes(Buffer.from('C2PA'))).toBe(false);
+      expect(extracted.pcmBuffer.includes(Buffer.from('RIFF'))).toBe(false);
+    });
+  });
+
+  describe('applyMicroFade', () => {
+    it('smooths boundaries by fading in first samples and fading out last samples', () => {
+      // 100 samples of constant non-zero value (3000)
+      const buffer = Buffer.alloc(200);
+      for (let i = 0; i < 100; i++) {
+        buffer.writeInt16LE(3000, i * 2);
+      }
+
+      const faded = applyMicroFade(buffer, 1, 24000); // 1ms fade = 24 samples
+      // First sample should be 0
+      expect(faded.readInt16LE(0)).toBe(0);
+      // Intermediate sample should be full volume (3000)
+      expect(faded.readInt16LE(50 * 2)).toBe(3000);
+      // Last sample should be 0
+      expect(faded.readInt16LE(99 * 2)).toBe(0);
+    });
+  });
 });
+
+
 

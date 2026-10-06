@@ -5,6 +5,10 @@
  */
 import type { Page, Locator } from '@playwright/test';
 
+// Ambient types for browser-context functions executed inside page.evaluate()
+declare const document: any;
+declare const window: any;
+
 export class ComposerNotFoundError extends Error {
   constructor(message = 'Composer textarea not found in page DOM.') {
     super(message);
@@ -179,6 +183,11 @@ export async function dispatchTurn(page: Page): Promise<void> {
 export interface WaitForTurnOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
+  autoCollapseTrace?: boolean;
+  autoScrollIntervalMs?: number;
+  requireReviewer?: boolean;
+  requireSelector?: string;
+  minConsecutiveDone?: number;
 }
 
 /**
@@ -191,9 +200,53 @@ export async function waitForTurnCompletion(
 ): Promise<{ durationMs: number }> {
   const timeoutMs = options?.timeoutMs ?? 60_000;
   const pollIntervalMs = options?.pollIntervalMs ?? 200;
+  const autoCollapseTrace = options?.autoCollapseTrace ?? true;
+  const autoScrollIntervalMs = options?.autoScrollIntervalMs ?? 1000;
+  const requireReviewer = options?.requireReviewer ?? false;
+  const requireSelector = options?.requireSelector;
+  const minConsecutiveDone =
+    options?.minConsecutiveDone ?? (requireReviewer || requireSelector ? 3 : 2);
   const startTime = Date.now();
+  let lastScrollTime = 0;
+  let consecutiveDone = 0;
 
   while (true) {
+    // 0a. Auto-collapse any visible expanded trace bar
+    if (autoCollapseTrace) {
+      if (typeof (page as any).evaluate === 'function') {
+        await (page as any).evaluate(() => {
+          const expanded = document.querySelectorAll('button.trace-bar[aria-expanded="true"]');
+          expanded.forEach((btn: any) => btn?.click?.());
+        }).catch(() => {});
+      }
+      const expandedTrace = asFirst(
+        page.locator('button.trace-bar[aria-expanded="true"]'),
+      );
+      if ((await asCount(expandedTrace)) > 0) {
+        const isTraceVis =
+          typeof expandedTrace.isVisible === 'function' ? await expandedTrace.isVisible() : true;
+        if (isTraceVis && typeof expandedTrace.click === 'function') {
+          await expandedTrace.click().catch(() => {});
+        }
+      }
+    }
+
+    // 0b. Auto-scroll to the bottom periodically while waiting for answers
+    const now = Date.now();
+    if (autoScrollIntervalMs > 0 && now - lastScrollTime >= autoScrollIntervalMs) {
+      lastScrollTime = now;
+      if (typeof (page as any).evaluate === 'function') {
+        await (page as any).evaluate(() => {
+          const el = document.querySelector('.messages');
+          if (el) {
+            el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+          } else {
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+          }
+        }).catch(() => {});
+      }
+    }
+
     // 1. Check if an interactive preflight recommendation card is displayed
     const preflightCard = asFirst(
       page.locator('.preflight-card, #demo-preflight-recommendation'),
@@ -206,10 +259,8 @@ export async function waitForTurnCompletion(
       }
     }
 
-    // 2. Check if an interactive clarifying question card is displayed
-    const clarifCard = asFirst(
-      page.locator('.clarifying-question-card:not(.answered), .clarifying-question-card'),
-    );
+    // 2. Check if an interactive clarifying question card is displayed (unanswered)
+    const clarifCard = asFirst(page.locator('.clarifying-question-card:not(.answered)'));
     if ((await asCount(clarifCard)) > 0) {
       const isVis =
         typeof clarifCard.isVisible === 'function' ? await clarifCard.isVisible() : true;
@@ -218,7 +269,7 @@ export async function waitForTurnCompletion(
       }
     }
 
-    // 3. Check if turn is still running (stop button visible)
+    // 3. Check if turn is still running (stop button visible or live message present)
     const stopBtn = asFirst(
       page.locator('button.danger.composer-send, button:has-text("Stop")'),
     );
@@ -226,22 +277,60 @@ export async function waitForTurnCompletion(
     const isStopVis =
       stopCount > 0 && typeof stopBtn.isVisible === 'function' ? await stopBtn.isVisible() : false;
 
-    if (!isStopVis) {
-      // Stop button not visible; check if send button or composer textarea is ready
+    const liveMsg = asFirst(page.locator('.message.assistant.live'));
+    const liveMsgCount = await asCount(liveMsg);
+    const isLiveVis =
+      liveMsgCount > 0 && typeof liveMsg.isVisible === 'function'
+        ? await liveMsg.isVisible()
+        : liveMsgCount > 0;
+
+    const isRunning = isStopVis || isLiveVis;
+
+    if (!isRunning) {
+      // Stop button and live message not present; check if send button is mounted / visible
       const sendBtn = asFirst(
         page.locator('button.primary.composer-send, button:has-text("Send")'),
       );
       const sendCount = await asCount(sendBtn);
-      if (sendCount > 0) {
-        const isSendVis =
-          typeof sendBtn.isVisible === 'function' ? await sendBtn.isVisible() : true;
-        const isSendEnabled =
-          typeof sendBtn.isEnabled === 'function' ? await sendBtn.isEnabled() : true;
+      const isSendVis =
+        sendCount > 0 && typeof sendBtn.isVisible === 'function' ? await sendBtn.isVisible() : true;
 
-        if (isSendVis && isSendEnabled) {
-          return { durationMs: Date.now() - startTime };
+      if (isSendVis) {
+        let requirementsMet = true;
+
+        if (requireReviewer) {
+          const reviewerLoc = asFirst(
+            page.locator(
+              '.subagent-card .verdict-badge, .subagent-card .subagent-title:has-text("Reviewer"), .subagent-card:has-text("Reviewer"), .subagent-card:has-text("reviewer")',
+            ),
+          );
+          const reviewerCount = await asCount(reviewerLoc);
+          if (reviewerCount === 0) {
+            requirementsMet = false;
+          }
         }
+
+        if (requireSelector) {
+          const reqLoc = asFirst(page.locator(requireSelector));
+          const reqCount = await asCount(reqLoc);
+          if (reqCount === 0) {
+            requirementsMet = false;
+          }
+        }
+
+        if (requirementsMet) {
+          consecutiveDone++;
+          if (consecutiveDone >= minConsecutiveDone) {
+            return { durationMs: Date.now() - startTime };
+          }
+        } else {
+          consecutiveDone = 0;
+        }
+      } else {
+        consecutiveDone = 0;
       }
+    } else {
+      consecutiveDone = 0;
     }
 
     // 4. Check timeout
@@ -253,7 +342,9 @@ export async function waitForTurnCompletion(
     }
 
     if (typeof page.waitForTimeout === 'function') {
-      await page.waitForTimeout(pollIntervalMs);
+      await page
+        .waitForTimeout(pollIntervalMs)
+        .catch(() => new Promise((resolve) => setTimeout(resolve, pollIntervalMs)));
     } else {
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
