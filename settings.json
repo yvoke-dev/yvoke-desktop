@@ -13,7 +13,7 @@
     "haiku"
   ],
   "defaultModel": "sonnet",
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "low",
   "webSearch": {
     "enabled": true,
     "allowedDomains": [
@@ -26,15 +26,15 @@
   "orchestrator": {
     "orchestrator": {
       "model": "sonnet",
-      "thinkingLevel": "medium"
+      "thinkingLevel": "low"
     },
     "reviewer": {
       "model": "sonnet",
-      "thinkingLevel": "medium"
+      "thinkingLevel": "low"
     },
     "specialist": {
       "model": "sonnet",
-      "thinkingLevel": "medium"
+      "thinkingLevel": "low"
     },
     "maxReviewRounds": 2,
     "maxSpecialistCalls": 8,

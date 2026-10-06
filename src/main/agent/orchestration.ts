@@ -57,7 +57,7 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
  * the claim it is. Granting a tool the playbook says it does not have also invites the reviewer to
  * go looking when the playbook tells it that an unsettled claim is a finding to report.
  */
-const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`];
+const REVIEWER_TOOLS = ['ToolSearch', `${MCP_TOOL_PREFIX}verify_citations`];
 
 function orchestratorAdapter(roster: string, maxReviewRounds: number, maxSpecialistCalls: number): string {
   return `
@@ -69,12 +69,16 @@ You have NO \`call_specialist\` tool. To consult a specialist, call the **Task**
 \`subagent_type\` set to the specialist's name and \`prompt\` set to a fully self-contained question
 (include the version/tag and any entity names — the specialist cannot see this conversation). The Task
 result is that specialist's grounded, cited answer. You may delegate to several specialists in
-parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total.
+parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total. Instruct specialists to provide concise, structured bullet summaries with citations (under 600 words) rather than long essays, so findings return quickly.
 
-To have your composed answer validated, call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
+### Mandatory Review Gate (Strict Requirement)
+CRITICAL: DO NOT write or deliver an answer directly to the user without calling the reviewer first!
+An answer delivered without a reviewer pass will be rejected by the runtime. DO NOT output conversational prose, explanations, or candidate answers directly to the user in that turn.
+
+Once your specialists have responded, your immediate next action MUST be calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
 and a prompt containing all three of:
 1. \`## Original question\` — the user's question.
-2. \`## Candidate answer\` — your composed answer in full.
+2. \`## Candidate answer\` — your composed candidate answer in full.
 3. \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim, citation markers intact: the bare
    \`[<uuid>]\` ids specialists now write, plus \`[chunk_id=…]\`, \`[document_id=…]\` and \`[N]\` where
    one still uses the older form. The evidence is filtered down to the sources the answer cites, so
@@ -83,6 +87,7 @@ and a prompt containing all three of:
 The reviewer cannot see this conversation and validates ONLY against what you paste under (3); a review
 request without that section will be rejected for missing evidence.
 
+ONLY AFTER the reviewer has replied with \`APPROVED\` may you deliver the finalized answer to the user.
 If the reviewer replies \`REJECTED\`, the runtime hands the feedback (and the evidence) back to you for a
 revision round — up to ${maxReviewRounds}. Fix the answer and re-review; do not argue with the reviewer.
 Never add a "did not pass review" note yourself: the runtime appends one if the rounds run out.
@@ -178,7 +183,9 @@ export function reviewFlagNote(attempts: number): string {
  */
 export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your turn without having the answer reviewed, which this deployment requires.
 
-Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
+You MUST call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
+
+DO NOT output conversational prose, explanations, or answers in this turn. Your ONLY action in this turn is calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
 
 Then deliver the final answer:
 - reviewer says \`APPROVED\` → restate the answer in full;
@@ -297,6 +304,7 @@ export async function buildOrchestrator(
     : orchestratorPlaybookText;
 
   const orchestratorTools = [
+    'ToolSearch',
     DELEGATE_ALLOW_TOKEN,
     `${MCP_TOOL_PREFIX}ask_clarifying_question`,
     `${MCP_TOOL_PREFIX}verify_citations`,

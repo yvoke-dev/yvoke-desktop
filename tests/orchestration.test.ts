@@ -311,7 +311,8 @@ describe('buildOrchestrator tool grants', () => {
     // the whole section around a passage, so the reviewer would judge claims against neighbouring
     // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
-    expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
+    expect(reviewerOf(built.agents)).toContain(qualifyTool('verify_citations'));
+    expect(reviewerOf(built.agents)).not.toContain(qualifyTool('get_section'));
   });
 
   it('keeps the orchestrator out of the corpus — it composes, it does not retrieve', async () => {
@@ -320,6 +321,12 @@ describe('buildOrchestrator tool grants', () => {
     for (const denied of ['search_corpus', 'get_section', 'get_toc', 'list_documents']) {
       expect(tools).not.toContain(qualifyTool(denied));
     }
+  });
+
+  it('grants ToolSearch to both orchestrator and reviewer for MCP tool discovery', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain('ToolSearch');
+    expect(reviewerOf(built.agents)).toContain('ToolSearch');
   });
 
   it('carries every agent grant into the session allow-list', async () => {
@@ -334,3 +341,4 @@ describe('buildOrchestrator tool grants', () => {
     }
   });
 });
+
