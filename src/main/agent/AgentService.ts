@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -300,7 +300,7 @@ export class AgentService {
     // thread-level model/thinking selectors (and per-message thinking override) do not apply.
     if (!thread.orchestratorProfile) {
       if (session.model !== thread.model) {
-        await session.query.setModel(thread.model);
+        await session.query.setModel(resolveCanonicalModel(thread.model));
         session.model = thread.model;
       }
       const effectiveThinking = opts.thinkingOverride ?? thread.thinkingLevel;
@@ -424,7 +424,7 @@ export class AgentService {
       cwd: sandboxDir,
       env: debugEnv(),
       pathToClaudeCodeExecutable: binary ?? undefined,
-      ...(model ? { model } : {}),
+      ...(model ? { model: resolveCanonicalModel(model) } : {}),
     };
 
     let q: Query | undefined;
@@ -689,7 +689,7 @@ export class AgentService {
         playbookCodeExecution, Boolean(orchestrator)),
       settingSources: [],
       includePartialMessages: true,
-      model: effectiveModel,
+      model: resolveCanonicalModel(effectiveModel),
       maxThinkingTokens: thinkingBudget(effectiveThinking),
       maxTurns: orchestrator && orchCfg ? orchCfg.orchestratorMaxTurns : settings.maxTurns,
       cwd: this.deps.sandboxDir,

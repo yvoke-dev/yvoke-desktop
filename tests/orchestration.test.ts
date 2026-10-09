@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newTurnContext, parseVerdict, translateMessage } from '../src/main/agent/translate';
-import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
+import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile } from '../src/shared/types';
 import type { McpPrompts } from '../src/main/agent/McpPrompts';
@@ -332,5 +332,21 @@ describe('buildOrchestrator tool grants', () => {
         expect(built.allowedTools).toContain(tool);
       }
     }
+  });
+
+  it('resolves model aliases to canonical 5.5 wire IDs for orchestrator root, specialists, and reviewer', async () => {
+    const aliasSettings = {
+      ...settings,
+      orchestrator: {
+        ...settings.orchestrator,
+        orchestrator: { model: 'sonnet', thinkingLevel: 'low' },
+        specialist: { model: 'sonnet', thinkingLevel: 'low' },
+        reviewer: { model: 'opus', thinkingLevel: 'low' },
+      },
+    } as unknown as AppSettings;
+    const built = await buildOrchestrator(profile, aliasSettings, fakePrompts, 'BASE');
+    expect(built.agents[ORCHESTRATOR_AGENT].model).toBe('claude-sonnet-5-5');
+    expect(built.agents['oim-access-governance'].model).toBe('claude-sonnet-5-5');
+    expect(built.agents[REVIEWER_SUBAGENT].model).toBe('claude-opus-5-5');
   });
 });

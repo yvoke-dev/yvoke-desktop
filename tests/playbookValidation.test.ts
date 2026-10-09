@@ -1,9 +1,38 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildValidatorSystemPrompt,
   parseValidation,
 } from '../src/main/agent/playbookValidation';
+import { validatePlaybookSelection } from '../src/main/agent/PlaybookValidator';
 import type { McpPromptInfo } from '../src/shared/types';
+
+const sdkMock = vi.hoisted(() => ({
+  queryCalls: [] as { prompt: unknown; options: any }[],
+}));
+
+vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@anthropic-ai/claude-agent-sdk')>();
+  return {
+    ...actual,
+    query: (params: { prompt: unknown; options: any }) => {
+      sdkMock.queryCalls.push(params);
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield {
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            result: JSON.stringify({ plausible: true }),
+          };
+        },
+        close: () => {},
+      };
+    },
+  };
+});
 
 function playbook(name: string, title = name, description = ''): McpPromptInfo {
   return { name, title, description, arguments: [] };
@@ -118,3 +147,26 @@ describe('parseValidation', () => {
     expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
   });
 });
+
+describe('validatePlaybookSelection', () => {
+  it('resolves model to canonical wire ID in query options', async () => {
+    sdkMock.queryCalls.length = 0;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'playbook-val-'));
+    try {
+      const result = await validatePlaybookSelection({
+        question: 'How do I get started?',
+        selected: PLAYBOOKS[0],
+        playbooks: PLAYBOOKS,
+        model: 'sonnet',
+        sandboxDir: tmpDir,
+      });
+
+      expect(result).toEqual({ plausible: true });
+      expect(sdkMock.queryCalls).toHaveLength(1);
+      expect(sdkMock.queryCalls[0].options.model).toBe('claude-sonnet-5-5');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+

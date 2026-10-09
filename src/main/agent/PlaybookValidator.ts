@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { AbortError, query, type CanUseTool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import type { McpPromptInfo, PlaybookValidation } from '../../shared/types';
+import { resolveCanonicalModel } from '../../shared/types';
 import { log, logError } from '../log';
 import { claudeBinaryPath, debugEnv } from './AgentService';
 import { readSingleReply } from './singleTurn';
@@ -82,7 +83,7 @@ export async function validatePlaybookSelection(
     maxTurns: 1,
     // The SDK has no timeout option; this controller is the only lever.
     abortController,
-    model: opts.model,
+    model: opts.model ? resolveCanonicalModel(opts.model) : undefined,
     cwd: opts.sandboxDir,
     env: debugEnv(),
     ...(binary ? { pathToClaudeCodeExecutable: binary } : {}),

@@ -10,7 +10,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | Pane | What it sets |
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
-| **Models** | Which models the composer offers, which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
+| **Models** | Which models the composer offers (rendered with friendly generation labels such as *Sonnet 5.5*), which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
 | **Agents** | Whether a playbook-carrying message is preflighted; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
@@ -26,6 +26,7 @@ configuration: whatever ships as the build's defaults, the user can change.
   text size.
 - **Model and thinking changes apply to new turns and new conversations.** Existing conversations keep
   the choice they were given, changeable in the composer.
+- **Model options display friendly generation labels.** The model list chips, the default model selector, and multi-agent role selectors render friendly labels (*Sonnet 5.5*, *Opus 5.5*, *Haiku 5.5*) while persisting clean shorthand identifiers to disk and resolving them to canonical wire IDs when speaking to the Claude CLI.
 - **Removing a model re-points the default** rather than leaving it pointing at something that is gone.
 - **Web search ships off with an empty domain list.** Which domains are worth searching belongs to
   whichever knowledge base is loaded, so it is a per-deployment decision rather than a product one —

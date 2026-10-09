@@ -789,3 +789,64 @@ export function normalizeClarifyingInput(input: unknown): {
 // currently returns `title` equal to `name` for all 31 playbooks, so there is nothing better to
 // show. Giving playbooks a real `title` in their server-side metadata — alongside `tools` and
 // `codeExecution` — is what would actually fix that, for every knowledge base at once.
+
+/**
+ * Canonical model IDs for SDK and Anthropic CLI execution.
+ * Maps shorthand aliases to their exact 5.5 version IDs.
+ */
+export const CANONICAL_MODELS: Record<string, string> = {
+  haiku: 'claude-haiku-5-5',
+  'claude-haiku': 'claude-haiku-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  'claude-sonnet': 'claude-sonnet-5-5',
+  opus: 'claude-opus-5-5',
+  'claude-opus': 'claude-opus-5-5',
+};
+
+/**
+ * Resolves a model name or alias to its explicit canonical wire ID for the SDK.
+ */
+export function resolveCanonicalModel(modelOrAlias?: string): string {
+  if (!modelOrAlias) return '';
+  const key = modelOrAlias.toLowerCase().trim();
+  if (Object.hasOwn(CANONICAL_MODELS, key)) {
+    return CANONICAL_MODELS[key];
+  }
+  return modelOrAlias;
+}
+
+/**
+ * Friendly display names for UI model pickers and badges.
+ */
+export const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  haiku: 'Haiku 5.5',
+  'claude-haiku': 'Haiku 5.5',
+  'claude-haiku-5-5': 'Haiku 5.5',
+  sonnet: 'Sonnet 5.5',
+  'claude-sonnet': 'Sonnet 5.5',
+  'claude-sonnet-5-5': 'Sonnet 5.5',
+  opus: 'Opus 5.5',
+  'claude-opus': 'Opus 5.5',
+  'claude-opus-5-5': 'Opus 5.5',
+  'claude-haiku-4-5-20251001': 'Haiku 4.5',
+  'claude-sonnet-5': 'Sonnet 5',
+  'claude-opus-5': 'Opus 5',
+  'claude-fable-5-1': 'Fable 5.1',
+  'claude-fable-5': 'Fable 5',
+  'claude-opus-4-8': 'Opus 4.8',
+  'claude-opus-4-7': 'Opus 4.7',
+  'claude-opus-4-6': 'Opus 4.6',
+  'claude-sonnet-4-6': 'Sonnet 4.6',
+};
+
+/**
+ * Formats a model alias or ID into a clean display label for UI dropdowns and badges.
+ */
+export function formatModelDisplayName(modelOrAlias: string): string {
+  if (!modelOrAlias) return '';
+  const key = modelOrAlias.toLowerCase().trim();
+  if (Object.hasOwn(MODEL_DISPLAY_NAMES, key)) {
+    return MODEL_DISPLAY_NAMES[key];
+  }
+  return modelOrAlias;
+}

@@ -7,7 +7,7 @@ import {
   type Query,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { normalizeImageDescription, type ImageAttachment } from '../../shared/types';
+import { normalizeImageDescription, resolveCanonicalModel, type ImageAttachment } from '../../shared/types';
 import { log, logError } from '../log';
 import { claudeBinaryPath, debugEnv } from './AgentService';
 import { readSingleReply } from './singleTurn';
@@ -102,7 +102,7 @@ export async function describeImage(
     abortController,
     // Deliberately not the conversation's model: this is a caption, not the answer, and it runs
     // once per attachment per turn.
-    model: options.model ?? 'haiku',
+    model: resolveCanonicalModel(options.model ?? 'haiku'),
     cwd: options.sandboxDir,
     env: debugEnv(),
     ...(binary ? { pathToClaudeCodeExecutable: binary } : {}),

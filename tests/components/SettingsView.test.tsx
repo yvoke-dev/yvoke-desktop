@@ -117,6 +117,20 @@ describe('SettingsView', () => {
     );
   });
 
+  it('renders friendly versioned display names for models in Default model selector and role cards', async () => {
+    render(
+      <SettingsView
+        settings={{ ...settings, models: ['sonnet', 'opus', 'haiku'], defaultModel: 'sonnet' }}
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    openPane('Models');
+    expect(screen.getByRole('button', { name: 'Sonnet 5.5' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Opus 5.5' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Haiku 5.5' })).toBeTruthy();
+  });
+
   it('renders the orchestrator form from defaults when settings.json omits the block', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const { orchestrator: _omitted, ...withoutOrchestrator } = settings;
@@ -163,7 +177,7 @@ describe('SettingsView', () => {
     );
     openPane('Agents');
     const group = screen.getByRole('group', { name: 'Reviewer model' });
-    fireEvent.click(within(group).getByRole('button', { name: 'sonnet' }));
+    fireEvent.click(within(group).getByRole('button', { name: 'Sonnet 5.5' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith(

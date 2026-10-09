@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../../shared/types';
+import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS, formatModelDisplayName } from '../../../shared/types';
 import type {
   AppearanceSettings,
   AppSettings,
@@ -105,7 +105,7 @@ function RoleCard(props: {
         <Seg
           label={`${props.label} model`}
           value={props.value.model}
-          options={models.map((m) => ({ value: m, label: m }))}
+          options={models.map((m) => ({ value: m, label: formatModelDisplayName(m) }))}
           onChange={(model) => props.onChange({ ...props.value, model })}
         />
       </div>
@@ -199,7 +199,7 @@ function ModelChips(props: {
     <div className="chip-list">
       {props.models.map((m) => (
         <span key={m} className={`model-chip ${m === props.defaultModel ? 'is-default' : ''}`}>
-          {m}
+          {formatModelDisplayName(m)}
           <button
             type="button"
             className="chip-remove"
@@ -512,7 +512,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                     label="Default model"
                     wide
                     value={draft.defaultModel}
-                    options={draft.models.map((m) => ({ value: m, label: m }))}
+                    options={draft.models.map((m) => ({ value: m, label: formatModelDisplayName(m) }))}
                     onChange={(defaultModel) => setDraft({ ...draft, defaultModel })}
                   />
                 ) : (

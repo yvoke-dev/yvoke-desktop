@@ -27,7 +27,7 @@
     "dist:win": "npm run fetch:claude -- win-x64 && electron-vite build && electron-builder --win"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.170",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.295",
     "@azure/msal-node": "^5.2.3",
     "@fontsource/archivo": "^5.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
