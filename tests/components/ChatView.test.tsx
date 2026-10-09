@@ -1327,6 +1327,20 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
       pending.settle({ plausible: true });
     });
 
+    it('renders model options with friendly display names (Sonnet 5.5, Opus 5.5, Haiku 5.5)', () => {
+      const { container } = renderChat({
+        settings: settings({ models: ['sonnet', 'opus', 'haiku'] }),
+      });
+      const modelSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Model"]');
+      expect(modelSelect).not.toBeNull();
+      const options = Array.from(modelSelect!.querySelectorAll('option'));
+      expect(options.map((o) => ({ value: o.value, text: o.text }))).toEqual([
+        { value: 'sonnet', text: 'Sonnet 5.5' },
+        { value: 'opus', text: 'Opus 5.5' },
+        { value: 'haiku', text: 'Haiku 5.5' },
+      ]);
+    });
+
     it('Test 1.3: Declarative guard retention - (!!preflight && !orchestratorActive) prevents mounting recommendation card or empty .chat-notices container when props change without event', async () => {
       validatePlaybook.mockResolvedValueOnce({
         plausible: false,

@@ -1,6 +1,6 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
-import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool } from '../../shared/types';
+import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel } from '../../shared/types';
 import { COMPUTE_TOOLS } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
@@ -314,7 +314,7 @@ export async function buildOrchestrator(
     // with a tool it had not been given, leaving a fabricated id to cost a whole review round.
     tools: orchestratorTools,
     background: BACKGROUND_DELEGATION,
-    model: cfg.orchestrator.model,
+    model: resolveCanonicalModel(cfg.orchestrator.model),
     effort: effortFor(cfg.orchestrator.thinkingLevel),
     maxTurns: cfg.orchestratorMaxTurns,
   };
@@ -336,7 +336,7 @@ export async function buildOrchestrator(
       prompt: specialistPrompt,
       tools,
       background: BACKGROUND_DELEGATION,
-      model: cfg.specialist.model,
+      model: resolveCanonicalModel(cfg.specialist.model),
       effort: effortFor(cfg.specialist.thinkingLevel),
       maxTurns: cfg.specialistMaxTurns,
     };
@@ -347,7 +347,7 @@ export async function buildOrchestrator(
     prompt: (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
     tools: REVIEWER_TOOLS,
     background: BACKGROUND_DELEGATION,
-    model: cfg.reviewer.model,
+    model: resolveCanonicalModel(cfg.reviewer.model),
     effort: effortFor(cfg.reviewer.thinkingLevel),
     maxTurns: cfg.specialistMaxTurns,
   };

@@ -1,4 +1,4 @@
-import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, ClarificationOption } from '../../shared/types';
 import {
   builtinTool,
@@ -359,14 +359,20 @@ export function isToolAllowed(
  * This only holds while the web tools stay off the SDK's auto-approval list — see
  * `buildAutoApproveTools`. Pre-approve them and none of the below runs.
  */
+export type CanUseToolFn = (
+  toolName: string,
+  input: Record<string, unknown>,
+  options: Parameters<CanUseTool>[2],
+) => Promise<PermissionResult>;
+
 export function buildCanUseTool(
   getSettings: () => AppSettings,
   threadId?: string,
   onClarifyingQuestion?: (toolUseId: string, question: string, options: ClarificationOption[]) => Promise<string>,
   allowedTools?: string[],
   codeExecution?: boolean,
-  delegation?: boolean
-): CanUseTool {
+  delegation?: boolean,
+): CanUseToolFn {
   /**
    * Every `allow` carries `updatedInput`, even where nothing is rewritten.
    *

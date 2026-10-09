@@ -31,6 +31,7 @@ const h = vi.hoisted(() => ({
     closed: boolean;
     closeSpy: ReturnType<typeof vi.fn>;
     setMcpServersSpy: ReturnType<typeof vi.fn>;
+    setModelSpy: ReturnType<typeof vi.fn>;
   }[],
   nextQueryError: null as Error | null,
   nextQueryResult: null as Record<string, unknown> | null,
@@ -62,12 +63,14 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
       }
       return { added: [], removed: [], errors: {} };
     });
+    const setModelSpy = vi.fn(async () => undefined);
     const session = {
       options,
       pushed: [] as string[],
       closed: false,
       closeSpy,
       setMcpServersSpy,
+      setModelSpy,
     };
     h.sessions.push(session);
     const id = h.sessions.length;
@@ -122,7 +125,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
                 });
         },
       }),
-      setModel: async () => undefined,
+      setModel: setModelSpy,
       setMaxThinkingTokens: async () => undefined,
       interrupt: async () => undefined,
       close: closeSpy,
@@ -174,7 +177,7 @@ function settings(): AppSettings {
   } as AppSettings;
 }
 
-function thread(): ThreadMeta {
+function thread(overrides: Partial<ThreadMeta> = {}): ThreadMeta {
   return {
     id: 'thread-1',
     title: 'T',
@@ -184,6 +187,7 @@ function thread(): ThreadMeta {
     updatedAt: '',
     totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     syncState: 'synced',
+    ...overrides,
   };
 }
 
@@ -1131,3 +1135,19 @@ describe('completeTurn error handling with isResultFailure', () => {
   });
 });
 
+describe('canonical model mapping', () => {
+  it('maps model aliases to canonical 5.5 wire IDs when spawning session and switching models', async () => {
+    const meta = thread({ model: 'sonnet' });
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First turn', 'oim-schema');
+    expect(h.sessions[0].options.model).toBe('claude-sonnet-5-5');
+
+    // Switch model to opus alias
+    meta.model = 'opus';
+    await ask(svc, meta, 'Second turn', 'oim-schema');
+    expect(h.sessions[0].setModelSpy).toHaveBeenCalledWith('claude-opus-5-5');
+
+    svc.closeAll();
+  });
+});

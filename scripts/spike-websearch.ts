@@ -42,11 +42,11 @@ function settingsWith(enabled: boolean, allowedDomains: string[]): AppSettings {
 function tracing(inner: CanUseTool, seen: string[]): CanUseTool {
   return async (toolName, input, options) => {
     const result = await inner(toolName, input, options);
-    if (result.behavior === 'allow') {
+    if (result && result.behavior === 'allow') {
       const injected = (result as { updatedInput?: Record<string, unknown> }).updatedInput?.allowed_domains;
       seen.push(`ALLOW ${toolName}${injected ? ` allowed_domains=${JSON.stringify(injected)}` : ''}`);
     } else {
-      seen.push(`DENY  ${toolName} — ${(result as { message?: string }).message ?? ''}`);
+      seen.push(`DENY  ${toolName} — ${(result as { message?: string } | null)?.message ?? ''}`);
     }
     return result;
   };

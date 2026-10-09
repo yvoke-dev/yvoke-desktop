@@ -19,7 +19,7 @@ const withSearch: AppSettings = {
   webSearch: { enabled: true, allowedDomains: ['docs.oneidentity.com', 'learn.microsoft.com'] },
 };
 
-const callOptions = { signal: new AbortController().signal, toolUseID: 't1' };
+const callOptions = { signal: new AbortController().signal, toolUseID: 't1', requestId: 'req-1' };
 
 /**
  * Playbooks live server-side and were authored while the MCP alias was `oim`, so many still declare
@@ -550,7 +550,7 @@ describe('tool confinement (Correctness Property 1)', () => {
       expect(result.behavior, `${tool} should be allowed`).toBe('allow');
       // A record, not merely present: the schema rejects null/undefined on this branch.
       expect(
-        result.behavior === 'allow' && typeof result.updatedInput === 'object' && result.updatedInput !== null,
+        result.behavior === 'allow' && 'updatedInput' in result && typeof result.updatedInput === 'object' && result.updatedInput !== null,
         `${tool} allow is missing updatedInput and would fail the SDK's schema`,
       ).toBe(true);
     }
@@ -752,5 +752,11 @@ describe('canUseTool — WebFetch on a bot-challenged host', () => {
       (result as unknown as { updatedInput: { allowed_domains: string[] } }).updatedInput
         .allowed_domains,
     ).toEqual(['support.oneidentity.com', 'www.oneidentity.com']);
+  });
+
+  it('denies unknown/unregistered tools safely without throwing', async () => {
+    const result = await canUse('UnknownCustomTool', {}, callOptions);
+    expect(result.behavior).toBe('deny');
+    expect((result as { message: string }).message).toContain('UnknownCustomTool');
   });
 });

@@ -124,7 +124,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
           thinking: { type: 'disabled' },
           effort: 'low',
           maxTurns: 1,
-          model: 'sonnet',
+          model: 'claude-sonnet-5-5',
         }),
       }),
     );

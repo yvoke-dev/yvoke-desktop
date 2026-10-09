@@ -627,7 +627,7 @@ describe('Image Attachments & Vision Support', () => {
       expect(sdkMock.queryCalls).toHaveLength(1);
 
       const call = sdkMock.queryCalls[0];
-      expect(call.options.model).toBe('haiku');
+      expect(call.options.model).toBe('claude-haiku-5-5');
       expect(call.options.systemPrompt).toBe(IMAGE_DESCRIPTOR_SYSTEM_PROMPT);
       expect(call.options.tools).toEqual([]);
       expect(call.options.disallowedTools).toEqual(['Bash']);

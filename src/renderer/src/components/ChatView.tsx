@@ -19,6 +19,7 @@ import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   clarificationState,
   DEFAULT_APPEARANCE,
+  formatModelDisplayName,
   isClarificationTool,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
@@ -1158,7 +1159,7 @@ export function ChatView(props: {
                   >
                     {settings.models.map((m) => (
                       <option key={m} value={m}>
-                        {m}
+                        {formatModelDisplayName(m)}
                       </option>
                     ))}
                   </select>
