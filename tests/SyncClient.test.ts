@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SyncClient } from '../src/main/sync/SyncClient';
+import type { ValidSystemPromptName } from '../src/shared/types';
 
 /**
  * The PATCH body is the one place a settings change can destroy something the user cares about:
@@ -278,7 +279,10 @@ describe('SyncClient.getSystemPrompt', () => {
       }) as unknown as typeof fetch,
     });
 
-    const res = await client.getSystemPrompt('../../evil?test=1#frag');
+    // @ts-expect-error Raw unvalidated strings must not compile as ValidSystemPromptName argument
+    void client.getSystemPrompt('../../evil?test=1#frag');
+
+    const res = await client.getSystemPrompt('../../evil?test=1#frag' as unknown as ValidSystemPromptName);
     expect(res).toBe('PROMPT BODY');
     expect(requestedUrl).toBe('https://server.example/api/chat/v1/prompts/system/..%2F..%2Fevil%3Ftest%3D1%23frag');
   });

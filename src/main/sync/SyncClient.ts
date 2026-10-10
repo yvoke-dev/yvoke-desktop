@@ -173,7 +173,7 @@ export class SyncClient {
     return this.request('PUT', `/messages/${messageId}/feedback`, { rating, comment: comment ?? null });
   }
 
-  getSystemPrompt(name: ValidSystemPromptName | string): Promise<string> {
+  getSystemPrompt(name: ValidSystemPromptName): Promise<string> {
     return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${encodeURIComponent(name)}`)
       .then((res) => res.systemPrompt);
   }
