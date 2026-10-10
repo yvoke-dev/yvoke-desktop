@@ -401,6 +401,8 @@ export interface McpPromptInfo {
   prototype?: boolean;
   /** Which agent role the playbook is written for; undefined when the server does not say. */
   targetAgent?: PlaybookRole | string;
+  /** Optional base instruction / system prompt designated for this playbook. */
+  systemPrompt?: string;
 }
 
 /** The playbooks a profile drives itself, which a user therefore never picks by hand. */

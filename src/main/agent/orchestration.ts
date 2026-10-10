@@ -260,6 +260,7 @@ export async function buildOrchestrator(
   settings: AppSettings,
   mcpPrompts: McpPrompts,
   baseSystemPrompt: string,
+  loadSystemPrompt?: (name: string) => Promise<string>,
 ): Promise<ResolvedOrchestrator> {
   const cfg = settings.orchestrator;
   if (!cfg) {
@@ -268,6 +269,19 @@ export async function buildOrchestrator(
 
   const metadata = await mcpPrompts.list();
   const byName = new Map(metadata.map((p) => [p.name, p]));
+
+  const resolveBasePrompt = async (name: string): Promise<string> => {
+    const designated = byName.get(name)?.systemPrompt;
+    if (designated && loadSystemPrompt) {
+      try {
+        const loaded = await loadSystemPrompt(designated);
+        if (loaded && loaded.trim().length > 0) return loaded;
+      } catch {
+        // Fall back to baseSystemPrompt
+      }
+    }
+    return baseSystemPrompt;
+  };
 
   // Fetch every playbook's text in parallel.
   const names = [profile.orchestratorPlaybook, profile.reviewerPlaybook, ...profile.specialistPlaybooks];
@@ -291,9 +305,10 @@ export async function buildOrchestrator(
   // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
   // It previously got the control playbook alone — the one agent that never saw the contract it was
   // expected to honour. Playbook last, so its role-specific rules win on any conflict.
+  const orchestratorBase = await resolveBasePrompt(profile.orchestratorPlaybook);
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
-  const orchestratorPrompt = baseSystemPrompt
-    ? `${baseSystemPrompt}\n\n---\n\n${orchestratorPlaybookText}`
+  const orchestratorPrompt = orchestratorBase
+    ? `${orchestratorBase}\n\n---\n\n${orchestratorPlaybookText}`
     : orchestratorPlaybookText;
 
   const orchestratorTools = [
@@ -327,9 +342,10 @@ export async function buildOrchestrator(
     // Specialist system prompt = the server's base default-chat prompt (grounding + citation
     // contract) with the playbook layered on top — mirrors the web, where a specialist runs with
     // systemPromptOverride=null (base prompt) and the playbook prepended to the query.
+    const specialistBase = await resolveBasePrompt(name);
     const playbookText = textByName.get(name) ?? '';
-    const specialistPrompt = baseSystemPrompt
-      ? `${baseSystemPrompt}\n\n---\n\n${playbookText}`
+    const specialistPrompt = specialistBase
+      ? `${specialistBase}\n\n---\n\n${playbookText}`
       : playbookText;
     agents[name] = {
       description: info?.description || info?.title || name,
@@ -342,9 +358,22 @@ export async function buildOrchestrator(
     };
   }
 
+  const reviewerDesignated = byName.get(profile.reviewerPlaybook)?.systemPrompt;
+  let reviewerBase = '';
+  if (reviewerDesignated && loadSystemPrompt) {
+    try {
+      const loaded = await loadSystemPrompt(reviewerDesignated);
+      if (loaded && loaded.trim().length > 0) {
+        reviewerBase = `${loaded}\n\n---\n\n`;
+      }
+    } catch {
+      // Ignored
+    }
+  }
+
   agents[REVIEWER_SUBAGENT] = {
     description: 'Validates the composed answer against the gathered evidence. Never searches anew.',
-    prompt: (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
+    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
     tools: REVIEWER_TOOLS,
     background: BACKGROUND_DELEGATION,
     model: resolveCanonicalModel(cfg.reviewer.model),

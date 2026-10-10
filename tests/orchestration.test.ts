@@ -349,4 +349,41 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents['oim-access-governance'].model).toBe('claude-sonnet-5-5');
     expect(built.agents[REVIEWER_SUBAGENT].model).toBe('claude-opus-5-5');
   });
+
+  it('layers designated custom system prompts onto orchestrator, specialist, and reviewer', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'custom-orch-prompt' },
+        { name: 'oim-access-governance', systemPrompt: 'custom-spec-prompt' },
+        { name: 'oim-orchestrator-reviewer', systemPrompt: 'custom-rev-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const loadPrompt = async (name: string) => `CUSTOM_SYS(${name})`;
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
+    expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('CUSTOM_SYS(custom-orch-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator)');
+    expect(built.agents['oim-access-governance'].prompt).toBe('CUSTOM_SYS(custom-spec-prompt)\n\n---\n\nPLAYBOOK(oim-access-governance)');
+    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('CUSTOM_SYS(custom-rev-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator-reviewer)');
+  });
+
+  it('falls back to baseSystemPrompt when designated system prompt cannot be resolved', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'broken-orch-prompt' },
+        { name: 'oim-access-governance', systemPrompt: 'broken-spec-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const loadPrompt = async (_name: string) => {
+      throw new Error('404 Not Found');
+    };
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
+    expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('BASE\n\n---\n\nPLAYBOOK(oim-orchestrator)');
+    expect(built.agents['oim-access-governance'].prompt).toBe('BASE\n\n---\n\nPLAYBOOK(oim-access-governance)');
+  });
 });
+

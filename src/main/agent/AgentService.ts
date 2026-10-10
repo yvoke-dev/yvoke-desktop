@@ -84,11 +84,17 @@ export function claudeBinaryPath(): string | null {
  */
 export async function loadRequiredSystemPrompt(
   syncClient: Pick<SyncClient, 'getSystemPrompt'>,
+  promptName?: string,
 ): Promise<string> {
+  const targetName = promptName && promptName.trim().length > 0 ? promptName.trim() : BASE_SYSTEM_PROMPT_NAME;
   let prompt: string;
   try {
-    prompt = await syncClient.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
+    prompt = await syncClient.getSystemPrompt(targetName);
   } catch (err) {
+    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
+      log('agent', `Custom system prompt "${targetName}" could not be loaded, falling back to "${BASE_SYSTEM_PROMPT_NAME}": ${err instanceof Error ? err.message : String(err)}`);
+      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
+    }
     const msg = err instanceof Error ? err.message : String(err);
     if (hasErrorSourcePrefix(msg, 'Entra')) {
       throw err;
@@ -103,6 +109,10 @@ export async function loadRequiredSystemPrompt(
   }
 
   if (!prompt || !prompt.trim()) {
+    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
+      log('agent', `Custom system prompt "${targetName}" came back empty, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
+      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
+    }
     // A 200 with an empty body is a failure too, not an empty-but-valid prompt.
     throw new Error(
       tagAttributedError(
@@ -111,7 +121,7 @@ export async function loadRequiredSystemPrompt(
       ),
     );
   }
-  log('agent', `Loaded system prompt "${BASE_SYSTEM_PROMPT_NAME}" from remote server`);
+  log('agent', `Loaded system prompt "${targetName}" from remote server`);
   return prompt;
 }
 
@@ -583,11 +593,10 @@ export class AgentService {
     const settings = this.deps.getSettings();
     fs.mkdirSync(this.deps.sandboxDir, { recursive: true });
 
-    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient);
-
     let playbookTools: string[] | undefined;
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
+    let playbookSystemPrompt: string | undefined;
     if (playbookName) {
       try {
         const prompts = await this.deps.mcpPrompts.list();
@@ -595,12 +604,15 @@ export class AgentService {
         if (p) {
           playbookTools = p.tools;
           playbookCodeExecution = p.codeExecution;
-          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false}`);
+          playbookSystemPrompt = p.systemPrompt;
+          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
         }
       } catch (err) {
         logError('agent', `Failed to load playbook metadata for "${playbookName}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
+    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, playbookSystemPrompt);
 
     const queue = new MessageQueue();
     const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {
@@ -632,7 +644,13 @@ export class AgentService {
           `Orchestrator profile "${thread.orchestratorProfile}" is unavailable (is the server reachable?).`,
         );
       }
-      orchestrator = await buildOrchestrator(profile, settings, this.deps.mcpPrompts, systemPrompt);
+      orchestrator = await buildOrchestrator(
+        profile,
+        settings,
+        this.deps.mcpPrompts,
+        systemPrompt,
+        (name) => loadRequiredSystemPrompt(this.deps.syncClient, name),
+      );
       const oc = settings.orchestrator;
       log(
         'orch',

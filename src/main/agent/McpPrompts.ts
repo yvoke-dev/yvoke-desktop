@@ -63,6 +63,12 @@ export interface RawPrompt {
  */
 export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
   const meta = (raw._meta ?? raw.meta ?? {}) as Record<string, unknown>;
+  const rawSystemPrompt = typeof meta.systemPrompt === 'string'
+    ? meta.systemPrompt
+    : typeof meta.system_prompt === 'string'
+      ? meta.system_prompt
+      : undefined;
+  const systemPrompt = rawSystemPrompt && rawSystemPrompt.trim().length > 0 ? rawSystemPrompt.trim() : undefined;
   return {
     name: raw.name,
     title: raw.title ?? raw.name,
@@ -76,6 +82,7 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     codeExecution: typeof meta.codeExecution === 'boolean' ? meta.codeExecution : undefined,
     prototype: typeof meta.prototype === 'boolean' ? meta.prototype : undefined,
     targetAgent: typeof meta.targetAgent === 'string' ? meta.targetAgent : undefined,
+    systemPrompt,
   };
 }
 

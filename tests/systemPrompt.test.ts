@@ -57,5 +57,37 @@ describe('loadRequiredSystemPrompt', () => {
     });
     await expect(loadRequiredSystemPrompt(c)).rejects.toBe(entraError);
   });
+
+  it('loads a custom designated prompt when requested', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (name: string) => `Prompt for ${name}`),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).resolves.toBe('Prompt for custom-prompt');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+  });
+
+  it('falls back to BASE_SYSTEM_PROMPT_NAME when custom prompt throws', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (name: string) => {
+        if (name === 'custom-prompt') throw new Error('Not found: 404');
+        return 'Base Prompt';
+      }),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).resolves.toBe('Base Prompt');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+  });
+
+  it('falls back to BASE_SYSTEM_PROMPT_NAME when custom prompt returns empty', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (name: string) => {
+        if (name === 'custom-prompt') return '   ';
+        return 'Base Prompt';
+      }),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).resolves.toBe('Base Prompt');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+  });
 });
 

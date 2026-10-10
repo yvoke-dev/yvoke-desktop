@@ -50,6 +50,11 @@ server.
 - **A playbook can withhold computation.** A playbook that declares no code execution loses the compute
   tools, checked in two independent places. A playbook that declares nothing at all keeps them: the
   grant is opt-out, not opt-in.
+- **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
+  the app loads that prompt from the server on session creation instead of the default chat base instructions.
+  If the designated prompt cannot be loaded or is empty, it falls back seamlessly to the default chat base instructions.
+  In multi-agent orchestration, designated system prompts are also layered onto orchestrator, specialist, and reviewer
+  agents according to each playbook's configuration.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.
