@@ -417,6 +417,8 @@ export function isValidSystemPromptName(name: unknown): name is string {
   const trimmed = name.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_SYSTEM_PROMPT_NAME_LENGTH) return false;
   if (
+    trimmed.startsWith('.') ||
+    trimmed.endsWith('.') ||
     trimmed.includes('..') ||
     trimmed.includes('/') ||
     trimmed.includes('\\') ||

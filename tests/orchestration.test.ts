@@ -406,7 +406,7 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
   });
 
-  it('fetches designated prompts concurrently and works with memoized loader across duplicate prompt designations', async () => {
+  it('deduplicates requests across roles when using a memoized loader', async () => {
     const customPrompts = {
       list: async () => [
         { name: 'oim-orchestrator', systemPrompt: 'shared-prompt' },
@@ -434,6 +434,42 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('LOADED(shared-prompt)');
     expect(built.agents['oim-access-governance'].prompt).toContain('LOADED(shared-prompt)');
     expect(fetchCounts['shared-prompt']).toBe(1);
+  });
+
+  it('loads specialist designated system prompts concurrently', async () => {
+    const multiSpecProfile = {
+      ...profile,
+      specialistPlaybooks: ['oim-access-governance', 'oim-developer-api'],
+    } as unknown as OrchestratorProfile;
+
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-access-governance', systemPrompt: 'spec-prompt-1' },
+        { name: 'oim-developer-api', systemPrompt: 'spec-prompt-2' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    let inFlight = 0;
+    let maxOverlap = 0;
+    const barrierLoader = async (name: string) => {
+      inFlight++;
+      maxOverlap = Math.max(maxOverlap, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      inFlight--;
+      return `PROMPT(${name})`;
+    };
+
+    const built = await buildOrchestrator(
+      multiSpecProfile,
+      settings,
+      customPrompts,
+      'BASE',
+      barrierLoader,
+    );
+    expect(built.agents['oim-access-governance'].prompt).toContain('PROMPT(spec-prompt-1)');
+    expect(built.agents['oim-developer-api'].prompt).toContain('PROMPT(spec-prompt-2)');
+    expect(maxOverlap).toBeGreaterThanOrEqual(2);
   });
 });
 

@@ -195,7 +195,10 @@ let sandboxDir: string;
 let events: AgentEvent[];
 
 /** A service wired to a thread, mirroring how AppCore persists the session id back onto the meta. */
-function makeService(meta: ThreadMeta) {
+function makeService(
+  meta: ThreadMeta,
+  overrides: Partial<ConstructorParameters<typeof AgentService>[0]> = {},
+) {
   return new AgentService({
     getSettings: settings,
     mcpAuthProvider: { headers: async () => ({}) } as never,
@@ -212,6 +215,7 @@ function makeService(meta: ThreadMeta) {
       getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
     } as never,
     getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
+    ...overrides,
   });
 }
 
@@ -368,6 +372,47 @@ describe('playbook injection across a session', () => {
     expect(h.sessions[0].options.resume).toBeUndefined();
     expect(meta.sessionId).toBe('sdk-session-1');
     expect(meta.sessionProfile).toBe('OIM');
+    svc.closeAll();
+  });
+
+  it('deduplicates remote system prompt requests across roles in an orchestrator profile via memoizedLoadPrompt', async () => {
+    const meta = thread();
+    meta.orchestratorProfile = 'OIM';
+    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `PROMPT(${name})`);
+    const customPlaybooks: McpPromptInfo[] = [
+      {
+        name: 'oim-schema',
+        title: 'Schema',
+        description: 'Tables.',
+        arguments: [],
+        tools: ['get_section'],
+        systemPrompt: 'shared-schema-prompt',
+      },
+      {
+        name: 'oim-customers',
+        title: 'Customers',
+        description: 'Accounts.',
+        arguments: [],
+        tools: ['search_corpus'],
+      },
+    ];
+    const svc = makeService(meta, {
+      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      mcpPrompts: {
+        list: async () => customPlaybooks,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Multi-agent question', {});
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    const callsForShared = getSystemPromptSpy.mock.calls.filter(([name]) => name === 'shared-schema-prompt');
+    expect(callsForShared).toHaveLength(1);
     svc.closeAll();
   });
 });

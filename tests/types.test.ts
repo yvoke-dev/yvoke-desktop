@@ -370,6 +370,9 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(isValidSystemPromptName(null)).toBe(false);
       expect(isValidSystemPromptName(undefined)).toBe(false);
       expect(isValidSystemPromptName(123)).toBe(false);
+      expect(isValidSystemPromptName('.')).toBe(false);
+      expect(isValidSystemPromptName('.hidden')).toBe(false);
+      expect(isValidSystemPromptName('trailing.')).toBe(false);
       expect(isValidSystemPromptName('../../conversations')).toBe(false);
       expect(isValidSystemPromptName('foo/bar')).toBe(false);
       expect(isValidSystemPromptName('foo\\bar')).toBe(false);
