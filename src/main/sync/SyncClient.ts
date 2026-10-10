@@ -168,7 +168,7 @@ export class SyncClient {
   }
 
   getSystemPrompt(name: string): Promise<string> {
-    return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${name}`)
+    return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${encodeURIComponent(name)}`)
       .then((res) => res.systemPrompt);
   }
 

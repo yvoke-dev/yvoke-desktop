@@ -10,6 +10,7 @@ import {
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
   clarificationAnswer,
   clarificationState,
+  isValidSystemPromptName,
   type ToolCallInfo,
 } from '../src/shared/types';
 
@@ -352,6 +353,30 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
         };
         expect(clarificationState(call3)).toBe('failed');
       });
+    });
+  });
+
+  describe('isValidSystemPromptName', () => {
+    it('accepts valid identifier and slug names', () => {
+      expect(isValidSystemPromptName('default-chat')).toBe(true);
+      expect(isValidSystemPromptName('custom_prompt_1')).toBe(true);
+      expect(isValidSystemPromptName('oim.specialist-v1')).toBe(true);
+      expect(isValidSystemPromptName('MyPrompt-123')).toBe(true);
+    });
+
+    it('rejects path traversal, separators, query/hash, spaces, and empty names', () => {
+      expect(isValidSystemPromptName('')).toBe(false);
+      expect(isValidSystemPromptName('   ')).toBe(false);
+      expect(isValidSystemPromptName(null)).toBe(false);
+      expect(isValidSystemPromptName(undefined)).toBe(false);
+      expect(isValidSystemPromptName(123)).toBe(false);
+      expect(isValidSystemPromptName('../../conversations')).toBe(false);
+      expect(isValidSystemPromptName('foo/bar')).toBe(false);
+      expect(isValidSystemPromptName('foo\\bar')).toBe(false);
+      expect(isValidSystemPromptName('prompt?query=1')).toBe(false);
+      expect(isValidSystemPromptName('prompt#hash')).toBe(false);
+      expect(isValidSystemPromptName('prompt with spaces')).toBe(false);
+      expect(isValidSystemPromptName('a'.repeat(256))).toBe(false);
     });
   });
 });

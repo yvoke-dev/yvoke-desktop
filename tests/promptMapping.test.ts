@@ -55,6 +55,13 @@ describe('toPromptInfo', () => {
     expect(toPromptInfo({ name: 'd', _meta: { systemPrompt: 123 } }).systemPrompt).toBeUndefined();
   });
 
+  it('drops systemPrompt when the name fails identifier/boundary validation', () => {
+    expect(toPromptInfo({ name: 'a', _meta: { systemPrompt: '../../conversations' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'b', _meta: { systemPrompt: 'foo/bar' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'c', _meta: { systemPrompt: 'prompt?test=1' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'd', _meta: { systemPrompt: 'prompt#frag' } }).systemPrompt).toBeUndefined();
+  });
+
   // Undefined is meaningful downstream: buildAllowedTools reads it as "not declared" and falls
   // back to the default set, so it must not be confused with an empty declaration.
   it('leaves everything undefined when the server declares nothing', () => {

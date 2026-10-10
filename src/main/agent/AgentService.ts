@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveCanonicalModel } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -72,13 +72,15 @@ export function claudeBinaryPath(): string | null {
 }
 
 /**
- * Loads the base system prompt from the server, throwing if it cannot be had.
+ * Loads a system prompt from the server.
  *
- * There is deliberately NO local fallback. The prompt carries the grounding rules, the citation
- * contract and the mermaid/KaTeX delimiters; a hardcoded copy would drift from the server's
- * `default-chat` and silently contradict the playbooks and tools, which is worse than not
- * answering. Running with an empty prompt — which is what the previous "fallback" actually did,
- * since its catch block logged but never assigned — is worse still.
+ * When an optional custom `promptName` is requested, failure to load (e.g. 404, network error,
+ * invalid name, or empty body) cleanly falls back to the server's base prompt (`default-chat`).
+ *
+ * For the base system prompt itself (`default-chat`), there is deliberately NO local fallback:
+ * the prompt carries the grounding rules, the citation contract and the mermaid/KaTeX delimiters;
+ * a hardcoded copy would drift from the server's `default-chat` and silently contradict the
+ * playbooks and tools. If `default-chat` cannot be loaded, it fails closed and throws.
  *
  * Thrown messages reach the user: App.tsx puts them on the failed turn.
  */
@@ -86,7 +88,12 @@ export async function loadRequiredSystemPrompt(
   syncClient: Pick<SyncClient, 'getSystemPrompt'>,
   promptName?: string,
 ): Promise<string> {
-  const targetName = promptName && promptName.trim().length > 0 ? promptName.trim() : BASE_SYSTEM_PROMPT_NAME;
+  const isCustom = Boolean(promptName && promptName.trim().length > 0 && promptName.trim() !== BASE_SYSTEM_PROMPT_NAME);
+  if (isCustom && !isValidSystemPromptName(promptName)) {
+    log('agent', `Custom system prompt "${promptName}" has invalid name shape, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
+    return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
+  }
+  const targetName = isCustom ? promptName!.trim() : BASE_SYSTEM_PROMPT_NAME;
   let prompt: string;
   try {
     prompt = await syncClient.getSystemPrompt(targetName);
@@ -644,12 +651,22 @@ export class AgentService {
           `Orchestrator profile "${thread.orchestratorProfile}" is unavailable (is the server reachable?).`,
         );
       }
+      const promptCache = new Map<string, Promise<string>>();
+      const memoizedLoadPrompt = (name: string): Promise<string> => {
+        let p = promptCache.get(name);
+        if (!p) {
+          p = this.deps.syncClient.getSystemPrompt(name);
+          promptCache.set(name, p);
+        }
+        return p;
+      };
+
       orchestrator = await buildOrchestrator(
         profile,
         settings,
         this.deps.mcpPrompts,
         systemPrompt,
-        (name) => loadRequiredSystemPrompt(this.deps.syncClient, name),
+        memoizedLoadPrompt,
       );
       const oc = settings.orchestrator;
       log(

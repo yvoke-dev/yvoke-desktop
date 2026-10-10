@@ -42,7 +42,13 @@ async function main(): Promise<void> {
   const baseSystemPrompt = await sync.getSystemPrompt('default-chat');
   console.log('base system prompt chars:', baseSystemPrompt.length);
 
-  const { agents, allowedTools, specialistNames } = await buildOrchestrator(profile, settings, mcpPrompts, baseSystemPrompt);
+  const { agents, allowedTools, specialistNames } = await buildOrchestrator(
+    profile,
+    settings,
+    mcpPrompts,
+    baseSystemPrompt,
+    (name) => sync.getSystemPrompt(name),
+  );
 
   console.log('agent keys:', Object.keys(agents).join(', '));
   console.log('specialists:', specialistNames.join(', '));

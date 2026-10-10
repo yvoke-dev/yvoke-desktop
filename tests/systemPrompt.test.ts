@@ -89,5 +89,14 @@ describe('loadRequiredSystemPrompt', () => {
     expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
     expect(c.getSystemPrompt).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
   });
+
+  it('falls back to BASE_SYSTEM_PROMPT_NAME when custom prompt name is invalid', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (_name: string) => 'Base Prompt'),
+    };
+    await expect(loadRequiredSystemPrompt(c, '../../conversations')).resolves.toBe('Base Prompt');
+    expect(c.getSystemPrompt).not.toHaveBeenCalledWith('../../conversations');
+    expect(c.getSystemPrompt).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+  });
 });
 

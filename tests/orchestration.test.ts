@@ -182,6 +182,8 @@ describe('orchestrator-mode translation', () => {
   });
 });
 
+const noopLoadPrompt = async () => '';
+
 describe('buildOrchestrator prompt composition', () => {
   const BASE = 'BASE-PROMPT: cite the bare id inline, e.g. [8f7c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071].';
 
@@ -214,31 +216,31 @@ describe('buildOrchestrator prompt composition', () => {
     // The orchestrator writes the user-facing answer. It used to get its control playbook alone —
     // the only agent never shown the citation contract — which is what produced answers full of
     // raw [chunk_id=<uuid>] tokens.
-    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain(BASE);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
   });
 
   it('keeps the specialist under the base prompt too', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     expect(built.agents['oim-access-governance'].prompt).toContain(BASE);
   });
 
   it('leaves the reviewer on its playbook alone', async () => {
     // Deliberate: it emits a plain-text verdict, so answer-formatting rules are noise for it.
-    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     const reviewer = Object.entries(built.agents).find(([k]) => k.includes('review'))?.[1];
     expect(reviewer?.prompt).not.toContain(BASE);
   });
 
   it('puts the playbook after the base prompt so role rules win on conflict', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     const p = built.agents[ORCHESTRATOR_AGENT].prompt;
     expect(p.indexOf(BASE)).toBeLessThan(p.indexOf('PLAYBOOK(oim-orchestrator)'));
   });
 
   it('degrades to the playbook alone when no base prompt is supplied', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, '');
+    const built = await buildOrchestrator(profile, settings, fakePrompts, '', noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
   });
   /**
@@ -254,7 +256,7 @@ describe('buildOrchestrator prompt composition', () => {
    * This test is the tripwire: it fails here rather than in front of a user.
    */
   it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE);
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     const names = Object.keys(built.agents);
     expect(names.length).toBeGreaterThan(2);
     for (const name of names) {
@@ -301,7 +303,7 @@ describe('buildOrchestrator tool grants', () => {
     // Web parity: OrchestrationService grants List.of("ask_clarifying_question",
     // "verify_citations"). Without it the pre-flight check the playbook requires is impossible,
     // and a fabricated id costs a full ~50k-token review round to learn what one call answers.
-    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('verify_citations'));
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
   });
@@ -310,12 +312,12 @@ describe('buildOrchestrator tool grants', () => {
     // Its playbook states it cannot open a section any more, with the reason: get_section returns
     // the whole section around a passage, so the reviewer would judge claims against neighbouring
     // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
-    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
   });
 
   it('keeps the orchestrator out of the corpus — it composes, it does not retrieve', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     const tools = built.agents[ORCHESTRATOR_AGENT].tools ?? [];
     for (const denied of ['search_corpus', 'get_section', 'get_toc', 'list_documents']) {
       expect(tools).not.toContain(qualifyTool(denied));
@@ -326,7 +328,7 @@ describe('buildOrchestrator tool grants', () => {
     // The allow-list is the enforcement layer; a per-agent grant missing from it is denied at
     // runtime. verify_citations used to reach it only via the reviewer's grant, so narrowing the
     // reviewer would have silently revoked the orchestrator's.
-    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE');
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     for (const [, agent] of Object.entries(built.agents)) {
       for (const tool of agent.tools ?? []) {
         expect(built.allowedTools).toContain(tool);
@@ -344,7 +346,7 @@ describe('buildOrchestrator tool grants', () => {
         reviewer: { model: 'opus', thinkingLevel: 'low' },
       },
     } as unknown as AppSettings;
-    const built = await buildOrchestrator(profile, aliasSettings, fakePrompts, 'BASE');
+    const built = await buildOrchestrator(profile, aliasSettings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].model).toBe('claude-sonnet-5-5');
     expect(built.agents['oim-access-governance'].model).toBe('claude-sonnet-5-5');
     expect(built.agents[REVIEWER_SUBAGENT].model).toBe('claude-opus-5-5');
@@ -368,11 +370,12 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('CUSTOM_SYS(custom-rev-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator-reviewer)');
   });
 
-  it('falls back to baseSystemPrompt when designated system prompt cannot be resolved', async () => {
+  it('falls back to baseSystemPrompt for orchestrator and specialists, and to empty for reviewer when designated system prompt cannot be resolved', async () => {
     const customPrompts = {
       list: async () => [
         { name: 'oim-orchestrator', systemPrompt: 'broken-orch-prompt' },
         { name: 'oim-access-governance', systemPrompt: 'broken-spec-prompt' },
+        { name: 'oim-orchestrator-reviewer', systemPrompt: 'broken-rev-prompt' },
       ] as McpPromptInfo[],
       getText: async (name: string) => `PLAYBOOK(${name})`,
     } as unknown as McpPrompts;
@@ -384,6 +387,53 @@ describe('buildOrchestrator tool grants', () => {
     const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('BASE\n\n---\n\nPLAYBOOK(oim-orchestrator)');
     expect(built.agents['oim-access-governance'].prompt).toBe('BASE\n\n---\n\nPLAYBOOK(oim-access-governance)');
+    expect(built.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE');
+    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+  });
+
+  it('falls back to empty string for reviewer when designated prompt is empty or whitespace', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator-reviewer', systemPrompt: 'whitespace-rev-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const loadPrompt = async (_name: string) => '   \n   ';
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
+    expect(built.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE');
+    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+  });
+
+  it('fetches designated prompts concurrently and works with memoized loader across duplicate prompt designations', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'shared-prompt' },
+        { name: 'oim-access-governance', systemPrompt: 'shared-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const fetchCounts: Record<string, number> = {};
+    const promptCache = new Map<string, Promise<string>>();
+    const rawFetch = async (name: string) => {
+      fetchCounts[name] = (fetchCounts[name] || 0) + 1;
+      return `LOADED(${name})`;
+    };
+    const memoizedLoadPrompt = (name: string) => {
+      let p = promptCache.get(name);
+      if (!p) {
+        p = rawFetch(name);
+        promptCache.set(name, p);
+      }
+      return p;
+    };
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', memoizedLoadPrompt);
+    expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('LOADED(shared-prompt)');
+    expect(built.agents['oim-access-governance'].prompt).toContain('LOADED(shared-prompt)');
+    expect(fetchCounts['shared-prompt']).toBe(1);
   });
 });
 

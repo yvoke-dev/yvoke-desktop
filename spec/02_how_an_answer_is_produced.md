@@ -51,10 +51,10 @@ server.
   tools, checked in two independent places. A playbook that declares nothing at all keeps them: the
   grant is opt-out, not opt-in.
 - **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
-  the app loads that prompt from the server on session creation instead of the default chat base instructions.
-  If the designated prompt cannot be loaded or is empty, it falls back seamlessly to the default chat base instructions.
-  In multi-agent orchestration, designated system prompts are also layered onto orchestrator, specialist, and reviewer
-  agents according to each playbook's configuration.
+  the app loads that prompt from the server on session creation to replace the default chat base instructions
+  (with the playbook's template text layered on top). If the designated prompt cannot be loaded, has an invalid name,
+  or is empty: single-agent chat, orchestrator, and specialist agents fall back to the default chat base instructions,
+  whereas the reviewer agent falls back to running on its playbook alone without a base prompt.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.

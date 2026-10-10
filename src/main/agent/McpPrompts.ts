@@ -3,6 +3,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { AppSettings, CitationRef, McpPromptInfo } from '../../shared/types';
+import { isValidSystemPromptName } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 import { log, logError } from '../log';
 import type { McpAuthProvider } from './McpConnection';
@@ -68,7 +69,12 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     : typeof meta.system_prompt === 'string'
       ? meta.system_prompt
       : undefined;
-  const systemPrompt = rawSystemPrompt && rawSystemPrompt.trim().length > 0 ? rawSystemPrompt.trim() : undefined;
+  const systemPrompt = rawSystemPrompt && isValidSystemPromptName(rawSystemPrompt)
+    ? rawSystemPrompt.trim()
+    : undefined;
+  if (rawSystemPrompt && !systemPrompt) {
+    log('mcp', `Playbook "${raw.name}" declared invalid systemPrompt "${rawSystemPrompt}"; ignoring`);
+  }
   return {
     name: raw.name,
     title: raw.title ?? raw.name,

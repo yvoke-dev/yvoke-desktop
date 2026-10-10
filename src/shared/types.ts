@@ -405,6 +405,29 @@ export interface McpPromptInfo {
   systemPrompt?: string;
 }
 
+/** Maximum length matching system_prompts.name VARCHAR(255). */
+export const MAX_SYSTEM_PROMPT_NAME_LENGTH = 255;
+
+/**
+ * Validates that a system prompt name is a safe identifier matching backend constraints.
+ * Rejects path traversal (..), separators (/, \), query/hash (?, #), whitespace, and control chars.
+ */
+export function isValidSystemPromptName(name: unknown): name is string {
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_SYSTEM_PROMPT_NAME_LENGTH) return false;
+  if (
+    trimmed.includes('..') ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('?') ||
+    trimmed.includes('#')
+  ) {
+    return false;
+  }
+  return /^[a-zA-Z0-9_.-]+$/.test(trimmed);
+}
+
 /** The playbooks a profile drives itself, which a user therefore never picks by hand. */
 export function controlPlaybookNames(profiles: OrchestratorProfile[]): Set<string> {
   const names = new Set<string>();

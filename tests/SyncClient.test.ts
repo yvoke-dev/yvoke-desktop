@@ -262,3 +262,25 @@ describe('SyncClient.verifyConnection review regressions', () => {
     expect(message).not.toContain('secret-jwt-value');
   });
 });
+
+describe('SyncClient.getSystemPrompt', () => {
+  it('URL-encodes prompt name to prevent path traversal and truncation', async () => {
+    let requestedUrl = '';
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async (url: string) => {
+        requestedUrl = url;
+        return new Response(JSON.stringify({ systemPrompt: 'PROMPT BODY' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as unknown as typeof fetch,
+    });
+
+    const res = await client.getSystemPrompt('../../evil?test=1#frag');
+    expect(res).toBe('PROMPT BODY');
+    expect(requestedUrl).toBe('https://server.example/api/chat/v1/prompts/system/..%2F..%2Fevil%3Ftest%3D1%23frag');
+  });
+});
+
