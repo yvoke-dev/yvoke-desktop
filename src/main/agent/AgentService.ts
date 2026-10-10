@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -560,7 +560,16 @@ export class AgentService {
           log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
         }
       } catch (err) {
-        logError('agent', `Failed to load playbook metadata for "${playbookName}": ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (hasErrorSourcePrefix(msg, 'Entra')) {
+          throw err;
+        }
+        throw new Error(
+          tagAttributedError(
+            'Yvoke Backend',
+            `Playbook metadata for "${playbookName}" could not be loaded: ` + msg,
+          ),
+        );
       }
     }
 

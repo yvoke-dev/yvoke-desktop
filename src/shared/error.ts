@@ -153,13 +153,19 @@ export function isNetworkError(error: unknown): boolean {
  */
 export function isNotFoundError(error: unknown): boolean {
   if (typeof error === 'object' && error !== null) {
-    if ('status' in error && (error as { status: unknown }).status === 404) {
-      return true;
+    const status = (error as { status?: unknown }).status;
+    const statusCode = (error as { statusCode?: unknown }).statusCode;
+    if (typeof status === 'number') {
+      return status === 404;
     }
-    if ('statusCode' in error && (error as { statusCode: unknown }).statusCode === 404) {
-      return true;
+    if (typeof statusCode === 'number') {
+      return statusCode === 404;
     }
   }
   const message = error instanceof Error ? error.message : String(error ?? '');
-  return /\b(404|not found)\b/i.test(message);
+  // Do not treat 5xx, 401, 403, or network errors as 404 even if their message contains "not found"
+  if (/\b(5\d{2}|401|403)\b/.test(message) || message.includes('ECONNREFUSED') || message.includes('fetch failed')) {
+    return false;
+  }
+  return /\b404\b/.test(message);
 }

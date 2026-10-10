@@ -333,7 +333,7 @@ export async function buildOrchestrator(
   // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
   // It previously got the control playbook alone — the one agent that never saw the contract it was
   // expected to honour. Playbook last, so its role-specific rules win on any conflict.
-  // Falls back to baseSystemPrompt if no custom prompt is designated or if loading fails.
+  // Falls back to baseSystemPrompt if no custom prompt is designated, if not found (404), or if empty.
   const customOrchPrompt = resolveDesignatedPrompt(profile.orchestratorPlaybook);
   const orchestratorBase = customOrchPrompt ?? baseSystemPrompt;
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
@@ -388,7 +388,7 @@ export async function buildOrchestrator(
 
   // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt).
   // If a custom designated system prompt is specified and loads successfully, it is layered on top.
-  // If absent or failed, it falls back to empty string (playbook alone, NO baseSystemPrompt).
+  // If absent, not found (404), or empty, it falls back to empty string (playbook alone, NO baseSystemPrompt).
   const customRevPrompt = resolveDesignatedPrompt(profile.reviewerPlaybook);
   const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
 

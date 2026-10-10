@@ -411,11 +411,14 @@ export const MAX_SYSTEM_PROMPT_NAME_LENGTH = 255;
 /** Canonical name of the base default chat system prompt. */
 export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
 
+/** Validated, non-empty, path-safe system prompt identifier matching system_prompts.name constraints. */
+export type ValidSystemPromptName = string & { readonly __validSystemPromptNameBrand?: never };
+
 /**
  * Validates that a system prompt name is a safe identifier matching backend constraints.
  * Rejects path traversal (..), separators (/, \), query/hash (?, #), whitespace, and control chars.
  */
-export function isValidSystemPromptName(name: unknown): name is string {
+export function isValidSystemPromptName(name: unknown): name is ValidSystemPromptName {
   if (typeof name !== 'string') return false;
   if (name.length === 0 || name.length > MAX_SYSTEM_PROMPT_NAME_LENGTH) return false;
   if (name.trim() !== name) return false;
