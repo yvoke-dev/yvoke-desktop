@@ -379,6 +379,7 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(isValidSystemPromptName('prompt?query=1')).toBe(false);
       expect(isValidSystemPromptName('prompt#hash')).toBe(false);
       expect(isValidSystemPromptName('prompt with spaces')).toBe(false);
+      expect(isValidSystemPromptName('  default-chat  ')).toBe(false);
       expect(isValidSystemPromptName('a'.repeat(256))).toBe(false);
     });
   });

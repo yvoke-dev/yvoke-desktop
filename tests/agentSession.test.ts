@@ -415,6 +415,43 @@ describe('playbook injection across a session', () => {
     expect(callsForShared).toHaveLength(1);
     svc.closeAll();
   });
+
+  it('passes the playbook designated system prompt to single-agent session options', async () => {
+    const meta = thread();
+    const customPlaybooks: McpPromptInfo[] = [
+      {
+        name: 'custom-playbook',
+        title: 'Custom',
+        description: 'Custom playbook.',
+        arguments: [],
+        tools: ['search_corpus'],
+        systemPrompt: 'custom-designated-prompt',
+      },
+    ];
+    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `BODY OF ${name}`);
+    const svc = makeService(meta, {
+      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      mcpPrompts: {
+        list: async () => customPlaybooks,
+        getText: async () => 'PLAYBOOK BODY',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Hello single agent', {
+      playbook: 'custom-playbook',
+      playbookName: 'custom-playbook',
+    });
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(getSystemPromptSpy).toHaveBeenCalledWith('custom-designated-prompt');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe('BODY OF custom-designated-prompt');
+    svc.closeAll();
+  });
 });
 
 describe('error attribution across session events', () => {

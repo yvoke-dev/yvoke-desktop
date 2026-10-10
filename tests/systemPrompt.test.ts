@@ -58,6 +58,18 @@ describe('loadRequiredSystemPrompt', () => {
     await expect(loadRequiredSystemPrompt(c)).rejects.toBe(entraError);
   });
 
+  it('re-throws Entra error on custom prompt load without falling back to base prompt', async () => {
+    const entraError = new Error('Entra: Interactive login required');
+    const c = {
+      getSystemPrompt: vi.fn(async () => {
+        throw entraError;
+      }),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).rejects.toBe(entraError);
+    expect(c.getSystemPrompt).toHaveBeenCalledTimes(1);
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+  });
+
   it('loads a custom designated prompt when requested', async () => {
     const c = {
       getSystemPrompt: vi.fn(async (name: string) => `Prompt for ${name}`),

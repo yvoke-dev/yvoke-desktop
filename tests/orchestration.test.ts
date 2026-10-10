@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newTurnContext, parseVerdict, translateMessage } from '../src/main/agent/translate';
 import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
@@ -406,7 +406,7 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
   });
 
-  it('deduplicates requests across roles when using a memoized loader', async () => {
+  it('deduplicates prompt loads across roles internally', async () => {
     const customPrompts = {
       list: async () => [
         { name: 'oim-orchestrator', systemPrompt: 'shared-prompt' },
@@ -415,25 +415,43 @@ describe('buildOrchestrator tool grants', () => {
       getText: async (name: string) => `PLAYBOOK(${name})`,
     } as unknown as McpPrompts;
 
-    const fetchCounts: Record<string, number> = {};
-    const promptCache = new Map<string, Promise<string>>();
-    const rawFetch = async (name: string) => {
-      fetchCounts[name] = (fetchCounts[name] || 0) + 1;
-      return `LOADED(${name})`;
-    };
-    const memoizedLoadPrompt = (name: string) => {
-      let p = promptCache.get(name);
-      if (!p) {
-        p = rawFetch(name);
-        promptCache.set(name, p);
-      }
-      return p;
-    };
+    const rawFetch = vi.fn(async (name: string) => `LOADED(${name})`);
 
-    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', memoizedLoadPrompt);
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', rawFetch);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('LOADED(shared-prompt)');
     expect(built.agents['oim-access-governance'].prompt).toContain('LOADED(shared-prompt)');
-    expect(fetchCounts['shared-prompt']).toBe(1);
+    expect(rawFetch).toHaveBeenCalledTimes(1);
+    expect(rawFetch).toHaveBeenCalledWith('shared-prompt');
+  });
+
+  it('does not re-fetch baseSystemPrompt when a playbook designates default-chat', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'default-chat' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const rawFetch = vi.fn(async (name: string) => `LOADED(${name})`);
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', rawFetch);
+    expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('BASE\n\n---\n\nPLAYBOOK(oim-orchestrator)');
+    expect(rawFetch).not.toHaveBeenCalled();
+  });
+
+  it('trims padded designated system prompt names before loading', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: '  custom-orch-prompt  ' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const rawFetch = vi.fn(async (name: string) => `LOADED(${name})`);
+
+    const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', rawFetch);
+    expect(rawFetch).toHaveBeenCalledWith('custom-orch-prompt');
+    expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('LOADED(custom-orch-prompt)');
   });
 
   it('loads specialist designated system prompts concurrently', async () => {

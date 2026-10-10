@@ -408,26 +408,29 @@ export interface McpPromptInfo {
 /** Maximum length matching system_prompts.name VARCHAR(255). */
 export const MAX_SYSTEM_PROMPT_NAME_LENGTH = 255;
 
+/** Canonical name of the base default chat system prompt. */
+export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+
 /**
  * Validates that a system prompt name is a safe identifier matching backend constraints.
  * Rejects path traversal (..), separators (/, \), query/hash (?, #), whitespace, and control chars.
  */
 export function isValidSystemPromptName(name: unknown): name is string {
   if (typeof name !== 'string') return false;
-  const trimmed = name.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_SYSTEM_PROMPT_NAME_LENGTH) return false;
+  if (name.length === 0 || name.length > MAX_SYSTEM_PROMPT_NAME_LENGTH) return false;
+  if (name.trim() !== name) return false;
   if (
-    trimmed.startsWith('.') ||
-    trimmed.endsWith('.') ||
-    trimmed.includes('..') ||
-    trimmed.includes('/') ||
-    trimmed.includes('\\') ||
-    trimmed.includes('?') ||
-    trimmed.includes('#')
+    name.startsWith('.') ||
+    name.endsWith('.') ||
+    name.includes('..') ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    name.includes('?') ||
+    name.includes('#')
   ) {
     return false;
   }
-  return /^[a-zA-Z0-9_.-]+$/.test(trimmed);
+  return /^[a-zA-Z0-9_.-]+$/.test(name);
 }
 
 /** The playbooks a profile drives itself, which a user therefore never picks by hand. */

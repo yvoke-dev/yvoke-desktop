@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -33,7 +33,7 @@ import {
 } from './orchestration';
 
 /** The server-managed system prompt every turn runs under. */
-export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+export { BASE_SYSTEM_PROMPT_NAME };
 
 /** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
@@ -88,23 +88,27 @@ export async function loadRequiredSystemPrompt(
   syncClient: Pick<SyncClient, 'getSystemPrompt'>,
   promptName?: string,
 ): Promise<string> {
-  const isCustom = Boolean(promptName && promptName.trim().length > 0 && promptName.trim() !== BASE_SYSTEM_PROMPT_NAME);
-  if (isCustom && !isValidSystemPromptName(promptName)) {
-    log('agent', `Custom system prompt "${promptName}" has invalid name shape, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
+  const trimmed = promptName?.trim();
+  const isCustom = Boolean(trimmed && trimmed.length > 0 && trimmed !== BASE_SYSTEM_PROMPT_NAME);
+  if (isCustom && !isValidSystemPromptName(trimmed!)) {
+    const safeName = (promptName ?? '').slice(0, 80);
+    log('agent', `Custom system prompt "${safeName}" has invalid name shape, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
     return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
   }
-  const targetName = isCustom ? promptName!.trim() : BASE_SYSTEM_PROMPT_NAME;
+  const targetName = isCustom ? trimmed! : BASE_SYSTEM_PROMPT_NAME;
   let prompt: string;
   try {
     prompt = await syncClient.getSystemPrompt(targetName);
   } catch (err) {
-    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
-      log('agent', `Custom system prompt "${targetName}" could not be loaded, falling back to "${BASE_SYSTEM_PROMPT_NAME}": ${err instanceof Error ? err.message : String(err)}`);
-      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
-    }
     const msg = err instanceof Error ? err.message : String(err);
     if (hasErrorSourcePrefix(msg, 'Entra')) {
       throw err;
+    }
+    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
+      const safeTargetName = targetName.slice(0, 80);
+      const safeMsg = msg.slice(0, 200).replace(/[\r\n]+/g, ' ');
+      log('agent', `Custom system prompt "${safeTargetName}" could not be loaded, falling back to "${BASE_SYSTEM_PROMPT_NAME}": ${safeMsg}`);
+      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
     }
     throw new Error(
       tagAttributedError(
@@ -117,7 +121,8 @@ export async function loadRequiredSystemPrompt(
 
   if (!prompt || !prompt.trim()) {
     if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
-      log('agent', `Custom system prompt "${targetName}" came back empty, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
+      const safeTargetName = targetName.slice(0, 80);
+      log('agent', `Custom system prompt "${safeTargetName}" came back empty, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
       return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
     }
     // A 200 with an empty body is a failure too, not an empty-but-valid prompt.
@@ -128,7 +133,8 @@ export async function loadRequiredSystemPrompt(
       ),
     );
   }
-  log('agent', `Loaded system prompt "${targetName}" from remote server`);
+  const safeTargetName = targetName.slice(0, 80);
+  log('agent', `Loaded system prompt "${safeTargetName}" from remote server`);
   return prompt;
 }
 
@@ -651,22 +657,12 @@ export class AgentService {
           `Orchestrator profile "${thread.orchestratorProfile}" is unavailable (is the server reachable?).`,
         );
       }
-      const promptCache = new Map<string, Promise<string>>();
-      const memoizedLoadPrompt = (name: string): Promise<string> => {
-        let p = promptCache.get(name);
-        if (!p) {
-          p = this.deps.syncClient.getSystemPrompt(name);
-          promptCache.set(name, p);
-        }
-        return p;
-      };
-
       orchestrator = await buildOrchestrator(
         profile,
         settings,
         this.deps.mcpPrompts,
         systemPrompt,
-        memoizedLoadPrompt,
+        (name) => this.deps.syncClient.getSystemPrompt(name),
       );
       const oc = settings.orchestrator;
       log(

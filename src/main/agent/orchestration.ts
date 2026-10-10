@@ -1,6 +1,6 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
-import { DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel } from '../../shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel } from '../../shared/types';
 import { COMPUTE_TOOLS } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
@@ -271,31 +271,60 @@ export async function buildOrchestrator(
   const metadata = await mcpPrompts.list();
   const byName = new Map(metadata.map((p) => [p.name, p]));
 
-  // Helper to load a designated custom prompt with safe fallback.
-  // Returns the loaded custom prompt text if present and valid; otherwise null.
-  const resolveDesignatedPrompt = async (playbookName: string): Promise<string | null> => {
-    const designated = byName.get(playbookName)?.systemPrompt;
-    if (!designated || !isValidSystemPromptName(designated)) {
-      return null;
-    }
-    try {
-      const loaded = await loadSystemPrompt(designated);
-      if (loaded && loaded.trim().length > 0) {
-        return loaded;
-      }
-      log('orch', `Designated system prompt "${designated}" for playbook "${playbookName}" came back empty; falling back`);
-    } catch (err) {
-      log('orch', `Designated system prompt "${designated}" for playbook "${playbookName}" failed to load (${err instanceof Error ? err.message : String(err)}); falling back`);
-    }
-    return null;
-  };
-
-  // Fetch every playbook's text in parallel.
   const names = [profile.orchestratorPlaybook, profile.reviewerPlaybook, ...profile.specialistPlaybooks];
-  const textEntries = await Promise.all(
-    names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
-  );
+
+  // Collect all unique, valid designated system prompt names across all roles in this profile.
+  const uniqueDesignatedNames = [
+    ...new Set(
+      names
+        .map((name) => {
+          const raw = byName.get(name)?.systemPrompt;
+          return typeof raw === 'string' ? raw.trim() : undefined;
+        })
+        .filter((p): p is string => Boolean(p && isValidSystemPromptName(p))),
+    ),
+  ];
+
+  // Pre-seed cache with baseSystemPrompt under BASE_SYSTEM_PROMPT_NAME ('default-chat') so designating
+  // it explicitly never triggers a redundant remote fetch.
+  const promptCache = new Map<string, string>();
+  if (baseSystemPrompt && baseSystemPrompt.trim().length > 0) {
+    promptCache.set(BASE_SYSTEM_PROMPT_NAME, baseSystemPrompt);
+  }
+
+  // Load all unique designated custom prompts and all playbook texts concurrently in a single parallel stage.
+  const [, textEntries] = await Promise.all([
+    Promise.all(
+      uniqueDesignatedNames.map(async (promptName) => {
+        if (promptCache.has(promptName)) return;
+        try {
+          const loaded = await loadSystemPrompt(promptName);
+          if (loaded && loaded.trim().length > 0) {
+            promptCache.set(promptName, loaded);
+          } else {
+            const safeName = promptName.slice(0, 80);
+            log('orch', `Designated system prompt "${safeName}" came back empty; falling back`);
+          }
+        } catch (err) {
+          const safeName = promptName.slice(0, 80);
+          const safeMsg = (err instanceof Error ? err.message : String(err)).slice(0, 200).replace(/[\r\n]+/g, ' ');
+          log('orch', `Designated system prompt "${safeName}" failed to load (${safeMsg}); falling back`);
+        }
+      }),
+    ),
+    Promise.all(
+      names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
+    ),
+  ]);
   const textByName = new Map(textEntries);
+
+  const resolveDesignatedPrompt = (playbookName: string): string | null => {
+    const raw = byName.get(playbookName)?.systemPrompt;
+    if (!raw || typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!isValidSystemPromptName(trimmed)) return null;
+    return promptCache.get(trimmed) ?? null;
+  };
 
   const specialistNames = profile.specialistPlaybooks;
   const roster = specialistNames
@@ -313,7 +342,7 @@ export async function buildOrchestrator(
   // It previously got the control playbook alone — the one agent that never saw the contract it was
   // expected to honour. Playbook last, so its role-specific rules win on any conflict.
   // Falls back to baseSystemPrompt if no custom prompt is designated or if loading fails.
-  const customOrchPrompt = await resolveDesignatedPrompt(profile.orchestratorPlaybook);
+  const customOrchPrompt = resolveDesignatedPrompt(profile.orchestratorPlaybook);
   const orchestratorBase = customOrchPrompt ?? baseSystemPrompt;
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
   const orchestratorPrompt = orchestratorBase
@@ -344,44 +373,31 @@ export async function buildOrchestrator(
   };
 
   const specialistToolSets: string[][] = [];
-  // Specialist system prompts are loaded in parallel via Promise.all.
-  // If a specialist has a designated custom prompt, it replaces baseSystemPrompt;
-  // on error or omission, it falls back to baseSystemPrompt.
-  const specialistResults = await Promise.all(
-    specialistNames.map(async (name) => {
-      const info = byName.get(name);
-      const tools = mapSpecialistTools(info, settings);
-      const customSpecPrompt = await resolveDesignatedPrompt(name);
-      const specialistBase = customSpecPrompt ?? baseSystemPrompt;
-      const playbookText = textByName.get(name) ?? '';
-      const specialistPrompt = specialistBase
-        ? `${specialistBase}\n\n---\n\n${playbookText}`
-        : playbookText;
-      return {
-        name,
-        tools,
-        agent: {
-          description: info?.description || info?.title || name,
-          prompt: specialistPrompt,
-          tools,
-          background: BACKGROUND_DELEGATION,
-          model: resolveCanonicalModel(cfg.specialist.model),
-          effort: effortFor(cfg.specialist.thinkingLevel),
-          maxTurns: cfg.specialistMaxTurns,
-        } as AgentDefinition,
-      };
-    }),
-  );
-
-  for (const { name, tools, agent } of specialistResults) {
+  for (const name of specialistNames) {
+    const info = byName.get(name);
+    const tools = mapSpecialistTools(info, settings);
+    const customSpecPrompt = resolveDesignatedPrompt(name);
+    const specialistBase = customSpecPrompt ?? baseSystemPrompt;
+    const playbookText = textByName.get(name) ?? '';
+    const specialistPrompt = specialistBase
+      ? `${specialistBase}\n\n---\n\n${playbookText}`
+      : playbookText;
     specialistToolSets.push(tools);
-    agents[name] = agent;
+    agents[name] = {
+      description: info?.description || info?.title || name,
+      prompt: specialistPrompt,
+      tools,
+      background: BACKGROUND_DELEGATION,
+      model: resolveCanonicalModel(cfg.specialist.model),
+      effort: effortFor(cfg.specialist.thinkingLevel),
+      maxTurns: cfg.specialistMaxTurns,
+    };
   }
 
   // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt).
   // If a custom designated system prompt is specified and loads successfully, it is layered on top.
   // If absent or failed, it falls back to empty string (playbook alone, NO baseSystemPrompt).
-  const customRevPrompt = await resolveDesignatedPrompt(profile.reviewerPlaybook);
+  const customRevPrompt = resolveDesignatedPrompt(profile.reviewerPlaybook);
   const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
 
   agents[REVIEWER_SUBAGENT] = {
