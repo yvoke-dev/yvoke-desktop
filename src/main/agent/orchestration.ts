@@ -1,11 +1,10 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
-import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel } from '../../shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel, type ValidSystemPromptName } from '../../shared/types';
 import { COMPUTE_TOOLS } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
 import { loadDesignatedSystemPrompt } from './systemPrompt';
-import { log } from '../log';
 
 
 /**
@@ -262,7 +261,7 @@ export async function buildOrchestrator(
   settings: AppSettings,
   mcpPrompts: McpPrompts,
   baseSystemPrompt: string,
-  loadSystemPrompt: (name: string) => Promise<string>,
+  loadSystemPrompt: (name: ValidSystemPromptName) => Promise<string>,
 ): Promise<ResolvedOrchestrator> {
   const cfg = settings.orchestrator;
   if (!cfg) {
@@ -282,7 +281,7 @@ export async function buildOrchestrator(
           const raw = byName.get(name)?.systemPrompt;
           return typeof raw === 'string' ? raw.trim() : undefined;
         })
-        .filter((p): p is string => Boolean(p && isValidSystemPromptName(p))),
+        .filter((p): p is ValidSystemPromptName => Boolean(p && isValidSystemPromptName(p))),
     ),
   ];
 

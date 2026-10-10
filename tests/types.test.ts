@@ -12,6 +12,7 @@ import {
   clarificationState,
   isValidSystemPromptName,
   type ToolCallInfo,
+  type ValidSystemPromptName,
 } from '../src/shared/types';
 
 describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
@@ -381,6 +382,21 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(isValidSystemPromptName('prompt with spaces')).toBe(false);
       expect(isValidSystemPromptName('  default-chat  ')).toBe(false);
       expect(isValidSystemPromptName('a'.repeat(256))).toBe(false);
+    });
+
+    it('narrows to ValidSystemPromptName on success and rejects unvalidated strings at compile time', () => {
+      const candidate: string = 'custom-prompt';
+      if (isValidSystemPromptName(candidate)) {
+        const validated: ValidSystemPromptName = candidate;
+        expect(validated).toBe('custom-prompt');
+      } else {
+        const stillString: string = candidate;
+        expect(stillString).toBe('custom-prompt');
+      }
+
+      // @ts-expect-error Raw string must not be assignable to ValidSystemPromptName without runtime validation
+      const rawPrompt: ValidSystemPromptName = 'unvalidated-raw-string';
+      expect(rawPrompt).toBe('unvalidated-raw-string');
     });
   });
 });

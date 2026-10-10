@@ -1,5 +1,5 @@
 import type { SyncClient } from '../sync/SyncClient';
-import { BASE_SYSTEM_PROMPT_NAME, isValidSystemPromptName } from '../../shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, isValidSystemPromptName, type ValidSystemPromptName } from '../../shared/types';
 import {
   hasErrorSourcePrefix,
   isNotFoundError,
@@ -17,7 +17,7 @@ export { BASE_SYSTEM_PROMPT_NAME };
  * - Returns null on 404 Not Found, empty/whitespace prompt, or invalid name shape (clean fallback).
  */
 export async function loadDesignatedSystemPrompt(
-  fetchPrompt: (name: string) => Promise<string>,
+  fetchPrompt: (name: ValidSystemPromptName) => Promise<string>,
   promptName: string,
 ): Promise<string | null> {
   const trimmed = promptName.trim();

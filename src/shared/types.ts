@@ -408,11 +408,13 @@ export interface McpPromptInfo {
 /** Maximum length matching system_prompts.name VARCHAR(255). */
 export const MAX_SYSTEM_PROMPT_NAME_LENGTH = 255;
 
-/** Canonical name of the base default chat system prompt. */
-export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+declare const validSystemPromptNameBrand: unique symbol;
 
 /** Validated, non-empty, path-safe system prompt identifier matching system_prompts.name constraints. */
-export type ValidSystemPromptName = string & { readonly __validSystemPromptNameBrand?: never };
+export type ValidSystemPromptName = string & { readonly [validSystemPromptNameBrand]: true };
+
+/** Canonical name of the base default chat system prompt. */
+export const BASE_SYSTEM_PROMPT_NAME = 'default-chat' as ValidSystemPromptName;
 
 /**
  * Validates that a system prompt name is a safe identifier matching backend constraints.

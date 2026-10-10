@@ -56,8 +56,10 @@ server.
   single-agent chat, the designated system prompt governs the session while the playbook text is prepended
   to the first user turn. If the designated prompt is not found on the server (404), has an invalid name,
   or is empty: single-agent chat, orchestrator, and specialist agents fall back to the default chat base instructions,
-  whereas the reviewer agent falls back to running on its playbook alone without a base prompt. Any authentication
-  error (Entra) or transient network / 5xx server failure fails closed and halts session initialization.
+  whereas the reviewer agent falls back to running on its playbook alone without a base prompt. Every other failure
+  fails closed and halts session initialization, failing the turn: authentication errors (Entra), client and server
+  errors (including 401, 403, 429, 5xx), network unreachability, timeouts, and selecting a playbook while the playbook
+  metadata lookup (`prompts/list`) is unavailable all fail closed rather than silently falling back.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.
