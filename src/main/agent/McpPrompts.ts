@@ -3,7 +3,8 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { AppSettings, CitationRef, McpPromptInfo } from '../../shared/types';
-import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
+import { isValidSystemPromptName } from '../../shared/types';
+import { hasErrorSourcePrefix, sanitizeLogContent, tagAttributedError } from '../../shared/error';
 import { log, logError } from '../log';
 import type { McpAuthProvider } from './McpConnection';
 
@@ -63,6 +64,17 @@ export interface RawPrompt {
  */
 export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
   const meta = (raw._meta ?? raw.meta ?? {}) as Record<string, unknown>;
+  const rawString = typeof meta.systemPrompt === 'string'
+    ? meta.systemPrompt
+    : typeof meta.system_prompt === 'string'
+      ? meta.system_prompt
+      : undefined;
+  const trimmed = rawString?.trim();
+  const systemPrompt = trimmed && isValidSystemPromptName(trimmed) ? trimmed : undefined;
+  if (rawString && !systemPrompt) {
+    const safeName = sanitizeLogContent(rawString).slice(0, 80);
+    log('mcp', `Playbook "${raw.name}" declared invalid systemPrompt "${safeName}"; ignoring`);
+  }
   return {
     name: raw.name,
     title: raw.title ?? raw.name,
@@ -76,6 +88,7 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     codeExecution: typeof meta.codeExecution === 'boolean' ? meta.codeExecution : undefined,
     prototype: typeof meta.prototype === 'boolean' ? meta.prototype : undefined,
     targetAgent: typeof meta.targetAgent === 'string' ? meta.targetAgent : undefined,
+    systemPrompt,
   };
 }
 

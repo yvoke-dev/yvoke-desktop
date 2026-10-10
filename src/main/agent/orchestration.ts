@@ -1,9 +1,10 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
-import { DEFAULT_KB_TOOLS, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel } from '../../shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel, type ValidSystemPromptName } from '../../shared/types';
 import { COMPUTE_TOOLS } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
+import { loadDesignatedSystemPrompt } from './systemPrompt';
 
 
 /**
@@ -260,6 +261,7 @@ export async function buildOrchestrator(
   settings: AppSettings,
   mcpPrompts: McpPrompts,
   baseSystemPrompt: string,
+  loadSystemPrompt: (name: ValidSystemPromptName) => Promise<string>,
 ): Promise<ResolvedOrchestrator> {
   const cfg = settings.orchestrator;
   if (!cfg) {
@@ -269,12 +271,51 @@ export async function buildOrchestrator(
   const metadata = await mcpPrompts.list();
   const byName = new Map(metadata.map((p) => [p.name, p]));
 
-  // Fetch every playbook's text in parallel.
   const names = [profile.orchestratorPlaybook, profile.reviewerPlaybook, ...profile.specialistPlaybooks];
-  const textEntries = await Promise.all(
-    names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
-  );
+
+  // Collect all unique, valid designated system prompt names across all roles in this profile.
+  const uniqueDesignatedNames = [
+    ...new Set(
+      names
+        .map((name) => {
+          const raw = byName.get(name)?.systemPrompt;
+          return typeof raw === 'string' ? raw.trim() : undefined;
+        })
+        .filter((p): p is ValidSystemPromptName => Boolean(p && isValidSystemPromptName(p))),
+    ),
+  ];
+
+  // Pre-seed cache with baseSystemPrompt under BASE_SYSTEM_PROMPT_NAME ('default-chat') so designating
+  // it explicitly never triggers a redundant remote fetch.
+  const promptCache = new Map<string, string>();
+  if (baseSystemPrompt && baseSystemPrompt.trim().length > 0) {
+    promptCache.set(BASE_SYSTEM_PROMPT_NAME, baseSystemPrompt);
+  }
+
+  // Load all unique designated custom prompts and all playbook texts concurrently in a single parallel stage.
+  const [, textEntries] = await Promise.all([
+    Promise.all(
+      uniqueDesignatedNames.map(async (promptName) => {
+        if (promptCache.has(promptName)) return;
+        const loaded = await loadDesignatedSystemPrompt(loadSystemPrompt, promptName);
+        if (loaded !== null) {
+          promptCache.set(promptName, loaded);
+        }
+      }),
+    ),
+    Promise.all(
+      names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
+    ),
+  ]);
   const textByName = new Map(textEntries);
+
+  const resolveDesignatedPrompt = (playbookName: string): string | null => {
+    const raw = byName.get(playbookName)?.systemPrompt;
+    if (!raw || typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!isValidSystemPromptName(trimmed)) return null;
+    return promptCache.get(trimmed) ?? null;
+  };
 
   const specialistNames = profile.specialistPlaybooks;
   const roster = specialistNames
@@ -291,9 +332,12 @@ export async function buildOrchestrator(
   // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
   // It previously got the control playbook alone — the one agent that never saw the contract it was
   // expected to honour. Playbook last, so its role-specific rules win on any conflict.
+  // Falls back to baseSystemPrompt if no custom prompt is designated, if not found (404), or if empty.
+  const customOrchPrompt = resolveDesignatedPrompt(profile.orchestratorPlaybook);
+  const orchestratorBase = customOrchPrompt ?? baseSystemPrompt;
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
-  const orchestratorPrompt = baseSystemPrompt
-    ? `${baseSystemPrompt}\n\n---\n\n${orchestratorPlaybookText}`
+  const orchestratorPrompt = orchestratorBase
+    ? `${orchestratorBase}\n\n---\n\n${orchestratorPlaybookText}`
     : orchestratorPlaybookText;
 
   const orchestratorTools = [
@@ -323,14 +367,13 @@ export async function buildOrchestrator(
   for (const name of specialistNames) {
     const info = byName.get(name);
     const tools = mapSpecialistTools(info, settings);
-    specialistToolSets.push(tools);
-    // Specialist system prompt = the server's base default-chat prompt (grounding + citation
-    // contract) with the playbook layered on top — mirrors the web, where a specialist runs with
-    // systemPromptOverride=null (base prompt) and the playbook prepended to the query.
+    const customSpecPrompt = resolveDesignatedPrompt(name);
+    const specialistBase = customSpecPrompt ?? baseSystemPrompt;
     const playbookText = textByName.get(name) ?? '';
-    const specialistPrompt = baseSystemPrompt
-      ? `${baseSystemPrompt}\n\n---\n\n${playbookText}`
+    const specialistPrompt = specialistBase
+      ? `${specialistBase}\n\n---\n\n${playbookText}`
       : playbookText;
+    specialistToolSets.push(tools);
     agents[name] = {
       description: info?.description || info?.title || name,
       prompt: specialistPrompt,
@@ -342,9 +385,15 @@ export async function buildOrchestrator(
     };
   }
 
+  // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt).
+  // If a custom designated system prompt is specified and loads successfully, it is layered on top.
+  // If absent, not found (404), or empty, it falls back to empty string (playbook alone, NO baseSystemPrompt).
+  const customRevPrompt = resolveDesignatedPrompt(profile.reviewerPlaybook);
+  const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
+
   agents[REVIEWER_SUBAGENT] = {
     description: 'Validates the composed answer against the gathered evidence. Never searches anew.',
-    prompt: (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
+    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
     tools: REVIEWER_TOOLS,
     background: BACKGROUND_DELEGATION,
     model: resolveCanonicalModel(cfg.reviewer.model),

@@ -3,7 +3,7 @@
  * against the live MCP server — proving the agents map + allow-list assemble from actual playbooks.
  *   npm run spike:build
  */
-import { qualifyTool, type AppSettings, type OrchestratorProfile } from '../src/shared/types';
+import { BASE_SYSTEM_PROMPT_NAME, qualifyTool, type AppSettings, type OrchestratorProfile } from '../src/shared/types';
 import { McpPrompts } from '../src/main/agent/McpPrompts';
 import { buildOrchestrator } from '../src/main/agent/orchestration';
 import { SyncClient } from '../src/main/sync/SyncClient';
@@ -39,10 +39,16 @@ async function main(): Promise<void> {
   });
 
   const sync = new SyncClient({ getBaseUrl: () => SERVER, getToken: async () => 'dev-local-token' });
-  const baseSystemPrompt = await sync.getSystemPrompt('default-chat');
+  const baseSystemPrompt = await sync.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
   console.log('base system prompt chars:', baseSystemPrompt.length);
 
-  const { agents, allowedTools, specialistNames } = await buildOrchestrator(profile, settings, mcpPrompts, baseSystemPrompt);
+  const { agents, allowedTools, specialistNames } = await buildOrchestrator(
+    profile,
+    settings,
+    mcpPrompts,
+    baseSystemPrompt,
+    (name) => sync.getSystemPrompt(name),
+  );
 
   console.log('agent keys:', Object.keys(agents).join(', '));
   console.log('specialists:', specialistNames.join(', '));

@@ -41,6 +41,31 @@ describe('toPromptInfo', () => {
     expect(info.tools).toEqual(['a']);
   });
 
+  it('reads systemPrompt from _meta (camelCase and snake_case)', () => {
+    expect(toPromptInfo({ name: 'a', _meta: { systemPrompt: 'custom-prompt-1' } }).systemPrompt).toBe('custom-prompt-1');
+    expect(toPromptInfo({ name: 'b', _meta: { system_prompt: 'custom-prompt-2' } }).systemPrompt).toBe('custom-prompt-2');
+    expect(toPromptInfo({ name: 'c', meta: { systemPrompt: 'custom-prompt-3' } }).systemPrompt).toBe('custom-prompt-3');
+    expect(toPromptInfo({ name: 'd', meta: { system_prompt: 'custom-prompt-4' } }).systemPrompt).toBe('custom-prompt-4');
+  });
+
+  it('tolerates and trims padded systemPrompt names', () => {
+    expect(toPromptInfo({ name: 'a', _meta: { systemPrompt: '  custom-prompt-padded  ' } }).systemPrompt).toBe('custom-prompt-padded');
+  });
+
+  it('leaves systemPrompt undefined when empty or absent', () => {
+    expect(toPromptInfo({ name: 'a', _meta: {} }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'b', _meta: { systemPrompt: '' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'c', _meta: { systemPrompt: '   ' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'd', _meta: { systemPrompt: 123 } }).systemPrompt).toBeUndefined();
+  });
+
+  it('drops systemPrompt when the name fails identifier/boundary validation', () => {
+    expect(toPromptInfo({ name: 'a', _meta: { systemPrompt: '../../conversations' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'b', _meta: { systemPrompt: 'foo/bar' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'c', _meta: { systemPrompt: 'prompt?test=1' } }).systemPrompt).toBeUndefined();
+    expect(toPromptInfo({ name: 'd', _meta: { systemPrompt: 'prompt#frag' } }).systemPrompt).toBeUndefined();
+  });
+
   // Undefined is meaningful downstream: buildAllowedTools reads it as "not declared" and falls
   // back to the default set, so it must not be confused with an empty declaration.
   it('leaves everything undefined when the server declares nothing', () => {

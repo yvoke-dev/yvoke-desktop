@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  BASE_SYSTEM_PROMPT_NAME,
   MCP_SERVER_NAME,
   type AgentEvent,
   type AppSettings,
@@ -11,6 +12,7 @@ import {
   type ThreadMeta,
 } from '../src/shared/types';
 import { buildMcpServers } from '../src/main/agent/McpConnection';
+import { ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
 
 /**
  * Session lifecycle, against a stand-in for the Agent SDK.
@@ -195,7 +197,10 @@ let sandboxDir: string;
 let events: AgentEvent[];
 
 /** A service wired to a thread, mirroring how AppCore persists the session id back onto the meta. */
-function makeService(meta: ThreadMeta) {
+function makeService(
+  meta: ThreadMeta,
+  overrides: Partial<ConstructorParameters<typeof AgentService>[0]> = {},
+) {
   return new AgentService({
     getSettings: settings,
     mcpAuthProvider: { headers: async () => ({}) } as never,
@@ -212,6 +217,7 @@ function makeService(meta: ThreadMeta) {
       getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
     } as never,
     getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
+    ...overrides,
   });
 }
 
@@ -368,6 +374,173 @@ describe('playbook injection across a session', () => {
     expect(h.sessions[0].options.resume).toBeUndefined();
     expect(meta.sessionId).toBe('sdk-session-1');
     expect(meta.sessionProfile).toBe('OIM');
+    svc.closeAll();
+  });
+
+  it('deduplicates remote system prompt requests across roles in an orchestrator profile via memoizedLoadPrompt', async () => {
+    const meta = thread();
+    meta.orchestratorProfile = 'OIM';
+    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `PROMPT(${name})`);
+    const customPlaybooks: McpPromptInfo[] = [
+      {
+        name: 'oim-schema',
+        title: 'Schema',
+        description: 'Tables.',
+        arguments: [],
+        tools: ['get_section'],
+        systemPrompt: 'shared-schema-prompt',
+      },
+      {
+        name: 'oim-customers',
+        title: 'Customers',
+        description: 'Accounts.',
+        arguments: [],
+        tools: ['search_corpus'],
+      },
+    ];
+    const svc = makeService(meta, {
+      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      mcpPrompts: {
+        list: async () => customPlaybooks,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Multi-agent question', {});
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    const callsForShared = getSystemPromptSpy.mock.calls.filter(([name]) => name === 'shared-schema-prompt');
+    expect(callsForShared).toHaveLength(1);
+    svc.closeAll();
+  });
+
+  it('passes the playbook designated system prompt to single-agent session options', async () => {
+    const meta = thread();
+    const customPlaybooks: McpPromptInfo[] = [
+      {
+        name: 'custom-playbook',
+        title: 'Custom',
+        description: 'Custom playbook.',
+        arguments: [],
+        tools: ['search_corpus'],
+        systemPrompt: 'custom-designated-prompt',
+      },
+    ];
+    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `BODY OF ${name}`);
+    const svc = makeService(meta, {
+      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      mcpPrompts: {
+        list: async () => customPlaybooks,
+        getText: async () => 'PLAYBOOK BODY',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Hello single agent', {
+      playbook: 'custom-playbook',
+      playbookName: 'custom-playbook',
+    });
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(getSystemPromptSpy).toHaveBeenCalledWith('custom-designated-prompt');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe('BODY OF custom-designated-prompt');
+    svc.closeAll();
+  });
+
+  it('ignores thread playbook designated prompt in orchestrator mode, using default-chat as base', async () => {
+    const meta = thread();
+    meta.orchestratorProfile = 'OIM';
+    const customPlaybooks: McpPromptInfo[] = [
+      {
+        name: 'custom-playbook',
+        title: 'Custom',
+        description: 'Custom playbook.',
+        arguments: [],
+        tools: ['search_corpus'],
+        systemPrompt: 'custom-designated-prompt',
+      },
+      {
+        name: 'oim-orchestrator',
+        title: 'Orchestrator',
+        description: 'Orchestrator playbook',
+        arguments: [],
+        tools: [],
+      },
+    ];
+    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `BODY OF ${name}`);
+    const svc = makeService(meta, {
+      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      mcpPrompts: {
+        list: async () => customPlaybooks,
+        getText: async () => 'PLAYBOOK BODY',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Hello orchestrator', {
+      playbook: 'custom-playbook',
+      playbookName: 'custom-playbook',
+    });
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    // In orchestrator mode, the base prompt must be default-chat, NOT custom-designated-prompt
+    expect(getSystemPromptSpy).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+    expect(getSystemPromptSpy).not.toHaveBeenCalledWith('custom-designated-prompt');
+    expect(h.sessions).toHaveLength(1);
+    const agents = h.sessions[0].options.agents as Record<string, { prompt: string }> | undefined;
+    const orchPrompt = agents?.[ORCHESTRATOR_AGENT]?.prompt;
+    expect(orchPrompt).toContain(`BODY OF ${BASE_SYSTEM_PROMPT_NAME}`);
+    expect(orchPrompt).not.toContain('BODY OF custom-designated-prompt');
+    svc.closeAll();
+  });
+
+  it('fails closed when playbook metadata lookup throws an Entra error', async () => {
+    const meta = thread();
+    const entraError = new Error('Entra: Interactive login required');
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => {
+          throw entraError;
+        },
+      } as never,
+    });
+
+    await expect(
+      svc.sendMessage(meta, 'Hello', {
+        playbook: 'custom-playbook',
+        playbookName: 'custom-playbook',
+      }),
+    ).rejects.toBe(entraError);
+    svc.closeAll();
+  });
+
+  it('fails closed when playbook metadata lookup throws a backend error', async () => {
+    const meta = thread();
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => {
+          throw new Error('500 Internal Server Error');
+        },
+      } as never,
+    });
+
+    await expect(
+      svc.sendMessage(meta, 'Hello', {
+        playbook: 'custom-playbook',
+        playbookName: 'custom-playbook',
+      }),
+    ).rejects.toThrow(/Playbook metadata for "custom-playbook" could not be loaded/);
     svc.closeAll();
   });
 });

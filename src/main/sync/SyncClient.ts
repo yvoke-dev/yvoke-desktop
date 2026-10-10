@@ -1,6 +1,12 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
-import type { LoginVerificationResult, OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
+import {
+  BASE_SYSTEM_PROMPT_NAME,
+  type LoginVerificationResult,
+  type OrchestratorProfile,
+  type OrchestratorRunPayload,
+  type ValidSystemPromptName,
+} from '../../shared/types';
 import {
   hasErrorSourcePrefix,
   isNetworkError,
@@ -9,7 +15,7 @@ import {
 } from '../../shared/error';
 
 /** The system prompt every conversation starts from; also the connection probe's target. */
-export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+export { BASE_SYSTEM_PROMPT_NAME };
 
 /** How long the connection probe waits before calling the server unreachable. */
 export const VERIFY_TIMEOUT_MS = 10_000;
@@ -167,8 +173,8 @@ export class SyncClient {
     return this.request('PUT', `/messages/${messageId}/feedback`, { rating, comment: comment ?? null });
   }
 
-  getSystemPrompt(name: string): Promise<string> {
-    return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${name}`)
+  getSystemPrompt(name: ValidSystemPromptName): Promise<string> {
+    return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${encodeURIComponent(name)}`)
       .then((res) => res.systemPrompt);
   }
 

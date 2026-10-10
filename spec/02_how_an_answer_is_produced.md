@@ -50,6 +50,16 @@ server.
 - **A playbook can withhold computation.** A playbook that declares no code execution loses the compute
   tools, checked in two independent places. A playbook that declares nothing at all keeps them: the
   grant is opt-out, not opt-in.
+- **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
+  the app loads that prompt from the server on session creation to replace the default chat base instructions.
+  In orchestrator mode, each agent's playbook template text is appended to its resolved system prompt; in
+  single-agent chat, the designated system prompt governs the session while the playbook text is prepended
+  to the first user turn. If the designated prompt is not found on the server (404), has an invalid name,
+  or is empty: single-agent chat, orchestrator, and specialist agents fall back to the default chat base instructions,
+  whereas the reviewer agent falls back to running on its playbook alone without a base prompt. Every other failure
+  fails closed and halts session initialization, failing the turn: authentication errors (Entra), client and server
+  errors (including 401, 403, 429, 5xx), network unreachability, timeouts, and selecting a playbook while the playbook
+  metadata lookup (`prompts/list`) is unavailable all fail closed rather than silently falling back.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.
