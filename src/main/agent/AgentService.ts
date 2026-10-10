@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { BASE_SYSTEM_PROMPT_NAME, EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, isValidSystemPromptName, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -31,9 +31,14 @@ import {
   REVIEW_ENFORCEMENT_PROMPT,
   reviewFlagNote,
 } from './orchestration';
+import {
+  BASE_SYSTEM_PROMPT_NAME,
+  loadDesignatedSystemPrompt,
+  loadRequiredSystemPrompt,
+} from './systemPrompt';
 
-/** The server-managed system prompt every turn runs under. */
-export { BASE_SYSTEM_PROMPT_NAME };
+/** The server-managed system prompt every turn runs under and helper loaders. */
+export { BASE_SYSTEM_PROMPT_NAME, loadDesignatedSystemPrompt, loadRequiredSystemPrompt };
 
 /** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
@@ -71,72 +76,6 @@ export function claudeBinaryPath(): string | null {
   return claudeBinary;
 }
 
-/**
- * Loads a system prompt from the server.
- *
- * When an optional custom `promptName` is requested, failure to load (e.g. 404, network error,
- * invalid name, or empty body) cleanly falls back to the server's base prompt (`default-chat`).
- *
- * For the base system prompt itself (`default-chat`), there is deliberately NO local fallback:
- * the prompt carries the grounding rules, the citation contract and the mermaid/KaTeX delimiters;
- * a hardcoded copy would drift from the server's `default-chat` and silently contradict the
- * playbooks and tools. If `default-chat` cannot be loaded, it fails closed and throws.
- *
- * Thrown messages reach the user: App.tsx puts them on the failed turn.
- */
-export async function loadRequiredSystemPrompt(
-  syncClient: Pick<SyncClient, 'getSystemPrompt'>,
-  promptName?: string,
-): Promise<string> {
-  const trimmed = promptName?.trim();
-  const isCustom = Boolean(trimmed && trimmed.length > 0 && trimmed !== BASE_SYSTEM_PROMPT_NAME);
-  if (isCustom && !isValidSystemPromptName(trimmed!)) {
-    const safeName = (promptName ?? '').slice(0, 80);
-    log('agent', `Custom system prompt "${safeName}" has invalid name shape, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
-    return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
-  }
-  const targetName = isCustom ? trimmed! : BASE_SYSTEM_PROMPT_NAME;
-  let prompt: string;
-  try {
-    prompt = await syncClient.getSystemPrompt(targetName);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (hasErrorSourcePrefix(msg, 'Entra')) {
-      throw err;
-    }
-    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
-      const safeTargetName = targetName.slice(0, 80);
-      const safeMsg = msg.slice(0, 200).replace(/[\r\n]+/g, ' ');
-      log('agent', `Custom system prompt "${safeTargetName}" could not be loaded, falling back to "${BASE_SYSTEM_PROMPT_NAME}": ${safeMsg}`);
-      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
-    }
-    throw new Error(
-      tagAttributedError(
-        'Yvoke Backend',
-        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" could not be loaded (is the server reachable?): ` +
-          msg,
-      ),
-    );
-  }
-
-  if (!prompt || !prompt.trim()) {
-    if (targetName !== BASE_SYSTEM_PROMPT_NAME) {
-      const safeTargetName = targetName.slice(0, 80);
-      log('agent', `Custom system prompt "${safeTargetName}" came back empty, falling back to "${BASE_SYSTEM_PROMPT_NAME}"`);
-      return loadRequiredSystemPrompt(syncClient, BASE_SYSTEM_PROMPT_NAME);
-    }
-    // A 200 with an empty body is a failure too, not an empty-but-valid prompt.
-    throw new Error(
-      tagAttributedError(
-        'Yvoke Backend',
-        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" came back empty (is the server reachable?).`,
-      ),
-    );
-  }
-  const safeTargetName = targetName.slice(0, 80);
-  log('agent', `Loaded system prompt "${safeTargetName}" from remote server`);
-  return prompt;
-}
 
 /**
  * Decides how a thrown turn failure reaches the user.
@@ -625,7 +564,10 @@ export class AgentService {
       }
     }
 
-    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, playbookSystemPrompt);
+    // In orchestrator mode, each role resolves its designated prompt from the profile's playbooks,
+    // and the base fallback prompt is always default-chat. In single-agent mode, use the thread's playbook.
+    const designatedPrompt = thread.orchestratorProfile ? undefined : playbookSystemPrompt;
+    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, designatedPrompt);
 
     const queue = new MessageQueue();
     const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {

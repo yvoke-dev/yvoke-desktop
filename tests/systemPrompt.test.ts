@@ -102,6 +102,32 @@ describe('loadRequiredSystemPrompt', () => {
     expect(c.getSystemPrompt).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
   });
 
+  it('re-throws transient 5xx or network error on custom prompt load without falling back to base prompt', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (name: string) => {
+        if (name === 'custom-prompt') throw new Error('500 Internal Server Error');
+        return 'Base Prompt';
+      }),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).rejects.toThrow(/could not be loaded/);
+    expect(c.getSystemPrompt).toHaveBeenCalledTimes(1);
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+    expect(c.getSystemPrompt).not.toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+  });
+
+  it('re-throws connection error on custom prompt load without falling back to base prompt', async () => {
+    const c = {
+      getSystemPrompt: vi.fn(async (name: string) => {
+        if (name === 'custom-prompt') throw new Error('fetch failed: ECONNREFUSED');
+        return 'Base Prompt';
+      }),
+    };
+    await expect(loadRequiredSystemPrompt(c, 'custom-prompt')).rejects.toThrow(/could not be loaded/);
+    expect(c.getSystemPrompt).toHaveBeenCalledTimes(1);
+    expect(c.getSystemPrompt).toHaveBeenCalledWith('custom-prompt');
+    expect(c.getSystemPrompt).not.toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
+  });
+
   it('falls back to BASE_SYSTEM_PROMPT_NAME when custom prompt name is invalid', async () => {
     const c = {
       getSystemPrompt: vi.fn(async (_name: string) => 'Base Prompt'),

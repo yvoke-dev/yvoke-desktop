@@ -4,6 +4,7 @@ import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP
 import { COMPUTE_TOOLS } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
+import { loadDesignatedSystemPrompt } from './systemPrompt';
 import { log } from '../log';
 
 
@@ -297,18 +298,9 @@ export async function buildOrchestrator(
     Promise.all(
       uniqueDesignatedNames.map(async (promptName) => {
         if (promptCache.has(promptName)) return;
-        try {
-          const loaded = await loadSystemPrompt(promptName);
-          if (loaded && loaded.trim().length > 0) {
-            promptCache.set(promptName, loaded);
-          } else {
-            const safeName = promptName.slice(0, 80);
-            log('orch', `Designated system prompt "${safeName}" came back empty; falling back`);
-          }
-        } catch (err) {
-          const safeName = promptName.slice(0, 80);
-          const safeMsg = (err instanceof Error ? err.message : String(err)).slice(0, 200).replace(/[\r\n]+/g, ' ');
-          log('orch', `Designated system prompt "${safeName}" failed to load (${safeMsg}); falling back`);
+        const loaded = await loadDesignatedSystemPrompt(loadSystemPrompt, promptName);
+        if (loaded !== null) {
+          promptCache.set(promptName, loaded);
         }
       }),
     ),

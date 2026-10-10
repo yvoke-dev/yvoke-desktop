@@ -146,3 +146,20 @@ export function isNetworkError(error: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * Whether an error represents an HTTP 404 (Not Found) response from the backend.
+ * Checks HTTP status codes on Error/SyncApiError objects as well as 404 message markers.
+ */
+export function isNotFoundError(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null) {
+    if ('status' in error && (error as { status: unknown }).status === 404) {
+      return true;
+    }
+    if ('statusCode' in error && (error as { statusCode: unknown }).statusCode === 404) {
+      return true;
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /\b(404|not found)\b/i.test(message);
+}

@@ -48,6 +48,10 @@ describe('toPromptInfo', () => {
     expect(toPromptInfo({ name: 'd', meta: { system_prompt: 'custom-prompt-4' } }).systemPrompt).toBe('custom-prompt-4');
   });
 
+  it('tolerates and trims padded systemPrompt names', () => {
+    expect(toPromptInfo({ name: 'a', _meta: { systemPrompt: '  custom-prompt-padded  ' } }).systemPrompt).toBe('custom-prompt-padded');
+  });
+
   it('leaves systemPrompt undefined when empty or absent', () => {
     expect(toPromptInfo({ name: 'a', _meta: {} }).systemPrompt).toBeUndefined();
     expect(toPromptInfo({ name: 'b', _meta: { systemPrompt: '' } }).systemPrompt).toBeUndefined();

@@ -454,6 +454,37 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('LOADED(custom-orch-prompt)');
   });
 
+  it('re-throws Entra authentication error on designated prompt load without swallowing', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'custom-orch-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const entraError = new Error('Entra: Interactive login required');
+    const loadPrompt = vi.fn(async () => {
+      throw entraError;
+    });
+
+    await expect(buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt)).rejects.toBe(entraError);
+  });
+
+  it('re-throws 500 or network error on designated prompt load without falling back to base prompt', async () => {
+    const customPrompts = {
+      list: async () => [
+        { name: 'oim-orchestrator', systemPrompt: 'custom-orch-prompt' },
+      ] as McpPromptInfo[],
+      getText: async (name: string) => `PLAYBOOK(${name})`,
+    } as unknown as McpPrompts;
+
+    const loadPrompt = vi.fn(async () => {
+      throw new Error('500 Internal Server Error');
+    });
+
+    await expect(buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt)).rejects.toThrow(/could not be loaded/);
+  });
+
   it('loads specialist designated system prompts concurrently', async () => {
     const multiSpecProfile = {
       ...profile,

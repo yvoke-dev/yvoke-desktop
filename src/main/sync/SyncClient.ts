@@ -1,6 +1,11 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
-import type { LoginVerificationResult, OrchestratorProfile, OrchestratorRunPayload } from '../../shared/types';
+import {
+  BASE_SYSTEM_PROMPT_NAME,
+  type LoginVerificationResult,
+  type OrchestratorProfile,
+  type OrchestratorRunPayload,
+} from '../../shared/types';
 import {
   hasErrorSourcePrefix,
   isNetworkError,
@@ -9,7 +14,7 @@ import {
 } from '../../shared/error';
 
 /** The system prompt every conversation starts from; also the connection probe's target. */
-export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+export { BASE_SYSTEM_PROMPT_NAME };
 
 /** How long the connection probe waits before calling the server unreachable. */
 export const VERIFY_TIMEOUT_MS = 10_000;
