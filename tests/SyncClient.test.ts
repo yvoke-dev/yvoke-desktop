@@ -280,7 +280,7 @@ describe('SyncClient.getSystemPrompt', () => {
     });
 
     // @ts-expect-error Raw unvalidated strings must not compile as ValidSystemPromptName argument
-    void client.getSystemPrompt('../../evil?test=1#frag');
+    const _typeOnly = () => client.getSystemPrompt('../../evil?test=1#frag');
 
     const res = await client.getSystemPrompt('../../evil?test=1#frag' as unknown as ValidSystemPromptName);
     expect(res).toBe('PROMPT BODY');
