@@ -18,7 +18,7 @@ behind it, and the work that produced it can be opened and read.
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears chronologically alongside the turn's prose in the order it occurred, with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer, remaining in place alongside the turn's prose. |
-| **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
+| **Get a playbook check before sending** | Before the first message in a conversation is sent, a message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
 | **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
 | **Copy an answer** | A copy button on every answer copies the answer prose — not the reasoning, the tool calls or the trace. |
@@ -44,11 +44,12 @@ behind it, and the work that produced it can be opened and read.
   sent as it was and the assistant gets the default knowledge-base tool set.
 - **A conversation is locked to its initial playbook after the first message is sent.** Playbook
   instructions are combined with the resolved system prompt in the SDK system prompt rather than
-  prepended to user messages. Once a user message has been sent, the active playbook cannot be
-  changed or removed: the remove button (`×`) on the active playbook indicator is omitted, typing `/`
-  does not open the autocomplete picker, and backspacing on an empty draft does not clear it. Preflight
-  validation runs only on the conversation's first message, and preflight recommendations do not offer
-  switching playbooks mid-conversation.
+  prepended to user messages. Once a user message has been sent in the conversation (persisting across
+  restarts and failed or stopped initial turns), the active playbook cannot be changed or removed:
+  the remove button (`×`) on the active playbook indicator is omitted, typing `/` does not open the
+  autocomplete picker, and backspacing on an empty draft does not clear it. Preflight validation runs
+  only on the conversation's first message, and preflight recommendations do not offer switching
+  playbooks mid-conversation.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -70,7 +71,13 @@ behind it, and the work that produced it can be opened and read.
   or a citation-shaped token appears verbatim. Answers and assistant clarifying questions
   are rendered as formatted text.
 - **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right. In multi-agent mode, the active playbook badge is hidden because playbooks are defined strictly by the orchestrator profile.
-- **Composer controls are disabled while an answer generates or preflight checks.** When an answer is streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation configuration controls (agent mode selector, model selector, thinking effort selector) and context modifiers (playbook removal button, image attachments button, and prompt textarea) are disabled. Only the *Stop* button remains interactive during answer generation so the turn can be cancelled.
+- **Composer controls are disabled while an answer generates or preflight checks.** When an answer is
+  streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation
+  configuration controls (agent mode selector, model selector, thinking effort selector) and context
+  modifiers (image attachments button and prompt textarea) are disabled. The playbook removal button is
+  disabled during preflight checking before a message is sent; once a message has been sent (including
+  during answer streaming), it is omitted entirely because the playbook is locked. Only the *Stop*
+  button remains interactive during answer generation so the turn can be cancelled.
 - **Model options display friendly versioned names.** The composer's model selector formats model aliases into clean display labels (e.g. *Sonnet 5.5*, *Opus 5.5*, *Haiku 5.5*) while the runtime resolves them to explicit canonical wire IDs (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) when launching agent sessions and executing turns.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
