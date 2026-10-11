@@ -89,13 +89,14 @@ server.
 - **A clarifying question reaches the model as a refused tool call** whose message reads *User
   answered: …*. Stopping a turn resolves any question still waiting with an empty answer rather than
   leaving the run hanging.
-- **Playbooks are immutable once a conversation starts, and changing agent mode restarts the assistant's session.**
-  Once a conversation contains at least one user message, the session is locked to its initial playbook;
-  attempting to switch playbooks on an existing session is rejected with an error. When continuing under the same playbook,
-  the session remains warm. Knowledge-base connection credentials are automatically synchronized before each turn so that
-  long-lived sessions transparently retain access without requiring an app restart. Changing agent mode restarts the
-  assistant's session so the new tool allow-list and instructions take effect. Attempting to change agent mode while a turn
-  is already running is rejected.
+- **Agent mode and playbooks are immutable once a conversation starts.**
+  Once a conversation has started (stamped upon sending the first prompt, persisting across restarts and failed or stopped turns),
+  both the agent mode (single-agent vs. multi-agent profile) and the initial single-agent playbook are permanently locked.
+  Attempting to change agent mode or switch playbooks on a started conversation is rejected with an error. Before a conversation
+  starts, switching agent mode cleanly closes any prepared session so the new tool allow-list and instructions take effect.
+  When continuing under the same mode and playbook, the session remains warm. Knowledge-base connection credentials are
+  automatically synchronized before each turn so that long-lived sessions transparently retain access without requiring an app
+  restart. Attempting to change agent mode while a turn is already running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -175,4 +176,5 @@ server.
   where nothing displays it.
 - Changing the agent mode while a turn is in progress.
 - Changing or removing a playbook once a conversation has started.
+- Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 

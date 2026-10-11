@@ -22,7 +22,7 @@ behind it, and the work that produced it can be opened and read.
 | **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
 | **Copy an answer** | A copy button on every answer copies the answer prose — not the reasoning, the tool calls or the trace. |
-| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the bottom toolbar below the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
+| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the bottom toolbar below the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. Before the first prompt is sent, the conversation mode (Single agent vs. Multi-agent profile) can be switched freely; once started, the mode is permanently locked alongside the playbook. Model and thinking effort remain editable between turns when idle. |
 | **Search conversations** | The sidebar search matches conversation titles *and* the text of messages, showing the matching excerpt with the terms highlighted under the row. |
 | **Browse by age** | Conversations are grouped *Today · This Week · Last Week · Earlier*, newest first, each row carrying a relative time that loses precision as it ages — *just now*, *12m ago*, *3h ago*, *Yesterday 14:22*, a weekday, then a date. Only the newest group is open to begin with; a section the reader opens or shuts stays that way. Weeks break where the reader's locale says they do. |
 | **Delete a conversation** | Confirmed, then permanent — on the server as well as here. |
@@ -42,13 +42,16 @@ behind it, and the work that produced it can be opened and read.
   both the error would be one the user could not act on: a multi-agent conversation, which takes its
   playbooks from the profile, and a server that offers no playbooks at all, where the question is
   sent as it was and the assistant gets the default knowledge-base tool set.
-- **A conversation is locked to its initial playbook after the first message is sent.** Playbook
+- **A conversation is locked to its initial playbook and agent mode after the first message is sent.** Playbook
   instructions are combined with the resolved system prompt in the SDK system prompt rather than
-  prepended to user messages. Once a user message has been sent in the conversation (persisting across
-  restarts and failed or stopped initial turns), the active playbook cannot be changed or removed:
-  the remove button (`×`) on the active playbook indicator is omitted, typing `/` does not open the
-  autocomplete picker, and backspacing on an empty draft does not clear it. Preflight validation runs
-  only on the conversation's first message, and preflight recommendations do not offer switching
+  prepended to user messages. Once a conversation has started (persisting across restarts and failed
+  or stopped initial turns), both the conversation's agent mode (Single agent vs. Multi-agent orchestrator
+  profile) and the active single-agent playbook cannot be changed or removed: the agent mode selector
+  is disabled with an explanatory tooltip, the remove button (`×`) on the active playbook indicator is
+  omitted, typing `/` does not open the autocomplete picker, and backspacing on an empty draft does not
+  clear it. Attempting to change agent mode on a started conversation is rejected. In single-agent mode,
+  the model and thinking effort selectors remain editable between turns when idle. Preflight validation
+  runs only on the conversation's first message, and preflight recommendations do not offer switching
   playbooks mid-conversation.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
@@ -247,6 +250,7 @@ behind it, and the work that produced it can be opened and read.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
 - Changing or removing a playbook once a conversation has started.
+- Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 - **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
   When an assistant call specifies multiple questions or multi-select choices, the questions are
   presented together in the card, and the user provides a single selection or custom text answer for the turn.
