@@ -942,6 +942,173 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
     expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-first');
   });
 
+  it('Legacy Thread Backfill: backfills initialPlaybook and stamps hasStarted on first promptName send', async () => {
+    const thread: ThreadMeta = {
+      id: 't-legacy-backfill',
+      title: 'Legacy Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'legacy-sess',
+      totals: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheCreationTokens: 0 },
+      syncState: 'synced',
+      initialPlaybook: undefined,
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First legacy prompt',
+      promptName: 'oim-schema',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'First legacy prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.initialPlaybook).toBe('oim-schema');
+    expect(stored.hasStarted).toBe(true);
+  });
+
+  it('Second Prompt Immutability After Backfill: preserves backfilled playbook and ignores divergent promptName', async () => {
+    const thread: ThreadMeta = {
+      id: 't-legacy-second-send',
+      title: 'Legacy Thread 2',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'legacy-sess-2',
+      totals: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheCreationTokens: 0 },
+      syncState: 'synced',
+      initialPlaybook: undefined,
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Initial send to backfill',
+      promptName: 'oim-schema',
+    });
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second send with divergent prompt',
+      promptName: 'divergent-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'Second send with divergent prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Plain Chat Immutability Negative Test: started plain-chat thread ignores promptName and never mutates initialPlaybook', async () => {
+    const thread: ThreadMeta = {
+      id: 't-plain-chat',
+      title: 'Plain Chat Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Follow-up send attempting to attach playbook',
+      promptName: 'divergent-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Follow-up send attempting to attach playbook',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+  });
+
+  it('Orchestrator Rogue Playbook Immunity Negative Test: orchestrator stamps hasStarted but ignores rogue playbook', async () => {
+    const thread: ThreadMeta = {
+      id: 't-orch-rogue',
+      title: 'Orchestrator Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Send with rogue playbook to orchestrator',
+      promptName: 'rogue-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Send with rogue playbook to orchestrator',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBeUndefined();
+  });
+
+  it('Whitespace Sanitization Boundary Test: whitespace promptName is sanitized to undefined', async () => {
+    const thread: ThreadMeta = {
+      id: 't-whitespace-prompt',
+      title: 'Whitespace Prompt Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Send with whitespace prompt',
+      promptName: '   ',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Send with whitespace prompt',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+  });
+
   it('Unknown Thread Boundary: throws "Unknown thread" without writing hasStarted to store', async () => {
     const patchSpy = vi.spyOn(appCore.threads, 'patch');
     await expect(

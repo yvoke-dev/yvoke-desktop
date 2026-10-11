@@ -656,16 +656,21 @@ export class AppCore {
 
     const isOrchestrator = Boolean(thread.orchestratorProfile);
     const isFirstSend = !isThreadStarted(thread);
+    const canSetPlaybook = !isOrchestrator && !thread.hasStarted;
+    const sanitizedPrompt = request.promptName?.trim() || undefined;
     const effectivePlaybook = isOrchestrator
       ? undefined
-      : (isFirstSend ? (request.promptName || undefined) : thread.initialPlaybook);
+      : (thread.initialPlaybook ?? (canSetPlaybook ? sanitizedPrompt : undefined));
 
     let effectiveThread = thread;
-    if (isFirstSend) {
-      const startPatch: Partial<ThreadMeta> = {
-        hasStarted: true,
-        ...(effectivePlaybook ? { initialPlaybook: effectivePlaybook } : {}),
-      };
+    const startPatch: Partial<ThreadMeta> = {};
+    if (isFirstSend || !thread.hasStarted) {
+      startPatch.hasStarted = true;
+    }
+    if (canSetPlaybook && !thread.initialPlaybook && effectivePlaybook) {
+      startPatch.initialPlaybook = effectivePlaybook;
+    }
+    if (Object.keys(startPatch).length > 0) {
       const patched = this.threads.patch(thread.id, startPatch);
       if (patched) {
         effectiveThread = patched;
