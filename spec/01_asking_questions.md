@@ -10,19 +10,19 @@ behind it, and the work that produced it can be opened and read.
 | Capability | What happens |
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
-| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
-| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook. |
+| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. Before the first message is sent, typing `/` opens the same list as an autocomplete (filtering on title and name). Once a user message has been sent in the conversation, the playbook is locked to that initial choice and cannot be changed or removed. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
+| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook before any message is sent; once a message exists, the playbook is locked. |
 | **Attach images** | Attach up to five images (PNG, JPEG, WebP, GIF) using the attach button on the left of the toolbar, drag-and-drop, or clipboard paste. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears chronologically alongside the turn's prose in the order it occurred, with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer, remaining in place alongside the turn's prose. |
-| **Get a playbook check before sending** | A message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
+| **Get a playbook check before sending** | Before the first message in a conversation is sent, a message that carries a playbook is checked first: a *Playbook recommendation* card explains why another playbook fits better and offers **Switch to …** or **Send anyway**. |
 | **Stop a running answer** | The Send button inside the input container dynamically switches to a danger *Stop* button while a turn runs. Stopping ends the turn and shows *Processing stopped.* |
 | **Rate an answer** | Thumbs up or thumbs down on every answer. Thumbs up may carry a comment; thumbs down **requires** one. |
 | **Copy an answer** | A copy button on every answer copies the answer prose — not the reasoning, the tool calls or the trace. |
-| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the bottom toolbar below the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. |
+| **Choose model, thinking effort and agent mode per conversation** | Three selectors sit in the right group of the bottom toolbar below the composer. Each conversation keeps its own choices; new ones start from the defaults in Settings. Before the first prompt is sent, the conversation mode (Single agent vs. Multi-agent profile) can be switched freely; once started, the mode is permanently locked alongside the playbook. Model and thinking effort remain editable between turns when idle. |
 | **Search conversations** | The sidebar search matches conversation titles *and* the text of messages, showing the matching excerpt with the terms highlighted under the row. |
 | **Browse by age** | Conversations are grouped *Today · This Week · Last Week · Earlier*, newest first, each row carrying a relative time that loses precision as it ages — *just now*, *12m ago*, *3h ago*, *Yesterday 14:22*, a weekday, then a date. Only the newest group is open to begin with; a section the reader opens or shuts stays that way. Weeks break where the reader's locale says they do. |
 | **Delete a conversation** | Confirmed, then permanent — on the server as well as here. |
@@ -42,11 +42,17 @@ behind it, and the work that produced it can be opened and read.
   both the error would be one the user could not act on: a multi-agent conversation, which takes its
   playbooks from the profile, and a server that offers no playbooks at all, where the question is
   sent as it was and the assistant gets the default knowledge-base tool set.
-- **A playbook stays selected across messages in a conversation**, matching the web model. Once
-  chosen, follow-up questions continue under the same playbook without re-prompting or repeating
-  preflight checks. The user can switch playbooks at any time with `/` autocomplete or clear it with
-  the remove button. Preflight validation runs on the conversation's first message or when switching
-  to a different playbook.
+- **A conversation is locked to its initial playbook and agent mode after the first message is sent.** Playbook
+  instructions are combined with the resolved system prompt in the SDK system prompt rather than
+  prepended to user messages. Once a conversation has started (persisting across restarts and failed
+  or stopped initial turns), both the conversation's agent mode (Single agent vs. Multi-agent orchestrator
+  profile) and the active single-agent playbook cannot be changed or removed: the agent mode selector
+  is disabled with an explanatory tooltip, the remove button (`×`) on the active playbook indicator is
+  omitted, typing `/` does not open the autocomplete picker, and backspacing on an empty draft does not
+  clear it. Attempting to change agent mode on a started conversation is rejected. In single-agent mode,
+  the model and thinking effort selectors remain editable between turns when idle. Preflight validation
+  runs only on the conversation's first message, and preflight recommendations do not offer switching
+  playbooks mid-conversation.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -68,12 +74,18 @@ behind it, and the work that produced it can be opened and read.
   or a citation-shaped token appears verbatim. Answers and assistant clarifying questions
   are rendered as formatted text.
 - **The composer layout partitions prompt drafting from toolbar controls.** The input field integrates the prompt textarea and the vertically centered Send / Stop action button on the right. Below it, the toolbar cleanly divides secondary actions: input attachments (image attachment button and active playbook badge) sit on the left, while conversation configuration (agent mode, model, and thinking level selectors) sits on the right. In multi-agent mode, the active playbook badge is hidden because playbooks are defined strictly by the orchestrator profile.
-- **Composer controls are disabled while an answer generates or preflight checks.** When an answer is streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation configuration controls (agent mode selector, model selector, thinking effort selector) and context modifiers (playbook removal button, image attachments button, and prompt textarea) are disabled. Only the *Stop* button remains interactive during answer generation so the turn can be cancelled.
+- **Composer controls are disabled while an answer generates or preflight checks.** When an answer is
+  streaming (`liveTurn.running`) or a playbook preflight check is active (`checking`), the conversation
+  configuration controls (agent mode selector, model selector, thinking effort selector) and context
+  modifiers (image attachments button and prompt textarea) are disabled. The playbook removal button is
+  disabled during preflight checking before a message is sent; once a message has been sent (including
+  during answer streaming), it is omitted entirely because the playbook is locked. Only the *Stop*
+  button remains interactive during answer generation so the turn can be cancelled.
 - **Model options display friendly versioned names.** The composer's model selector formats model aliases into clean display labels (e.g. *Sonnet 5.5*, *Opus 5.5*, *Haiku 5.5*) while the runtime resolves them to explicit canonical wire IDs (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) when launching agent sessions and executing turns.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
-  the same act. So a failed turn leaves no record of having been asked. The question stays on screen
-  until the conversation is reopened, which is the only sign that anything was lost. Reaching the
+  the same act. So a failed turn leaves no record of having been asked in the transcript. The question stays on screen
+  until the conversation is reopened, which is the only sign that anything was lost (though an initial attempt permanently locks the conversation's agent mode and playbook). Reaching the
   turn ceiling counts as a failure, so a long investigation that runs out of steps loses everything.
 - **Stopping is the same act, for the same reason.** Stopping produces an error result, so the partial
   answer and the question are both discarded. The web app keeps a stopped answer; this one does not.
@@ -208,7 +220,7 @@ behind it, and the work that produced it can be opened and read.
   *Force Reload* and *Toggle Developer Tools* in a released build, on their usual shortcuts. Reloading
   mid-answer throws away the live view of a turn that keeps running without it.
 - **The app's own keyboard support stops at the composer.** Enter (insert newline),
-  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook, Escape and the arrow
+  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook (before the first question is sent), Escape and the arrow
   keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
   than just closing the list. There is no shortcut for new conversation, search, settings, delete or
   stop.
@@ -237,6 +249,8 @@ behind it, and the work that produced it can be opened and read.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
+- Changing or removing a playbook once a conversation has started.
+- Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 - **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
   When an assistant call specifies multiple questions or multi-select choices, the questions are
   presented together in the card, and the user provides a single selection or custom text answer for the turn.

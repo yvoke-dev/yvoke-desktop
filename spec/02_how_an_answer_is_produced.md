@@ -13,7 +13,7 @@ server.
 | **Every answer is grounded in a live search** | The assistant answers from what the server's knowledge-base tools return, under the server's own grounding and citation instructions. It has no other source. |
 | **A toolbox, not a search box** | The assistant can search the corpus, list an area's documents, read a table of contents, read a whole section, look a thing up in the knowledge graph and follow its connections, query structured records, read their declared shape, and check its own citations. Nine of these are granted by default. |
 | **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name is stored. |
-| **Playbook preflight** | Before a playbook-carrying message runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
+| **Playbook preflight** | Before the first message in a conversation runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
 | **Arithmetic without a shell** | Three in-app tools — a calculator, a summary-statistics tool and a date-difference tool — let the assistant do numeric work. They run inside the app with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
 | **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options (including descriptive explanations), and continue from the answer. |
@@ -53,8 +53,9 @@ server.
 - **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
   the app loads that prompt from the server on session creation to replace the default chat base instructions.
   In orchestrator mode, each agent's playbook template text is appended to its resolved system prompt; in
-  single-agent chat, the designated system prompt governs the session while the playbook text is prepended
-  to the first user turn. If the designated prompt is not found on the server (404), has an invalid name,
+  single-agent chat, the playbook instruction text is combined with the designated or base system prompt
+  in the SDK system prompt (`<systemPrompt>\n\n---\n\n<playbookText>`), and the user message passes raw user
+  input without prepending playbook instructions. If the designated prompt is not found on the server (404), has an invalid name,
   or is empty: single-agent chat, orchestrator, and specialist agents fall back to the default chat base instructions,
   whereas the reviewer agent falls back to running on its playbook alone without a base prompt. Every other failure
   fails closed and halts session initialization, failing the turn: authentication errors (Entra), client and server
@@ -88,13 +89,14 @@ server.
 - **A clarifying question reaches the model as a refused tool call** whose message reads *User
   answered: …*. Stopping a turn resolves any question still waiting with an empty answer rather than
   leaving the run hanging.
-- **Changing the playbook or the agent mode restarts the assistant's session** so the new tool
-  allow-list and instructions take effect. When continuing under the same playbook, the session
-  remains warm and playbook instructions are not redundantly re-injected. Knowledge-base connection
-  credentials are automatically synchronized before each turn so that long-lived sessions transparently
-  retain access without requiring an app restart. When switching playbooks, a fresh session is initialized
-  with the new playbook's tools and instructions. Attempting to change agent mode while a turn is already
-  running is rejected.
+- **Agent mode and playbooks are immutable once a conversation starts.**
+  Once a conversation has started (stamped upon sending the first prompt, persisting across restarts and failed or stopped turns),
+  both the agent mode (single-agent vs. multi-agent profile) and the initial single-agent playbook are permanently locked.
+  Attempting to change agent mode or switch playbooks on a started conversation is rejected with an error. Before a conversation
+  starts, switching agent mode cleanly closes any prepared session so the new tool allow-list and instructions take effect.
+  When continuing under the same mode and playbook, the session remains warm. Knowledge-base connection credentials are
+  automatically synchronized before each turn so that long-lived sessions transparently retain access without requiring an app
+  restart. Attempting to change agent mode while a turn is already running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
   settings and instruction files are all excluded; the assistant's behaviour comes from the server's
   instructions plus the selected playbook. The environment the model runs in *is* inherited, so
@@ -126,8 +128,8 @@ server.
   (model, thinking effort, agent mode) and playbook controls are disabled while a check runs, so the verdict
   and turn run under the selected model.
 - **The check is skipped when there is nothing to compare against** — fewer than two playbooks offered,
-  an unreachable server, a playbook the picker does not list, a multi-agent conversation, or when the
-  selected playbook is configured in the deployment's validation exclusion list.
+  an unreachable server, a playbook the picker does not list, a multi-agent conversation, follow-up messages
+  once a conversation has started, or when the selected playbook is configured in the deployment's validation exclusion list.
 - **A playbook whose constraints cannot be resolved runs with the full default tool set and no
   code-execution restriction.** Nothing is logged when the playbook is simply absent from the server's
   list, and nothing is shown either way — a playbook that meant to narrow the assistant silently
@@ -173,4 +175,6 @@ server.
 - Any cost figure. The runtime reports what a turn cost and the app forwards it to the interface,
   where nothing displays it.
 - Changing the agent mode while a turn is in progress.
+- Changing or removing a playbook once a conversation has started.
+- Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 

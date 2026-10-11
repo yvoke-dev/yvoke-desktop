@@ -426,30 +426,219 @@ describe('playbook preflight', () => {
     expect(onSend).toHaveBeenCalledWith('Follow up', 'oim-schema');
   });
 
-  it('runs preflight when the user switches to a different playbook for a follow-up question', async () => {
+  it('locks playbook after first turn: typing / on a locked thread does not open autocomplete', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
     ];
     const { container } = renderChat({ messages: existingMessages });
 
-    // Switch playbook via autocomplete
+    // Typing / on a locked thread does not show autocomplete
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+
+    // Active playbook indicator remains locked to Getting started
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
+  });
+
+  it('does not run preflight for follow-up turns in a locked thread, sending immediately under the locked playbook', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(validatePlaybook).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', 'oim-getting-started');
+  });
+
+  it('ensures preflight recommendation card does not offer switching playbooks mid-conversation', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    validatePlaybook.mockResolvedValue({
+      plausible: false,
+      reason: 'Schema fits better.',
+      suggestedPlaybookName: 'oim-schema',
+      suggestedPlaybookTitle: 'Schema',
+    });
+    const { container, rerender } = renderChat({ messages: [] });
+    ask(container, 'Question', 'Getting started');
+    await waitFor(() => expect(screen.getByText('Switch to Schema')).toBeTruthy());
+
+    // When the thread has messages, Switch to Schema button is omitted
+    rerender(chat({ messages: existingMessages }));
+    expect(screen.queryByText('Switch to Schema')).toBeNull();
+  });
+
+  it('gracefully handles external thread history with user messages having missing playbook attributes', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question without playbook', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(container.querySelector('.playbook-required')).toBeNull();
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', undefined);
+  });
+
+  it('gracefully retains locked playbook when prompts catalogue is temporarily empty or loading', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages, prompts: [] });
+
+    expect(container.querySelector('.active-playbook')).not.toBeNull();
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', 'oim-schema');
+  });
+
+  it('does not lock playbook when thread messages only contain assistant messages without user messages', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'a1', role: 'assistant', content: 'Welcome! How can I help you?', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    // User can select a playbook via autocomplete before sending first message
     const textarea = container.querySelector('textarea')!;
     fireEvent.change(textarea, { target: { value: '/schema' } });
     fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
 
-    // Type new question and submit
-    fireEvent.change(textarea, { target: { value: 'Different area question' } });
+    expect(container.querySelector('.active-playbook')).toBeTruthy();
+    expect(container.querySelector('.active-playbook-remove')).toBeTruthy();
+
+    // User can clear it before sending first message
+    fireEvent.click(container.querySelector('.active-playbook-remove')!);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+  });
+
+  it('3-Way Async Matrix: derives locked initialPlaybook across async loading, populated messages, and message-only fallback', () => {
+    // State A: thread.initialPlaybook set, messages: [] (asynchronous loading state)
+    const { container: containerA } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-schema' },
+      messages: [],
+    });
+    expect(containerA.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerA.querySelector('.active-playbook-remove')).toBeNull();
+    expect(containerA.querySelector('.picker')).toBeNull();
+
+    // State B: thread.initialPlaybook set, messages populated with user turn
+    const { container: containerB } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-schema' },
+      messages: [
+        { localId: 'u1', role: 'user', content: 'Turn 1', playbook: 'oim-schema', createdAt: '' },
+        { localId: 'a1', role: 'assistant', content: 'Answer 1', createdAt: '' },
+      ],
+    });
+    expect(containerB.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerB.querySelector('.active-playbook-remove')).toBeNull();
+
+    // State C: thread.initialPlaybook undefined, legacy/fallback user message with playbook
+    const { container: containerC } = renderChat({
+      thread: { ...THREAD, initialPlaybook: undefined },
+      messages: [
+        { localId: 'u1', role: 'user', content: 'Legacy Turn 1', playbook: 'oim-schema', createdAt: '' },
+        { localId: 'a1', role: 'assistant', content: 'Legacy Answer', createdAt: '' },
+      ],
+    });
+    expect(containerC.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerC.querySelector('.active-playbook-remove')).toBeNull();
+  });
+
+  it('Negative 1.4.1: async loading lock defense with thread.initialPlaybook prevents modification or removal while messages load', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      messages: [], // messages still loading asynchronously
+    });
+
+    // Active playbook badge is shown
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
+
+    // Backspace on empty input does not clear locked playbook
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+
+    // Sending follow-up sends under the locked playbook
+    fireEvent.change(textarea, { target: { value: 'Follow up during load' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('Follow up during load', 'oim-getting-started');
+  });
+
+  it('Negative 1.4.2: mid-conversation autocomplete suppression suppresses autocomplete popup when thread has initialPlaybook', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      messages: [],
+    });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+  });
+
+  it('orchestrator isolation: hides active playbook badge and suppresses autocomplete in orchestrator mode', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, orchestratorProfile: 'OIM', initialPlaybook: undefined },
+      messages: [],
+    });
+
+    // In multi-agent mode, active playbook badge is hidden
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    // Autocomplete is suppressed in orchestrator mode
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+
+    // Sending sends with undefined promptName
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('/schema', undefined);
+  });
+
+  it('locks to initial user message playbook when initial message had no playbook even if a subsequent message had one', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'First question without playbook', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
+      { localId: 'u2', role: 'user', content: 'Legacy switched question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a2', role: 'assistant', content: 'Legacy answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    // Thread is locked to initial user message (undefined / no playbook)
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Third question' } });
     fireEvent.click(container.querySelector('.composer-send')!);
 
-    await waitFor(() =>
-      expect(validatePlaybook).toHaveBeenCalledWith({
-        threadId: 't1',
-        text: 'Different area question',
-        promptName: 'oim-schema',
-      }),
-    );
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Different area question', 'oim-schema'));
+    expect(container.querySelector('.playbook-required')).toBeNull();
+    expect(onSend).toHaveBeenCalledWith('Third question', undefined);
   });
 
   describe('excluded playbook preflight bypass', () => {
@@ -568,17 +757,13 @@ describe('playbook preflight', () => {
       }
     });
 
-    it('bypasses preflight when switching from one playbook to an excluded playbook mid-thread', () => {
-      const existingMessages: ChatMessage[] = [
-        { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
-        { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
-      ];
+    it('bypasses preflight when selecting an excluded playbook via autocomplete', () => {
       const { container } = renderChat({
-        messages: existingMessages,
+        messages: [],
         settings: settings({ playbookValidationExcludedPlaybooks: ['oim-schema'] }),
       });
 
-      // Switch playbook via autocomplete to excluded playbook (oim-schema)
+      // Select playbook via autocomplete to excluded playbook (oim-schema)
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: '/schema' } });
       fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
@@ -781,25 +966,52 @@ describe('playbook preflight', () => {
   it.each([
     ['Backspace on an empty composer', (c: HTMLElement) => fireEvent.keyDown(c.querySelector('textarea')!, { key: 'Backspace' })],
     ['the remove button', (c: HTMLElement) => fireEvent.click(c.querySelector('.active-playbook-remove')!)],
-  ])('keeps the playbook cleared via %s when the message list is replaced', async (_label, clear) => {
+  ])('allows clearing the playbook via %s before any messages are sent', async (_label, clear) => {
+    const { container } = renderChat({ messages: [] });
+    const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+      r.textContent?.includes('Schema'),
+    );
+    fireEvent.click(row!);
+    expect(container.querySelector('.active-playbook')).toBeTruthy();
+
+    clear(container);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+  });
+
+  it('locks the playbook once messages exist: remove button is omitted, backspace does not clear it, and / does not open autocomplete', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
     ];
-    const { container, rerender } = renderChat({ messages: existingMessages });
+    const { container } = renderChat({ messages: existingMessages });
     await waitFor(() => expect(container.querySelector('.active-playbook')).toBeTruthy());
 
-    clear(container);
-    expect(container.querySelector('.active-playbook')).toBeNull();
+    // The remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
 
-    // Same content, new array identity — what App does when server ids come back for the turn.
-    rerender(chat({ messages: existingMessages.map((m) => ({ ...m })) }));
-    await waitFor(() => expect(container.querySelector('.active-playbook')).toBeNull());
+    // Backspacing on an empty composer does not clear the playbook
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema');
 
-    // Still reachable afterwards: a clear is not a lock.
-    fireEvent.change(container.querySelector('textarea')!, { target: { value: '/getting' } });
-    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
-    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Typing / does not open autocomplete
+    fireEvent.change(textarea, { target: { value: '/getting' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+  });
+
+  it('submits literal slash text as user message content under the locked playbook when typing on a locked thread', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'First question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/getting' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('/getting', 'oim-schema');
   });
 });
 
@@ -1414,17 +1626,16 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
   });
 
   describe('mid-turn controls lockout and guard retention', () => {
-    it('Test 1.1: Mid-turn controls lockout - when liveTurn.running === true, agent mode select, model select, thinking effort select, and .active-playbook-remove are disabled, while Stop button remains enabled', () => {
+    it('Test 1.1: Mid-turn controls lockout - when liveTurn.running === true, agent mode select, model select, and thinking effort select are disabled, while Stop button remains enabled and .active-playbook-remove is omitted on existing messages', () => {
       const { container } = renderChat({
         liveTurn: { ...IDLE, running: true },
         profiles: [ORDINARY],
         messages: [{ localId: 'm1', role: 'user', content: 'hello', playbook: 'oim-schema', createdAt: '2026-08-01T10:00:00.000Z' }],
       });
 
-      // Playbook remove button
+      // Playbook remove button is omitted when thread has existing messages (locked)
       const removeBtn = container.querySelector<HTMLButtonElement>('.active-playbook-remove');
-      expect(removeBtn).not.toBeNull();
-      expect(removeBtn?.disabled).toBe(true);
+      expect(removeBtn).toBeNull();
 
       // Agent mode select
       const modeSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]');
@@ -2315,6 +2526,220 @@ describe('deterministic platform shortcut labels', () => {
       // While turn is running, diagrams in earlier closed blocks must remain streaming source text
       expect(container.querySelector('.mermaid-streaming')).toBeTruthy();
       expect(container.querySelector('.mermaid-diagram-container')).toBeNull();
+    });
+  });
+
+  describe('Wave 1: Agent Mode & Playbook Locking in ChatView', () => {
+    it('DOM Structure & Tooltip: asserts inner select[aria-label="Agent mode"] is nested inside .composer-select-wrapper with unstarted tooltip', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+      });
+
+      const wrapper = container.querySelector('.composer-select-wrapper');
+      expect(wrapper).toBeTruthy();
+      expect(wrapper?.getAttribute('data-tip')).toBe('Multi-agent profile (orchestrator mode)');
+
+      const select = wrapper?.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(select).toBeTruthy();
+      expect(select.disabled).toBe(false);
+    });
+
+    it('Unstarted State (Success): enables select, fires onPatchThread on change', () => {
+      const onPatchThread = vi.fn();
+      render(
+        <ChatView
+          thread={{ ...THREAD, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={onPatchThread}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      const select = screen.getByLabelText('Agent mode') as HTMLSelectElement;
+      expect(select.disabled).toBe(false);
+      fireEvent.change(select, { target: { value: 'OIM' } });
+      expect(onPatchThread).toHaveBeenCalledWith({ orchestratorProfile: 'OIM' });
+    });
+
+    it('Started State (Lock): disables select and updates wrapper tooltip across all start triggers', () => {
+      const userMessage: ChatMessage = {
+        localId: 'u1',
+        role: 'user',
+        content: 'hello',
+        createdAt: '2026-08-01T10:00:00.000Z',
+      };
+
+      // 1. hasStarted: true
+      const { container: c1 } = renderChat({
+        thread: { ...THREAD, hasStarted: true },
+        profiles: [ORDINARY],
+      });
+      const wrapper1 = c1.querySelector('.composer-select-wrapper')!;
+      expect(wrapper1.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper1.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 2. sessionId set
+      const { container: c2 } = renderChat({
+        thread: { ...THREAD, sessionId: 'sess-active' },
+        profiles: [ORDINARY],
+      });
+      const wrapper2 = c2.querySelector('.composer-select-wrapper')!;
+      expect(wrapper2.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper2.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 3. initialPlaybook set
+      const { container: c3 } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+        profiles: [ORDINARY],
+      });
+      const wrapper3 = c3.querySelector('.composer-select-wrapper')!;
+      expect(wrapper3.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper3.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 4. user messages exist
+      const { container: c4 } = renderChat({
+        thread: THREAD,
+        messages: [userMessage],
+        profiles: [ORDINARY],
+      });
+      const wrapper4 = c4.querySelector('.composer-select-wrapper')!;
+      expect(wrapper4.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper4.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+    });
+
+    it('Granular Lock: single-agent model and thinkingLevel selectors remain enabled when idle on a started thread', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, hasStarted: true, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+      });
+
+      const modeSelect = container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(modeSelect.disabled).toBe(true);
+
+      const modelSelect = container.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+      expect(modelSelect.disabled).toBe(false);
+
+      const thinkingSelect = container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement;
+      expect(thinkingSelect.disabled).toBe(false);
+    });
+
+    it('Busy State: when liveTurn.running is true, all selectors (model, thinkingLevel, mode) are disabled', () => {
+      const runningTurn: LiveTurn = {
+        running: true,
+        liveText: 'Working...',
+        liveThinking: '',
+        blocks: [],
+      };
+
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+        liveTurn: runningTurn,
+      });
+
+      const modeSelect = container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(modeSelect.disabled).toBe(true);
+
+      const modelSelect = container.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+      expect(modelSelect.disabled).toBe(true);
+
+      const thinkingSelect = container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement;
+      expect(thinkingSelect.disabled).toBe(true);
+    });
+
+    it('Abort / Stale State: when liveTurn.running transitions back from true to false, model and thinkingLevel re-enable while mode remains locked', () => {
+      const runningTurn: LiveTurn = {
+        running: true,
+        liveText: 'Working...',
+        liveThinking: '',
+        blocks: [],
+      };
+
+      const { container, rerender } = render(
+        <ChatView
+          thread={{ ...THREAD, hasStarted: true, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={runningTurn}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      // In running state, all are disabled
+      expect((container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Model"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement).disabled).toBe(true);
+
+      // Transition to idle (e.g. stopped or finished)
+      rerender(
+        <ChatView
+          thread={{ ...THREAD, hasStarted: true, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      // Model & thinking effort re-enabled, agent mode stays locked
+      expect((container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Model"]') as HTMLSelectElement).disabled).toBe(false);
+      expect((container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement).disabled).toBe(false);
+    });
+
+    it('Active playbook remove button is omitted once conversation is started', () => {
+      const { container: cUnstarted, rerender } = render(
+        <ChatView
+          thread={{ ...THREAD, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      rerender(
+        <ChatView
+          thread={{ ...THREAD, initialPlaybook: 'oim-getting-started', orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      expect(cUnstarted.querySelector('.composer-pill-remove')).toBeNull();
     });
   });
 });

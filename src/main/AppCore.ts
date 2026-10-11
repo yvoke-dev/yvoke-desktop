@@ -26,6 +26,7 @@ import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   controlPlaybookNames,
   isPlaybookValidationExcluded,
+  isThreadStarted,
   isUserSelectablePlaybook,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -474,6 +475,8 @@ export class AppCore {
           totals: existing?.totals ?? ThreadStore.emptyTotals(),
           syncState: existing?.syncState ?? 'synced',
           orchestratorProfile,
+          initialPlaybook: existing?.initialPlaybook,
+          hasStarted: existing?.hasStarted,
         });
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
@@ -532,10 +535,16 @@ export class AppCore {
     update = sanitized;
 
     const existing = this.threads.get(threadId);
+    if (!existing) {
+      throw new Error(`Thread not found: ${threadId}`);
+    }
     const modeChanged =
       'orchestratorProfile' in update &&
-      existing !== undefined &&
       (sanitized.orchestratorProfile || undefined) !== (existing.orchestratorProfile || undefined);
+
+    if (modeChanged && isThreadStarted(existing)) {
+      throw new Error('Cannot change agent mode once a conversation has started');
+    }
 
     if (modeChanged) {
       if (this.agent.isBusy(threadId)) {
@@ -644,19 +653,33 @@ export class AppCore {
     }
     const sanitizedImages = validateAndSanitizeImages(request.images);
     this.startImageDescriptions(sanitizedImages);
-    let injectBefore: string | undefined;
-    let playbook: string | undefined;
-    // Orchestrator mode drives everything from the orchestrator's system prompt — never prepend a playbook.
-    if (request.promptName && !thread.orchestratorProfile) {
-      // Resolve the playbook text up front so a server hiccup surfaces before the turn starts.
-      injectBefore = await this.mcpPrompts.getText(request.promptName);
-      playbook = request.promptName;
+
+    const isOrchestrator = Boolean(thread.orchestratorProfile);
+    const isFirstSend = !isThreadStarted(thread);
+    const canSetPlaybook = !isOrchestrator && !thread.hasStarted;
+    const sanitizedPrompt = request.promptName?.trim() || undefined;
+    const effectivePlaybook = isOrchestrator
+      ? undefined
+      : (thread.initialPlaybook ?? (canSetPlaybook ? sanitizedPrompt : undefined));
+
+    let effectiveThread = thread;
+    const startPatch: Partial<ThreadMeta> = {};
+    if (isFirstSend || !thread.hasStarted) {
+      startPatch.hasStarted = true;
     }
-    await this.agent.sendMessage(thread, request.text, {
+    if (canSetPlaybook && !thread.initialPlaybook && effectivePlaybook) {
+      startPatch.initialPlaybook = effectivePlaybook;
+    }
+    if (Object.keys(startPatch).length > 0) {
+      const patched = this.threads.patch(thread.id, startPatch);
+      if (patched) {
+        effectiveThread = patched;
+      }
+    }
+
+    await this.agent.sendMessage(effectiveThread, request.text, {
       thinkingOverride: request.thinkingOverride,
-      injectBefore,
-      playbook,
-      playbookName: playbook,
+      playbook: effectivePlaybook,
       images: sanitizedImages,
     });
   }

@@ -102,7 +102,7 @@ describe('App conversation switching with in-progress turn', () => {
       listPrompts: vi.fn().mockResolvedValue(PROMPTS),
       listOrchestratorProfiles: vi.fn().mockResolvedValue([]),
       listThreads: vi.fn().mockImplementation(async () => ({
-        threads: storedThreads,
+        threads: storedThreads.map((t) => ({ ...t })),
         serverReachable: true,
       })),
       createThread: vi.fn().mockImplementation(async () => {
@@ -593,6 +593,74 @@ describe('App conversation switching with in-progress turn', () => {
     await waitFor(() => {
       expect(textarea.placeholder).not.toBe('Awaiting clarification…');
     });
+  });
+
+  it('rejection sync: removes optimistic message, surfaces error, re-enables composer, and locks UI on send rejection', async () => {
+    (window as unknown as { api: any }).api.listOrchestratorProfiles = vi.fn().mockResolvedValue([
+      {
+        name: 'OIM',
+        orchestratorPlaybook: 'oim-orchestrator',
+        reviewerPlaybook: 'oim-orchestrator-reviewer',
+        specialistPlaybooks: [],
+      },
+    ]);
+    const sendRejectError = new Error('Message sending failed');
+    (window as unknown as { api: any }).api.sendMessage = vi.fn().mockImplementation(async () => {
+      const t1 = storedThreads.find((t) => t.id === 'thread-1');
+      if (t1) {
+        t1.hasStarted = true;
+        t1.initialPlaybook = 'oim-schema';
+      }
+      throw sendRejectError;
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+    const schemaBtn = screen.getByText('Schema').closest('button')!;
+    fireEvent.click(schemaBtn);
+
+    const textarea = await screen.findByPlaceholderText(/Add your question/);
+    fireEvent.change(textarea, { target: { value: 'Why did the table fail?' } });
+
+    // Verify Agent mode and remove playbook button are enabled before sending
+    const agentModeSelect = screen.getByLabelText('Agent mode') as HTMLSelectElement;
+    expect(agentModeSelect.disabled).toBe(false);
+    expect(document.querySelector('.active-playbook-remove')).not.toBeNull();
+
+    const listThreadsSpy = vi.spyOn((window as unknown as { api: any }).api, 'listThreads');
+    const initialListCalls = listThreadsSpy.mock.calls.length;
+
+    const sendBtn = screen.getByRole('button', { name: /Send/i });
+    fireEvent.click(sendBtn);
+
+    // 1. Optimistic message is removed from transcript on rejection
+    await waitFor(() => {
+      expect(screen.queryByText('Why did the table fail?')).toBeNull();
+    });
+
+    // 2. Error notice is surfaced in error banner
+    await waitFor(() => {
+      expect(screen.getByText('Message sending failed')).toBeTruthy();
+    });
+
+    // 3. Composer controls re-enable
+    expect((textarea as HTMLTextAreaElement).disabled).toBe(false);
+
+    // 4. listThreads was called on rejection and UI immediately reflects the lock
+    await waitFor(() => {
+      expect(listThreadsSpy.mock.calls.length).toBeGreaterThan(initialListCalls);
+    });
+    await waitFor(() => {
+      expect(agentModeSelect.disabled).toBe(true);
+    });
+    expect(agentModeSelect.closest('.composer-select-wrapper')?.getAttribute('data-tip')).toBe(
+      'Agent mode cannot be changed once a conversation has started',
+    );
+    expect(screen.getByText('Schema')).toBeTruthy();
+    expect(document.querySelector('.active-playbook-remove')).toBeNull();
   });
 });
 

@@ -28,7 +28,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('Test 1.7a: Main Process Isolation in AppCore.sendMessage passes playbookName: undefined and injectBefore: undefined when orchestratorProfile is set', async () => {
+  it('Test 1.7a: Main Process Isolation in AppCore.sendMessage passes playbook: undefined and omits injectBefore when orchestratorProfile is set', async () => {
     const thread: ThreadMeta = {
       id: 'thread-orch-1',
       title: 'Orchestrator Conversation',
@@ -57,14 +57,13 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.objectContaining({ id: thread.id, orchestratorProfile: 'OIM' }),
       'Run multi-agent investigation',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
+    expect(sendSpy.mock.calls[0][2]).not.toHaveProperty('injectBefore');
   });
 
-  it('Test 1.7b: Adversarial Defense & Prompt Resolution Bypass - getText is not called in orchestrator mode, but is called in single-agent mode', async () => {
+  it('Test 1.7b: Adversarial Defense & Prompt Resolution Bypass - getText is never called in sendMessage', async () => {
     const orchThread: ThreadMeta = {
       id: 'thread-orch-2',
       title: 'Orchestrator Conversation 2',
@@ -90,9 +89,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
     appCore.threads.upsert(orchThread);
     appCore.threads.upsert(singleThread);
 
-    const getTextSpy = vi
-      .spyOn(appCore.mcpPrompts, 'getText')
-      .mockResolvedValue('playbook system instructions content');
+    const getTextSpy = vi.spyOn(appCore.mcpPrompts, 'getText');
     const sendSpy = vi
       .spyOn(appCore.agent, 'sendMessage')
       .mockResolvedValue(undefined as any);
@@ -108,9 +105,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.anything(),
       'Orchestrator message with prompt',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
 
@@ -125,29 +120,143 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.anything(),
       'Orchestrator message with empty prompt',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
 
-    // Case 3: Single agent thread with promptName
+    // Case 3: Single agent thread with promptName: getText is NOT called in AppCore, agent receives playbook, thread is patched
     await appCore.sendMessage({
       threadId: singleThread.id,
       text: 'Single agent message with prompt',
       promptName: 'oim-schema',
     });
-    expect(getTextSpy).toHaveBeenCalledTimes(1);
-    expect(getTextSpy).toHaveBeenCalledWith('oim-schema');
+    expect(getTextSpy).not.toHaveBeenCalled();
     expect(sendSpy).toHaveBeenLastCalledWith(
-      expect.anything(),
+      expect.objectContaining({ id: singleThread.id, initialPlaybook: 'oim-schema' }),
       'Single agent message with prompt',
       expect.objectContaining({
-        playbookName: 'oim-schema',
         playbook: 'oim-schema',
-        injectBefore: 'playbook system instructions content',
       }),
     );
+    expect(sendSpy.mock.calls[2][2]).not.toHaveProperty('injectBefore');
+  });
+
+  it('Negative 1.2.1: authoritative lock on divergent promptName ignores divergent promptName and locks to initialPlaybook', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-locked-1',
+      title: 'Locked Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-getting-started',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi
+      .spyOn(appCore.agent, 'sendMessage')
+      .mockResolvedValue(undefined as any);
+
+    // Caller attempts to send message with a divergent promptName
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second question attempting divergent playbook',
+      promptName: 'oim-divergent',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: thread.id, initialPlaybook: 'oim-getting-started' }),
+      'Second question attempting divergent playbook',
+      expect.objectContaining({
+        playbook: 'oim-getting-started',
+      }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-getting-started');
+  });
+
+  it('Negative 1.2.2: sync preservation in listThreads preserves initialPlaybook on upsert', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-sync-1',
+      title: 'Local Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-schema',
+    };
+    appCore.threads.upsert(thread);
+
+    // Server returns conversation without initialPlaybook
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValue([
+      {
+        id: 'thread-sync-1',
+        title: 'Server Conversation Title',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T11:00:00.000Z',
+        settings: { model: 'opus' },
+      } as any,
+    ]);
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(true);
+
+    const stored = appCore.threads.get('thread-sync-1')!;
+    expect(stored.title).toBe('Server Conversation Title');
+    expect(stored.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Negative 1.2.3: sync failure resilience preserves local initialPlaybook when syncClient fails', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-fail-1',
+      title: 'Local Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-schema',
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockRejectedValue(new Error('Network error'));
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(false);
+
+    const stored = appCore.threads.get('thread-fail-1')!;
+    expect(stored.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Negative 1.2.4: patchThread tampering defense strips initialPlaybook and prevents unauthorized modification', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-tamper-1',
+      title: 'Tamper Test Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-legitimate',
+    };
+    appCore.threads.upsert(thread);
+
+    // Malicious caller tries to inject initialPlaybook or sessionId via patchThread
+    const patched = appCore.patchThread(thread.id, {
+      title: 'Updated Title',
+      initialPlaybook: 'oim-hacked',
+      sessionId: 'fake-session',
+    } as any);
+
+    expect(patched?.title).toBe('Updated Title');
+    expect(patched?.initialPlaybook).toBe('oim-legitimate');
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-legitimate');
   });
 });
 
@@ -171,10 +280,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('clears sessionId and closes agent session when switching from single-agent to multi-agent', () => {
+  it('allows mode change on unstarted thread when switching from single-agent to multi-agent', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-1',
-      sessionId: 'session-single-1',
       title: 'Switch Test',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -195,11 +303,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
   });
 
-  it('clears sessionId and closes agent session when switching from multi-agent to single-agent', () => {
+  it('allows mode change on unstarted thread when switching from multi-agent to single-agent', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-2',
-      sessionId: 'session-orch-1',
-      sessionProfile: 'OIM',
       title: 'Switch Test 2',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -220,11 +326,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
   });
 
-  it('clears sessionId and closes agent session when switching between different orchestrator profiles', () => {
+  it('allows mode change on unstarted thread when switching between different orchestrator profiles', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-3',
-      sessionId: 'session-orch-oim',
-      sessionProfile: 'OIM',
       title: 'Switch Test 3',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -243,6 +347,29 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(patched?.sessionId).toBeUndefined();
     expect(patched?.orchestratorProfile).toBe('Security');
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+  });
+
+  it('rejects mode change once conversation has started (started thread boundary)', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-started',
+      sessionId: 'session-single-1',
+      title: 'Started Switch Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    expect(() => appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBeUndefined();
   });
 
   it('preserves sessionId and does not close agent session when patching non-profile fields', () => {
@@ -361,12 +488,10 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
     expect(closeSpy).not.toHaveBeenCalled();
   });
 
-  it('Test 1.5: Mode change allowed when idle (closes thread, updates store, clears sessionId/sessionProfile)', () => {
+  it('Test 1.5: Mode change allowed on unstarted thread when idle (closes thread, updates store, clears sessionId/sessionProfile)', () => {
     const thread: ThreadMeta = {
       id: 'thread-idle-1',
       title: 'Idle Thread',
-      sessionId: 'session-idle-1',
-      sessionProfile: undefined,
       model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: '2026-08-01T10:00:00.000Z',
@@ -386,6 +511,30 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
     expect(patched?.sessionId).toBeUndefined();
     expect(patched?.sessionProfile).toBeUndefined();
     expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBe('OIM');
+  });
+
+  it('Test 1.5b: Mode change rejected on started thread even when idle', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-idle-started',
+      title: 'Idle Started Thread',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(false);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    expect(() => appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('Test 1.6 & 1.6b: Profile divergence matrix in listThreads clears sessionId when server settings diverge', async () => {
@@ -682,6 +831,493 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
     expect(result).toEqual({ plausible: true });
     expect(listPromptsSpy).not.toHaveBeenCalled();
     expect(validatorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-lock-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(() => {
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Upfront Stamping: stamps hasStarted: true into ThreadStore for single-agent on first prompt', async () => {
+    const thread: ThreadMeta = {
+      id: 't-stamp-single',
+      title: 'Single Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBeUndefined();
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First question',
+      promptName: 'oim-query',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBe('oim-query');
+  });
+
+  it('Upfront Stamping: stamps hasStarted: true into ThreadStore for multi-agent threads on first prompt', async () => {
+    const thread: ThreadMeta = {
+      id: 't-stamp-multi',
+      title: 'Multi Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBeUndefined();
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First multi-agent question',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBeUndefined();
+  });
+
+  it('Second Prompt Playbook Immutability: preserves initialPlaybook and ignores different promptName', async () => {
+    const thread: ThreadMeta = {
+      id: 't-immut-playbook',
+      title: 'Playbook Immutability',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: 'oim-first',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second question with another prompt',
+      promptName: 'oim-second',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Second question with another prompt',
+      expect.objectContaining({ playbook: 'oim-first' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-first');
+  });
+
+  it('Legacy Thread Backfill: backfills initialPlaybook and stamps hasStarted on first promptName send', async () => {
+    const thread: ThreadMeta = {
+      id: 't-legacy-backfill',
+      title: 'Legacy Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'legacy-sess',
+      totals: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheCreationTokens: 0 },
+      syncState: 'synced',
+      initialPlaybook: undefined,
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First legacy prompt',
+      promptName: 'oim-schema',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'First legacy prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.initialPlaybook).toBe('oim-schema');
+    expect(stored.hasStarted).toBe(true);
+  });
+
+  it('Second Prompt Immutability After Backfill: preserves backfilled playbook and ignores divergent promptName', async () => {
+    const thread: ThreadMeta = {
+      id: 't-legacy-second-send',
+      title: 'Legacy Thread 2',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'legacy-sess-2',
+      totals: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheCreationTokens: 0 },
+      syncState: 'synced',
+      initialPlaybook: undefined,
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Initial send to backfill',
+      promptName: 'oim-schema',
+    });
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second send with divergent prompt',
+      promptName: 'divergent-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'Second send with divergent prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Plain Chat Immutability Negative Test: started plain-chat thread ignores promptName and never mutates initialPlaybook', async () => {
+    const thread: ThreadMeta = {
+      id: 't-plain-chat',
+      title: 'Plain Chat Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Follow-up send attempting to attach playbook',
+      promptName: 'divergent-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Follow-up send attempting to attach playbook',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+  });
+
+  it('Orchestrator Rogue Playbook Immunity Negative Test: orchestrator stamps hasStarted but ignores rogue playbook', async () => {
+    const thread: ThreadMeta = {
+      id: 't-orch-rogue',
+      title: 'Orchestrator Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Send with rogue playbook to orchestrator',
+      promptName: 'rogue-playbook',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Send with rogue playbook to orchestrator',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBeUndefined();
+  });
+
+  it('Whitespace Sanitization Boundary Test: whitespace promptName is sanitized to undefined', async () => {
+    const thread: ThreadMeta = {
+      id: 't-whitespace-prompt',
+      title: 'Whitespace Prompt Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Send with whitespace prompt',
+      promptName: '   ',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Send with whitespace prompt',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+  });
+
+  it('Unknown Thread Boundary: throws "Unknown thread" without writing hasStarted to store', async () => {
+    const patchSpy = vi.spyOn(appCore.threads, 'patch');
+    await expect(
+      appCore.sendMessage({
+        threadId: 'non-existent',
+        text: 'Hello?',
+      }),
+    ).rejects.toThrow('Unknown thread: non-existent');
+    expect(patchSpy).not.toHaveBeenCalled();
+  });
+
+  it('Failure Resilience: hasStarted: true remains set even if agent.sendMessage throws an error', async () => {
+    const thread: ThreadMeta = {
+      id: 't-fail-resilience',
+      title: 'Resilience Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore.agent, 'sendMessage').mockRejectedValue(new Error('Network crash'));
+
+    await expect(
+      appCore.sendMessage({
+        threadId: thread.id,
+        text: 'Crash turn',
+      }),
+    ).rejects.toThrow('Network crash');
+
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBe(true);
+  });
+
+  it('Negative Error Boundary: throws when changing orchestratorProfile on started thread for all 4 start criteria', () => {
+    // 1. hasStarted: true
+    const t1: ThreadMeta = {
+      id: 't-started-flag',
+      title: 'Started Flag',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t1);
+    expect(() => appCore.patchThread(t1.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 2. initialPlaybook set
+    const t2: ThreadMeta = {
+      id: 't-started-playbook',
+      title: 'Started Playbook',
+      initialPlaybook: 'oim-getting-started',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t2);
+    expect(() => appCore.patchThread(t2.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 3. sessionId set
+    const t3: ThreadMeta = {
+      id: 't-started-session',
+      title: 'Started Session',
+      sessionId: 'session-xyz',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t3);
+    expect(() => appCore.patchThread(t3.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 4. non-zero tokens
+    const t4: ThreadMeta = {
+      id: 't-started-tokens',
+      title: 'Started Tokens',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), outputTokens: 42 },
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(t4);
+    expect(() => appCore.patchThread(t4.id, { orchestratorProfile: undefined })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+  });
+
+  it('Positive Unstarted Switching: allows switching orchestratorProfile on unstarted thread', () => {
+    const thread: ThreadMeta = {
+      id: 't-unstarted',
+      title: 'Fresh Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBe('OIM');
+  });
+
+  it('Idempotent Mode Patch: identical orchestratorProfile on started thread succeeds and does not call closeThread', () => {
+    const thread: ThreadMeta = {
+      id: 't-idempotent',
+      title: 'Started Orchestrator',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it('Non-mode Modifications: allows updating model, thinkingLevel, or title on started thread when idle', () => {
+    const thread: ThreadMeta = {
+      id: 't-started-nonmode',
+      title: 'Original Title',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const patched = appCore.patchThread(thread.id, {
+      model: 'opus',
+      thinkingLevel: 'high',
+      title: 'Updated Title',
+    });
+
+    expect(patched?.model).toBe('opus');
+    expect(patched?.thinkingLevel).toBe('high');
+    expect(patched?.title).toBe('Updated Title');
+    expect(patched?.hasStarted).toBe(true);
+  });
+
+  it('Remote Sync Cache Reconciliation: listThreads preserves hasStarted: true', async () => {
+    const localThread: ThreadMeta = {
+      id: 't-sync-cache',
+      title: 'Local Started Thread',
+      hasStarted: true,
+      initialPlaybook: 'oim-schema',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(localThread);
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-sync-cache',
+        title: 'Server Updated Title',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T11:00:00.000Z',
+        settings: { model: 'sonnet', 'thinking-level': 'medium' },
+      },
+    ]);
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(true);
+    const reconciled = appCore.threads.get('t-sync-cache')!;
+    expect(reconciled.hasStarted).toBe(true);
+    expect(reconciled.initialPlaybook).toBe('oim-schema');
+    expect(reconciled.title).toBe('Server Updated Title');
   });
 });
 

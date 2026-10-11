@@ -448,9 +448,10 @@ export default function App(): React.JSX.Element {
           ...prev,
           [threadId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },
         }));
+        await refreshThreads();
       }
     },
-    [activeThreadId],
+    [activeThreadId, refreshThreads],
   );
 
   const patchThread = useCallback(

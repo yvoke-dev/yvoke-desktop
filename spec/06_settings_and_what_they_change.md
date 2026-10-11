@@ -50,8 +50,8 @@ configuration: whatever ships as the build's defaults, the user can change.
   shadows that file from then on. A later release that changes a default — a new server address, a new
   model list, a different agent budget — reaches nobody who has ever pressed Save.
 - **Settings do not reach a conversation that already has a live session.** The server address, the
-  transport and the turn ceiling are read when a conversation's session starts. A failed turn, a
-  playbook change, an eviction or a restart is what picks up the new values.
+  transport and the turn ceiling are read when a conversation's session starts. A failed turn, an
+  eviction or a restart is what picks up the new values.
 - **Only the server address is checked at all.** Every other value — the sign-in mode, the three
   identity strings, the model list, the turn ceiling, every agent budget, every appearance field — is
   written to disk and used exactly as given.

@@ -22,6 +22,7 @@ import {
   formatModelDisplayName,
   isClarificationTool,
   isPlaybookValidationExcluded,
+  isThreadStarted,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -326,30 +327,36 @@ export function ChatView(props: {
   }, [lightboxImage]);
 
   /**
-   * The playbook this message will be sent under. A playbook is sticky for the conversation, so the
-   * default is whichever one its last question carried — which is also what restores it after a
-   * restart, with nothing to persist. An override (a pick, a send under a different playbook, or an
-   * explicit clear, which is `prompt: null`) wins for the thread it was made on.
-   *
-   * Derived rather than mirrored into state on purpose: an effect that copies this into a `useState`
-   * has to name every input in a dependency array and race the thread-switch reset for the same
-   * variable, and both of those went wrong.
+   * The playbook the conversation's initial question carried, if any.
+   * Once at least one user message has been sent or thread.initialPlaybook is set,
+   * the thread is locked to that playbook.
    */
-  /**
-   * The playbook the conversation's most recent question carried, if any. Derived once: it decides
-   * both what the composer shows and whether the next send is preflighted, and those two must never
-   * disagree about which playbook the conversation is already under.
-   */
-  const lastUserPlaybook = useMemo(
-    () => messages.findLast((m) => m.role === 'user' && m.playbook)?.playbook,
-    [messages],
+  const initialUserPlaybook = useMemo(
+    () => thread.initialPlaybook ?? messages.find((m) => m.role === 'user')?.playbook,
+    [thread.initialPlaybook, messages],
   );
+
+  const isConversationStarted =
+    isThreadStarted(thread) ||
+    messages.some((m) => m.role === 'user');
+
+  const isPlaybookLocked = isConversationStarted;
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
-    if (promptOverride?.threadId === thread.id) return promptOverride.prompt;
-    return prompts.find((p) => p.name === lastUserPlaybook) ?? null;
-  }, [orchestratorActive, promptOverride, thread.id, lastUserPlaybook, prompts]);
+    if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
+    if (initialUserPlaybook) {
+      const found = prompts.find((p) => p.name === initialUserPlaybook);
+      if (found) return found;
+      return {
+        name: initialUserPlaybook,
+        title: initialUserPlaybook,
+        description: '',
+        arguments: [],
+      };
+    }
+    return null;
+  }, [orchestratorActive, isPlaybookLocked, promptOverride, thread.id, initialUserPlaybook, prompts]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -380,13 +387,13 @@ export function ChatView(props: {
       );
   }, []);
 
-  // Autocomplete is open while the draft is a single "/token" (no space yet).
+  // Autocomplete is open while the draft is a single "/token" (no space yet) on an unlocked thread.
   const slashQuery = /^\/(\S*)$/.exec(draft)?.[1];
   const suggestions = useMemo(() => {
-    if (orchestratorActive || slashQuery == null || prompts.length === 0) return [];
+    if (orchestratorActive || isPlaybookLocked || slashQuery == null || prompts.length === 0) return [];
     const q = slashQuery.toLowerCase();
     return prompts.filter((p) => p.name.toLowerCase().includes(q) || p.title.toLowerCase().includes(q));
-  }, [orchestratorActive, slashQuery, prompts]);
+  }, [orchestratorActive, isPlaybookLocked, slashQuery, prompts]);
   const showAutocomplete = suggestions.length > 0;
 
   useEffect(() => setHighlight(0), [slashQuery]);
@@ -545,6 +552,7 @@ export function ChatView(props: {
   );
 
   const pickPrompt = (prompt: McpPromptInfo): void => {
+    if (isPlaybookLocked) return;
     setPromptOverride({ threadId: thread.id, prompt });
     // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
     // refusal card are both reachable with a real question already typed, and that question is
@@ -575,22 +583,23 @@ export function ChatView(props: {
     }
     // The recommendation card's "Switch to …" sends under a playbook that is not the active one;
     // make it the active one so the composer agrees with what was just asked.
-    if (promptName && promptName !== activePrompt?.name) {
+    if (!isPlaybookLocked && promptName && promptName !== activePrompt?.name) {
       const matching = prompts.find((p) => p.name === promptName);
       if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
+    const effectivePromptName = isPlaybookLocked ? (activePrompt?.name ?? initialUserPlaybook) : promptName;
     if (toSend && toSend.length > 0) {
-      onSend(text, promptName, toSend);
+      onSend(text, effectivePromptName, toSend);
     } else {
-      onSend(text, promptName);
+      onSend(text, effectivePromptName);
     }
     setDraft('');
     setAttachments([]);
   };
 
   /**
-   * Preflight playbook check: runs on the conversation's first message or when switching to a
-   * different playbook. Fails open at every step so a check that cannot run never blocks a question.
+   * Preflight playbook check: runs on the conversation's first message.
+   * Fails open at every step so a check that cannot run never blocks a question.
    */
   const runPreflight = async (text: string, prompt: McpPromptInfo, imagesToSend?: ImageAttachment[]): Promise<void> => {
     const runId = ++runIdRef.current;
@@ -625,7 +634,7 @@ export function ChatView(props: {
     // rather than quietly answered with the bare default tool set. Multi-agent conversations take
     // their playbooks from the profile, and an empty catalogue — an unreachable server — leaves
     // nothing to pick, so neither is gated: an error the user cannot act on is just a dead end.
-    if (!orchestratorActive && !prompt && prompts.length > 0) {
+    if (!isPlaybookLocked && !orchestratorActive && !prompt && prompts.length > 0) {
       setPlaybookRequired(true);
       return;
     }
@@ -640,10 +649,9 @@ export function ChatView(props: {
     // gets checked again.
     const alreadyAnswered = !!preflight && preflight.forPlaybook === prompt?.name;
 
-    // Run preflight only on the conversation's first message or when the user switched playbooks.
-    const isFirstMessage = messages.length === 0;
-    const isPlaybookChanged = !isFirstMessage && prompt?.name !== lastUserPlaybook;
-    const needsPreflight = isFirstMessage || isPlaybookChanged;
+    // Run preflight only on the conversation's first message.
+    const isFirstMessage = !isPlaybookLocked;
+    const needsPreflight = isFirstMessage;
 
     if (prompt && !orchestratorActive && validationEnabled && needsPreflight && !alreadyAnswered) {
       void runPreflight(text, prompt, attachments.length > 0 ? attachments : undefined);
@@ -675,8 +683,8 @@ export function ChatView(props: {
         return;
       }
     }
-    // Backspace on an empty draft clears the active playbook.
-    if (e.key === 'Backspace' && draft === '' && activePrompt) {
+    // Backspace on an empty draft clears the active playbook before any messages are sent.
+    if (!isPlaybookLocked && e.key === 'Backspace' && draft === '' && activePrompt) {
       e.preventDefault();
       setPromptOverride({ threadId: thread.id, prompt: null });
       return;
@@ -705,6 +713,7 @@ export function ChatView(props: {
   // running (or its recommendation is standing), that grid is thirty rows of noise between the
   // user and the one thing they now have to read, so it stands down.
   const showPicker =
+    !isPlaybookLocked &&
     messages.length === 0 &&
     !liveTurn.running &&
     !orchestratorActive &&
@@ -807,7 +816,7 @@ export function ChatView(props: {
               </div>
               {preflight.reason && <div className="preflight-card-reason">{preflight.reason}</div>}
               <div className="preflight-card-actions">
-                {preflight.suggestedName && (
+                {preflight.suggestedName && !isPlaybookLocked && (
                   <button
                     className="primary"
                     disabled={draft.trim().length === 0 && attachments.length === 0}
@@ -1114,45 +1123,55 @@ export function ChatView(props: {
                 <span className="active-playbook" data-tip={activePrompt.description}>
                   <PlaybookIcon size={11} />
                   {activePrompt.title}
-                  <button
-                    className="active-playbook-remove"
-                    data-tip="Remove playbook"
-                    disabled={controlsDisabled}
-                    onClick={() => {
-                      setPromptOverride({ threadId: thread.id, prompt: null });
-                    }}
-                  >
-                    <CloseIcon size={11} />
-                  </button>
+                  {!isPlaybookLocked && (
+                    <button
+                      className="active-playbook-remove"
+                      data-tip="Remove playbook"
+                      disabled={controlsDisabled}
+                      onClick={() => {
+                        setPromptOverride({ threadId: thread.id, prompt: null });
+                      }}
+                    >
+                      <CloseIcon size={11} />
+                    </button>
+                  )}
                 </span>
               )}
             </div>
             <div className="composer-controls-right">
               {visibleProfiles.length > 0 && (
-                <select
-                  className="composer-select"
-                  value={thread.orchestratorProfile ?? ''}
-                  data-tip="Multi-agent profile (orchestrator mode)"
-                  aria-label="Agent mode"
-                  disabled={controlsDisabled}
-                  onChange={(e) => {
-                    const profile = e.target.value;
-                    if (profile) {
-                      setPlaybookRequired(false);
-                      setPreflight(null);
-                      runIdRef.current += 1;
-                      setChecking(false);
-                    }
-                    onPatchThread({ orchestratorProfile: profile });
-                  }}
+                <span
+                  className="composer-select-wrapper"
+                  data-tip={
+                    isConversationStarted
+                      ? 'Agent mode cannot be changed once a conversation has started'
+                      : 'Multi-agent profile (orchestrator mode)'
+                  }
                 >
-                  <option value="">Single agent</option>
-                  {visibleProfiles.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {p.prototype ? `🧪 ${p.name}` : p.name}
-                    </option>
-                  ))}
-                </select>
+                  <select
+                    className="composer-select"
+                    value={thread.orchestratorProfile ?? ''}
+                    aria-label="Agent mode"
+                    disabled={controlsDisabled || isConversationStarted}
+                    onChange={(e) => {
+                      const profile = e.target.value;
+                      if (profile) {
+                        setPlaybookRequired(false);
+                        setPreflight(null);
+                        runIdRef.current += 1;
+                        setChecking(false);
+                      }
+                      onPatchThread({ orchestratorProfile: profile });
+                    }}
+                  >
+                    <option value="">Single agent</option>
+                    {visibleProfiles.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.prototype ? `🧪 ${p.name}` : p.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
               )}
               {!orchestratorActive ? (
                 <>
