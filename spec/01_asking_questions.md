@@ -84,8 +84,8 @@ behind it, and the work that produced it can be opened and read.
 - **Model options display friendly versioned names.** The composer's model selector formats model aliases into clean display labels (e.g. *Sonnet 5.5*, *Opus 5.5*, *Haiku 5.5*) while the runtime resolves them to explicit canonical wire IDs (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) when launching agent sessions and executing turns.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
-  the same act. So a failed turn leaves no record of having been asked. The question stays on screen
-  until the conversation is reopened, which is the only sign that anything was lost. Reaching the
+  the same act. So a failed turn leaves no record of having been asked in the transcript. The question stays on screen
+  until the conversation is reopened, which is the only sign that anything was lost (though an initial attempt permanently locks the conversation's agent mode and playbook). Reaching the
   turn ceiling counts as a failure, so a long investigation that runs out of steps loses everything.
 - **Stopping is the same act, for the same reason.** Stopping produces an error result, so the partial
   answer and the question are both discarded. The web app keeps a stopped answer; this one does not.
