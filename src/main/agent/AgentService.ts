@@ -145,11 +145,8 @@ class MessageQueue implements AsyncIterable<SDKUserMessage> {
 export interface SendOptions {
   /** Thinking override for exactly this message. */
   thinkingOverride?: ThinkingLevel;
-  /** Playbook text injected ahead of the user's message for the model only. */
-  injectBefore?: string;
-  /** Display label for the injected playbook, stored on the user message. */
+  /** Playbook identifier / name for this turn. */
   playbook?: string;
-  playbookName?: string;
   /** Attached images for multimodal prompt context. */
   images?: ImageAttachment[];
 }
@@ -244,7 +241,7 @@ export class AgentService {
 
     let session: ThreadSession;
     try {
-      session = await this.ensureSession(thread, opts.playbookName, opts.injectBefore);
+      session = await this.ensureSession(thread, opts.playbook);
     } catch (error) {
       const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
       logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
@@ -427,7 +424,6 @@ export class AgentService {
   private async ensureSession(
     thread: ThreadMeta,
     playbookName?: string,
-    optsInjectBefore?: string,
   ): Promise<ThreadSession> {
     const existing = this.sessions.get(thread.id);
     let resolvedHeaders: Record<string, string> | undefined;
@@ -519,6 +515,10 @@ export class AgentService {
           return existing;
         }
       }
+    } else if (!thread.orchestratorProfile && thread.initialPlaybook && playbookName !== thread.initialPlaybook) {
+      throw new Error(
+        `Cannot switch playbook on an existing conversation session (locked to "${thread.initialPlaybook}", requested "${playbookName ?? 'none'}")`,
+      );
     }
 
     const MAX_WARM_SESSIONS = 3;
@@ -544,8 +544,8 @@ export class AgentService {
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
     let playbookSystemPrompt: string | undefined;
-    let playbookText: string | undefined = optsInjectBefore;
-    if (playbookName) {
+    let playbookText: string | undefined;
+    if (playbookName && !thread.orchestratorProfile) {
       try {
         const prompts = await this.deps.mcpPrompts.list();
         const p = prompts.find((pr: McpPromptInfo) => pr.name === playbookName);
@@ -555,9 +555,7 @@ export class AgentService {
           playbookSystemPrompt = p.systemPrompt;
           log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
         }
-        if (playbookText === undefined) {
-          playbookText = await this.deps.mcpPrompts.getText(playbookName);
-        }
+        playbookText = await this.deps.mcpPrompts.getText(playbookName);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (hasErrorSourcePrefix(msg, 'Entra')) {
@@ -704,7 +702,7 @@ export class AgentService {
       interrupted: false,
       turn: newTurnContext(thread.id, Boolean(thread.orchestratorProfile)),
       lastActiveAt: Date.now(),
-      playbookName,
+      playbookName: thread.orchestratorProfile ? undefined : playbookName,
       orchestratorProfile: thread.orchestratorProfile,
       lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };

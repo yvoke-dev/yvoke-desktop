@@ -533,6 +533,94 @@ describe('playbook preflight', () => {
     expect(container.querySelector('.active-playbook')).toBeNull();
   });
 
+  it('3-Way Async Matrix: derives locked initialPlaybook across async loading, populated messages, and message-only fallback', () => {
+    // State A: thread.initialPlaybook set, messages: [] (asynchronous loading state)
+    const { container: containerA } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-schema' },
+      messages: [],
+    });
+    expect(containerA.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerA.querySelector('.active-playbook-remove')).toBeNull();
+    expect(containerA.querySelector('.picker')).toBeNull();
+
+    // State B: thread.initialPlaybook set, messages populated with user turn
+    const { container: containerB } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-schema' },
+      messages: [
+        { localId: 'u1', role: 'user', content: 'Turn 1', playbook: 'oim-schema', createdAt: '' },
+        { localId: 'a1', role: 'assistant', content: 'Answer 1', createdAt: '' },
+      ],
+    });
+    expect(containerB.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerB.querySelector('.active-playbook-remove')).toBeNull();
+
+    // State C: thread.initialPlaybook undefined, legacy/fallback user message with playbook
+    const { container: containerC } = renderChat({
+      thread: { ...THREAD, initialPlaybook: undefined },
+      messages: [
+        { localId: 'u1', role: 'user', content: 'Legacy Turn 1', playbook: 'oim-schema', createdAt: '' },
+        { localId: 'a1', role: 'assistant', content: 'Legacy Answer', createdAt: '' },
+      ],
+    });
+    expect(containerC.querySelector('.active-playbook')?.textContent).toContain('Schema');
+    expect(containerC.querySelector('.active-playbook-remove')).toBeNull();
+  });
+
+  it('Negative 1.4.1: async loading lock defense with thread.initialPlaybook prevents modification or removal while messages load', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      messages: [], // messages still loading asynchronously
+    });
+
+    // Active playbook badge is shown
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
+
+    // Backspace on empty input does not clear locked playbook
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+
+    // Sending follow-up sends under the locked playbook
+    fireEvent.change(textarea, { target: { value: 'Follow up during load' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('Follow up during load', 'oim-getting-started');
+  });
+
+  it('Negative 1.4.2: mid-conversation autocomplete suppression suppresses autocomplete popup when thread has initialPlaybook', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      messages: [],
+    });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+  });
+
+  it('orchestrator isolation: hides active playbook badge and suppresses autocomplete in orchestrator mode', () => {
+    const { container } = renderChat({
+      thread: { ...THREAD, orchestratorProfile: 'OIM', initialPlaybook: undefined },
+      messages: [],
+    });
+
+    // In multi-agent mode, active playbook badge is hidden
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    // Autocomplete is suppressed in orchestrator mode
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+
+    // Sending sends with undefined promptName
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('/schema', undefined);
+  });
+
   it('locks to initial user message playbook when initial message had no playbook even if a subsequent message had one', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'First question without playbook', createdAt: '' },

@@ -326,25 +326,16 @@ export function ChatView(props: {
   }, [lightboxImage]);
 
   /**
-   * The playbook this message will be sent under. A playbook is sticky for the conversation, so the
-   * default is whichever one its last question carried — which is also what restores it after a
-   * restart, with nothing to persist. An override (a pick, a send under a different playbook, or an
-   * explicit clear, which is `prompt: null`) wins for the thread it was made on.
-   *
-   * Derived rather than mirrored into state on purpose: an effect that copies this into a `useState`
-   * has to name every input in a dependency array and race the thread-switch reset for the same
-   * variable, and both of those went wrong.
-   */
-  /**
    * The playbook the conversation's initial question carried, if any.
-   * Once at least one user message has been sent, the thread is locked to that playbook.
+   * Once at least one user message has been sent or thread.initialPlaybook is set,
+   * the thread is locked to that playbook.
    */
-  const isPlaybookLocked = messages.some((m) => m.role === 'user');
-
   const initialUserPlaybook = useMemo(
-    () => messages.find((m) => m.role === 'user')?.playbook,
-    [messages],
+    () => thread.initialPlaybook ?? messages.find((m) => m.role === 'user')?.playbook,
+    [thread.initialPlaybook, messages],
   );
+
+  const isPlaybookLocked = Boolean(thread.initialPlaybook) || messages.some((m) => m.role === 'user');
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
@@ -717,6 +708,7 @@ export function ChatView(props: {
   // running (or its recommendation is standing), that grid is thirty rows of noise between the
   // user and the one thing they now have to read, so it stands down.
   const showPicker =
+    !isPlaybookLocked &&
     messages.length === 0 &&
     !liveTurn.running &&
     !orchestratorActive &&

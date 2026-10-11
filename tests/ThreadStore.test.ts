@@ -286,4 +286,91 @@ describe('ThreadStore', () => {
       await expect(store.drain()).resolves.toBeUndefined();
     });
   });
+
+  describe('initialPlaybook persistence hardening', () => {
+    it('persists initialPlaybook in index across instances (happy path)', () => {
+      store.upsert(meta('t1'));
+      store.patch('t1', { initialPlaybook: 'oim-getting-started' });
+      expect(store.get('t1')?.initialPlaybook).toBe('oim-getting-started');
+
+      const reopened = new ThreadStore(dir);
+      expect(reopened.get('t1')?.initialPlaybook).toBe('oim-getting-started');
+    });
+
+    it('Negative 1.1.1: disk key omission when initialPlaybook is undefined or cleared', () => {
+      store.upsert(meta('t1'));
+      const inMemoryInit = store.get('t1')!;
+      expect('initialPlaybook' in inMemoryInit).toBe(false);
+
+      const rawInitial = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
+      expect('initialPlaybook' in rawInitial.t1).toBe(false);
+
+      store.patch('t1', { initialPlaybook: 'oim-schema' });
+      expect(store.get('t1')?.initialPlaybook).toBe('oim-schema');
+
+      store.patch('t1', { initialPlaybook: undefined });
+      const inMemoryCleared = store.get('t1')!;
+      expect(inMemoryCleared.initialPlaybook).toBeUndefined();
+      expect('initialPlaybook' in inMemoryCleared).toBe(false);
+
+      const reopened = new ThreadStore(dir).get('t1')!;
+      expect(reopened.initialPlaybook).toBeUndefined();
+      expect('initialPlaybook' in reopened).toBe(false);
+
+      const rawCleared = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
+      expect('initialPlaybook' in rawCleared.t1).toBe(false);
+    });
+
+    it('Negative 1.1.2: index corruption resilience preserves corrupt index and recovers with initialPlaybook', () => {
+      const indexFile = path.join(dir, 'index.json');
+      fs.writeFileSync(indexFile, '{"t1": {"id": "t1", "initialPlaybook": "partially corrupted json');
+
+      const reopened = new ThreadStore(dir);
+      expect(fs.existsSync(indexFile + '.corrupt')).toBe(true);
+      expect(reopened.list()).toEqual([]);
+
+      reopened.upsert({ ...meta('t2'), initialPlaybook: 'oim-getting-started' });
+      expect(reopened.get('t2')?.initialPlaybook).toBe('oim-getting-started');
+      const diskReloaded = new ThreadStore(dir).get('t2')!;
+      expect(diskReloaded.initialPlaybook).toBe('oim-getting-started');
+    });
+
+    it('Negative 1.1.3: enforces orchestrator mutual exclusivity (initialPlaybook omitted when orchestratorProfile set)', () => {
+      // Case 1: upsert with both orchestratorProfile and initialPlaybook omits initialPlaybook
+      store.upsert({
+        ...meta('t1'),
+        orchestratorProfile: 'OIM',
+        initialPlaybook: 'oim-schema',
+      });
+      const t1 = store.get('t1')!;
+      expect(t1.orchestratorProfile).toBe('OIM');
+      expect('initialPlaybook' in t1).toBe(false);
+      expect(t1.initialPlaybook).toBeUndefined();
+
+      const diskT1 = new ThreadStore(dir).get('t1')!;
+      expect('initialPlaybook' in diskT1).toBe(false);
+
+      // Case 2: patch setting orchestratorProfile on a thread with initialPlaybook clears initialPlaybook
+      store.upsert(meta('t2'));
+      store.patch('t2', { initialPlaybook: 'oim-getting-started' });
+      expect(store.get('t2')?.initialPlaybook).toBe('oim-getting-started');
+
+      store.patch('t2', { orchestratorProfile: 'OIM' });
+      const t2 = store.get('t2')!;
+      expect(t2.orchestratorProfile).toBe('OIM');
+      expect('initialPlaybook' in t2).toBe(false);
+      expect(t2.initialPlaybook).toBeUndefined();
+
+      const diskT2 = new ThreadStore(dir).get('t2')!;
+      expect('initialPlaybook' in diskT2).toBe(false);
+
+      // Case 3: patch attempting to set initialPlaybook on orchestrator thread is ignored/omitted
+      store.patch('t2', { initialPlaybook: 'oim-schema' });
+      const t2StillOrch = store.get('t2')!;
+      expect(t2StillOrch.orchestratorProfile).toBe('OIM');
+      expect('initialPlaybook' in t2StillOrch).toBe(false);
+      expect(t2StillOrch.initialPlaybook).toBeUndefined();
+    });
+  });
 });
+

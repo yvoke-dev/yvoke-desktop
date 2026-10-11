@@ -237,9 +237,7 @@ async function ask(
 ): Promise<void> {
   const before = events.filter((e) => e.kind === 'turn-complete').length;
   await svc.sendMessage(meta, text, {
-    injectBefore: playbookName ? TEXT[playbookName] : undefined,
     playbook: playbookName,
-    playbookName,
   });
   for (let i = 0; i < 200; i++) {
     if (events.filter((e) => e.kind === 'turn-complete').length > before) return;
@@ -326,9 +324,7 @@ describe('playbook injection across a session', () => {
     const before = events.filter((e) => e.kind === 'turn-complete').length;
 
     await svc.sendMessage(meta, 'Question with image', {
-      injectBefore: TEXT['oim-schema'],
       playbook: 'oim-schema',
-      playbookName: 'oim-schema',
       images: [
         {
           id: 'img-1',
@@ -422,7 +418,6 @@ describe('playbook injection across a session', () => {
     const before = events.filter((e) => e.kind === 'turn-complete').length;
     await svc.sendMessage(meta, 'Question with empty playbook body', {
       playbook: 'oim-schema',
-      playbookName: 'oim-schema',
     });
     for (let i = 0; i < 200; i++) {
       if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
@@ -449,7 +444,6 @@ describe('playbook injection across a session', () => {
     await expect(
       svc.sendMessage(meta, 'Question with unreadable playbook', {
         playbook: 'oim-schema',
-        playbookName: 'oim-schema',
       }),
     ).rejects.toThrow(/Playbook metadata for "oim-schema" could not be loaded: Playbook file unreadable/);
 
@@ -584,7 +578,6 @@ describe('playbook injection across a session', () => {
     const before = events.filter((e) => e.kind === 'turn-complete').length;
     await svc.sendMessage(meta, 'Hello single agent', {
       playbook: 'custom-playbook',
-      playbookName: 'custom-playbook',
     });
     for (let i = 0; i < 200; i++) {
       if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
@@ -629,7 +622,6 @@ describe('playbook injection across a session', () => {
     const before = events.filter((e) => e.kind === 'turn-complete').length;
     await svc.sendMessage(meta, 'Hello orchestrator', {
       playbook: 'custom-playbook',
-      playbookName: 'custom-playbook',
     });
     for (let i = 0; i < 200; i++) {
       if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
@@ -661,7 +653,6 @@ describe('playbook injection across a session', () => {
     await expect(
       svc.sendMessage(meta, 'Hello', {
         playbook: 'custom-playbook',
-        playbookName: 'custom-playbook',
       }),
     ).rejects.toBe(entraError);
     svc.closeAll();
@@ -680,9 +671,85 @@ describe('playbook injection across a session', () => {
     await expect(
       svc.sendMessage(meta, 'Hello', {
         playbook: 'custom-playbook',
-        playbookName: 'custom-playbook',
       }),
     ).rejects.toThrow(/Playbook metadata for "custom-playbook" could not be loaded/);
+    svc.closeAll();
+  });
+
+  it('Negative 1.3.1: session eviction & cold session re-locking enforces lock against divergent playbook and resumes under initialPlaybook', async () => {
+    const meta = thread();
+    meta.initialPlaybook = 'oim-schema';
+    const svc = makeService(meta);
+
+    // Turn 1 on cold thread with initialPlaybook
+    await ask(svc, meta, 'First question', 'oim-schema');
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
+
+    // Evict session from memory (e.g. by closing or simulating warm session eviction)
+    svc.closeThread(meta.id);
+    expect(h.sessions[0].closed).toBe(true);
+
+    // Attempting to send on cold thread with divergent playbook throws locking error
+    await expect(ask(svc, meta, 'Divergent question', 'oim-customers')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session/,
+    );
+
+    // Resending on cold thread with locked initialPlaybook succeeds and rebuilds session under oim-schema
+    await ask(svc, meta, 'Valid follow-up', 'oim-schema');
+    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions[1].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
+    svc.closeAll();
+  });
+
+  it('Negative 1.3.2: mcpPrompts failure & attribution attributes generic errors to Yvoke Backend and emits error event', async () => {
+    const meta = thread();
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => {
+          throw new Error('500 Internal Server Error in playbook prompt fetch');
+        },
+      } as never,
+    });
+
+    await expect(
+      svc.sendMessage(meta, 'Question with failing getText', {
+        playbook: 'oim-schema',
+      }),
+    ).rejects.toThrow(/Yvoke Backend: Playbook metadata for "oim-schema" could not be loaded: 500 Internal Server Error/);
+
+    const errorEvent = events.find((e) => e.kind === 'error');
+    expect(errorEvent).toBeDefined();
+    expect(errorEvent?.message).toContain('Yvoke Backend: Playbook metadata for "oim-schema" could not be loaded: 500 Internal Server Error');
+    svc.closeAll();
+  });
+
+  it('Negative 1.3.3: Entra token expiry preservation preserves Entra error prefix without wrapping in Yvoke Backend', async () => {
+    const meta = thread();
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => {
+          throw new Error('Entra: Authentication token expired. Please re-authenticate.');
+        },
+      } as never,
+    });
+
+    await expect(
+      svc.sendMessage(meta, 'Question with expired token', {
+        playbook: 'oim-schema',
+      }),
+    ).rejects.toThrow('Entra: Authentication token expired. Please re-authenticate.');
+
+    const errorEvent = events.find((e) => e.kind === 'error');
+    expect(errorEvent).toBeDefined();
+    expect(errorEvent?.message).toBe('Entra: Authentication token expired. Please re-authenticate.');
+    expect(errorEvent?.message).not.toContain('Yvoke Backend');
     svc.closeAll();
   });
 });
@@ -834,7 +901,7 @@ describe('error attribution across session events', () => {
     const closeSpy = vi.spyOn(svc, 'closeThread');
 
     await expect(
-      svc.sendMessage(meta, 'Second question while busy', { playbookName: 'oim-customers' }),
+      svc.sendMessage(meta, 'Second question while busy', { playbook: 'oim-customers' }),
     ).rejects.toThrow('A turn is already running for this conversation.');
 
     expect(closeSpy).not.toHaveBeenCalled();
@@ -936,9 +1003,7 @@ describe('error attribution across session events', () => {
     h.nextQueryError = new Error('Turn exploded');
 
     await svc.sendMessage(meta, 'Question that fails', {
-      injectBefore: TEXT['oim-schema'],
       playbook: 'oim-schema',
-      playbookName: 'oim-schema',
     });
 
     // Wait for consume to hit error block
@@ -1294,7 +1359,7 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     };
 
     const prevErrorEvents = events.filter((e) => e.kind === 'error');
-    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbook: 'oim-schema' })).rejects.toThrow(
       'A turn is already running for this conversation.',
     );
     // Crucial: ensure no error event was emitted to avoid wiping the active turn view in the UI
@@ -1356,7 +1421,7 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
     };
 
     const prevErrorEvents = events.filter((e) => e.kind === 'error');
-    await expect(svc.sendMessage(meta, 'Turn 2', { playbookName: 'oim-schema' })).rejects.toThrow(
+    await expect(svc.sendMessage(meta, 'Turn 2', { playbook: 'oim-schema' })).rejects.toThrow(
       'A turn is already running for this conversation.',
     );
     // Crucial: ensure no error event was emitted and active session was NOT closed mid-turn

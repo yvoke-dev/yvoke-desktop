@@ -28,7 +28,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('Test 1.7a: Main Process Isolation in AppCore.sendMessage passes playbookName: undefined and injectBefore: undefined when orchestratorProfile is set', async () => {
+  it('Test 1.7a: Main Process Isolation in AppCore.sendMessage passes playbook: undefined and omits injectBefore when orchestratorProfile is set', async () => {
     const thread: ThreadMeta = {
       id: 'thread-orch-1',
       title: 'Orchestrator Conversation',
@@ -57,14 +57,13 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.objectContaining({ id: thread.id, orchestratorProfile: 'OIM' }),
       'Run multi-agent investigation',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
+    expect(sendSpy.mock.calls[0][2]).not.toHaveProperty('injectBefore');
   });
 
-  it('Test 1.7b: Adversarial Defense & Prompt Resolution Bypass - getText is not called in orchestrator mode, but is called in single-agent mode', async () => {
+  it('Test 1.7b: Adversarial Defense & Prompt Resolution Bypass - getText is never called in sendMessage', async () => {
     const orchThread: ThreadMeta = {
       id: 'thread-orch-2',
       title: 'Orchestrator Conversation 2',
@@ -90,9 +89,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
     appCore.threads.upsert(orchThread);
     appCore.threads.upsert(singleThread);
 
-    const getTextSpy = vi
-      .spyOn(appCore.mcpPrompts, 'getText')
-      .mockResolvedValue('playbook system instructions content');
+    const getTextSpy = vi.spyOn(appCore.mcpPrompts, 'getText');
     const sendSpy = vi
       .spyOn(appCore.agent, 'sendMessage')
       .mockResolvedValue(undefined as any);
@@ -108,9 +105,7 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.anything(),
       'Orchestrator message with prompt',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
 
@@ -125,29 +120,143 @@ describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
       expect.anything(),
       'Orchestrator message with empty prompt',
       expect.objectContaining({
-        playbookName: undefined,
         playbook: undefined,
-        injectBefore: undefined,
       }),
     );
 
-    // Case 3: Single agent thread with promptName
+    // Case 3: Single agent thread with promptName: getText is NOT called in AppCore, agent receives playbook, thread is patched
     await appCore.sendMessage({
       threadId: singleThread.id,
       text: 'Single agent message with prompt',
       promptName: 'oim-schema',
     });
-    expect(getTextSpy).toHaveBeenCalledTimes(1);
-    expect(getTextSpy).toHaveBeenCalledWith('oim-schema');
+    expect(getTextSpy).not.toHaveBeenCalled();
     expect(sendSpy).toHaveBeenLastCalledWith(
-      expect.anything(),
+      expect.objectContaining({ id: singleThread.id, initialPlaybook: 'oim-schema' }),
       'Single agent message with prompt',
       expect.objectContaining({
-        playbookName: 'oim-schema',
         playbook: 'oim-schema',
-        injectBefore: 'playbook system instructions content',
       }),
     );
+    expect(sendSpy.mock.calls[2][2]).not.toHaveProperty('injectBefore');
+  });
+
+  it('Negative 1.2.1: authoritative lock on divergent promptName ignores divergent promptName and locks to initialPlaybook', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-locked-1',
+      title: 'Locked Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-getting-started',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi
+      .spyOn(appCore.agent, 'sendMessage')
+      .mockResolvedValue(undefined as any);
+
+    // Caller attempts to send message with a divergent promptName
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second question attempting divergent playbook',
+      promptName: 'oim-divergent',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: thread.id, initialPlaybook: 'oim-getting-started' }),
+      'Second question attempting divergent playbook',
+      expect.objectContaining({
+        playbook: 'oim-getting-started',
+      }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-getting-started');
+  });
+
+  it('Negative 1.2.2: sync preservation in listThreads preserves initialPlaybook on upsert', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-sync-1',
+      title: 'Local Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-schema',
+    };
+    appCore.threads.upsert(thread);
+
+    // Server returns conversation without initialPlaybook
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValue([
+      {
+        id: 'thread-sync-1',
+        title: 'Server Conversation Title',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T11:00:00.000Z',
+        settings: { model: 'opus' },
+      } as any,
+    ]);
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(true);
+
+    const stored = appCore.threads.get('thread-sync-1')!;
+    expect(stored.title).toBe('Server Conversation Title');
+    expect(stored.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Negative 1.2.3: sync failure resilience preserves local initialPlaybook when syncClient fails', async () => {
+    const thread: ThreadMeta = {
+      id: 'thread-fail-1',
+      title: 'Local Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-schema',
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockRejectedValue(new Error('Network error'));
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(false);
+
+    const stored = appCore.threads.get('thread-fail-1')!;
+    expect(stored.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Negative 1.2.4: patchThread tampering defense strips initialPlaybook and prevents unauthorized modification', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-tamper-1',
+      title: 'Tamper Test Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-legitimate',
+    };
+    appCore.threads.upsert(thread);
+
+    // Malicious caller tries to inject initialPlaybook or sessionId via patchThread
+    const patched = appCore.patchThread(thread.id, {
+      title: 'Updated Title',
+      initialPlaybook: 'oim-hacked',
+      sessionId: 'fake-session',
+    } as any);
+
+    expect(patched?.title).toBe('Updated Title');
+    expect(patched?.initialPlaybook).toBe('oim-legitimate');
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-legitimate');
   });
 });
 

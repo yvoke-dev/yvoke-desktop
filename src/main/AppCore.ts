@@ -474,6 +474,7 @@ export class AppCore {
           totals: existing?.totals ?? ThreadStore.emptyTotals(),
           syncState: existing?.syncState ?? 'synced',
           orchestratorProfile,
+          initialPlaybook: existing?.initialPlaybook,
         });
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
@@ -644,19 +645,23 @@ export class AppCore {
     }
     const sanitizedImages = validateAndSanitizeImages(request.images);
     this.startImageDescriptions(sanitizedImages);
-    let injectBefore: string | undefined;
-    let playbook: string | undefined;
-    // Orchestrator mode drives everything from the orchestrator's system prompt — never prepend a playbook.
-    if (request.promptName && !thread.orchestratorProfile) {
-      // Resolve the playbook text up front so a server hiccup surfaces before the turn starts.
-      injectBefore = await this.mcpPrompts.getText(request.promptName);
-      playbook = request.promptName;
+
+    const isOrchestrator = Boolean(thread.orchestratorProfile);
+    const effectivePlaybook = isOrchestrator
+      ? undefined
+      : (thread.initialPlaybook ?? (request.promptName || undefined));
+
+    let effectiveThread = thread;
+    if (!isOrchestrator && effectivePlaybook && !thread.initialPlaybook) {
+      const patched = this.threads.patch(thread.id, { initialPlaybook: effectivePlaybook });
+      if (patched) {
+        effectiveThread = patched;
+      }
     }
-    await this.agent.sendMessage(thread, request.text, {
+
+    await this.agent.sendMessage(effectiveThread, request.text, {
       thinkingOverride: request.thinkingOverride,
-      injectBefore,
-      playbook,
-      playbookName: playbook,
+      playbook: effectivePlaybook,
       images: sanitizedImages,
     });
   }

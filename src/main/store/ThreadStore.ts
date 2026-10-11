@@ -97,7 +97,12 @@ export class ThreadStore {
 
   upsert(meta: ThreadMeta): void {
     this.validateThreadId(meta.id);
-    this.index[meta.id] = meta;
+    const cleaned = { ...meta };
+    if (cleaned.sessionId === undefined) delete cleaned.sessionId;
+    if (cleaned.sessionProfile === undefined) delete cleaned.sessionProfile;
+    if (!cleaned.orchestratorProfile) delete cleaned.orchestratorProfile;
+    if (!cleaned.initialPlaybook || cleaned.orchestratorProfile) delete cleaned.initialPlaybook;
+    this.index[meta.id] = cleaned;
     this.persistIndex();
   }
 
@@ -116,6 +121,12 @@ export class ThreadStore {
     }
     if ('orchestratorProfile' in update && !update.orchestratorProfile) {
       delete updated.orchestratorProfile;
+    }
+    if ('initialPlaybook' in update && !update.initialPlaybook) {
+      delete updated.initialPlaybook;
+    }
+    if (updated.orchestratorProfile) {
+      delete updated.initialPlaybook;
     }
     this.index[threadId] = updated;
     this.persistIndex();

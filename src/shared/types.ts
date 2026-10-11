@@ -238,6 +238,8 @@ export interface ThreadMeta {
   syncState: SyncState;
   /** Selected multi-agent profile name; undefined/'' = Off (normal single-agent chat). */
   orchestratorProfile?: string;
+  /** Initial playbook this thread was locked to upon sending its first message. */
+  initialPlaybook?: string;
 }
 
 export interface ToolCallInfo {
