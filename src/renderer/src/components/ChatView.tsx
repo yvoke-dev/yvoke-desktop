@@ -21,6 +21,7 @@ import {
   DEFAULT_APPEARANCE,
   formatModelDisplayName,
   isClarificationTool,
+  isPlaybookValidationExcluded,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -628,6 +629,12 @@ export function ChatView(props: {
       setPlaybookRequired(true);
       return;
     }
+
+    if (prompt && isPlaybookValidationExcluded(prompt, settings.playbookValidationExcludedPlaybooks)) {
+      send(text, prompt?.name, attachments.length > 0 ? attachments : undefined);
+      return;
+    }
+
     // An open card is a question the user has already been shown: sending again with the same
     // playbook is their "send anyway". Changing the playbook first is a new question, so it
     // gets checked again.
