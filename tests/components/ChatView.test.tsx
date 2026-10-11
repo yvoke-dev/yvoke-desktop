@@ -426,30 +426,131 @@ describe('playbook preflight', () => {
     expect(onSend).toHaveBeenCalledWith('Follow up', 'oim-schema');
   });
 
-  it('runs preflight when the user switches to a different playbook for a follow-up question', async () => {
+  it('locks playbook after first turn: typing / on a locked thread does not open autocomplete', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
     ];
     const { container } = renderChat({ messages: existingMessages });
 
-    // Switch playbook via autocomplete
+    // Typing / on a locked thread does not show autocomplete
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+    expect(container.querySelector('.autocomplete')).toBeNull();
+
+    // Active playbook indicator remains locked to Getting started
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
+  });
+
+  it('does not run preflight for follow-up turns in a locked thread, sending immediately under the locked playbook', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(validatePlaybook).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', 'oim-getting-started');
+  });
+
+  it('ensures preflight recommendation card does not offer switching playbooks mid-conversation', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    validatePlaybook.mockResolvedValue({
+      plausible: false,
+      reason: 'Schema fits better.',
+      suggestedPlaybookName: 'oim-schema',
+      suggestedPlaybookTitle: 'Schema',
+    });
+    const { container, rerender } = renderChat({ messages: [] });
+    ask(container, 'Question', 'Getting started');
+    await waitFor(() => expect(screen.getByText('Switch to Schema')).toBeTruthy());
+
+    // When the thread has messages, Switch to Schema button is omitted
+    rerender(chat({ messages: existingMessages }));
+    expect(screen.queryByText('Switch to Schema')).toBeNull();
+  });
+
+  it('gracefully handles external thread history with user messages having missing playbook attributes', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question without playbook', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(container.querySelector('.playbook-required')).toBeNull();
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', undefined);
+  });
+
+  it('gracefully retains locked playbook when prompts catalogue is temporarily empty or loading', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages, prompts: [] });
+
+    expect(container.querySelector('.active-playbook')).not.toBeNull();
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(onSend).toHaveBeenCalledWith('Follow-up question', 'oim-schema');
+  });
+
+  it('does not lock playbook when thread messages only contain assistant messages without user messages', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'a1', role: 'assistant', content: 'Welcome! How can I help you?', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    // User can select a playbook via autocomplete before sending first message
     const textarea = container.querySelector('textarea')!;
     fireEvent.change(textarea, { target: { value: '/schema' } });
     fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
 
-    // Type new question and submit
-    fireEvent.change(textarea, { target: { value: 'Different area question' } });
+    expect(container.querySelector('.active-playbook')).toBeTruthy();
+    expect(container.querySelector('.active-playbook-remove')).toBeTruthy();
+
+    // User can clear it before sending first message
+    fireEvent.click(container.querySelector('.active-playbook-remove')!);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+  });
+
+  it('locks to initial user message playbook when initial message had no playbook even if a subsequent message had one', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'First question without playbook', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
+      { localId: 'u2', role: 'user', content: 'Legacy switched question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a2', role: 'assistant', content: 'Legacy answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    // Thread is locked to initial user message (undefined / no playbook)
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Third question' } });
     fireEvent.click(container.querySelector('.composer-send')!);
 
-    await waitFor(() =>
-      expect(validatePlaybook).toHaveBeenCalledWith({
-        threadId: 't1',
-        text: 'Different area question',
-        promptName: 'oim-schema',
-      }),
-    );
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Different area question', 'oim-schema'));
+    expect(container.querySelector('.playbook-required')).toBeNull();
+    expect(onSend).toHaveBeenCalledWith('Third question', undefined);
   });
 
   describe('excluded playbook preflight bypass', () => {
@@ -568,17 +669,13 @@ describe('playbook preflight', () => {
       }
     });
 
-    it('bypasses preflight when switching from one playbook to an excluded playbook mid-thread', () => {
-      const existingMessages: ChatMessage[] = [
-        { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-getting-started', createdAt: '' },
-        { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
-      ];
+    it('bypasses preflight when selecting an excluded playbook via autocomplete', () => {
       const { container } = renderChat({
-        messages: existingMessages,
+        messages: [],
         settings: settings({ playbookValidationExcludedPlaybooks: ['oim-schema'] }),
       });
 
-      // Switch playbook via autocomplete to excluded playbook (oim-schema)
+      // Select playbook via autocomplete to excluded playbook (oim-schema)
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: '/schema' } });
       fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
@@ -781,25 +878,52 @@ describe('playbook preflight', () => {
   it.each([
     ['Backspace on an empty composer', (c: HTMLElement) => fireEvent.keyDown(c.querySelector('textarea')!, { key: 'Backspace' })],
     ['the remove button', (c: HTMLElement) => fireEvent.click(c.querySelector('.active-playbook-remove')!)],
-  ])('keeps the playbook cleared via %s when the message list is replaced', async (_label, clear) => {
+  ])('allows clearing the playbook via %s before any messages are sent', async (_label, clear) => {
+    const { container } = renderChat({ messages: [] });
+    const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+      r.textContent?.includes('Schema'),
+    );
+    fireEvent.click(row!);
+    expect(container.querySelector('.active-playbook')).toBeTruthy();
+
+    clear(container);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+  });
+
+  it('locks the playbook once messages exist: remove button is omitted, backspace does not clear it, and / does not open autocomplete', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question', playbook: 'oim-schema', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
     ];
-    const { container, rerender } = renderChat({ messages: existingMessages });
+    const { container } = renderChat({ messages: existingMessages });
     await waitFor(() => expect(container.querySelector('.active-playbook')).toBeTruthy());
 
-    clear(container);
-    expect(container.querySelector('.active-playbook')).toBeNull();
+    // The remove button is omitted
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
 
-    // Same content, new array identity — what App does when server ids come back for the turn.
-    rerender(chat({ messages: existingMessages.map((m) => ({ ...m })) }));
-    await waitFor(() => expect(container.querySelector('.active-playbook')).toBeNull());
+    // Backspacing on an empty composer does not clear the playbook
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema');
 
-    // Still reachable afterwards: a clear is not a lock.
-    fireEvent.change(container.querySelector('textarea')!, { target: { value: '/getting' } });
-    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
-    expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started');
+    // Typing / does not open autocomplete
+    fireEvent.change(textarea, { target: { value: '/getting' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+  });
+
+  it('submits literal slash text as user message content under the locked playbook when typing on a locked thread', async () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'First question', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages });
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: '/getting' } });
+    expect(container.querySelector('.prompt-option')).toBeNull();
+
+    fireEvent.click(container.querySelector('.composer-send')!);
+    expect(onSend).toHaveBeenCalledWith('/getting', 'oim-schema');
   });
 });
 
@@ -1414,17 +1538,16 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
   });
 
   describe('mid-turn controls lockout and guard retention', () => {
-    it('Test 1.1: Mid-turn controls lockout - when liveTurn.running === true, agent mode select, model select, thinking effort select, and .active-playbook-remove are disabled, while Stop button remains enabled', () => {
+    it('Test 1.1: Mid-turn controls lockout - when liveTurn.running === true, agent mode select, model select, and thinking effort select are disabled, while Stop button remains enabled and .active-playbook-remove is omitted on existing messages', () => {
       const { container } = renderChat({
         liveTurn: { ...IDLE, running: true },
         profiles: [ORDINARY],
         messages: [{ localId: 'm1', role: 'user', content: 'hello', playbook: 'oim-schema', createdAt: '2026-08-01T10:00:00.000Z' }],
       });
 
-      // Playbook remove button
+      // Playbook remove button is omitted when thread has existing messages (locked)
       const removeBtn = container.querySelector<HTMLButtonElement>('.active-playbook-remove');
-      expect(removeBtn).not.toBeNull();
-      expect(removeBtn?.disabled).toBe(true);
+      expect(removeBtn).toBeNull();
 
       // Agent mode select
       const modeSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Agent mode"]');

@@ -169,8 +169,6 @@ interface ThreadSession {
   orchestratorProfile?: string;
   /** The user message for the in-flight turn, persisted once the turn completes. */
   pendingUser?: ChatMessage;
-  /** The playbook whose instructions are in this session's context, if any. */
-  injectedPlaybook?: string;
   /** Last resolved MCP headers serialized to JSON for change detection. */
   lastMcpHeadersJson: string;
 }
@@ -246,7 +244,7 @@ export class AgentService {
 
     let session: ThreadSession;
     try {
-      session = await this.ensureSession(thread, opts.playbookName);
+      session = await this.ensureSession(thread, opts.playbookName, opts.injectBefore);
     } catch (error) {
       const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
       logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
@@ -279,16 +277,6 @@ export class AgentService {
     session.turn.sessionId = thread.sessionId;
     this.deps.emit({ kind: 'turn-start', threadId: thread.id });
 
-    // The model sees the playbook (if any) prepended the first time that playbook is used in this
-    // session; follow-up turns under the same playbook omit it to preserve context. Tracking the
-    // name rather than a flag is what makes the two switch paths safe: a session rebuilt for a
-    // different playbook (the restart below) and a session resumed from disk have both not seen
-    // the selected playbook's text, and neither can be relied on to reset a boolean.
-    const shouldInjectPlaybook = Boolean(opts.injectBefore) && session.injectedPlaybook !== opts.playbookName;
-    const modelText = shouldInjectPlaybook ? `${opts.injectBefore}\n\n---\n\n${text}` : text;
-    if (shouldInjectPlaybook) {
-      session.injectedPlaybook = opts.playbookName;
-    }
     const userMessage: ChatMessage = {
       localId: randomUUID(),
       role: 'user',
@@ -313,8 +301,8 @@ export class AgentService {
           },
         })),
       ];
-      if (modelText.trim().length > 0) {
-        blocks.push({ type: 'text', text: modelText });
+      if (text.trim().length > 0) {
+        blocks.push({ type: 'text', text });
       }
       session.queue.push({
         type: 'user',
@@ -324,7 +312,7 @@ export class AgentService {
     } else {
       session.queue.push({
         type: 'user',
-        message: { role: 'user', content: modelText },
+        message: { role: 'user', content: text },
         parent_tool_use_id: null,
       });
     }
@@ -436,18 +424,25 @@ export class AgentService {
     }
   }
 
-  private async ensureSession(thread: ThreadMeta, playbookName?: string): Promise<ThreadSession> {
+  private async ensureSession(
+    thread: ThreadMeta,
+    playbookName?: string,
+    optsInjectBefore?: string,
+  ): Promise<ThreadSession> {
     const existing = this.sessions.get(thread.id);
     let resolvedHeaders: Record<string, string> | undefined;
 
     if (existing) {
-      if (existing.orchestratorProfile !== thread.orchestratorProfile || existing.playbookName !== playbookName) {
+      if (existing.orchestratorProfile !== thread.orchestratorProfile) {
         log(
           'agent',
-          `Session config changed (playbook "${existing.playbookName}"→"${playbookName}", ` +
-            `profile "${existing.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
+          `Session config changed (profile "${existing.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
         );
         this.closeThread(thread.id);
+      } else if (existing.playbookName !== playbookName) {
+        throw new Error(
+          `Cannot switch playbook on an existing conversation session (locked to "${existing.playbookName ?? 'none'}", requested "${playbookName ?? 'none'}")`,
+        );
       } else {
         const headers = await this.deps.mcpAuthProvider.headers();
         resolvedHeaders = headers;
@@ -549,6 +544,7 @@ export class AgentService {
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
     let playbookSystemPrompt: string | undefined;
+    let playbookText: string | undefined = optsInjectBefore;
     if (playbookName) {
       try {
         const prompts = await this.deps.mcpPrompts.list();
@@ -558,6 +554,9 @@ export class AgentService {
           playbookCodeExecution = p.codeExecution;
           playbookSystemPrompt = p.systemPrompt;
           log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
+        }
+        if (playbookText === undefined) {
+          playbookText = await this.deps.mcpPrompts.getText(playbookName);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -577,6 +576,10 @@ export class AgentService {
     // and the base fallback prompt is always default-chat. In single-agent mode, use the thread's playbook.
     const designatedPrompt = thread.orchestratorProfile ? undefined : playbookSystemPrompt;
     const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, designatedPrompt);
+    const singleAgentPrompt =
+      playbookName && playbookText !== undefined
+        ? `${systemPrompt}\n\n---\n\n${playbookText}`
+        : systemPrompt;
 
     const queue = new MessageQueue();
     const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {
@@ -657,7 +660,7 @@ export class AgentService {
     }
 
     const options: Options = {
-      systemPrompt: orchestrator ? '' : systemPrompt,
+      systemPrompt: orchestrator ? '' : singleAgentPrompt,
       mcpServers: buildMcpServers(settings, resolvedHeaders),
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that

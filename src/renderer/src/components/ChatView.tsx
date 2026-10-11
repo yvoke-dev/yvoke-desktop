@@ -336,20 +336,31 @@ export function ChatView(props: {
    * variable, and both of those went wrong.
    */
   /**
-   * The playbook the conversation's most recent question carried, if any. Derived once: it decides
-   * both what the composer shows and whether the next send is preflighted, and those two must never
-   * disagree about which playbook the conversation is already under.
+   * The playbook the conversation's initial question carried, if any.
+   * Once at least one user message has been sent, the thread is locked to that playbook.
    */
-  const lastUserPlaybook = useMemo(
-    () => messages.findLast((m) => m.role === 'user' && m.playbook)?.playbook,
+  const isPlaybookLocked = messages.some((m) => m.role === 'user');
+
+  const initialUserPlaybook = useMemo(
+    () => messages.find((m) => m.role === 'user')?.playbook,
     [messages],
   );
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
-    if (promptOverride?.threadId === thread.id) return promptOverride.prompt;
-    return prompts.find((p) => p.name === lastUserPlaybook) ?? null;
-  }, [orchestratorActive, promptOverride, thread.id, lastUserPlaybook, prompts]);
+    if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
+    if (initialUserPlaybook) {
+      const found = prompts.find((p) => p.name === initialUserPlaybook);
+      if (found) return found;
+      return {
+        name: initialUserPlaybook,
+        title: initialUserPlaybook,
+        description: '',
+        arguments: [],
+      };
+    }
+    return null;
+  }, [orchestratorActive, isPlaybookLocked, promptOverride, thread.id, initialUserPlaybook, prompts]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -380,13 +391,13 @@ export function ChatView(props: {
       );
   }, []);
 
-  // Autocomplete is open while the draft is a single "/token" (no space yet).
+  // Autocomplete is open while the draft is a single "/token" (no space yet) on an unlocked thread.
   const slashQuery = /^\/(\S*)$/.exec(draft)?.[1];
   const suggestions = useMemo(() => {
-    if (orchestratorActive || slashQuery == null || prompts.length === 0) return [];
+    if (orchestratorActive || isPlaybookLocked || slashQuery == null || prompts.length === 0) return [];
     const q = slashQuery.toLowerCase();
     return prompts.filter((p) => p.name.toLowerCase().includes(q) || p.title.toLowerCase().includes(q));
-  }, [orchestratorActive, slashQuery, prompts]);
+  }, [orchestratorActive, isPlaybookLocked, slashQuery, prompts]);
   const showAutocomplete = suggestions.length > 0;
 
   useEffect(() => setHighlight(0), [slashQuery]);
@@ -545,6 +556,7 @@ export function ChatView(props: {
   );
 
   const pickPrompt = (prompt: McpPromptInfo): void => {
+    if (isPlaybookLocked) return;
     setPromptOverride({ threadId: thread.id, prompt });
     // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
     // refusal card are both reachable with a real question already typed, and that question is
@@ -575,22 +587,23 @@ export function ChatView(props: {
     }
     // The recommendation card's "Switch to …" sends under a playbook that is not the active one;
     // make it the active one so the composer agrees with what was just asked.
-    if (promptName && promptName !== activePrompt?.name) {
+    if (!isPlaybookLocked && promptName && promptName !== activePrompt?.name) {
       const matching = prompts.find((p) => p.name === promptName);
       if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
+    const effectivePromptName = isPlaybookLocked ? (activePrompt?.name ?? initialUserPlaybook) : promptName;
     if (toSend && toSend.length > 0) {
-      onSend(text, promptName, toSend);
+      onSend(text, effectivePromptName, toSend);
     } else {
-      onSend(text, promptName);
+      onSend(text, effectivePromptName);
     }
     setDraft('');
     setAttachments([]);
   };
 
   /**
-   * Preflight playbook check: runs on the conversation's first message or when switching to a
-   * different playbook. Fails open at every step so a check that cannot run never blocks a question.
+   * Preflight playbook check: runs on the conversation's first message.
+   * Fails open at every step so a check that cannot run never blocks a question.
    */
   const runPreflight = async (text: string, prompt: McpPromptInfo, imagesToSend?: ImageAttachment[]): Promise<void> => {
     const runId = ++runIdRef.current;
@@ -625,7 +638,7 @@ export function ChatView(props: {
     // rather than quietly answered with the bare default tool set. Multi-agent conversations take
     // their playbooks from the profile, and an empty catalogue — an unreachable server — leaves
     // nothing to pick, so neither is gated: an error the user cannot act on is just a dead end.
-    if (!orchestratorActive && !prompt && prompts.length > 0) {
+    if (!isPlaybookLocked && !orchestratorActive && !prompt && prompts.length > 0) {
       setPlaybookRequired(true);
       return;
     }
@@ -640,10 +653,9 @@ export function ChatView(props: {
     // gets checked again.
     const alreadyAnswered = !!preflight && preflight.forPlaybook === prompt?.name;
 
-    // Run preflight only on the conversation's first message or when the user switched playbooks.
-    const isFirstMessage = messages.length === 0;
-    const isPlaybookChanged = !isFirstMessage && prompt?.name !== lastUserPlaybook;
-    const needsPreflight = isFirstMessage || isPlaybookChanged;
+    // Run preflight only on the conversation's first message.
+    const isFirstMessage = !isPlaybookLocked;
+    const needsPreflight = isFirstMessage;
 
     if (prompt && !orchestratorActive && validationEnabled && needsPreflight && !alreadyAnswered) {
       void runPreflight(text, prompt, attachments.length > 0 ? attachments : undefined);
@@ -675,8 +687,8 @@ export function ChatView(props: {
         return;
       }
     }
-    // Backspace on an empty draft clears the active playbook.
-    if (e.key === 'Backspace' && draft === '' && activePrompt) {
+    // Backspace on an empty draft clears the active playbook before any messages are sent.
+    if (!isPlaybookLocked && e.key === 'Backspace' && draft === '' && activePrompt) {
       e.preventDefault();
       setPromptOverride({ threadId: thread.id, prompt: null });
       return;
@@ -807,7 +819,7 @@ export function ChatView(props: {
               </div>
               {preflight.reason && <div className="preflight-card-reason">{preflight.reason}</div>}
               <div className="preflight-card-actions">
-                {preflight.suggestedName && (
+                {preflight.suggestedName && !isPlaybookLocked && (
                   <button
                     className="primary"
                     disabled={draft.trim().length === 0 && attachments.length === 0}
@@ -1114,16 +1126,18 @@ export function ChatView(props: {
                 <span className="active-playbook" data-tip={activePrompt.description}>
                   <PlaybookIcon size={11} />
                   {activePrompt.title}
-                  <button
-                    className="active-playbook-remove"
-                    data-tip="Remove playbook"
-                    disabled={controlsDisabled}
-                    onClick={() => {
-                      setPromptOverride({ threadId: thread.id, prompt: null });
-                    }}
-                  >
-                    <CloseIcon size={11} />
-                  </button>
+                  {!isPlaybookLocked && (
+                    <button
+                      className="active-playbook-remove"
+                      data-tip="Remove playbook"
+                      disabled={controlsDisabled}
+                      onClick={() => {
+                        setPromptOverride({ threadId: thread.id, prompt: null });
+                      }}
+                    >
+                      <CloseIcon size={11} />
+                    </button>
+                  )}
                 </span>
               )}
             </div>

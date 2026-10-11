@@ -30,6 +30,7 @@ const h = vi.hoisted(() => ({
   sessions: [] as {
     options: Record<string, unknown>;
     pushed: string[];
+    rawPushed: unknown[];
     closed: boolean;
     closeSpy: ReturnType<typeof vi.fn>;
     setMcpServersSpy: ReturnType<typeof vi.fn>;
@@ -69,6 +70,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
     const session = {
       options,
       pushed: [] as string[],
+      rawPushed: [] as unknown[],
       closed: false,
       closeSpy,
       setMcpServersSpy,
@@ -91,7 +93,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
 
     void (async () => {
       for await (const msg of prompt) {
-        session.pushed.push(String(msg.message.content));
+        session.rawPushed.push(msg.message.content);
+        session.pushed.push(
+          typeof msg.message.content === 'string'
+            ? msg.message.content
+            : JSON.stringify(msg.message.content),
+        );
         emit({
           type: 'system',
           subtype: 'init',
@@ -226,11 +233,11 @@ async function ask(
   svc: InstanceType<typeof AgentService>,
   meta: ThreadMeta,
   text: string,
-  playbookName: string,
+  playbookName?: string,
 ): Promise<void> {
   const before = events.filter((e) => e.kind === 'turn-complete').length;
   await svc.sendMessage(meta, text, {
-    injectBefore: TEXT[playbookName],
+    injectBefore: playbookName ? TEXT[playbookName] : undefined,
     playbook: playbookName,
     playbookName,
   });
@@ -255,7 +262,7 @@ afterEach(() => {
 });
 
 describe('playbook injection across a session', () => {
-  it('prepends the playbook to the first question and to no follow-up under the same one', async () => {
+  it('combines system prompt and playbook instructions in systemPrompt, and passes raw user input', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
@@ -263,41 +270,99 @@ describe('playbook injection across a session', () => {
     await ask(svc, meta, 'Follow-up question', 'oim-schema');
 
     expect(h.sessions).toHaveLength(1); // stayed warm — no restart for an unchanged playbook
+    expect(h.sessions[0].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
     expect(h.sessions[0].pushed).toEqual([
-      'SCHEMA PLAYBOOK INSTRUCTIONS\n\n---\n\nFirst question',
+      'First question',
       'Follow-up question',
     ]);
     svc.closeAll();
   });
 
-  /**
-   * Regression: `playbookInjected` was a boolean seeded from `thread.sessionId`, which is set as soon
-   * as the first turn's session initialises. The switch below therefore rebuilt the session with the
-   * new playbook's tools and suppressed its instructions entirely.
-   */
-  it('prepends the new playbook when the user switches mid-conversation', async () => {
+  it('rejects switching playbooks mid-conversation on an existing thread session', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
     await ask(svc, meta, 'First question', 'oim-schema');
-    expect(meta.sessionId).toBe('sdk-session-1'); // the id that made the old guard fire
-    await ask(svc, meta, 'Different area question', 'oim-customers');
+    expect(meta.sessionId).toBe('sdk-session-1');
+    await expect(ask(svc, meta, 'Different area question', 'oim-customers')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session/,
+    );
 
-    expect(h.sessions).toHaveLength(2); // the switch restarts the session
-    expect(h.sessions[1].options.resume).toBe('sdk-session-1'); // resuming the old transcript…
-    expect(h.sessions[1].pushed).toEqual([
-      // …so the new playbook's instructions are the only thing telling the model what it is now doing
-      'CUSTOMERS PLAYBOOK INSTRUCTIONS\n\n---\n\nDifferent area question',
+    expect(h.sessions).toHaveLength(1); // session was not replaced
+    svc.closeAll();
+  });
+
+  it('rejects switching from a playbook to no playbook on an existing thread session', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First question', 'oim-schema');
+    await expect(ask(svc, meta, 'Second question without playbook', undefined)).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session \(locked to "oim-schema", requested "none"\)/,
+    );
+
+    expect(h.sessions).toHaveLength(1);
+    svc.closeAll();
+  });
+
+  it('rejects switching from no playbook to a playbook on an existing thread session', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First question', undefined);
+    await expect(ask(svc, meta, 'Second question with playbook', 'oim-schema')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session \(locked to "none", requested "oim-schema"\)/,
+    );
+
+    expect(h.sessions).toHaveLength(1);
+    svc.closeAll();
+  });
+
+  it('does not prepend playbook text when user message includes image attachments', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+
+    await svc.sendMessage(meta, 'Question with image', {
+      injectBefore: TEXT['oim-schema'],
+      playbook: 'oim-schema',
+      playbookName: 'oim-schema',
+      images: [
+        {
+          id: 'img-1',
+          mediaType: 'image/png',
+          data: 'base64data',
+          name: 'diagram.png',
+        },
+      ],
+    });
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
+    expect(h.sessions[0].rawPushed).toEqual([
+      [
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'base64data' },
+        },
+        {
+          type: 'text',
+          text: 'Question with image',
+        },
+      ],
     ]);
     svc.closeAll();
   });
 
-  /**
-   * The same bug by a second route, which resetting a flag on the restart path would not have caught:
-   * after a restart there is no warm session to compare against, so `ensureSession` builds the new
-   * playbook's session directly and the restart branch never runs.
-   */
-  it('prepends the new playbook when the conversation is resumed cold under a different one', async () => {
+  it('combines system prompt and playbook instructions when the conversation is resumed cold', async () => {
     const meta = thread();
     const first = makeService(meta);
     await ask(first, meta, 'First question', 'oim-schema');
@@ -306,14 +371,90 @@ describe('playbook injection across a session', () => {
     // App restart: a fresh service, no warm sessions, but the thread remembers its transcript.
     h.sessions.length = 0;
     const second = makeService(meta);
-    await ask(second, meta, 'Different area question', 'oim-customers');
+    await ask(second, meta, 'Follow-up question', 'oim-schema');
 
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.resume).toBe('sdk-session-1');
+    expect(h.sessions[0].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
     expect(h.sessions[0].pushed).toEqual([
-      'CUSTOMERS PLAYBOOK INSTRUCTIONS\n\n---\n\nDifferent area question',
+      'Follow-up question',
     ]);
     second.closeAll();
+  });
+
+  it('keeps session warm across three turns with raw user input and rejects mid-conversation switch on turn 3', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+
+    await ask(svc, meta, 'First turn', 'oim-schema');
+    await ask(svc, meta, 'Second turn', 'oim-schema');
+    await ask(svc, meta, 'Third turn', 'oim-schema');
+
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe(
+      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+    );
+    expect(h.sessions[0].pushed).toEqual([
+      'First turn',
+      'Second turn',
+      'Third turn',
+    ]);
+
+    // Attempting to switch playbook on turn 4 rejects
+    await expect(ask(svc, meta, 'Fourth turn switch', 'oim-customers')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session/,
+    );
+    expect(h.sessions).toHaveLength(1);
+    svc.closeAll();
+  });
+
+  it('combines system prompt with empty playbook text when getText returns empty string', async () => {
+    const meta = thread();
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => '',
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Question with empty playbook body', {
+      playbook: 'oim-schema',
+      playbookName: 'oim-schema',
+    });
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0].options.systemPrompt).toBe('BASE SYSTEM PROMPT\n\n---\n\n');
+    expect(h.sessions[0].pushed).toEqual(['Question with empty playbook body']);
+    svc.closeAll();
+  });
+
+  it('fails closed when getText throws a backend error during prompt resolution', async () => {
+    const meta = thread();
+    const svc = makeService(meta, {
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => {
+          throw new Error('Playbook file unreadable');
+        },
+      } as never,
+    });
+
+    await expect(
+      svc.sendMessage(meta, 'Question with unreadable playbook', {
+        playbook: 'oim-schema',
+        playbookName: 'oim-schema',
+      }),
+    ).rejects.toThrow(/Playbook metadata for "oim-schema" could not be loaded: Playbook file unreadable/);
+
+    expect(h.sessions).toHaveLength(0);
+    svc.closeAll();
   });
 
   it('prepends nothing when the question carries no playbook', async () => {
@@ -323,6 +464,7 @@ describe('playbook injection across a session', () => {
     for (let i = 0; i < 200 && events.every((e) => e.kind !== 'turn-complete'); i++) {
       await new Promise((r) => setTimeout(r, 0));
     }
+    expect(h.sessions[0].options.systemPrompt).toBe('BASE SYSTEM PROMPT');
     expect(h.sessions[0].pushed).toEqual(['Bare question']);
     svc.closeAll();
   });
@@ -451,7 +593,7 @@ describe('playbook injection across a session', () => {
 
     expect(getSystemPromptSpy).toHaveBeenCalledWith('custom-designated-prompt');
     expect(h.sessions).toHaveLength(1);
-    expect(h.sessions[0].options.systemPrompt).toBe('BODY OF custom-designated-prompt');
+    expect(h.sessions[0].options.systemPrompt).toBe('BODY OF custom-designated-prompt\n\n---\n\nPLAYBOOK BODY');
     svc.closeAll();
   });
 
@@ -700,7 +842,7 @@ describe('error attribution across session events', () => {
     svc.closeAll();
   });
 
-  it('Test 1.9: Session config change handling in ensureSession handles playbook changes when idle', async () => {
+  it('Test 1.9: Session config change handling in ensureSession rejects playbook changes on an existing session', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
@@ -708,9 +850,11 @@ describe('error attribution across session events', () => {
     const initialSession = (svc as any).sessions.get(meta.id);
     expect(initialSession.playbookName).toBe('oim-schema');
 
-    await ask(svc, meta, 'Second question with new playbook', 'oim-customers');
-    const updatedSession = (svc as any).sessions.get(meta.id);
-    expect(updatedSession.playbookName).toBe('oim-customers');
+    await expect(ask(svc, meta, 'Second question with new playbook', 'oim-customers')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session/,
+    );
+    const existingSession = (svc as any).sessions.get(meta.id);
+    expect(existingSession.playbookName).toBe('oim-schema');
     svc.closeAll();
   });
 

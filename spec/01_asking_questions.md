@@ -10,8 +10,8 @@ behind it, and the work that produced it can be opened and read.
 | Capability | What happens |
 | --- | --- |
 | **Start a conversation** | *New* creates the conversation on the server and opens it empty. The server names it; the app never invents a title. |
-| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. In a conversation that already has messages, typing `/` opens the same list as an autocomplete — which filters on title and name only. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
-| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook. |
+| **Pick a playbook** | An empty conversation opens on a picker listing every playbook the user may choose, filterable by title, name or description. Before the first message is sent, typing `/` opens the same list as an autocomplete (filtering on title and name). Once a user message has been sent in the conversation, the playbook is locked to that initial choice and cannot be changed or removed. Prototype playbooks (`prototype: true`) are hidden by default unless *Show prototypes* is enabled in Settings. A single-agent question needs one: sending without it raises *Playbook required* and nothing is asked. |
+| **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook before any message is sent; once a message exists, the playbook is locked. |
 | **Attach images** | Attach up to five images (PNG, JPEG, WebP, GIF) using the attach button on the left of the toolbar, drag-and-drop, or clipboard paste. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced. Until the first of either arrives, the answer shows *Working…*. |
 | **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
@@ -42,11 +42,13 @@ behind it, and the work that produced it can be opened and read.
   both the error would be one the user could not act on: a multi-agent conversation, which takes its
   playbooks from the profile, and a server that offers no playbooks at all, where the question is
   sent as it was and the assistant gets the default knowledge-base tool set.
-- **A playbook stays selected across messages in a conversation**, matching the web model. Once
-  chosen, follow-up questions continue under the same playbook without re-prompting or repeating
-  preflight checks. The user can switch playbooks at any time with `/` autocomplete or clear it with
-  the remove button. Preflight validation runs on the conversation's first message or when switching
-  to a different playbook.
+- **A conversation is locked to its initial playbook after the first message is sent.** Playbook
+  instructions are combined with the resolved system prompt in the SDK system prompt rather than
+  prepended to user messages. Once a user message has been sent, the active playbook cannot be
+  changed or removed: the remove button (`×`) on the active playbook indicator is omitted, typing `/`
+  does not open the autocomplete picker, and backspacing on an empty draft does not clear it. Preflight
+  validation runs only on the conversation's first message, and preflight recommendations do not offer
+  switching playbooks mid-conversation.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -208,7 +210,7 @@ behind it, and the work that produced it can be opened and read.
   *Force Reload* and *Toggle Developer Tools* in a released build, on their usual shortcuts. Reloading
   mid-answer throws away the live view of a turn that keeps running without it.
 - **The app's own keyboard support stops at the composer.** Enter (insert newline),
-  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook, Escape and the arrow
+  Cmd+Enter (macOS) / Ctrl+Enter (Windows) to send, Backspace-clears-playbook (before the first question is sent), Escape and the arrow
   keys inside the autocomplete are the whole set — and Escape there clears the entire draft rather
   than just closing the list. There is no shortcut for new conversation, search, settings, delete or
   stop.
@@ -237,6 +239,7 @@ behind it, and the work that produced it can be opened and read.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
+- Changing or removing a playbook once a conversation has started.
 - **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
   When an assistant call specifies multiple questions or multi-select choices, the questions are
   presented together in the card, and the user provides a single selection or custom text answer for the turn.
