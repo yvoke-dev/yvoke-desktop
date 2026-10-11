@@ -5,6 +5,7 @@ import {
   sanitizeLogContent,
   hasErrorSourcePrefix,
   isAttributedError,
+  isNotFoundError,
   type ErrorSource,
 } from '../src/shared/error';
 
@@ -220,6 +221,38 @@ describe('errorAttribution', () => {
       expect(sanitizeLogContent('')).toBe('');
       expect(sanitizeLogContent(null as unknown as string)).toBe('');
       expect(sanitizeLogContent(undefined as unknown as string)).toBe('');
+    });
+  });
+
+  describe('isNotFoundError', () => {
+    it('detects 404 on status property', () => {
+      expect(isNotFoundError({ status: 404 })).toBe(true);
+      expect(isNotFoundError({ statusCode: 404 })).toBe(true);
+      expect(isNotFoundError({ status: 500 })).toBe(false);
+      expect(isNotFoundError({ status: 502 })).toBe(false);
+      expect(isNotFoundError({ status: 401 })).toBe(false);
+      // Status property takes precedence even if message contains "not found"
+      expect(isNotFoundError({ status: 500, message: 'Resource not found' })).toBe(false);
+      expect(isNotFoundError({ status: 502, message: 'Upstream server not found' })).toBe(false);
+      expect(isNotFoundError({ status: 401, message: 'Session token not found' })).toBe(false);
+    });
+
+    it('detects 404 in error message strings', () => {
+      expect(isNotFoundError(new Error('GET /prompts/system/foo failed (404): Not found'))).toBe(true);
+      expect(isNotFoundError('404 Not Found')).toBe(true);
+      expect(isNotFoundError(new Error('Not found: 404'))).toBe(true);
+      expect(isNotFoundError(new Error('fetch failed: ECONNREFUSED'))).toBe(false);
+      expect(isNotFoundError(new Error('500 Internal Server Error'))).toBe(false);
+      expect(isNotFoundError(new Error('500 Internal Server Error: route not found'))).toBe(false);
+      expect(isNotFoundError(new Error('502 Bad Gateway: host not found'))).toBe(false);
+      expect(isNotFoundError(new Error('401 Unauthorized: token not found'))).toBe(false);
+      expect(isNotFoundError(new Error('Resource not found without status code'))).toBe(false);
+      expect(isNotFoundError(new Error('Entra: Interactive login required'))).toBe(false);
+    });
+
+    it('returns false for null or undefined', () => {
+      expect(isNotFoundError(null)).toBe(false);
+      expect(isNotFoundError(undefined)).toBe(false);
     });
   });
 });

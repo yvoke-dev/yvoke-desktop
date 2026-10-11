@@ -31,9 +31,14 @@ import {
   REVIEW_ENFORCEMENT_PROMPT,
   reviewFlagNote,
 } from './orchestration';
+import {
+  BASE_SYSTEM_PROMPT_NAME,
+  loadDesignatedSystemPrompt,
+  loadRequiredSystemPrompt,
+} from './systemPrompt';
 
-/** The server-managed system prompt every turn runs under. */
-export const BASE_SYSTEM_PROMPT_NAME = 'default-chat';
+/** The server-managed system prompt every turn runs under and helper loaders. */
+export { BASE_SYSTEM_PROMPT_NAME, loadDesignatedSystemPrompt, loadRequiredSystemPrompt };
 
 /** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
@@ -71,49 +76,6 @@ export function claudeBinaryPath(): string | null {
   return claudeBinary;
 }
 
-/**
- * Loads the base system prompt from the server, throwing if it cannot be had.
- *
- * There is deliberately NO local fallback. The prompt carries the grounding rules, the citation
- * contract and the mermaid/KaTeX delimiters; a hardcoded copy would drift from the server's
- * `default-chat` and silently contradict the playbooks and tools, which is worse than not
- * answering. Running with an empty prompt — which is what the previous "fallback" actually did,
- * since its catch block logged but never assigned — is worse still.
- *
- * Thrown messages reach the user: App.tsx puts them on the failed turn.
- */
-export async function loadRequiredSystemPrompt(
-  syncClient: Pick<SyncClient, 'getSystemPrompt'>,
-): Promise<string> {
-  let prompt: string;
-  try {
-    prompt = await syncClient.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (hasErrorSourcePrefix(msg, 'Entra')) {
-      throw err;
-    }
-    throw new Error(
-      tagAttributedError(
-        'Yvoke Backend',
-        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" could not be loaded (is the server reachable?): ` +
-          msg,
-      ),
-    );
-  }
-
-  if (!prompt || !prompt.trim()) {
-    // A 200 with an empty body is a failure too, not an empty-but-valid prompt.
-    throw new Error(
-      tagAttributedError(
-        'Yvoke Backend',
-        `System prompt "${BASE_SYSTEM_PROMPT_NAME}" came back empty (is the server reachable?).`,
-      ),
-    );
-  }
-  log('agent', `Loaded system prompt "${BASE_SYSTEM_PROMPT_NAME}" from remote server`);
-  return prompt;
-}
 
 /**
  * Decides how a thrown turn failure reaches the user.
@@ -583,11 +545,10 @@ export class AgentService {
     const settings = this.deps.getSettings();
     fs.mkdirSync(this.deps.sandboxDir, { recursive: true });
 
-    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient);
-
     let playbookTools: string[] | undefined;
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
+    let playbookSystemPrompt: string | undefined;
     if (playbookName) {
       try {
         const prompts = await this.deps.mcpPrompts.list();
@@ -595,12 +556,27 @@ export class AgentService {
         if (p) {
           playbookTools = p.tools;
           playbookCodeExecution = p.codeExecution;
-          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false}`);
+          playbookSystemPrompt = p.systemPrompt;
+          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
         }
       } catch (err) {
-        logError('agent', `Failed to load playbook metadata for "${playbookName}": ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (hasErrorSourcePrefix(msg, 'Entra')) {
+          throw err;
+        }
+        throw new Error(
+          tagAttributedError(
+            'Yvoke Backend',
+            `Playbook metadata for "${playbookName}" could not be loaded: ` + msg,
+          ),
+        );
       }
     }
+
+    // In orchestrator mode, each role resolves its designated prompt from the profile's playbooks,
+    // and the base fallback prompt is always default-chat. In single-agent mode, use the thread's playbook.
+    const designatedPrompt = thread.orchestratorProfile ? undefined : playbookSystemPrompt;
+    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, designatedPrompt);
 
     const queue = new MessageQueue();
     const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {
@@ -632,7 +608,13 @@ export class AgentService {
           `Orchestrator profile "${thread.orchestratorProfile}" is unavailable (is the server reachable?).`,
         );
       }
-      orchestrator = await buildOrchestrator(profile, settings, this.deps.mcpPrompts, systemPrompt);
+      orchestrator = await buildOrchestrator(
+        profile,
+        settings,
+        this.deps.mcpPrompts,
+        systemPrompt,
+        (name) => this.deps.syncClient.getSystemPrompt(name),
+      );
       const oc = settings.orchestrator;
       log(
         'orch',

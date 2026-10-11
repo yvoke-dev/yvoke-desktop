@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SyncClient } from '../src/main/sync/SyncClient';
+import type { ValidSystemPromptName } from '../src/shared/types';
 
 /**
  * The PATCH body is the one place a settings change can destroy something the user cares about:
@@ -262,3 +263,28 @@ describe('SyncClient.verifyConnection review regressions', () => {
     expect(message).not.toContain('secret-jwt-value');
   });
 });
+
+describe('SyncClient.getSystemPrompt', () => {
+  it('URL-encodes prompt name to prevent path traversal and truncation', async () => {
+    let requestedUrl = '';
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async (url: string) => {
+        requestedUrl = url;
+        return new Response(JSON.stringify({ systemPrompt: 'PROMPT BODY' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as unknown as typeof fetch,
+    });
+
+    // @ts-expect-error Raw unvalidated strings must not compile as ValidSystemPromptName argument
+    const _typeOnly = () => client.getSystemPrompt('../../evil?test=1#frag');
+
+    const res = await client.getSystemPrompt('../../evil?test=1#frag' as unknown as ValidSystemPromptName);
+    expect(res).toBe('PROMPT BODY');
+    expect(requestedUrl).toBe('https://server.example/api/chat/v1/prompts/system/..%2F..%2Fevil%3Ftest%3D1%23frag');
+  });
+});
+
