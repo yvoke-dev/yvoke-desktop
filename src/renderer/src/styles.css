@@ -1785,8 +1785,12 @@ h6 {
   cursor: not-allowed;
 }
 
-/* The active playbook, model and thinking level as a row of chips instead of three
-   web-default dropdowns. The selects underneath are still native — restyled, not replaced. */
+.composer-select-wrapper {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
 .composer-select {
   appearance: none;
   border: 1px solid var(--line);

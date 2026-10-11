@@ -209,6 +209,7 @@ export interface UsageTotals {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheCreationTokens?: number;
   thoughtTokens?: number;
 }
 
@@ -240,6 +241,29 @@ export interface ThreadMeta {
   orchestratorProfile?: string;
   /** Initial playbook this thread was locked to upon sending its first message. */
   initialPlaybook?: string;
+  /** Whether the conversation has started (first prompt sent). */
+  hasStarted?: boolean;
+}
+
+/**
+ * Pure helper determining whether a thread has started (first prompt sent or state established).
+ * Zero disk I/O, synchronous, safe across main and renderer processes.
+ */
+export function isThreadStarted(meta: ThreadMeta): boolean {
+  const hasTokens =
+    Boolean(meta.totals) &&
+    ((meta.totals?.inputTokens ?? 0) > 0 ||
+      (meta.totals?.outputTokens ?? 0) > 0 ||
+      (meta.totals?.cacheReadTokens ?? 0) > 0 ||
+      (meta.totals?.cacheCreationTokens ?? 0) > 0 ||
+      (meta.totals?.cacheWriteTokens ?? 0) > 0);
+
+  return Boolean(
+    meta.hasStarted ||
+    (meta.initialPlaybook && meta.initialPlaybook.trim().length > 0) ||
+    (meta.sessionId && meta.sessionId.trim().length > 0) ||
+    hasTokens
+  );
 }
 
 export interface ToolCallInfo {

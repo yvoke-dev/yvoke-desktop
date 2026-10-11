@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import type { ChatMessage, ThreadMeta } from '../src/shared/types';
+import { isThreadStarted, type ChatMessage, type ThreadMeta } from '../src/shared/types';
 
 function meta(id: string): ThreadMeta {
   return {
@@ -370,6 +370,112 @@ describe('ThreadStore', () => {
       expect(t2StillOrch.orchestratorProfile).toBe('OIM');
       expect('initialPlaybook' in t2StillOrch).toBe(false);
       expect(t2StillOrch.initialPlaybook).toBeUndefined();
+    });
+  });
+
+  describe('isThreadStarted helper', () => {
+    it('returns false for clean unstarted thread', () => {
+      const cleanMeta: ThreadMeta = {
+        id: 't1',
+        title: 'New',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: '2026-06-10T10:00:00Z',
+        updatedAt: '2026-06-10T10:00:00Z',
+        totals: undefined as any,
+        syncState: 'synced',
+      };
+      expect(isThreadStarted(cleanMeta)).toBe(false);
+    });
+
+    it('returns false when totals are all 0', () => {
+      const t = {
+        ...meta('t1'),
+        totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheCreationTokens: 0 },
+      };
+      expect(isThreadStarted(t)).toBe(false);
+    });
+
+    it('Negative boundary: returns false when initialPlaybook or sessionId are empty strings', () => {
+      const t = {
+        ...meta('t1'),
+        initialPlaybook: '',
+        sessionId: '',
+      };
+      expect(isThreadStarted(t)).toBe(false);
+    });
+
+    it('returns true when hasStarted === true', () => {
+      expect(isThreadStarted({ ...meta('t1'), hasStarted: true })).toBe(true);
+    });
+
+    it('returns true when initialPlaybook is a non-empty string', () => {
+      expect(isThreadStarted({ ...meta('t1'), initialPlaybook: 'oim-query' })).toBe(true);
+    });
+
+    it('returns true when sessionId is a non-empty string', () => {
+      expect(isThreadStarted({ ...meta('t1'), sessionId: 'session-123' })).toBe(true);
+    });
+
+    it('returns true when tokens are non-zero', () => {
+      expect(isThreadStarted({ ...meta('t1'), totals: { ...ThreadStore.emptyTotals(), inputTokens: 1 } })).toBe(true);
+      expect(isThreadStarted({ ...meta('t1'), totals: { ...ThreadStore.emptyTotals(), outputTokens: 1 } })).toBe(true);
+      expect(isThreadStarted({ ...meta('t1'), totals: { ...ThreadStore.emptyTotals(), cacheReadTokens: 1 } })).toBe(true);
+      expect(isThreadStarted({ ...meta('t1'), totals: { ...ThreadStore.emptyTotals(), cacheCreationTokens: 1 } })).toBe(true);
+    });
+  });
+
+  describe('hasStarted persistence hardening', () => {
+    it('persists hasStarted: true across patch and reload from disk', () => {
+      store.upsert(meta('t1'));
+      store.patch('t1', { hasStarted: true });
+      expect(store.get('t1')?.hasStarted).toBe(true);
+
+      const reopened = new ThreadStore(dir);
+      expect(reopened.get('t1')?.hasStarted).toBe(true);
+    });
+
+    it('upsert preserves hasStarted: true across disk round-trips', () => {
+      store.upsert({ ...meta('t1'), hasStarted: true });
+      expect(store.get('t1')?.hasStarted).toBe(true);
+
+      const reopened = new ThreadStore(dir);
+      expect(reopened.get('t1')?.hasStarted).toBe(true);
+    });
+
+    it('Negative test: setting orchestratorProfile deletes initialPlaybook but preserves hasStarted: true', () => {
+      store.upsert({ ...meta('t1'), initialPlaybook: 'oim-query', hasStarted: true });
+      expect(store.get('t1')?.initialPlaybook).toBe('oim-query');
+      expect(store.get('t1')?.hasStarted).toBe(true);
+
+      store.patch('t1', { orchestratorProfile: 'OIM' });
+      const patched = store.get('t1')!;
+      expect(patched.orchestratorProfile).toBe('OIM');
+      expect('initialPlaybook' in patched).toBe(false);
+      expect(patched.initialPlaybook).toBeUndefined();
+      expect(patched.hasStarted).toBe(true);
+
+      const reloaded = new ThreadStore(dir).get('t1')!;
+      expect(reloaded.orchestratorProfile).toBe('OIM');
+      expect('initialPlaybook' in reloaded).toBe(false);
+      expect(reloaded.hasStarted).toBe(true);
+    });
+
+    it('Disk hygiene negative test: patch with { hasStarted: undefined } completely deletes hasStarted key from store and serialized disk index', () => {
+      store.upsert({ ...meta('t1'), hasStarted: true });
+      expect(store.get('t1')?.hasStarted).toBe(true);
+
+      store.patch('t1', { hasStarted: undefined });
+      const inMemory = store.get('t1')!;
+      expect(inMemory.hasStarted).toBeUndefined();
+      expect('hasStarted' in inMemory).toBe(false);
+
+      const reloaded = new ThreadStore(dir).get('t1')!;
+      expect(reloaded.hasStarted).toBeUndefined();
+      expect('hasStarted' in reloaded).toBe(false);
+
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
+      expect('hasStarted' in raw.t1).toBe(false);
     });
   });
 });

@@ -102,6 +102,7 @@ export class ThreadStore {
     if (cleaned.sessionProfile === undefined) delete cleaned.sessionProfile;
     if (!cleaned.orchestratorProfile) delete cleaned.orchestratorProfile;
     if (!cleaned.initialPlaybook || cleaned.orchestratorProfile) delete cleaned.initialPlaybook;
+    if (cleaned.hasStarted === undefined) delete cleaned.hasStarted;
     this.index[meta.id] = cleaned;
     this.persistIndex();
   }
@@ -127,6 +128,9 @@ export class ThreadStore {
     }
     if (updated.orchestratorProfile) {
       delete updated.initialPlaybook;
+    }
+    if ('hasStarted' in update && update.hasStarted === undefined) {
+      delete updated.hasStarted;
     }
     this.index[threadId] = updated;
     this.persistIndex();

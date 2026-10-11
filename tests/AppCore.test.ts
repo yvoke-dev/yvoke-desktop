@@ -280,10 +280,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('clears sessionId and closes agent session when switching from single-agent to multi-agent', () => {
+  it('allows mode change on unstarted thread when switching from single-agent to multi-agent', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-1',
-      sessionId: 'session-single-1',
       title: 'Switch Test',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -304,11 +303,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
   });
 
-  it('clears sessionId and closes agent session when switching from multi-agent to single-agent', () => {
+  it('allows mode change on unstarted thread when switching from multi-agent to single-agent', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-2',
-      sessionId: 'session-orch-1',
-      sessionProfile: 'OIM',
       title: 'Switch Test 2',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -329,11 +326,9 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
   });
 
-  it('clears sessionId and closes agent session when switching between different orchestrator profiles', () => {
+  it('allows mode change on unstarted thread when switching between different orchestrator profiles', () => {
     const thread: ThreadMeta = {
       id: 'thread-switch-3',
-      sessionId: 'session-orch-oim',
-      sessionProfile: 'OIM',
       title: 'Switch Test 3',
       model: 'sonnet',
       thinkingLevel: 'medium',
@@ -352,6 +347,29 @@ describe('AppCore.patchThread - Mode Boundary Session Isolation', () => {
     expect(patched?.sessionId).toBeUndefined();
     expect(patched?.orchestratorProfile).toBe('Security');
     expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+  });
+
+  it('rejects mode change once conversation has started (started thread boundary)', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-switch-started',
+      sessionId: 'session-single-1',
+      title: 'Started Switch Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    expect(() => appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBeUndefined();
   });
 
   it('preserves sessionId and does not close agent session when patching non-profile fields', () => {
@@ -470,12 +488,10 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
     expect(closeSpy).not.toHaveBeenCalled();
   });
 
-  it('Test 1.5: Mode change allowed when idle (closes thread, updates store, clears sessionId/sessionProfile)', () => {
+  it('Test 1.5: Mode change allowed on unstarted thread when idle (closes thread, updates store, clears sessionId/sessionProfile)', () => {
     const thread: ThreadMeta = {
       id: 'thread-idle-1',
       title: 'Idle Thread',
-      sessionId: 'session-idle-1',
-      sessionProfile: undefined,
       model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: '2026-08-01T10:00:00.000Z',
@@ -495,6 +511,30 @@ describe('AppCore.patchThread - Concurrency Lockout & Mode Rejection', () => {
     expect(patched?.sessionId).toBeUndefined();
     expect(patched?.sessionProfile).toBeUndefined();
     expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBe('OIM');
+  });
+
+  it('Test 1.5b: Mode change rejected on started thread even when idle', () => {
+    const thread: ThreadMeta = {
+      id: 'thread-idle-started',
+      title: 'Idle Started Thread',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    (appCore.agent as any).isBusy = vi.fn().mockReturnValue(false);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    expect(() => appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
   });
 
   it('Test 1.6 & 1.6b: Profile divergence matrix in listThreads clears sessionId when server settings diverge', async () => {
@@ -791,6 +831,326 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
     expect(result).toEqual({ plausible: true });
     expect(listPromptsSpy).not.toHaveBeenCalled();
     expect(validatorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-lock-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(() => {
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Upfront Stamping: stamps hasStarted: true into ThreadStore for single-agent on first prompt', async () => {
+    const thread: ThreadMeta = {
+      id: 't-stamp-single',
+      title: 'Single Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBeUndefined();
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First question',
+      promptName: 'oim-query',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBe('oim-query');
+  });
+
+  it('Upfront Stamping: stamps hasStarted: true into ThreadStore for multi-agent threads on first prompt', async () => {
+    const thread: ThreadMeta = {
+      id: 't-stamp-multi',
+      title: 'Multi Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBeUndefined();
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'First multi-agent question',
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const stored = appCore.threads.get(thread.id)!;
+    expect(stored.hasStarted).toBe(true);
+    expect(stored.initialPlaybook).toBeUndefined();
+  });
+
+  it('Second Prompt Playbook Immutability: preserves initialPlaybook and ignores different promptName', async () => {
+    const thread: ThreadMeta = {
+      id: 't-immut-playbook',
+      title: 'Playbook Immutability',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: 'oim-first',
+    };
+    appCore.threads.upsert(thread);
+
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Second question with another prompt',
+      promptName: 'oim-second',
+    });
+
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      'Second question with another prompt',
+      expect.objectContaining({ playbook: 'oim-first' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-first');
+  });
+
+  it('Unknown Thread Boundary: throws "Unknown thread" without writing hasStarted to store', async () => {
+    const patchSpy = vi.spyOn(appCore.threads, 'patch');
+    await expect(
+      appCore.sendMessage({
+        threadId: 'non-existent',
+        text: 'Hello?',
+      }),
+    ).rejects.toThrow('Unknown thread: non-existent');
+    expect(patchSpy).not.toHaveBeenCalled();
+  });
+
+  it('Failure Resilience: hasStarted: true remains set even if agent.sendMessage throws an error', async () => {
+    const thread: ThreadMeta = {
+      id: 't-fail-resilience',
+      title: 'Resilience Test',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore.agent, 'sendMessage').mockRejectedValue(new Error('Network crash'));
+
+    await expect(
+      appCore.sendMessage({
+        threadId: thread.id,
+        text: 'Crash turn',
+      }),
+    ).rejects.toThrow('Network crash');
+
+    expect(appCore.threads.get(thread.id)?.hasStarted).toBe(true);
+  });
+
+  it('Negative Error Boundary: throws when changing orchestratorProfile on started thread for all 4 start criteria', () => {
+    // 1. hasStarted: true
+    const t1: ThreadMeta = {
+      id: 't-started-flag',
+      title: 'Started Flag',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t1);
+    expect(() => appCore.patchThread(t1.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 2. initialPlaybook set
+    const t2: ThreadMeta = {
+      id: 't-started-playbook',
+      title: 'Started Playbook',
+      initialPlaybook: 'oim-getting-started',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t2);
+    expect(() => appCore.patchThread(t2.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 3. sessionId set
+    const t3: ThreadMeta = {
+      id: 't-started-session',
+      title: 'Started Session',
+      sessionId: 'session-xyz',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(t3);
+    expect(() => appCore.patchThread(t3.id, { orchestratorProfile: 'OIM' })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+
+    // 4. non-zero tokens
+    const t4: ThreadMeta = {
+      id: 't-started-tokens',
+      title: 'Started Tokens',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), outputTokens: 42 },
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(t4);
+    expect(() => appCore.patchThread(t4.id, { orchestratorProfile: undefined })).toThrow(
+      'Cannot change agent mode once a conversation has started',
+    );
+  });
+
+  it('Positive Unstarted Switching: allows switching orchestratorProfile on unstarted thread', () => {
+    const thread: ThreadMeta = {
+      id: 't-unstarted',
+      title: 'Fresh Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(appCore.threads.get(thread.id)?.orchestratorProfile).toBe('OIM');
+  });
+
+  it('Idempotent Mode Patch: identical orchestratorProfile on started thread succeeds and does not call closeThread', () => {
+    const thread: ThreadMeta = {
+      id: 't-idempotent',
+      title: 'Started Orchestrator',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(thread);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    const patched = appCore.patchThread(thread.id, { orchestratorProfile: 'OIM' });
+    expect(patched?.orchestratorProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it('Non-mode Modifications: allows updating model, thinkingLevel, or title on started thread when idle', () => {
+    const thread: ThreadMeta = {
+      id: 't-started-nonmode',
+      title: 'Original Title',
+      hasStarted: true,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    appCore.threads.upsert(thread);
+
+    const patched = appCore.patchThread(thread.id, {
+      model: 'opus',
+      thinkingLevel: 'high',
+      title: 'Updated Title',
+    });
+
+    expect(patched?.model).toBe('opus');
+    expect(patched?.thinkingLevel).toBe('high');
+    expect(patched?.title).toBe('Updated Title');
+    expect(patched?.hasStarted).toBe(true);
+  });
+
+  it('Remote Sync Cache Reconciliation: listThreads preserves hasStarted: true', async () => {
+    const localThread: ThreadMeta = {
+      id: 't-sync-cache',
+      title: 'Local Started Thread',
+      hasStarted: true,
+      initialPlaybook: 'oim-schema',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    };
+    appCore.threads.upsert(localThread);
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-sync-cache',
+        title: 'Server Updated Title',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        updatedAt: '2026-08-01T11:00:00.000Z',
+        settings: { model: 'sonnet', 'thinking-level': 'medium' },
+      },
+    ]);
+
+    const result = await appCore.listThreads();
+    expect(result.serverReachable).toBe(true);
+    const reconciled = appCore.threads.get('t-sync-cache')!;
+    expect(reconciled.hasStarted).toBe(true);
+    expect(reconciled.initialPlaybook).toBe('oim-schema');
+    expect(reconciled.title).toBe('Server Updated Title');
   });
 });
 

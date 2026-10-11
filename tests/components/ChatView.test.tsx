@@ -2528,4 +2528,218 @@ describe('deterministic platform shortcut labels', () => {
       expect(container.querySelector('.mermaid-diagram-container')).toBeNull();
     });
   });
+
+  describe('Wave 1: Agent Mode & Playbook Locking in ChatView', () => {
+    it('DOM Structure & Tooltip: asserts inner select[aria-label="Agent mode"] is nested inside .composer-select-wrapper with unstarted tooltip', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+      });
+
+      const wrapper = container.querySelector('.composer-select-wrapper');
+      expect(wrapper).toBeTruthy();
+      expect(wrapper?.getAttribute('data-tip')).toBe('Multi-agent profile (orchestrator mode)');
+
+      const select = wrapper?.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(select).toBeTruthy();
+      expect(select.disabled).toBe(false);
+    });
+
+    it('Unstarted State (Success): enables select, fires onPatchThread on change', () => {
+      const onPatchThread = vi.fn();
+      render(
+        <ChatView
+          thread={{ ...THREAD, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={onPatchThread}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      const select = screen.getByLabelText('Agent mode') as HTMLSelectElement;
+      expect(select.disabled).toBe(false);
+      fireEvent.change(select, { target: { value: 'OIM' } });
+      expect(onPatchThread).toHaveBeenCalledWith({ orchestratorProfile: 'OIM' });
+    });
+
+    it('Started State (Lock): disables select and updates wrapper tooltip across all start triggers', () => {
+      const userMessage: ChatMessage = {
+        localId: 'u1',
+        role: 'user',
+        content: 'hello',
+        createdAt: '2026-08-01T10:00:00.000Z',
+      };
+
+      // 1. hasStarted: true
+      const { container: c1 } = renderChat({
+        thread: { ...THREAD, hasStarted: true },
+        profiles: [ORDINARY],
+      });
+      const wrapper1 = c1.querySelector('.composer-select-wrapper')!;
+      expect(wrapper1.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper1.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 2. sessionId set
+      const { container: c2 } = renderChat({
+        thread: { ...THREAD, sessionId: 'sess-active' },
+        profiles: [ORDINARY],
+      });
+      const wrapper2 = c2.querySelector('.composer-select-wrapper')!;
+      expect(wrapper2.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper2.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 3. initialPlaybook set
+      const { container: c3 } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+        profiles: [ORDINARY],
+      });
+      const wrapper3 = c3.querySelector('.composer-select-wrapper')!;
+      expect(wrapper3.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper3.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+
+      // 4. user messages exist
+      const { container: c4 } = renderChat({
+        thread: THREAD,
+        messages: [userMessage],
+        profiles: [ORDINARY],
+      });
+      const wrapper4 = c4.querySelector('.composer-select-wrapper')!;
+      expect(wrapper4.getAttribute('data-tip')).toBe('Agent mode cannot be changed once a conversation has started');
+      expect((wrapper4.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      cleanup();
+    });
+
+    it('Granular Lock: single-agent model and thinkingLevel selectors remain enabled when idle on a started thread', () => {
+      const { container } = renderChat({
+        thread: { ...THREAD, hasStarted: true, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+      });
+
+      const modeSelect = container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(modeSelect.disabled).toBe(true);
+
+      const modelSelect = container.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+      expect(modelSelect.disabled).toBe(false);
+
+      const thinkingSelect = container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement;
+      expect(thinkingSelect.disabled).toBe(false);
+    });
+
+    it('Busy State: when liveTurn.running is true, all selectors (model, thinkingLevel, mode) are disabled', () => {
+      const runningTurn: LiveTurn = {
+        running: true,
+        liveText: 'Working...',
+        liveThinking: '',
+        blocks: [],
+      };
+
+      const { container } = renderChat({
+        thread: { ...THREAD, orchestratorProfile: undefined },
+        profiles: [ORDINARY],
+        liveTurn: runningTurn,
+      });
+
+      const modeSelect = container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement;
+      expect(modeSelect.disabled).toBe(true);
+
+      const modelSelect = container.querySelector('select[aria-label="Model"]') as HTMLSelectElement;
+      expect(modelSelect.disabled).toBe(true);
+
+      const thinkingSelect = container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement;
+      expect(thinkingSelect.disabled).toBe(true);
+    });
+
+    it('Abort / Stale State: when liveTurn.running transitions back from true to false, model and thinkingLevel re-enable while mode remains locked', () => {
+      const runningTurn: LiveTurn = {
+        running: true,
+        liveText: 'Working...',
+        liveThinking: '',
+        blocks: [],
+      };
+
+      const { container, rerender } = render(
+        <ChatView
+          thread={{ ...THREAD, hasStarted: true, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={runningTurn}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      // In running state, all are disabled
+      expect((container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Model"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement).disabled).toBe(true);
+
+      // Transition to idle (e.g. stopped or finished)
+      rerender(
+        <ChatView
+          thread={{ ...THREAD, hasStarted: true, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[ORDINARY]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      // Model & thinking effort re-enabled, agent mode stays locked
+      expect((container.querySelector('select[aria-label="Agent mode"]') as HTMLSelectElement).disabled).toBe(true);
+      expect((container.querySelector('select[aria-label="Model"]') as HTMLSelectElement).disabled).toBe(false);
+      expect((container.querySelector('select[aria-label="Thinking effort"]') as HTMLSelectElement).disabled).toBe(false);
+    });
+
+    it('Active playbook remove button is omitted once conversation is started', () => {
+      const { container: cUnstarted, rerender } = render(
+        <ChatView
+          thread={{ ...THREAD, orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      rerender(
+        <ChatView
+          thread={{ ...THREAD, initialPlaybook: 'oim-getting-started', orchestratorProfile: undefined }}
+          settings={settings()}
+          messages={[]}
+          prompts={PROMPTS}
+          profiles={[]}
+          liveTurn={IDLE}
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          onPatchThread={() => undefined}
+          onFeedback={async () => undefined}
+        />,
+      );
+
+      expect(cUnstarted.querySelector('.composer-pill-remove')).toBeNull();
+    });
+  });
 });

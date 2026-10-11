@@ -22,6 +22,7 @@ import {
   formatModelDisplayName,
   isClarificationTool,
   isPlaybookValidationExcluded,
+  isThreadStarted,
   isUserSelectableProfile,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -335,7 +336,11 @@ export function ChatView(props: {
     [thread.initialPlaybook, messages],
   );
 
-  const isPlaybookLocked = Boolean(thread.initialPlaybook) || messages.some((m) => m.role === 'user');
+  const isConversationStarted =
+    isThreadStarted(thread) ||
+    messages.some((m) => m.role === 'user');
+
+  const isPlaybookLocked = isConversationStarted;
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
@@ -1135,30 +1140,38 @@ export function ChatView(props: {
             </div>
             <div className="composer-controls-right">
               {visibleProfiles.length > 0 && (
-                <select
-                  className="composer-select"
-                  value={thread.orchestratorProfile ?? ''}
-                  data-tip="Multi-agent profile (orchestrator mode)"
-                  aria-label="Agent mode"
-                  disabled={controlsDisabled}
-                  onChange={(e) => {
-                    const profile = e.target.value;
-                    if (profile) {
-                      setPlaybookRequired(false);
-                      setPreflight(null);
-                      runIdRef.current += 1;
-                      setChecking(false);
-                    }
-                    onPatchThread({ orchestratorProfile: profile });
-                  }}
+                <span
+                  className="composer-select-wrapper"
+                  data-tip={
+                    isConversationStarted
+                      ? 'Agent mode cannot be changed once a conversation has started'
+                      : 'Multi-agent profile (orchestrator mode)'
+                  }
                 >
-                  <option value="">Single agent</option>
-                  {visibleProfiles.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {p.prototype ? `🧪 ${p.name}` : p.name}
-                    </option>
-                  ))}
-                </select>
+                  <select
+                    className="composer-select"
+                    value={thread.orchestratorProfile ?? ''}
+                    aria-label="Agent mode"
+                    disabled={controlsDisabled || isConversationStarted}
+                    onChange={(e) => {
+                      const profile = e.target.value;
+                      if (profile) {
+                        setPlaybookRequired(false);
+                        setPreflight(null);
+                        runIdRef.current += 1;
+                        setChecking(false);
+                      }
+                      onPatchThread({ orchestratorProfile: profile });
+                    }}
+                  >
+                    <option value="">Single agent</option>
+                    {visibleProfiles.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.prototype ? `🧪 ${p.name}` : p.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
               )}
               {!orchestratorActive ? (
                 <>

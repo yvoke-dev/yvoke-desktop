@@ -26,6 +26,7 @@ import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   controlPlaybookNames,
   isPlaybookValidationExcluded,
+  isThreadStarted,
   isUserSelectablePlaybook,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
@@ -475,6 +476,7 @@ export class AppCore {
           syncState: existing?.syncState ?? 'synced',
           orchestratorProfile,
           initialPlaybook: existing?.initialPlaybook,
+          hasStarted: existing?.hasStarted,
         });
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
@@ -533,10 +535,16 @@ export class AppCore {
     update = sanitized;
 
     const existing = this.threads.get(threadId);
+    if (!existing) {
+      throw new Error(`Thread not found: ${threadId}`);
+    }
     const modeChanged =
       'orchestratorProfile' in update &&
-      existing !== undefined &&
       (sanitized.orchestratorProfile || undefined) !== (existing.orchestratorProfile || undefined);
+
+    if (modeChanged && isThreadStarted(existing)) {
+      throw new Error('Cannot change agent mode once a conversation has started');
+    }
 
     if (modeChanged) {
       if (this.agent.isBusy(threadId)) {
@@ -647,13 +655,18 @@ export class AppCore {
     this.startImageDescriptions(sanitizedImages);
 
     const isOrchestrator = Boolean(thread.orchestratorProfile);
+    const isFirstSend = !isThreadStarted(thread);
     const effectivePlaybook = isOrchestrator
       ? undefined
-      : (thread.initialPlaybook ?? (request.promptName || undefined));
+      : (isFirstSend ? (request.promptName || undefined) : thread.initialPlaybook);
 
     let effectiveThread = thread;
-    if (!isOrchestrator && effectivePlaybook && !thread.initialPlaybook) {
-      const patched = this.threads.patch(thread.id, { initialPlaybook: effectivePlaybook });
+    if (isFirstSend) {
+      const startPatch: Partial<ThreadMeta> = {
+        hasStarted: true,
+        ...(effectivePlaybook ? { initialPlaybook: effectivePlaybook } : {}),
+      };
+      const patched = this.threads.patch(thread.id, startPatch);
       if (patched) {
         effectiveThread = patched;
       }
