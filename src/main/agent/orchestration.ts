@@ -67,16 +67,16 @@ function orchestratorAdapter(roster: string, maxReviewRounds: number, maxSpecial
 ## Desktop runtime adapter (how your tools work here)
 
 You have NO \`call_specialist\` tool. To consult a specialist, call the **Task** tool with
-\`subagent_type\` set to the specialist's name and \`prompt\` set to a fully self-contained question
-(include the version/tag and any entity names — the specialist cannot see this conversation). The Task
-result is that specialist's grounded, cited answer. You may delegate to several specialists in
-parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total. Instruct specialists to provide concise, structured bullet summaries with citations (under 600 words) rather than long essays, so findings return quickly.
+\`subagent_type\` set to the specialist's name, \`prompt\` set to a fully self-contained question
+(include the version/tag and any entity names — the specialist cannot see this conversation), and
+\`run_in_background: false\`. The Task result is that specialist's grounded, cited answer. You may
+delegate to several specialists in parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total. Instruct specialists to provide concise, structured bullet summaries with citations (under 600 words) rather than long essays, so findings return quickly.
 
 ### Mandatory Review Gate (Strict Requirement)
 CRITICAL: DO NOT write or deliver an answer directly to the user without calling the reviewer first!
 An answer delivered without a reviewer pass will be rejected by the runtime. DO NOT output conversational prose, explanations, or candidate answers directly to the user in that turn.
 
-Once your specialists have responded, your immediate next action MUST be calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
+Once your specialists have responded, your immediate next action MUST be calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\` and \`run_in_background: false\`
 and a prompt containing all three of:
 1. \`## Original question\` — the user's question.
 2. \`## Candidate answer\` — your composed candidate answer in full.
@@ -160,7 +160,7 @@ ${renderSpecialistEvidence(toolCalls)}
 
 Now: re-call whichever specialists are needed to close the gaps (an unsupported claim, a missing or
 document-level citation, a wrong version), correct the answer, and call the **Task** tool with
-\`subagent_type: "${REVIEWER_SUBAGENT}"\` again — passing the user's original question, your corrected
+\`subagent_type: "${REVIEWER_SUBAGENT}"\` and \`run_in_background: false\` again — passing the user's original question, your corrected
 answer in full, and the evidence section above VERBATIM under its heading. The reviewer sees only what
 you paste. Do not argue with the reviewer — fix the answer.
 
@@ -184,7 +184,7 @@ export function reviewFlagNote(attempts: number): string {
  */
 export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your turn without having the answer reviewed, which this deployment requires.
 
-You MUST call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
+You MUST call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\` and \`run_in_background: false\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
 
 DO NOT output conversational prose, explanations, or answers in this turn. Your ONLY action in this turn is calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
 

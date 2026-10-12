@@ -96,7 +96,13 @@ describe('sub-agent delegation', () => {
       expect((await single(tool, {}, callOptions))?.behavior).toBe('deny');
 
       const orch = buildCanUseTool(() => base, 'th', undefined, [], undefined, true);
-      expect((await orch(tool, {}, callOptions))?.behavior).toBe('allow');
+      const res = await orch(tool, { prompt: 'whoami' }, callOptions);
+      expect(res?.behavior).toBe('allow');
+      expect((res as any)?.updatedInput).toEqual({ prompt: 'whoami', run_in_background: false });
+    });
+
+    it(`withholds ${tool} from the SDK auto-approval list so it falls through to canUseTool`, () => {
+      expect(buildAutoApproveTools([tool])).toEqual([]);
     });
   }
 });

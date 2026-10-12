@@ -221,7 +221,7 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
  * Withholding auto-approval does NOT withhold the tool: it still reaches the model, and the
  * permission request it now raises is answered by `buildCanUseTool` with the same grant list.
  */
-const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch'];
+const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch', 'Task', 'Agent'];
 
 /**
  * The SDK's `allowedTools`: the grant from `buildAllowedTools` minus everything whose enforcement
@@ -418,8 +418,19 @@ export function buildCanUseTool(
     // Delegation bypasses the exact-match gating below because the allow-list token 'Task' differs
     // from the in-stream tool name 'Agent'. isToolAllowed has already refused it outside orchestrator
     // mode, so reaching here means delegation is part of the configured design.
+    //
+    // Force run_in_background: false: subagent delegation MUST be synchronous. Running in background
+    // causes the CLI to immediately return an async receipt ("Async agent launched successfully...")
+    // instead of the specialist's answer or reviewer's verdict, breaking review gating and composing.
     if (toolName === 'Task' || toolName === 'Agent') {
-      return { behavior: 'allow', updatedInput: input };
+      const inputObj = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : {};
+      return {
+        behavior: 'allow',
+        updatedInput: {
+          ...inputObj,
+          run_in_background: false,
+        },
+      };
     }
 
     // Playbook-specific tools gating
