@@ -360,6 +360,33 @@ describe('videoOrchestratorPreflight', () => {
 
       const masOpts = parseArgs(['--mas-model', 'haiku']);
       expect(masOpts.model).toBe('haiku');
+
+      const granularOpts = parseArgs([
+        '--model',
+        'haiku',
+        '--thinking',
+        'high',
+        '--orchestrator-model',
+        'sonnet',
+        '--orchestrator-thinking',
+        'medium',
+        '--worker-model',
+        'haiku',
+        '--worker-thinking',
+        'high',
+        '--reviewer-model',
+        'sonnet',
+        '--reviewer-thinking',
+        'medium',
+      ]);
+      expect(granularOpts.model).toBe('haiku');
+      expect(granularOpts.thinking).toBe('high');
+      expect(granularOpts.orchestratorModel).toBe('sonnet');
+      expect(granularOpts.orchestratorThinking).toBe('medium');
+      expect(granularOpts.specialistModel).toBe('haiku');
+      expect(granularOpts.specialistThinking).toBe('high');
+      expect(granularOpts.reviewerModel).toBe('sonnet');
+      expect(granularOpts.reviewerThinking).toBe('medium');
     });
   });
 

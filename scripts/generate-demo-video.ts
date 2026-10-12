@@ -117,6 +117,12 @@ export interface DemoOptions {
   scenes?: number[];
   model: 'opus' | 'sonnet' | 'haiku';
   thinking: 'low' | 'medium' | 'high' | 'off';
+  orchestratorModel?: 'opus' | 'sonnet' | 'haiku';
+  orchestratorThinking?: 'low' | 'medium' | 'high' | 'off';
+  specialistModel?: 'opus' | 'sonnet' | 'haiku';
+  specialistThinking?: 'low' | 'medium' | 'high' | 'off';
+  reviewerModel?: 'opus' | 'sonnet' | 'haiku';
+  reviewerThinking?: 'low' | 'medium' | 'high' | 'off';
 }
 
 export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOptions {
@@ -212,7 +218,71 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
       ? thinkingVal
       : 'low';
 
-  return { skipTts, skipBackend, backendUrl, outputPath, maxScenes, singleScene, scenes, model, thinking };
+  const orchModelIdx = args.indexOf('--orchestrator-model');
+  const orchModelVal = orchModelIdx !== -1 ? args[orchModelIdx + 1] : undefined;
+  const orchestratorModel: 'opus' | 'sonnet' | 'haiku' | undefined =
+    orchModelVal === 'opus' || orchModelVal === 'sonnet' || orchModelVal === 'haiku'
+      ? orchModelVal
+      : undefined;
+
+  const orchThinkingIdx = args.indexOf('--orchestrator-thinking');
+  const orchThinkingVal = orchThinkingIdx !== -1 ? args[orchThinkingIdx + 1] : undefined;
+  const orchestratorThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
+    orchThinkingVal === 'low' || orchThinkingVal === 'medium' || orchThinkingVal === 'high' || orchThinkingVal === 'off'
+      ? orchThinkingVal
+      : undefined;
+
+  const specModelIdx =
+    args.indexOf('--specialist-model') !== -1
+      ? args.indexOf('--specialist-model')
+      : args.indexOf('--worker-model');
+  const specModelVal = specModelIdx !== -1 ? args[specModelIdx + 1] : undefined;
+  const specialistModel: 'opus' | 'sonnet' | 'haiku' | undefined =
+    specModelVal === 'opus' || specModelVal === 'sonnet' || specModelVal === 'haiku'
+      ? specModelVal
+      : undefined;
+
+  const specThinkingIdx =
+    args.indexOf('--specialist-thinking') !== -1
+      ? args.indexOf('--specialist-thinking')
+      : args.indexOf('--worker-thinking');
+  const specThinkingVal = specThinkingIdx !== -1 ? args[specThinkingIdx + 1] : undefined;
+  const specialistThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
+    specThinkingVal === 'low' || specThinkingVal === 'medium' || specThinkingVal === 'high' || specThinkingVal === 'off'
+      ? specThinkingVal
+      : undefined;
+
+  const revModelIdx = args.indexOf('--reviewer-model');
+  const revModelVal = revModelIdx !== -1 ? args[revModelIdx + 1] : undefined;
+  const reviewerModel: 'opus' | 'sonnet' | 'haiku' | undefined =
+    revModelVal === 'opus' || revModelVal === 'sonnet' || revModelVal === 'haiku'
+      ? revModelVal
+      : undefined;
+
+  const revThinkingIdx = args.indexOf('--reviewer-thinking');
+  const revThinkingVal = revThinkingIdx !== -1 ? args[revThinkingIdx + 1] : undefined;
+  const reviewerThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
+    revThinkingVal === 'low' || revThinkingVal === 'medium' || revThinkingVal === 'high' || revThinkingVal === 'off'
+      ? revThinkingVal
+      : undefined;
+
+  return {
+    skipTts,
+    skipBackend,
+    backendUrl,
+    outputPath,
+    maxScenes,
+    singleScene,
+    scenes,
+    model,
+    thinking,
+    orchestratorModel,
+    orchestratorThinking,
+    specialistModel,
+    specialistThinking,
+    reviewerModel,
+    reviewerThinking,
+  };
 }
 
 export const SCENE_1_SEGMENTS: { key: string; narration: string }[] = [
@@ -429,10 +499,22 @@ export function seedUserData(
     cloneRealThreads?: boolean;
     model?: 'opus' | 'sonnet' | 'haiku';
     thinking?: 'low' | 'medium' | 'high' | 'off';
+    orchestratorModel?: 'opus' | 'sonnet' | 'haiku';
+    orchestratorThinking?: 'low' | 'medium' | 'high' | 'off';
+    specialistModel?: 'opus' | 'sonnet' | 'haiku';
+    specialistThinking?: 'low' | 'medium' | 'high' | 'off';
+    reviewerModel?: 'opus' | 'sonnet' | 'haiku';
+    reviewerThinking?: 'low' | 'medium' | 'high' | 'off';
   },
 ): string {
   const model = options?.model ?? 'opus';
   const thinkingLevel = options?.thinking ?? 'low';
+  const orchModel = options?.orchestratorModel ?? model;
+  const orchThinking = options?.orchestratorThinking ?? thinkingLevel;
+  const specModel = options?.specialistModel ?? model;
+  const specThinking = options?.specialistThinking ?? thinkingLevel;
+  const revModel = options?.reviewerModel ?? model;
+  const revThinking = options?.reviewerThinking ?? thinkingLevel;
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-demo-video-'));
 
   // 1. Settings strictly configured for local dev environment (Streamable HTTP + Dev token)
@@ -460,16 +542,16 @@ export function seedUserData(
     },
     orchestrator: {
       orchestrator: {
-        model,
-        thinkingLevel,
+        model: orchModel,
+        thinkingLevel: orchThinking,
       },
       reviewer: {
-        model,
-        thinkingLevel,
+        model: revModel,
+        thinkingLevel: revThinking,
       },
       specialist: {
-        model,
-        thinkingLevel,
+        model: specModel,
+        thinkingLevel: specThinking,
       },
       maxReviewRounds: 2,
       maxSpecialistCalls: 8,
@@ -881,6 +963,12 @@ export async function runDemoVideoGenerator(): Promise<void> {
     cloneRealThreads: true,
     model: options.model,
     thinking: options.thinking,
+    orchestratorModel: options.orchestratorModel,
+    orchestratorThinking: options.orchestratorThinking,
+    specialistModel: options.specialistModel,
+    specialistThinking: options.specialistThinking,
+    reviewerModel: options.reviewerModel,
+    reviewerThinking: options.reviewerThinking,
   });
   const recordingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-recordings-'));
 
@@ -2039,7 +2127,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               .catch(() => {});
             await appPage.waitForTimeout(250);
 
-            // Switch thinking effort to 'low' so Claude reasons concisely with large schema/DB results
+            // Switch thinking effort to configured level (or 'low' default)
             const thinkingSelect = appPage
               .locator(
                 'select.composer-select[aria-label="Thinking effort"], select.composer-select[data-tip="Thinking effort"]',
@@ -2047,7 +2135,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               .first();
             if ((await thinkingSelect.count()) > 0) {
               await glideMouse(appPage, thinkingSelect, 15, { delayMs: 150, optional: true });
-              await thinkingSelect.selectOption('low').catch(() => {});
+              await thinkingSelect.selectOption(options.thinking ?? 'low').catch(() => {});
               await appPage.waitForTimeout(200);
             }
 
@@ -2498,6 +2586,8 @@ export async function runDemoVideoGenerator(): Promise<void> {
     const srtPath = path.join(recordingsDir, 'subtitles.srt');
     fs.writeFileSync(srtPath, srtContent, 'utf8');
 
+    fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
+
     // Also write sidecar subtitles next to destination MP4
     const sidecarSrt = options.outputPath.replace(/\.mp4$/, '.srt');
     fs.writeFileSync(sidecarSrt, srtContent, 'utf8');
@@ -2509,8 +2599,6 @@ export async function runDemoVideoGenerator(): Promise<void> {
     if (fs.existsSync(defaultAmbientPath)) {
       backgroundMusicPath = defaultAmbientPath;
     }
-
-    fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
 
     console.log(`Stitching output with universal MP4 flags to ${options.outputPath}...`);
     try {
