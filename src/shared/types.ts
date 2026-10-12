@@ -295,6 +295,33 @@ export interface ReviewStatus {
   enforced?: boolean;
 }
 
+/** Parse a reviewer sub-agent's plain-text verdict (first line APPROVED/REJECTED + feedback). */
+export function parseVerdict(result: string): { approved: boolean; feedback?: string } | null {
+  const trimmed = result.trim();
+  if (!trimmed) return null;
+  const [firstLine, ...rest] = trimmed.split('\n');
+  const head = firstLine.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  const feedback = rest.join('\n').trim() || undefined;
+  if (head.startsWith('APPROVED')) return { approved: true, feedback };
+  if (head.startsWith('REJECTED')) return { approved: false, feedback };
+
+  // Fallback: the model reasoned first and put the token further down. Feedback is whatever follows
+  // the LAST standalone verdict line — a revision round replays this text back to the orchestrator,
+  // so the pre-verdict deliberation must not ride along as "feedback to address".
+  const lines = trimmed.split('\n');
+  const verdictLine = lines.reduce(
+    (found, line, i) => (/^[*_\s]*(APPROVED|REJECTED)[*_\s]*[:.]?\s*$/i.test(line) ? i : found),
+    -1,
+  );
+  if (verdictLine >= 0) {
+    const approved = /APPROVED/i.test(lines[verdictLine]);
+    return { approved, feedback: lines.slice(verdictLine + 1).join('\n').trim() || undefined };
+  }
+  if (/\bAPPROVED\b/.test(trimmed) && !/\bREJECTED\b/.test(trimmed)) return { approved: true, feedback };
+  if (/\bREJECTED\b/.test(trimmed)) return { approved: false, feedback };
+  return null;
+}
+
 /** One segment of an assistant turn — interleaved text, thinking, and/or tool calls. */
 export interface MessageBlock {
   text?: string;

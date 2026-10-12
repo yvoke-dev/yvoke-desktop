@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { controlPlaybookNames, DEFAULT_APPEARANCE, isUserSelectablePlaybook } from '../../shared/types';
+import { controlPlaybookNames, DEFAULT_APPEARANCE, isUserSelectablePlaybook, parseVerdict } from '../../shared/types';
 import type {
   AgentEvent,
   AppSettings,
@@ -226,8 +226,36 @@ export default function App(): React.JSX.Element {
                     : current.clarifyingQuestion,
                 blocks: current.blocks.map((b) => ({
                   ...b,
+                  toolCalls: b.toolCalls.map((c) => {
+                    if (c.id !== event.toolUseId) return c;
+                    const updated: ToolCallInfo = { ...c, result: event.result, isError: event.isError };
+                    if (c.subagentType === 'reviewer' && !updated.verdict && event.result) {
+                      const parsed = parseVerdict(event.result);
+                      if (parsed) updated.verdict = parsed;
+                    }
+                    return updated;
+                  }),
+                })),
+              },
+            };
+          });
+          break;
+        case 'review-verdict':
+          setLiveTurnsByThread((prev) => {
+            const current = prev[event.threadId] ?? EMPTY_TURN;
+            return {
+              ...prev,
+              [event.threadId]: {
+                ...current,
+                blocks: current.blocks.map((b) => ({
+                  ...b,
                   toolCalls: b.toolCalls.map((c) =>
-                    c.id === event.toolUseId ? { ...c, result: event.result, isError: event.isError } : c,
+                    c.id === event.toolUseId
+                      ? {
+                          ...c,
+                          verdict: { approved: event.approved, feedback: event.feedback },
+                        }
+                      : c,
                   ),
                 })),
               },

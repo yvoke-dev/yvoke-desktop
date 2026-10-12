@@ -33,7 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   maxTurns: 0,
   playbookValidationEnabled: true,
-  playbookValidationExcludedPlaybooks: [],
+  playbookValidationExcludedPlaybooks: ['oim-full'],
   imageDescriptionsEnabled: true,
   showPrototypePlaybooks: false,
   orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,

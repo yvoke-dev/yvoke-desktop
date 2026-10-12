@@ -528,6 +528,7 @@ export function seedUserData(
     defaultModel: model,
     defaultThinkingLevel: thinkingLevel,
     playbookValidationEnabled: true,
+    playbookValidationExcludedPlaybooks: ['oim-full'],
     showPrototypePlaybooks: false,
     imageDescriptionsEnabled: true,
     webSearch: {

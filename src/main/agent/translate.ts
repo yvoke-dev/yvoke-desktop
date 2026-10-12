@@ -1,6 +1,8 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, MessageBlock, ReviewStatus, ToolCallInfo, UsageTotals } from '../../shared/types';
-import { clarificationState, isClarificationTool } from '../../shared/types';
+import { clarificationState, isClarificationTool, parseVerdict } from '../../shared/types';
+
+export { parseVerdict };
 
 /** In-stream tool_use name for a delegation (the allow-list token is 'Task'; see orchestration.ts). */
 const DELEGATE_TOOL_NAME = 'Agent';
@@ -77,32 +79,6 @@ function stringifyToolResult(content: unknown): string {
   return content == null ? '' : JSON.stringify(content);
 }
 
-/** Parse a reviewer sub-agent's plain-text verdict (first line APPROVED/REJECTED + feedback). */
-export function parseVerdict(result: string): { approved: boolean; feedback?: string } | null {
-  const trimmed = result.trim();
-  if (!trimmed) return null;
-  const [firstLine, ...rest] = trimmed.split('\n');
-  const head = firstLine.trim().toUpperCase().replace(/[^A-Z]/g, '');
-  const feedback = rest.join('\n').trim() || undefined;
-  if (head.startsWith('APPROVED')) return { approved: true, feedback };
-  if (head.startsWith('REJECTED')) return { approved: false, feedback };
-
-  // Fallback: the model reasoned first and put the token further down. Feedback is whatever follows
-  // the LAST standalone verdict line — a revision round replays this text back to the orchestrator,
-  // so the pre-verdict deliberation must not ride along as "feedback to address".
-  const lines = trimmed.split('\n');
-  const verdictLine = lines.reduce(
-    (found, line, i) => (/^[*_\s]*(APPROVED|REJECTED)[*_\s]*[:.]?\s*$/i.test(line) ? i : found),
-    -1,
-  );
-  if (verdictLine >= 0) {
-    const approved = /APPROVED/i.test(lines[verdictLine]);
-    return { approved, feedback: lines.slice(verdictLine + 1).join('\n').trim() || undefined };
-  }
-  if (/\bAPPROVED\b/.test(trimmed) && !/\bREJECTED\b/.test(trimmed)) return { approved: true, feedback };
-  if (/\bREJECTED\b/.test(trimmed)) return { approved: false, feedback };
-  return null;
-}
 
 export function addUsage(a: UsageTotals, b: UsageTotals): UsageTotals {
   return {
