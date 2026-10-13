@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { newTurnContext, translateMessage } from '../src/main/agent/translate';
-import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
+import { buildOrchestrator, DELEGATE_ALLOW_TOKEN, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile } from '../src/shared/types';
 import type { McpPrompts } from '../src/main/agent/McpPrompts';
@@ -325,10 +325,27 @@ describe('buildOrchestrator tool grants', () => {
     }
   });
 
-  it('grants ToolSearch to both orchestrator and reviewer for MCP tool discovery', async () => {
+  it('pins minimal tool grants for orchestrator and reviewer — ToolSearch withheld', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
-    expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain('ToolSearch');
-    expect(reviewerOf(built.agents)).toContain('ToolSearch');
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toEqual([
+      DELEGATE_ALLOW_TOKEN,
+      qualifyTool('ask_clarifying_question'),
+      qualifyTool('verify_citations'),
+    ]);
+    expect(reviewerOf(built.agents)).toEqual([
+      qualifyTool('verify_citations'),
+    ]);
+  });
+
+  it('keeps orchestratorAdapter prompt clean of mandatory review gate, all-caps yelling, 600-word caps, and run_in_background', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
+    const orchPrompt = built.agents[ORCHESTRATOR_AGENT].prompt;
+    expect(orchPrompt).not.toContain('Mandatory Review Gate');
+    expect(orchPrompt).not.toContain('rejected by the runtime');
+    expect(orchPrompt).not.toContain('CRITICAL: DO NOT');
+    expect(orchPrompt).not.toContain('DO NOT output');
+    expect(orchPrompt).not.toContain('under 600 words');
+    expect(orchPrompt).not.toContain('run_in_background');
   });
 
   it('carries every agent grant into the session allow-list', async () => {

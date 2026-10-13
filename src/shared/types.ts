@@ -123,13 +123,6 @@ export interface OrchestratorSettings {
    */
   maxReviewRounds: number;
   maxSpecialistCalls: number;
-  /**
-   * Code-enforced review. When true (the default): a turn that delegated to specialists but never
-   * called the reviewer is re-prompted once to run one, and a rejected/unclear verdict is handed
-   * back for revision up to `maxReviewRounds` before the answer ships flagged. Set false to leave
-   * review entirely to the orchestrator playbook.
-   */
-  requireReview?: boolean;
   /** Hard backstops on agentic turns. */
   orchestratorMaxTurns: number;
   specialistMaxTurns: number;
@@ -145,7 +138,6 @@ export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
   specialist: { model: 'haiku', thinkingLevel: 'high' },
   maxReviewRounds: 2,
   maxSpecialistCalls: 8,
-  requireReview: true,
   orchestratorMaxTurns: 60,
   specialistMaxTurns: 20,
 };

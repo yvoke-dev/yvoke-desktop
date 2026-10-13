@@ -91,7 +91,6 @@ describe('nextReviewAction', () => {
 
   it('enforces a review when an orchestrated turn skipped the reviewer', () => {
     expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
-    expect(nextReviewAction({ ...base, requireReview: true })).toEqual({ kind: 'enforce' });
   });
 
   it('drives a revision round when the reviewer rejected the draft', () => {
@@ -128,9 +127,14 @@ describe('nextReviewAction', () => {
     expect(nextReviewAction({ ...base, alreadyEnforced: true })).toEqual({ kind: 'deliver' });
   });
 
-  it('is opt-out via requireReview: false', () => {
-    expect(nextReviewAction({ ...base, requireReview: false })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, toolCalls: rejected(), requireReview: false })).toEqual({ kind: 'deliver' });
+  it('always code-enforces review — review toggle cannot be turned off', () => {
+    expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
+    expect(nextReviewAction({ ...base, toolCalls: rejected() })).toEqual({
+      kind: 'revise',
+      outcome: 'rejected',
+      feedback: 'claim 2 unsupported',
+      round: 1,
+    });
   });
 
   it('leaves single-agent, errored and stopped turns alone', () => {
@@ -181,6 +185,11 @@ describe('revision round prompt', () => {
     expect(prompt).toContain(REVIEW_FEEDBACK_HEADING);
     expect(prompt).toMatch(/no parseable verdict/i);
   });
+
+  it('does not contain run_in_background instructions in buildRevisionPrompt', () => {
+    const prompt = buildRevisionPrompt({ feedback: 'test', toolCalls, round: 1, maxRounds: 2 });
+    expect(prompt).not.toContain('run_in_background');
+  });
 });
 
 describe('reviewFlagNote', () => {
@@ -205,6 +214,10 @@ describe('REVIEW_ENFORCEMENT_PROMPT', () => {
     expect(REVIEW_ENFORCEMENT_PROMPT).toContain('REJECTED');
     // The draft is dropped, so the model must be told its next text is the whole answer.
     expect(REVIEW_ENFORCEMENT_PROMPT).toMatch(/discarded/i);
+  });
+
+  it('does not contain run_in_background instructions in REVIEW_ENFORCEMENT_PROMPT', () => {
+    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('run_in_background');
   });
 });
 

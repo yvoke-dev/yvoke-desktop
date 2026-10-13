@@ -218,6 +218,10 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
  * WebSearch, checked against the URL for WebFetch — so pre-approving either would leave the model
  * free to reach the open web while README and spec claim the opposite.
  *
+ * Delegation (`Task`, `Agent`) is also withheld here: subagents default to running asynchronously in
+ * the background. Intercepting delegation in `canUseTool` allows the runtime to force
+ * `run_in_background: false` so that specialist and reviewer runs execute synchronously.
+ *
  * Withholding auto-approval does NOT withhold the tool: it still reaches the model, and the
  * permission request it now raises is answered by `buildCanUseTool` with the same grant list.
  */
@@ -423,11 +427,10 @@ export function buildCanUseTool(
     // causes the CLI to immediately return an async receipt ("Async agent launched successfully...")
     // instead of the specialist's answer or reviewer's verdict, breaking review gating and composing.
     if (toolName === 'Task' || toolName === 'Agent') {
-      const inputObj = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : {};
       return {
         behavior: 'allow',
         updatedInput: {
-          ...inputObj,
+          ...input,
           run_in_background: false,
         },
       };

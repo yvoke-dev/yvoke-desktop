@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   assert(rev.prompt.includes('APPROVED') && rev.prompt.includes('REJECTED'), 'reviewer adapter defines verdict tokens');
   assert(
     rev.tools?.includes(qualifyTool('verify_citations')) === true &&
-      rev.tools?.includes('ToolSearch') === true &&
+      rev.tools?.includes('ToolSearch') === false &&
       rev.tools?.includes(qualifyTool('get_section')) === false,
     'reviewer is validate-only',
   );

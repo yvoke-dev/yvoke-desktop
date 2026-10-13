@@ -19,7 +19,6 @@ profiles and the playbooks; there is no way to build one from the app.
 | **See when an answer did not pass** | An answer delivered without approval carries a banner saying which of the three happened — *delivered without review*, *no clear verdict*, or *rejected* — with the reviewer's notes beneath it, and the same warning is written into the answer text itself. |
 | **Bind a model to each role** | Settings sets the model and thinking level for lead, reviewer and specialist separately, and shows the worst-case number of model calls one turn can make. |
 | **Set the budgets** | How many revision rounds a rejection may drive, how many specialist calls a question should spend, and a ceiling on the lead's and each specialist's own loop. |
-| **Turn code-enforced review off** | A switch leaves review entirely to the lead's own playbook instead of the runtime insisting on it. |
 | **Have the run recorded centrally** | A completed multi-agent turn is uploaded to the server step by step — role, round, playbook, model, instructions, output, verdict and token counts — and appears in the web app's trace viewer beside the runs the web itself performed. |
 | **Still run a specialist on its own** | Specialist playbooks stay pickable in ordinary single-agent chat. Only the lead's and the reviewer's playbooks are hidden from the picker. |
 
@@ -50,7 +49,7 @@ profiles and the playbooks; there is no way to build one from the app.
   machine can settle on its own, so the lead verifies every id it is about to write rather than
   spending a whole review round learning the same thing. This says nothing about whether a real
   source supports the claim it sits on — that stays the reviewer's job.
-- **Review is enforced in code, not requested in a prompt.** A turn that consulted specialists but
+- **Review is always code-enforced, not requested in a prompt.** A turn that consulted specialists but
   never called the reviewer is re-prompted once to run one. A turn the reviewer rejected — or on which
   it returned no readable verdict — is handed the feedback *and* the evidence again and asked to
   revise, up to the configured number of rounds. Both were observed being ignored when they were only
@@ -84,9 +83,6 @@ profiles and the playbooks; there is no way to build one from the app.
 - **A reviewer that says "NOT APPROVED" is read as approved.** When no line is exactly the verdict, the
   fallback accepts any reply containing the word *APPROVED* and not the word *REJECTED* — so a
   negative phrased around the positive word passes.
-- **Verdicts and specialist results appear only when the whole turn ends.** While the run is live the
-  cards show that a delegation is in flight and nothing more; the tick, the cross and the *Approved* /
-  *Rejected* badge all arrive at the end.
 - **The specialist budget is advisory.** The lead is *told* how many specialist calls to aim for; no
   code counts them or stops it. Only the lead's own turn ceiling — 60 as shipped — actually bounds the
   run.

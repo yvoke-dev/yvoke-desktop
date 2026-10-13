@@ -251,5 +251,22 @@ describe('spec/ modular structure', () => {
     expect(settings).toContain('haiku');
     expect(settings).toContain('high');
   });
+
+  it('documents code-enforced review and live verdicts in 03_multi_agent_investigations.md and removes review toggle from 06_settings_and_what_they_change.md', () => {
+    const multiAgent = readFileSync(resolve(SPEC_DIR, '03_multi_agent_investigations.md'), 'utf8');
+    const settings = readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8');
+
+    // spec/03: "Turn code-enforced review off" removed
+    expect(multiAgent).not.toContain('Turn code-enforced review off');
+
+    // spec/03: end-of-turn verdict limit removed
+    expect(multiAgent).not.toContain('Verdicts and specialist results appear only when the whole turn ends');
+
+    // spec/03: review is always code-enforced
+    expect(multiAgent).toContain('Review is always code-enforced');
+
+    // spec/06: review toggle removed from Agents row
+    expect(settings).not.toContain('whether review is enforced in code');
+  });
 });
 

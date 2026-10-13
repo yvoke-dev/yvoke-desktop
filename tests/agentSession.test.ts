@@ -181,7 +181,6 @@ function settings(): AppSettings {
       maxSpecialistCalls: 5,
       orchestratorMaxTurns: 20,
       specialistMaxTurns: 10,
-      requireReview: false,
     },
   } as AppSettings;
 }

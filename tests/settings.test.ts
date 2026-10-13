@@ -199,5 +199,10 @@ describe('Shipped defaults and configuration alignment', () => {
   it('verifies equality between DEFAULT_ORCHESTRATOR_SETTINGS and shipped orchestrator block', () => {
     expect(DEFAULT_ORCHESTRATOR_SETTINGS).toEqual(shipped.orchestrator);
   });
+
+  it('does not carry requireReview toggle in DEFAULT_ORCHESTRATOR_SETTINGS or shipped settings.json', () => {
+    expect(shipped.orchestrator).not.toHaveProperty('requireReview');
+    expect(DEFAULT_ORCHESTRATOR_SETTINGS).not.toHaveProperty('requireReview');
+  });
 });
 

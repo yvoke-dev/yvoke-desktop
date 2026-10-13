@@ -41,7 +41,6 @@
     },
     "maxReviewRounds": 2,
     "maxSpecialistCalls": 8,
-    "requireReview": true,
     "orchestratorMaxTurns": 60,
     "specialistMaxTurns": 20
   }

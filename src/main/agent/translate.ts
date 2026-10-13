@@ -147,13 +147,10 @@ export function nextReviewAction(params: {
   revisionRounds?: number;
   /** OrchestratorSettings.maxReviewRounds — 0/undefined disables revision rounds. */
   maxReviewRounds?: number;
-  /** OrchestratorSettings.requireReview — undefined means enabled (the default). */
-  requireReview?: boolean;
   toolCalls: ToolCallInfo[];
 }): ReviewAction {
   const deliver: ReviewAction = { kind: 'deliver' };
   if (!params.orchestratorMode || params.isError || params.aborted) return deliver;
-  if (params.requireReview === false) return deliver;
 
   const status = reviewStatusOf(params.toolCalls);
   if (!status || status.outcome === 'approved') return deliver;

@@ -830,7 +830,6 @@ export class AgentService {
       alreadyEnforced: !!session.turn.reviewEnforced,
       revisionRounds: session.turn.revisionRounds,
       maxReviewRounds: cfg?.maxReviewRounds,
-      requireReview: cfg?.requireReview,
       toolCalls: session.turn.toolCalls,
     });
     if (action.kind === 'deliver') return false;

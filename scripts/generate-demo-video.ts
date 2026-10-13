@@ -556,7 +556,6 @@ export function seedUserData(
       },
       maxReviewRounds: 2,
       maxSpecialistCalls: 8,
-      requireReview: true,
       orchestratorMaxTurns: 60,
       specialistMaxTurns: 20,
     },
@@ -1003,10 +1002,10 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
   try {
     console.log('\n[3/4] Launching Electron in headed 720p HD mode (1280x720)...');
-    const mainEntry = path.resolve(process.cwd(), 'out/main/index.js');
+    const appDir = path.resolve(process.cwd());
     electronApp = await electron.launch({
       args: [
-        mainEntry,
+        appDir,
         '--disable-dev-shm-usage',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
