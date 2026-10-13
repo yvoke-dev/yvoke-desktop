@@ -84,6 +84,8 @@ export async function launchTestApp(options: LaunchOptions = {}): Promise<Electr
     options.headless ??
     (!process.argv.includes('--headed') && process.env.YVOKE_HEADLESS !== '0');
 
+  // If the test runner was invoked via Electron's embedded Node (ELECTRON_RUN_AS_NODE=1),
+  // strip it from the child environment so Electron launches as a full GUI application.
   const launchEnv = { ...process.env };
   delete launchEnv.ELECTRON_RUN_AS_NODE;
 
