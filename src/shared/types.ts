@@ -140,9 +140,9 @@ export interface OrchestratorSettings {
  * settings.json without an `orchestrator` block still renders (and saves) a complete form.
  */
 export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
-  orchestrator: { model: 'sonnet', thinkingLevel: 'low' },
-  reviewer: { model: 'sonnet', thinkingLevel: 'low' },
-  specialist: { model: 'sonnet', thinkingLevel: 'low' },
+  orchestrator: { model: 'sonnet', thinkingLevel: 'medium' },
+  reviewer: { model: 'sonnet', thinkingLevel: 'medium' },
+  specialist: { model: 'haiku', thinkingLevel: 'high' },
   maxReviewRounds: 2,
   maxSpecialistCalls: 8,
   requireReview: true,

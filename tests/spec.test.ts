@@ -236,5 +236,20 @@ describe('spec/ modular structure', () => {
       '**Conversations restored from the server show every clarification as answered.** The remote sync\n  payload does not retain tool execution results or error states, storing only that a tool was called.\n  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying\n  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.',
     );
   });
+
+  it('documents preflight exclusion of oim-full, shipped defaults, and removes code fallback disagreement', () => {
+    const multiAgent = readFileSync(resolve(SPEC_DIR, '03_multi_agent_investigations.md'), 'utf8');
+    const settings = readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8');
+
+    // spec/03: code fallback disagreement limit removed
+    expect(multiAgent).not.toContain("The code's own fallback and the shipped configuration disagree");
+
+    // spec/06: oim-full reason documented in deployment configuration list
+    expect(settings).toContain('oim-full');
+
+    // spec/06: shipped defaults documented
+    expect(settings).toContain('haiku');
+    expect(settings).toContain('high');
+  });
 });
 

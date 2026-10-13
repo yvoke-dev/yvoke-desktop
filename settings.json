@@ -12,8 +12,8 @@
     "opus",
     "haiku"
   ],
-  "defaultModel": "sonnet",
-  "defaultThinkingLevel": "low",
+  "defaultModel": "haiku",
+  "defaultThinkingLevel": "high",
   "webSearch": {
     "enabled": true,
     "allowedDomains": [
@@ -29,15 +29,15 @@
   "orchestrator": {
     "orchestrator": {
       "model": "sonnet",
-      "thinkingLevel": "low"
+      "thinkingLevel": "medium"
     },
     "reviewer": {
       "model": "sonnet",
-      "thinkingLevel": "low"
+      "thinkingLevel": "medium"
     },
     "specialist": {
-      "model": "sonnet",
-      "thinkingLevel": "low"
+      "model": "haiku",
+      "thinkingLevel": "high"
     },
     "maxReviewRounds": 2,
     "maxSpecialistCalls": 8,

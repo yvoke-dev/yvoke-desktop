@@ -126,9 +126,6 @@ profiles and the playbooks; there is no way to build one from the app.
   offers fails its next turn, saying the profile is unavailable.
 - **Cost is not reported anywhere the company can see it.** The model calls are billed to the user's
   Claude subscription; the trace records token counts, but no money.
-- **The code's own fallback and the shipped configuration disagree** about the specialist's thinking
-  level — medium in one, high in the other. Which one applies depends on whether the deployment's
-  settings file reached the machine.
 - **Mode switching does not carry model-level session context across boundaries.** When switching
   between single agent and an orchestrator profile, or switching between different profiles, the new
   turn does not resume the prior mode's model session on disk.

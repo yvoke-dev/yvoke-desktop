@@ -33,8 +33,16 @@ configuration: whatever ships as the build's defaults, the user can change.
   and enabling the feature means listing domains in the same act, because searches and page fetches refuse to run otherwise.
   The domain list is the one setting that reaches a running conversation immediately.
 - **Playbooks excluded from preflight validation are deployment configuration.** The build's bundled
-  settings file defines which playbooks skip preflight validation. The list is displayed read-only under
-  the Agents pane, and the deployment file always wins on load, so existing user profiles pick up updated exclusions automatically on startup without requiring a migration.
+  settings file defines which playbooks skip preflight validation (`oim-full` is excluded because it is
+  the comprehensive, catch-all knowledge playbook where narrow single-topic suitability preflight would
+  falsely reject queries). The list is displayed read-only under the Agents pane, and the deployment file
+  always wins on load, so existing user profiles pick up updated exclusions automatically on startup
+  without requiring a migration.
+- **Shipped product defaults prioritize speed for single-agent and deep reasoning for investigations.**
+  The bundled settings default single-agent chat to `haiku` with `high` thinking. For multi-agent
+  investigations, the shipped defaults assign `sonnet` with `medium` thinking to the lead orchestrator
+  and the reviewer, and `haiku` with `high` thinking to specialists, aligned across both bundled
+  configuration and code fallbacks.
 - **The theme's *System* setting stays live.** It keeps following the operating system for as long as
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.

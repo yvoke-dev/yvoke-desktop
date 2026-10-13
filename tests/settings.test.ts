@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
+import { DEFAULT_ORCHESTRATOR_SETTINGS } from '../src/shared/types';
 
 /**
  * The store merges the user's profile OVER the bundled defaults and `set()` writes the whole merged
@@ -172,6 +173,31 @@ describe('SettingsStore — playbookValidationExcludedPlaybooks deployment confi
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
     expect(onDisk.playbookValidationExcludedPlaybooks).toEqual(shipped);
     expect(onDisk.playbookValidationExcludedPlaybooks).not.toContain('hacked-playbook');
+  });
+});
+
+describe('Shipped defaults and configuration alignment', () => {
+  const shippedPath = path.resolve(__dirname, '../settings.json');
+  const shipped = JSON.parse(fs.readFileSync(shippedPath, 'utf8'));
+
+  it('explicitly pins oim-full in DEFAULT_SETTINGS and shipped settings.json', () => {
+    expect(DEFAULT_SETTINGS.playbookValidationExcludedPlaybooks).toEqual(['oim-full']);
+    expect(shipped.playbookValidationExcludedPlaybooks).toEqual(['oim-full']);
+  });
+
+  it('aligns product defaults in shipped settings.json (haiku/high)', () => {
+    expect(shipped.defaultModel).toBe('haiku');
+    expect(shipped.defaultThinkingLevel).toBe('high');
+  });
+
+  it('aligns multi-agent orchestrator defaults in shipped settings.json', () => {
+    expect(shipped.orchestrator.orchestrator).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+    expect(shipped.orchestrator.reviewer).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+    expect(shipped.orchestrator.specialist).toEqual({ model: 'haiku', thinkingLevel: 'high' });
+  });
+
+  it('verifies equality between DEFAULT_ORCHESTRATOR_SETTINGS and shipped orchestrator block', () => {
+    expect(DEFAULT_ORCHESTRATOR_SETTINGS).toEqual(shipped.orchestrator);
   });
 });
 
