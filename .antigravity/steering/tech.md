@@ -20,6 +20,7 @@
 - **electron-vite**: Specialized builder for Electron processes.
 - **electron-builder**: Package distributions into portable formats (`.zip`, `.exe`).
 - **vitest**: Fast test runner for Node.js unit and integration testing (`vitest.config.ts`).
+- **@playwright/test**: End-to-end testing framework for Electron app automation (`playwright.config.ts`).
 - **tsx**: Executing spike/test scripts without pre-compiling.
 
 ## Configuration
@@ -27,6 +28,7 @@
 - **Multi-Environment TS**:
   - `tsconfig.node.json` targets Node environment (`src/main/`, `src/preload/`, `tests/`, `scripts/`).
   - `tsconfig.web.json` targets Browser DOM environment (`src/renderer/`).
+  - `tsconfig.e2e.json` targets E2E Playwright test suite (`e2e/`, `playwright.config.ts`).
 - **electron-builder.yml**: Configures macOS app builder and Windows NSIS installer properties.
 
 ## Styling & CSS Architecture
@@ -47,8 +49,14 @@ npm run dev
 # Run Vitest test suite
 npm test
 
+# Run Playwright E2E test suite
+npm run e2e
+npm run e2e:headed
+npm run e2e:ui
+
 # Run typescript compilation checks for all compilation scopes
 npm run typecheck
+npm run typecheck:e2e
 
 # Run end-to-end spike query test (requires local server and active Claude Code credentials)
 npm run spike -- "your question"
