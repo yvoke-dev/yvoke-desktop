@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { newTurnContext, parseVerdict, translateMessage } from '../src/main/agent/translate';
+import { newTurnContext, translateMessage } from '../src/main/agent/translate';
 import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile } from '../src/shared/types';
 import type { McpPrompts } from '../src/main/agent/McpPrompts';
-import { qualifyTool } from '../src/shared/types';
+import { parseVerdict, qualifyTool } from '../src/shared/types';
 
 function msg(partial: Record<string, unknown>): SDKMessage {
   return { uuid: 'u', session_id: 's', ...partial } as unknown as SDKMessage;

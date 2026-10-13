@@ -2,8 +2,6 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, MessageBlock, ReviewStatus, ToolCallInfo, UsageTotals } from '../../shared/types';
 import { clarificationState, isClarificationTool, parseVerdict } from '../../shared/types';
 
-export { parseVerdict };
-
 /** In-stream tool_use name for a delegation (the allow-list token is 'Task'; see orchestration.ts). */
 const DELEGATE_TOOL_NAME = 'Agent';
 const REVIEWER_SUBAGENT = 'reviewer';

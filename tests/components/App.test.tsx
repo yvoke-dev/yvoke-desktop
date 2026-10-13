@@ -663,7 +663,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(document.querySelector('.active-playbook-remove')).toBeNull();
   });
 
-  it('updates reviewer card with Rejected verdict badge in real-time when review-verdict event arrives during live turn', async () => {
+  it('updates reviewer card with Rejected verdict badge in real-time when tool-result arrives during live turn', async () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
     fireEvent.click(screen.getByText('First Conversation'));
@@ -686,7 +686,7 @@ describe('App conversation switching with in-progress turn', () => {
       ],
     });
 
-    // Reviewer finishes and emits tool-result followed by review-verdict
+    // Reviewer finishes and emits tool-result
     emitAgent({
       kind: 'tool-result',
       threadId: 'thread-1',

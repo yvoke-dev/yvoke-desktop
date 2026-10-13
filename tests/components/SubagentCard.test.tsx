@@ -87,6 +87,22 @@ describe('SubagentCard', () => {
       expect(container.querySelector('.tool-status.error')).toBeNull();
     });
 
+    it('derives verdict solely from call.result, ignoring call.verdict if divergent', () => {
+      const call: ToolCallInfo = {
+        id: 'call-rev-divergent',
+        name: 'Agent',
+        subagentType: 'reviewer',
+        input: { prompt: 'Review candidate answer' },
+        result: 'REJECTED\nUnsupported claims found.',
+        verdict: { approved: true },
+      };
+      const { container } = render(<SubagentCard call={call} />);
+      expect(screen.getByText('Rejected')).toBeTruthy();
+      expect(screen.queryByText('Approved')).toBeNull();
+      expect(container.querySelector('.tool-status.error')).not.toBeNull();
+      expect(container.querySelector('.tool-status.ok')).toBeNull();
+    });
+
     it('falls back to parsing verdict from result if call.verdict is undefined on a rejected turn', () => {
       const call: ToolCallInfo = {
         id: 'call-rev-1',
