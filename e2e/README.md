@@ -71,7 +71,7 @@ Tests utilize the custom fixture defined in [`e2e/support/electronFixture.ts`](s
 
 ## Environment Variables
 
-The test harness and Electron main process recognize the following environment variables:
+The test harness and Electron main process recognize the following environment variables. Both are honoured by every build including packaged ones, and are intended for automated tests and demo recording only:
 
 | Variable | Description |
 | :--- | :--- |

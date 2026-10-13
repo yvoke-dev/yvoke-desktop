@@ -84,11 +84,14 @@ export async function launchTestApp(options: LaunchOptions = {}): Promise<Electr
     options.headless ??
     (!process.argv.includes('--headed') && process.env.YVOKE_HEADLESS !== '0');
 
-  const mainEntry = path.resolve(projectRoot, 'out/main/index.js');
+  const launchEnv = { ...process.env };
+  delete launchEnv.ELECTRON_RUN_AS_NODE;
+
   const electronApp = await electron.launch({
-    args: [mainEntry],
+    args: ['.'],
+    cwd: projectRoot,
     env: {
-      ...process.env,
+      ...launchEnv,
       YVOKE_USER_DATA_DIR: userDataDir,
       YVOKE_HEADLESS: isHeadless ? '1' : '0',
     },

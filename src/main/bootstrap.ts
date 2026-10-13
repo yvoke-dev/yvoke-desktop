@@ -7,6 +7,8 @@ import type { BrowserWindowConstructorOptions } from 'electron';
  * Relative paths are resolved to absolute paths against the working directory.
  * If envVal is empty or omitted, falls back to defaultPath.
  * Recursively ensures the directory exists before returning.
+ *
+ * Honoured by every build including packaged ones; intended for tests and demo recording only.
  */
 export function resolveUserDataDir(envVal?: string, defaultPath?: string): string {
   const candidate =
@@ -26,6 +28,8 @@ export function resolveUserDataDir(envVal?: string, defaultPath?: string): strin
 
 /**
  * Checks whether headless mode is active. Strictly returns true when envVal is '1'.
+ *
+ * Honoured by every build including packaged ones; intended for tests and demo recording only.
  */
 export function isHeadless(envVal?: string): boolean {
   return envVal === '1';
