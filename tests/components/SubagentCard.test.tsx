@@ -132,5 +132,37 @@ describe('SubagentCard', () => {
       expect(screen.queryByText('Approved')).toBeNull();
       expect(container.querySelector('.tool-status.error')).not.toBeNull();
     });
+
+    it('suppresses Approved verdict badge and shows error status when reviewer call isError is true even if result starts with APPROVED', () => {
+      const call: ToolCallInfo = {
+        id: 'call-rev-err-approved',
+        name: 'Agent',
+        subagentType: 'reviewer',
+        input: { prompt: 'Review candidate answer' },
+        isError: true,
+        result: 'APPROVED\nTool execution failed after header',
+      };
+      const { container } = render(<SubagentCard call={call} />);
+      expect(screen.queryByText('Approved')).toBeNull();
+      expect(screen.queryByText('Rejected')).toBeNull();
+      expect(container.querySelector('.verdict-badge')).toBeNull();
+      expect(container.querySelector('.tool-status.error')).not.toBeNull();
+      expect(container.querySelector('.tool-status.ok')).toBeNull();
+    });
+
+    it('suppresses Rejected verdict badge and shows error status when reviewer call isError is true even if result starts with REJECTED', () => {
+      const call: ToolCallInfo = {
+        id: 'call-rev-err-rejected',
+        name: 'Agent',
+        subagentType: 'reviewer',
+        input: { prompt: 'Review candidate answer' },
+        isError: true,
+        result: 'REJECTED\nSubagent crashed',
+      };
+      const { container } = render(<SubagentCard call={call} />);
+      expect(screen.queryByText('Rejected')).toBeNull();
+      expect(container.querySelector('.verdict-badge')).toBeNull();
+      expect(container.querySelector('.tool-status.error')).not.toBeNull();
+    });
   });
 });

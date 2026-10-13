@@ -250,7 +250,11 @@ export function getLogBufferForTesting(): readonly string[] {
 /** Maximum length of a single line emitted to stdout/stderr. Long lines freeze CI runners and terminal emulators. */
 export const MAX_CONSOLE_LINE_LENGTH = 8192;
 
+const guardedStreams = new WeakSet<NodeJS.WritableStream>();
+
 export function ignoreBrokenPipe(stream: NodeJS.WritableStream): void {
+  if (!stream || guardedStreams.has(stream)) return;
+  guardedStreams.add(stream);
   stream.on('error', (err: NodeJS.ErrnoException) => {
     if (err && err.code === 'EPIPE') {
       return;

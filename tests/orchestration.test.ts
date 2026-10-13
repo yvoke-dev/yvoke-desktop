@@ -302,12 +302,12 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
   });
 
-  it('does not grant the reviewer get_section', async () => {
+  it('keeps the reviewer validate-only — verify_citations and nothing else', async () => {
     // Its playbook states it cannot open a section any more, with the reason: get_section returns
     // the whole section around a passage, so the reviewer would judge claims against neighbouring
     // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
-    expect(reviewerOf(built.agents)).toContain(qualifyTool('verify_citations'));
+    expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
     expect(reviewerOf(built.agents)).not.toContain(qualifyTool('get_section'));
   });
 
@@ -339,6 +339,8 @@ describe('buildOrchestrator tool grants', () => {
     expect(orchPrompt).not.toContain('CRITICAL: DO NOT');
     expect(orchPrompt).not.toContain('DO NOT output');
     expect(orchPrompt).not.toContain('under 600 words');
+    expect(orchPrompt).not.toContain('600 words');
+    expect(orchPrompt).not.toContain('concise, structured bullet summaries');
     expect(orchPrompt).not.toContain('run_in_background');
   });
 
@@ -537,13 +539,6 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents['oim-access-governance'].prompt).toContain('PROMPT(spec-prompt-1)');
     expect(built.agents['oim-developer-api'].prompt).toContain('PROMPT(spec-prompt-2)');
     expect(maxOverlap).toBeGreaterThanOrEqual(2);
-  });
-
-  it('does not contain bullet summary instruction or word count caps in adapter', async () => {
-    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
-    const orchPrompt = built.agents[ORCHESTRATOR_AGENT].prompt;
-    expect(orchPrompt).not.toContain('concise, structured bullet summaries');
-    expect(orchPrompt).not.toContain('600 words');
   });
 });
 

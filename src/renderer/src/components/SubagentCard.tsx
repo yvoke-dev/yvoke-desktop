@@ -38,7 +38,7 @@ export function SubagentCard(props: {
   const input = (call.input ?? {}) as { prompt?: string; description?: string };
   const question = input.prompt ?? input.description ?? '';
   const isReviewer = call.subagentType === 'reviewer';
-  const verdict = isReviewer && call.result ? parseVerdict(call.result) ?? undefined : undefined;
+  const verdict = isReviewer && !call.isError && call.result ? parseVerdict(call.result) ?? undefined : undefined;
 
   const status = call.isError ? (
     <span className="tool-status error">

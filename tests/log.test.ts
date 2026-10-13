@@ -40,6 +40,24 @@ describe('log — EPIPE stream guard and plain console output', () => {
       expect(stdoutListeners.length).toBeGreaterThan(0);
       expect(stderrListeners.length).toBeGreaterThan(0);
     });
+
+    it('is idempotent and attaches only a single error listener when called repeatedly on the same stream', () => {
+      const stream = new EventEmitter();
+      const writable = stream as unknown as NodeJS.WritableStream;
+
+      ignoreBrokenPipe(writable);
+      ignoreBrokenPipe(writable);
+      ignoreBrokenPipe(writable);
+
+      expect(stream.listenerCount('error')).toBe(1);
+    });
+
+    it('does not throw when given a null or undefined stream reference', () => {
+      expect(() => {
+        ignoreBrokenPipe(null as unknown as NodeJS.WritableStream);
+        ignoreBrokenPipe(undefined as unknown as NodeJS.WritableStream);
+      }).not.toThrow();
+    });
   });
 
   afterEach(() => {

@@ -694,13 +694,6 @@ describe('App conversation switching with in-progress turn', () => {
       result: 'REJECTED\nUnsupported claims found.',
       isError: false,
     });
-    emitAgent({
-      kind: 'review-verdict',
-      threadId: 'thread-1',
-      toolUseId: 'call-rev-1',
-      approved: false,
-      feedback: 'Unsupported claims found.',
-    });
 
     await waitFor(() => {
       expect(screen.getByText('Reviewer')).toBeTruthy();
