@@ -244,16 +244,10 @@ describe('buildOrchestrator prompt composition', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
   });
   /**
-   * SDK-upgrade guard. The client is safe on the pinned 0.3.170, where the Task tool documents
-   * `run_in_background: true runs the agent asynchronously` — backgrounding is opt-in. It is NOT safe
-   * by design: 0.3.218 flipped that to `Subagents run in the background by default`, and running
-   * yvoke-eval on 0.3.218 on 3 Sep 2026 produced 802-character launch receipts in place of every
-   * specialist answer. The orchestrator re-delegated blind, the reviewer's own verdict became
-   * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
-   * they had been handed no evidence. Nothing errored; the answers still read well.
-   *
-   * A plain `npm update` would therefore have degraded grounding in production with no code change.
-   * This test is the tripwire: it fails here rather than in front of a user.
+   * Pins the DEFINITIONS only: no agent is declared a background agent. This does not make delegation
+   * synchronous — a call can still be backgrounded, and on SDK 0.3.295 it was, with this set on every
+   * agent. That guarantee is `sanitizedEnv` (tests/sanitizedEnv.test.ts, tests/agentSession.test.ts)
+   * and is only provable live: `npm run spike:delegation`.
    */
   it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);

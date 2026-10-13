@@ -244,18 +244,18 @@ export interface ResolvedOrchestrator {
  * and the reviewer's verdict in hand to ship — a backgrounded delegation returns a launch receipt
  * instead ("Async agent launched successfully… agentId: …").
  *
- * This is a guard against an SDK upgrade, not a fix for a live defect. The Task tool's DEFAULT
- * flipped between versions: the pinned 0.3.170 says `run_in_background: true runs the agent
- * asynchronously` (opt-in, so we are safe today), while 0.3.218 says `Subagents run in the
- * background by default`. Measured on 0.3.218 in yvoke-eval on 3 Sep 2026: specialists returned
- * 802-character receipts, the orchestrator re-delegated blind, the reviewer's own verdict became
- * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
- * in the same breath that they had been given no evidence. Nothing failed loudly — the answers
- * still looked well-formed.
+ * The Task tool's DEFAULT flipped between SDK versions: the pinned 0.3.170 says `run_in_background:
+ * true runs the agent asynchronously` (opt-in), while 0.3.218 says `Subagents run in the background
+ * by default`. Measured on 0.3.218 in yvoke-eval on 3 Sep 2026: specialists returned 802-character
+ * receipts, the orchestrator re-delegated blind, the reviewer's own verdict became unparseable
+ * because its result was a receipt too, and reviewers APPROVED answers while stating in the same
+ * breath that they had been given no evidence. Nothing failed loudly — the answers still looked
+ * well-formed.
  *
- * So a plain `npm update` of the SDK would have degraded grounding in production with no code
- * change and no failing test. Declaring it per agent costs nothing and removes that dependency on
- * a default we do not control.
+ * Declaring `background: false` per agent says no AGENT is a background agent. It does NOT stop a
+ * CALL from being backgrounded: with this set on every definition, on SDK 0.3.295, every specialist
+ * and reviewer call still came back as a receipt. What holds is `sanitizedEnv` switching background
+ * tasks off in the CLI (see there), checked end to end by `npm run spike:delegation`.
  */
 const BACKGROUND_DELEGATION = false;
 

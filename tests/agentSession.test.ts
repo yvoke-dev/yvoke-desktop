@@ -1532,3 +1532,50 @@ describe('canonical model mapping', () => {
     svc.closeAll();
   });
 });
+
+describe('background execution is switched off in the CLI environment', () => {
+  const FLAG = 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS';
+  const inherited = process.env[FLAG];
+
+  afterEach(() => {
+    if (inherited === undefined) delete process.env[FLAG];
+    else process.env[FLAG] = inherited;
+  });
+
+  // Delegation must be synchronous, and nothing in this app can make it so except the CLI's own
+  // switch: the Agent tool is never routed through `canUseTool` for the orchestrator agent (observed
+  // live), so a `run_in_background: false` rewrite there is never reached, and the model passes no
+  // such argument by itself. Without the switch every specialist and reviewer call came back as
+  // "Async agent launched successfully" instead of an answer.
+  it('is set on an orchestrator session, where delegation happens', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+    await ask(svc, meta, 'Multi-agent question');
+
+    expect(h.sessions).toHaveLength(1);
+    const env = h.sessions[0].options.env as Record<string, string | undefined>;
+    expect(env[FLAG]).toBe('1');
+    svc.closeAll();
+  });
+
+  it('is set on a single-agent session too', async () => {
+    const meta = thread();
+    const svc = makeService(meta);
+    await ask(svc, meta, 'Plain question', 'oim-schema');
+
+    const env = h.sessions[0].options.env as Record<string, string | undefined>;
+    expect(env[FLAG]).toBe('1');
+    svc.closeAll();
+  });
+
+  it('wins over a value inherited from the environment the app was started in', async () => {
+    process.env[FLAG] = '0';
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+    await ask(svc, meta, 'Multi-agent question');
+
+    const env = h.sessions[0].options.env as Record<string, string | undefined>;
+    expect(env[FLAG]).toBe('1');
+    svc.closeAll();
+  });
+});

@@ -108,10 +108,18 @@ export function classifyClaudeFailure(
 /**
  * Environment for the SDK subprocess: inherit everything except ANTHROPIC_API_KEY,
  * which would silently switch billing from the subscription to pay-per-token.
+ *
+ * Background tasks are switched off, always. Delegation (specialists, the reviewer) has to be
+ * synchronous — the caller needs the answer in hand — yet the CLI backgrounds a subagent by default,
+ * answering with "Async agent launched successfully" instead. Nothing else in the app can prevent
+ * that: the Agent tool is never routed through `canUseTool` for the orchestrator agent, and the model
+ * does not pass `run_in_background: false` of its own accord. With the capability gone there is
+ * nothing to ask the model for and nothing to rewrite.
  */
 export function sanitizedEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...base };
   delete env.ANTHROPIC_API_KEY;
+  env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
   return env;
 }
 

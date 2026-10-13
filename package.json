@@ -23,6 +23,7 @@
     "release:retag": "./scripts/release-retag.sh",
     "spike": "tsx scripts/spike.ts",
     "spike:mas": "tsx scripts/spike-mas.ts",
+    "spike:delegation": "tsx scripts/spike-delegation.ts",
     "spike:build": "tsx scripts/spike-orchestrator-build.ts",
     "spike:persist": "tsx scripts/spike-run-persist.ts",
     "spike:websearch": "tsx scripts/spike-websearch.ts",

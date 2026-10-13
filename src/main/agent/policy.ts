@@ -218,14 +218,10 @@ export function isUrlDomainAllowed(rawUrl: unknown, allowedDomains: string[]): b
  * WebSearch, checked against the URL for WebFetch — so pre-approving either would leave the model
  * free to reach the open web while README and spec claim the opposite.
  *
- * Delegation (`Task`, `Agent`) is also withheld here: subagents default to running asynchronously in
- * the background. Intercepting delegation in `canUseTool` allows the runtime to force
- * `run_in_background: false` so that specialist and reviewer runs execute synchronously.
- *
  * Withholding auto-approval does NOT withhold the tool: it still reaches the model, and the
  * permission request it now raises is answered by `buildCanUseTool` with the same grant list.
  */
-const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch', 'Task', 'Agent'];
+const NEVER_AUTO_APPROVE = ['WebSearch', 'WebFetch'];
 
 /**
  * The SDK's `allowedTools`: the grant from `buildAllowedTools` minus everything whose enforcement
@@ -422,18 +418,8 @@ export function buildCanUseTool(
     // Delegation bypasses the exact-match gating below because the allow-list token 'Task' differs
     // from the in-stream tool name 'Agent'. isToolAllowed has already refused it outside orchestrator
     // mode, so reaching here means delegation is part of the configured design.
-    //
-    // Force run_in_background: false: subagent delegation MUST be synchronous. Running in background
-    // causes the CLI to immediately return an async receipt ("Async agent launched successfully...")
-    // instead of the specialist's answer or reviewer's verdict, breaking review gating and composing.
     if (toolName === 'Task' || toolName === 'Agent') {
-      return {
-        behavior: 'allow',
-        updatedInput: {
-          ...input,
-          run_in_background: false,
-        },
-      };
+      return { behavior: 'allow', updatedInput: input };
     }
 
     // Playbook-specific tools gating
