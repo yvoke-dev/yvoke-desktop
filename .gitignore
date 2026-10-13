@@ -43,6 +43,11 @@ Thumbs.db
 .env.test.local
 .env.production.local
 scripts/git-*
+scripts/*.local.*
+scripts/local-*
+
+# Demo artifacts
+artifacts/
 
 # Optional git worktrees
 .worktrees/

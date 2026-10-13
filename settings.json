@@ -12,8 +12,8 @@
     "opus",
     "haiku"
   ],
-  "defaultModel": "sonnet",
-  "defaultThinkingLevel": "medium",
+  "defaultModel": "haiku",
+  "defaultThinkingLevel": "high",
   "webSearch": {
     "enabled": true,
     "allowedDomains": [
@@ -23,7 +23,9 @@
   },
   "maxTurns": 25,
   "playbookValidationEnabled": true,
-  "playbookValidationExcludedPlaybooks": [],
+  "playbookValidationExcludedPlaybooks": [
+    "oim-full"
+  ],
   "orchestrator": {
     "orchestrator": {
       "model": "sonnet",
@@ -34,12 +36,11 @@
       "thinkingLevel": "medium"
     },
     "specialist": {
-      "model": "sonnet",
-      "thinkingLevel": "medium"
+      "model": "haiku",
+      "thinkingLevel": "high"
     },
     "maxReviewRounds": 2,
     "maxSpecialistCalls": 8,
-    "requireReview": true,
     "orchestratorMaxTurns": 60,
     "specialistMaxTurns": 20
   }

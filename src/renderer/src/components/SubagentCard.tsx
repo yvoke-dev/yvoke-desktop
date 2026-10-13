@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { CitationRef, ToolCallInfo } from '../../../shared/types';
+import { parseVerdict } from '../../../shared/types';
 import { Markdown } from './Markdown';
 import {
   AlertIcon,
@@ -36,16 +37,28 @@ export function SubagentCard(props: {
   const { icon, title } = roleLabel(call.subagentType);
   const input = (call.input ?? {}) as { prompt?: string; description?: string };
   const question = input.prompt ?? input.description ?? '';
-  const verdict = call.verdict;
   const isReviewer = call.subagentType === 'reviewer';
+  const verdict = isReviewer && !call.isError && call.result ? parseVerdict(call.result) ?? undefined : undefined;
 
   const status = call.isError ? (
     <span className="tool-status error">
       <AlertIcon size={13} />
     </span>
+  ) : isReviewer ? (
+    verdict ? (
+      <span className={`tool-status ${verdict.approved ? 'ok' : 'error'}`}>
+        {verdict.approved ? <CheckIcon size={12} /> : <CloseIcon size={13} />}
+      </span>
+    ) : done ? (
+      <span className="tool-status error">
+        <AlertIcon size={13} />
+      </span>
+    ) : (
+      <span className="tool-status">…</span>
+    )
   ) : done ? (
-    <span className={`tool-status ${verdict && !verdict.approved ? 'error' : 'ok'}`}>
-      {verdict && !verdict.approved ? <CloseIcon size={13} /> : <CheckIcon size={12} />}
+    <span className="tool-status ok">
+      <CheckIcon size={12} />
     </span>
   ) : (
     <span className="tool-status">…</span>

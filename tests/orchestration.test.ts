@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { newTurnContext, parseVerdict, translateMessage } from '../src/main/agent/translate';
-import { buildOrchestrator, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
+import { newTurnContext, translateMessage } from '../src/main/agent/translate';
+import { buildOrchestrator, DELEGATE_ALLOW_TOKEN, mapSpecialistTools, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
 import { COMPUTE_TOOLS } from '../src/main/agent/computeTools';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile } from '../src/shared/types';
 import type { McpPrompts } from '../src/main/agent/McpPrompts';
-import { qualifyTool } from '../src/shared/types';
+import { parseVerdict, qualifyTool } from '../src/shared/types';
 
 function msg(partial: Record<string, unknown>): SDKMessage {
   return { uuid: 'u', session_id: 's', ...partial } as unknown as SDKMessage;
@@ -244,16 +244,10 @@ describe('buildOrchestrator prompt composition', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
   });
   /**
-   * SDK-upgrade guard. The client is safe on the pinned 0.3.170, where the Task tool documents
-   * `run_in_background: true runs the agent asynchronously` — backgrounding is opt-in. It is NOT safe
-   * by design: 0.3.218 flipped that to `Subagents run in the background by default`, and running
-   * yvoke-eval on 0.3.218 on 3 Sep 2026 produced 802-character launch receipts in place of every
-   * specialist answer. The orchestrator re-delegated blind, the reviewer's own verdict became
-   * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
-   * they had been handed no evidence. Nothing errored; the answers still read well.
-   *
-   * A plain `npm update` would therefore have degraded grounding in production with no code change.
-   * This test is the tripwire: it fails here rather than in front of a user.
+   * Pins the DEFINITIONS only: no agent is declared a background agent. This does not make delegation
+   * synchronous — a call can still be backgrounded, and on SDK 0.3.295 it was, with this set on every
+   * agent. That guarantee is `sanitizedEnv` (tests/sanitizedEnv.test.ts, tests/agentSession.test.ts)
+   * and is only provable live: `npm run spike:delegation`.
    */
   it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
@@ -308,12 +302,13 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
   });
 
-  it('does not grant the reviewer get_section', async () => {
+  it('keeps the reviewer validate-only — verify_citations and nothing else', async () => {
     // Its playbook states it cannot open a section any more, with the reason: get_section returns
     // the whole section around a passage, so the reviewer would judge claims against neighbouring
     // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
+    expect(reviewerOf(built.agents)).not.toContain(qualifyTool('get_section'));
   });
 
   it('keeps the orchestrator out of the corpus — it composes, it does not retrieve', async () => {
@@ -322,6 +317,31 @@ describe('buildOrchestrator tool grants', () => {
     for (const denied of ['search_corpus', 'get_section', 'get_toc', 'list_documents']) {
       expect(tools).not.toContain(qualifyTool(denied));
     }
+  });
+
+  it('pins minimal tool grants for orchestrator and reviewer — ToolSearch withheld', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toEqual([
+      DELEGATE_ALLOW_TOKEN,
+      qualifyTool('ask_clarifying_question'),
+      qualifyTool('verify_citations'),
+    ]);
+    expect(reviewerOf(built.agents)).toEqual([
+      qualifyTool('verify_citations'),
+    ]);
+  });
+
+  it('keeps orchestratorAdapter prompt clean of mandatory review gate, all-caps yelling, 600-word caps, and run_in_background', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
+    const orchPrompt = built.agents[ORCHESTRATOR_AGENT].prompt;
+    expect(orchPrompt).not.toContain('Mandatory Review Gate');
+    expect(orchPrompt).not.toContain('rejected by the runtime');
+    expect(orchPrompt).not.toContain('CRITICAL: DO NOT');
+    expect(orchPrompt).not.toContain('DO NOT output');
+    expect(orchPrompt).not.toContain('under 600 words');
+    expect(orchPrompt).not.toContain('600 words');
+    expect(orchPrompt).not.toContain('concise, structured bullet summaries');
+    expect(orchPrompt).not.toContain('run_in_background');
   });
 
   it('carries every agent grant into the session allow-list', async () => {

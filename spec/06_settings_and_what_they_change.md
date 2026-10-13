@@ -11,7 +11,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
 | **Models** | Which models the composer offers (rendered with friendly generation labels such as *Sonnet 5.5*), which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
-| **Agents** | Whether a playbook-carrying message is preflighted; which playbooks are excluded from validation by deployment configuration; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, the per-agent turn ceilings, and whether review is enforced in code. It also shows the worst-case number of model calls one turn can make. |
+| **Agents** | Whether a playbook-carrying message is preflighted; which playbooks are excluded from validation by deployment configuration; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, and the per-agent turn ceilings. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
@@ -33,8 +33,17 @@ configuration: whatever ships as the build's defaults, the user can change.
   and enabling the feature means listing domains in the same act, because searches and page fetches refuse to run otherwise.
   The domain list is the one setting that reaches a running conversation immediately.
 - **Playbooks excluded from preflight validation are deployment configuration.** The build's bundled
-  settings file defines which playbooks skip preflight validation. The list is displayed read-only under
-  the Agents pane, and the deployment file always wins on load, so existing user profiles pick up updated exclusions automatically on startup without requiring a migration.
+  settings file defines which playbooks skip preflight validation (`oim-full` is excluded because it is
+  the comprehensive, catch-all knowledge playbook where narrow single-topic suitability preflight would
+  falsely reject queries). The list is displayed read-only under the Agents pane, and the deployment file
+  always wins on load, so existing user profiles pick up updated exclusions automatically on startup
+  without requiring a migration.
+- **Shipped product defaults prioritize speed for single-agent and deep reasoning for investigations.**
+  The bundled settings default single-agent chat to `haiku` with `high` thinking (the code fallback
+  intentionally defaults to empty model and off thinking, deferring to the Claude agent SDK defaults).
+  For multi-agent investigations, the shipped defaults assign `sonnet` with `medium` thinking to the
+  lead orchestrator and the reviewer, and `haiku` with `high` thinking to specialists, aligned across
+  both bundled configuration and the `DEFAULT_ORCHESTRATOR_SETTINGS` code fallback.
 - **The theme's *System* setting stays live.** It keeps following the operating system for as long as
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.

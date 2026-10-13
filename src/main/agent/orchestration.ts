@@ -48,15 +48,13 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
 }
 
 /**
- * The reviewer is a validate-only agent. `verify_citations` and nothing else — matching
+ * The reviewer is a validate-only agent with `verify_citations` and nothing else — matching
  * `OrchestrationService.java`, which grants it exactly `List.of("verify_citations")`.
  *
- * `get_section` used to be here. The server's reviewer playbook now states outright that it "used
- * to be offered here and is not any more", with the reason: it returns the whole section around a
- * passage, so the reviewer ends up judging claims against neighbouring text no specialist ever
- * retrieved — which defeats cite-scoping, the entire mechanism that makes a citation testable as
- * the claim it is. Granting a tool the playbook says it does not have also invites the reviewer to
- * go looking when the playbook tells it that an unsettled claim is a finding to report.
+ * It has no search, read or compute tools (`code_execution: false`), and does not receive
+ * `ToolSearch` because local MCP tools are directly available without tool discovery.
+ * `get_section` was deliberately removed: returning the whole section around a passage lets the
+ * reviewer judge claims against neighbouring text no specialist ever retrieved, defeating cite-scoping.
  */
 const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`];
 
@@ -72,18 +70,21 @@ You have NO \`call_specialist\` tool. To consult a specialist, call the **Task**
 result is that specialist's grounded, cited answer. You may delegate to several specialists in
 parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total.
 
-To have your composed answer validated, call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
+### Reviewer
+Before delivering an answer to the user, consult the reviewer.
+Once your specialists have responded, call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
 and a prompt containing all three of:
 1. \`## Original question\` — the user's question.
-2. \`## Candidate answer\` — your composed answer in full.
+2. \`## Candidate answer\` — your composed candidate answer in full.
 3. \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim, citation markers intact: the bare
    \`[<uuid>]\` ids specialists now write, plus \`[chunk_id=…]\`, \`[document_id=…]\` and \`[N]\` where
    one still uses the older form. The evidence is filtered down to the sources the answer cites, so
    an id you drop here takes its source out of the reviewer's view.
 
-The reviewer cannot see this conversation and validates ONLY against what you paste under (3); a review
+The reviewer cannot see this conversation and validates only against what you paste under (3); a review
 request without that section will be rejected for missing evidence.
 
+When the reviewer replies \`APPROVED\`, deliver the finalized answer to the user.
 If the reviewer replies \`REJECTED\`, the runtime hands the feedback (and the evidence) back to you for a
 revision round — up to ${maxReviewRounds}. Fix the answer and re-review; do not argue with the reviewer.
 Never add a "did not pass review" note yourself: the runtime appends one if the rounds run out.
@@ -181,7 +182,9 @@ export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your t
 
 Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
 
-Then deliver the final answer:
+Do not output conversational prose or explanations before consulting the reviewer. Call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
+
+Once the reviewer responds, deliver the final answer:
 - reviewer says \`APPROVED\` → restate the answer in full;
 - reviewer says \`REJECTED\` → fix the claims it flagged, then give the corrected answer in full.
 
@@ -241,18 +244,18 @@ export interface ResolvedOrchestrator {
  * and the reviewer's verdict in hand to ship — a backgrounded delegation returns a launch receipt
  * instead ("Async agent launched successfully… agentId: …").
  *
- * This is a guard against an SDK upgrade, not a fix for a live defect. The Task tool's DEFAULT
- * flipped between versions: the pinned 0.3.170 says `run_in_background: true runs the agent
- * asynchronously` (opt-in, so we are safe today), while 0.3.218 says `Subagents run in the
- * background by default`. Measured on 0.3.218 in yvoke-eval on 3 Sep 2026: specialists returned
- * 802-character receipts, the orchestrator re-delegated blind, the reviewer's own verdict became
- * unparseable because its result was a receipt too, and reviewers APPROVED answers while stating
- * in the same breath that they had been given no evidence. Nothing failed loudly — the answers
- * still looked well-formed.
+ * The Task tool's DEFAULT flipped between SDK versions: the pinned 0.3.170 says `run_in_background:
+ * true runs the agent asynchronously` (opt-in), while 0.3.218 says `Subagents run in the background
+ * by default`. Measured on 0.3.218 in yvoke-eval on 3 Sep 2026: specialists returned 802-character
+ * receipts, the orchestrator re-delegated blind, the reviewer's own verdict became unparseable
+ * because its result was a receipt too, and reviewers APPROVED answers while stating in the same
+ * breath that they had been given no evidence. Nothing failed loudly — the answers still looked
+ * well-formed.
  *
- * So a plain `npm update` of the SDK would have degraded grounding in production with no code
- * change and no failing test. Declaring it per agent costs nothing and removes that dependency on
- * a default we do not control.
+ * Declaring `background: false` per agent says no AGENT is a background agent. It does NOT stop a
+ * CALL from being backgrounded: with this set on every definition, on SDK 0.3.295, every specialist
+ * and reviewer call still came back as a receipt. What holds is `sanitizedEnv` switching background
+ * tasks off in the CLI (see there), checked end to end by `npm run spike:delegation`.
  */
 const BACKGROUND_DELEGATION = false;
 

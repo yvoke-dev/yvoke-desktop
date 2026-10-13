@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CURRENT_SETTINGS_VERSION, DEFAULT_SETTINGS, SettingsStore } from '../src/main/settings/Settings';
+import { DEFAULT_ORCHESTRATOR_SETTINGS } from '../src/shared/types';
 
 /**
  * The store merges the user's profile OVER the bundled defaults and `set()` writes the whole merged
@@ -172,6 +173,99 @@ describe('SettingsStore — playbookValidationExcludedPlaybooks deployment confi
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
     expect(onDisk.playbookValidationExcludedPlaybooks).toEqual(shipped);
     expect(onDisk.playbookValidationExcludedPlaybooks).not.toContain('hacked-playbook');
+  });
+});
+
+describe('Shipped defaults and configuration alignment', () => {
+  const shippedPath = path.resolve(__dirname, '../settings.json');
+  const shipped = JSON.parse(fs.readFileSync(shippedPath, 'utf8'));
+
+  it('explicitly pins oim-full in DEFAULT_SETTINGS and shipped settings.json', () => {
+    expect(DEFAULT_SETTINGS.playbookValidationExcludedPlaybooks).toEqual(['oim-full']);
+    expect(shipped.playbookValidationExcludedPlaybooks).toEqual(['oim-full']);
+  });
+
+  it('aligns product defaults in shipped settings.json (haiku/high)', () => {
+    expect(shipped.defaultModel).toBe('haiku');
+    expect(shipped.defaultThinkingLevel).toBe('high');
+  });
+
+  it('aligns multi-agent orchestrator defaults in shipped settings.json', () => {
+    expect(shipped.orchestrator.orchestrator).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+    expect(shipped.orchestrator.reviewer).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+    expect(shipped.orchestrator.specialist).toEqual({ model: 'haiku', thinkingLevel: 'high' });
+  });
+
+  it('verifies equality between DEFAULT_ORCHESTRATOR_SETTINGS and shipped orchestrator block', () => {
+    expect(DEFAULT_ORCHESTRATOR_SETTINGS).toEqual(shipped.orchestrator);
+  });
+
+  it('does not carry requireReview toggle in DEFAULT_ORCHESTRATOR_SETTINGS or shipped settings.json', () => {
+    expect(shipped.orchestrator).not.toHaveProperty('requireReview');
+    expect(DEFAULT_ORCHESTRATOR_SETTINGS).not.toHaveProperty('requireReview');
+  });
+});
+
+describe('SettingsStore — orchestrator legacy requireReview sanitization and boundary guards', () => {
+  let dir: string;
+  const writeProfile = (raw: Record<string, unknown>): void =>
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(raw));
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-settings-orch-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('strips legacy requireReview from existing profile on disk while preserving custom role settings', () => {
+    const customOrchestrator = {
+      ...DEFAULT_ORCHESTRATOR_SETTINGS,
+      orchestrator: { model: 'opus', thinkingLevel: 'high' as const },
+      requireReview: false,
+    };
+    writeProfile({
+      ...DEFAULT_SETTINGS,
+      settingsVersion: CURRENT_SETTINGS_VERSION,
+      orchestrator: customOrchestrator,
+    });
+
+    const loaded = new SettingsStore(dir).get();
+    expect(loaded.orchestrator).not.toHaveProperty('requireReview');
+    expect(loaded.orchestrator?.orchestrator).toEqual({ model: 'opus', thinkingLevel: 'high' });
+    expect(loaded.orchestrator?.specialist).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS.specialist);
+    expect(loaded.orchestrator?.reviewer).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS.reviewer);
+  });
+
+  it('strips requireReview when set() is called and does not re-serialize it to disk', () => {
+    const store = new SettingsStore(dir);
+    store.set({
+      orchestrator: {
+        ...DEFAULT_ORCHESTRATOR_SETTINGS,
+        requireReview: false,
+      } as unknown as typeof DEFAULT_ORCHESTRATOR_SETTINGS,
+    });
+
+    expect(store.get().orchestrator).not.toHaveProperty('requireReview');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    expect(onDisk.orchestrator).not.toHaveProperty('requireReview');
+  });
+
+  it('ignores non-object or array orchestrator payloads on load() and set() without corrupting state', () => {
+    for (const invalid of [null, ['invalid'], 'invalid', 42]) {
+      writeProfile({
+        ...DEFAULT_SETTINGS,
+        settingsVersion: CURRENT_SETTINGS_VERSION,
+        orchestrator: invalid,
+      });
+      const store = new SettingsStore(dir);
+      expect(store.get().orchestrator).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
+      expect(store.get().orchestrator).not.toHaveProperty('0');
+
+      store.set({ orchestrator: invalid as unknown as typeof DEFAULT_ORCHESTRATOR_SETTINGS });
+      expect(store.get().orchestrator).toEqual(DEFAULT_ORCHESTRATOR_SETTINGS);
+      expect(store.get().orchestrator).not.toHaveProperty('0');
+    }
   });
 });
 

@@ -662,5 +662,45 @@ describe('App conversation switching with in-progress turn', () => {
     expect(screen.getByText('Schema')).toBeTruthy();
     expect(document.querySelector('.active-playbook-remove')).toBeNull();
   });
+
+  it('updates reviewer card with Rejected verdict badge in real-time when tool-result arrives during live turn', async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+
+    // Start live turn on thread-1
+    emitAgent({ kind: 'turn-start', threadId: 'thread-1' });
+
+    // Orchestrator delegates to reviewer
+    emitAgent({
+      kind: 'assistant-block',
+      threadId: 'thread-1',
+      text: '',
+      toolCalls: [
+        {
+          id: 'call-rev-1',
+          name: 'Agent',
+          subagentType: 'reviewer',
+          input: { prompt: 'Verify candidate answer' },
+        },
+      ],
+    });
+
+    // Reviewer finishes and emits tool-result
+    emitAgent({
+      kind: 'tool-result',
+      threadId: 'thread-1',
+      toolUseId: 'call-rev-1',
+      result: 'REJECTED\nUnsupported claims found.',
+      isError: false,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Reviewer')).toBeTruthy();
+      expect(screen.getByText('Rejected')).toBeTruthy();
+      expect(document.querySelector('.subagent-card .tool-status.error')).not.toBeNull();
+      expect(document.querySelector('.subagent-card .tool-status.ok')).toBeNull();
+    });
+  });
 });
 

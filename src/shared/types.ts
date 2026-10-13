@@ -123,13 +123,6 @@ export interface OrchestratorSettings {
    */
   maxReviewRounds: number;
   maxSpecialistCalls: number;
-  /**
-   * Code-enforced review. When true (the default): a turn that delegated to specialists but never
-   * called the reviewer is re-prompted once to run one, and a rejected/unclear verdict is handed
-   * back for revision up to `maxReviewRounds` before the answer ships flagged. Set false to leave
-   * review entirely to the orchestrator playbook.
-   */
-  requireReview?: boolean;
   /** Hard backstops on agentic turns. */
   orchestratorMaxTurns: number;
   specialistMaxTurns: number;
@@ -140,12 +133,11 @@ export interface OrchestratorSettings {
  * settings.json without an `orchestrator` block still renders (and saves) a complete form.
  */
 export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
-  orchestrator: { model: 'opus', thinkingLevel: 'high' },
-  reviewer: { model: 'opus', thinkingLevel: 'high' },
-  specialist: { model: 'sonnet', thinkingLevel: 'medium' },
+  orchestrator: { model: 'sonnet', thinkingLevel: 'medium' },
+  reviewer: { model: 'sonnet', thinkingLevel: 'medium' },
+  specialist: { model: 'haiku', thinkingLevel: 'high' },
   maxReviewRounds: 2,
   maxSpecialistCalls: 8,
-  requireReview: true,
   orchestratorMaxTurns: 60,
   specialistMaxTurns: 20,
 };
@@ -293,6 +285,33 @@ export interface ReviewStatus {
   feedback?: string;
   /** True when the runtime had to re-prompt the orchestrator to run the reviewer. */
   enforced?: boolean;
+}
+
+/** Parse a reviewer sub-agent's plain-text verdict (first line APPROVED/REJECTED + feedback). */
+export function parseVerdict(result: string): { approved: boolean; feedback?: string } | null {
+  const trimmed = result.trim();
+  if (!trimmed) return null;
+  const [firstLine, ...rest] = trimmed.split('\n');
+  const head = firstLine.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  const feedback = rest.join('\n').trim() || undefined;
+  if (head.startsWith('APPROVED')) return { approved: true, feedback };
+  if (head.startsWith('REJECTED')) return { approved: false, feedback };
+
+  // Fallback: the model reasoned first and put the token further down. Feedback is whatever follows
+  // the LAST standalone verdict line — a revision round replays this text back to the orchestrator,
+  // so the pre-verdict deliberation must not ride along as "feedback to address".
+  const lines = trimmed.split('\n');
+  const verdictLine = lines.reduce(
+    (found, line, i) => (/^[*_\s]*(APPROVED|REJECTED)[*_\s]*[:.]?\s*$/i.test(line) ? i : found),
+    -1,
+  );
+  if (verdictLine >= 0) {
+    const approved = /APPROVED/i.test(lines[verdictLine]);
+    return { approved, feedback: lines.slice(verdictLine + 1).join('\n').trim() || undefined };
+  }
+  if (/\bAPPROVED\b/.test(trimmed) && !/\bREJECTED\b/.test(trimmed)) return { approved: true, feedback };
+  if (/\bREJECTED\b/.test(trimmed)) return { approved: false, feedback };
+  return null;
 }
 
 /** One segment of an assistant turn — interleaved text, thinking, and/or tool calls. */

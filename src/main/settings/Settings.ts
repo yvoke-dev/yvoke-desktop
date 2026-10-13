@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS } from '../../shared/types';
-import type { AppSettings } from '../../shared/types';
+import type { AppSettings, OrchestratorSettings } from '../../shared/types';
 
 /**
  * Bumped whenever a *changed default* must reach profiles that already exist.
@@ -33,12 +33,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   maxTurns: 0,
   playbookValidationEnabled: true,
-  playbookValidationExcludedPlaybooks: [],
+  playbookValidationExcludedPlaybooks: ['oim-full'],
   imageDescriptionsEnabled: true,
   showPrototypePlaybooks: false,
   orchestrator: DEFAULT_ORCHESTRATOR_SETTINGS,
   appearance: DEFAULT_APPEARANCE,
 };
+
+function mergeOrchestratorSettings(
+  base: OrchestratorSettings = DEFAULT_ORCHESTRATOR_SETTINGS,
+  raw: unknown,
+): OrchestratorSettings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...base };
+  }
+  const { requireReview: _drop, ...clean } = raw as Record<string, unknown>;
+  return { ...base, ...(clean as Partial<OrchestratorSettings>) };
+}
 
 function loadProjectDefaults(): AppSettings {
   try {
@@ -58,9 +69,7 @@ function loadProjectDefaults(): AppSettings {
         ...raw,
         entra: { ...DEFAULT_SETTINGS.entra, ...(raw.entra ?? {}) },
         webSearch: { ...DEFAULT_SETTINGS.webSearch, ...(raw.webSearch ?? {}) },
-        orchestrator: raw.orchestrator
-          ? { ...DEFAULT_SETTINGS.orchestrator, ...raw.orchestrator }
-          : DEFAULT_SETTINGS.orchestrator,
+        orchestrator: mergeOrchestratorSettings(DEFAULT_SETTINGS.orchestrator, raw.orchestrator),
         appearance: { ...DEFAULT_APPEARANCE, ...(raw.appearance ?? {}) },
         playbookValidationExcludedPlaybooks: Array.isArray(raw.playbookValidationExcludedPlaybooks)
           ? raw.playbookValidationExcludedPlaybooks
@@ -185,9 +194,7 @@ export class SettingsStore {
         settingsVersion: CURRENT_SETTINGS_VERSION,
         entra: { ...projectDefaults.entra, ...(raw.entra ?? {}) },
         webSearch: reconcileWebSearch(projectDefaults, raw),
-        orchestrator: raw.orchestrator
-          ? { ...projectDefaults.orchestrator, ...raw.orchestrator }
-          : projectDefaults.orchestrator,
+        orchestrator: mergeOrchestratorSettings(projectDefaults.orchestrator, raw.orchestrator),
         appearance: { ...DEFAULT_APPEARANCE, ...(projectDefaults.appearance ?? {}), ...(raw.appearance ?? {}) },
         playbookValidationExcludedPlaybooks: projectDefaults.playbookValidationExcludedPlaybooks,
       };
@@ -217,9 +224,7 @@ export class SettingsStore {
         // freeze a copy of it into the profile is the exact mechanism this change removes.
         allowedDomains: this.cache.webSearch.allowedDomains,
       },
-      orchestrator: update.orchestrator
-        ? { ...this.cache.orchestrator, ...update.orchestrator }
-        : this.cache.orchestrator,
+      orchestrator: mergeOrchestratorSettings(this.cache.orchestrator, update.orchestrator),
       appearance: { ...DEFAULT_APPEARANCE, ...this.cache.appearance, ...(update.appearance ?? {}) },
       playbookValidationExcludedPlaybooks: this.cache.playbookValidationExcludedPlaybooks ?? [],
     };

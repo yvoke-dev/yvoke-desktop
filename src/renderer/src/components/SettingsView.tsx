@@ -724,21 +724,6 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   onChange={(specialistMaxTurns) => updateOrch({ specialistMaxTurns })}
                 />
               </div>
-
-              <label className="check-field">
-                <input
-                  type="checkbox"
-                  checked={orch.requireReview !== false}
-                  onChange={(e) => updateOrch({ requireReview: e.target.checked })}
-                />
-                <span className="check-field-text">
-                  <span className="check-field-name">Enforce review</span>
-                  <span className="settings-hint">
-                    Re-prompt for a reviewer pass when the orchestrator skips one, and drive
-                    revisions on a non-approval.
-                  </span>
-                </span>
-              </label>
             </>
           )}
 
