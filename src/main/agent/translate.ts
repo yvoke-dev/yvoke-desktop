@@ -77,7 +77,6 @@ function stringifyToolResult(content: unknown): string {
   return content == null ? '' : JSON.stringify(content);
 }
 
-
 export function addUsage(a: UsageTotals, b: UsageTotals): UsageTotals {
   return {
     inputTokens: a.inputTokens + b.inputTokens,

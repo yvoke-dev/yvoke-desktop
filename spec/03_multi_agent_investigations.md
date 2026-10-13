@@ -49,7 +49,7 @@ profiles and the playbooks; there is no way to build one from the app.
   machine can settle on its own, so the lead verifies every id it is about to write rather than
   spending a whole review round learning the same thing. This says nothing about whether a real
   source supports the claim it sits on — that stays the reviewer's job.
-- **Review is always code-enforced, not requested in a prompt.** A turn that consulted specialists but
+- **Review is required by the playbook and enforced in code, and cannot be switched off.** A turn that consulted specialists but
   never called the reviewer is re-prompted once to run one. A turn the reviewer rejected — or on which
   it returned no readable verdict — is handed the feedback *and* the evidence again and asked to
   revise, up to the configured number of rounds. Both were observed being ignored when they were only

@@ -544,5 +544,12 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents['oim-developer-api'].prompt).toContain('PROMPT(spec-prompt-2)');
     expect(maxOverlap).toBeGreaterThanOrEqual(2);
   });
+
+  it('does not contain bullet summary instruction or word count caps in adapter', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
+    const orchPrompt = built.agents[ORCHESTRATOR_AGENT].prompt;
+    expect(orchPrompt).not.toContain('concise, structured bullet summaries');
+    expect(orchPrompt).not.toContain('600 words');
+  });
 });
 

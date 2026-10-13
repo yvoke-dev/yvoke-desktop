@@ -48,15 +48,13 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
 }
 
 /**
- * The reviewer is a validate-only agent. `verify_citations` and nothing else — matching
+ * The reviewer is a validate-only agent with `verify_citations` and nothing else — matching
  * `OrchestrationService.java`, which grants it exactly `List.of("verify_citations")`.
  *
- * `get_section` used to be here. The server's reviewer playbook now states outright that it "used
- * to be offered here and is not any more", with the reason: it returns the whole section around a
- * passage, so the reviewer ends up judging claims against neighbouring text no specialist ever
- * retrieved — which defeats cite-scoping, the entire mechanism that makes a citation testable as
- * the claim it is. Granting a tool the playbook says it does not have also invites the reviewer to
- * go looking when the playbook tells it that an unsettled claim is a finding to report.
+ * It has no search, read or compute tools (`code_execution: false`), and does not receive
+ * `ToolSearch` because local MCP tools are directly available without tool discovery.
+ * `get_section` was deliberately removed: returning the whole section around a passage lets the
+ * reviewer judge claims against neighbouring text no specialist ever retrieved, defeating cite-scoping.
  */
 const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`];
 
@@ -70,7 +68,7 @@ You have NO \`call_specialist\` tool. To consult a specialist, call the **Task**
 \`subagent_type\` set to the specialist's name and \`prompt\` set to a fully self-contained question
 (include the version/tag and any entity names — the specialist cannot see this conversation). The Task
 result is that specialist's grounded, cited answer. You may delegate to several specialists in
-parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total. Instruct specialists to provide concise, structured bullet summaries with citations rather than long essays, so findings return quickly.
+parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total.
 
 ### Reviewer
 Before delivering an answer to the user, consult the reviewer.
@@ -182,11 +180,11 @@ export function reviewFlagNote(attempts: number): string {
  */
 export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your turn without having the answer reviewed, which this deployment requires.
 
-You MUST call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
+Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
 
-DO NOT output conversational prose, explanations, or answers in this turn. Your ONLY action in this turn is calling the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
+Do not output conversational prose or explanations before consulting the reviewer. Call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
 
-Then deliver the final answer:
+Once the reviewer responds, deliver the final answer:
 - reviewer says \`APPROVED\` → restate the answer in full;
 - reviewer says \`REJECTED\` → fix the claims it flagged, then give the corrected answer in full.
 

@@ -219,6 +219,12 @@ describe('REVIEW_ENFORCEMENT_PROMPT', () => {
   it('does not contain run_in_background instructions in REVIEW_ENFORCEMENT_PROMPT', () => {
     expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('run_in_background');
   });
+
+  it('does not contain contradictions or ALL-CAPS directives in REVIEW_ENFORCEMENT_PROMPT', () => {
+    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('ONLY action in this turn');
+    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('You MUST call');
+    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('DO NOT output');
+  });
 });
 
 describe('addUsage', () => {

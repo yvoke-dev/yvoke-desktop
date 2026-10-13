@@ -71,10 +71,8 @@ async function main(): Promise<void> {
   assert(orch.tools?.includes('Task') === true, 'orchestrator can delegate (Task)');
   assert(rev.prompt.includes('APPROVED') && rev.prompt.includes('REJECTED'), 'reviewer adapter defines verdict tokens');
   assert(
-    rev.tools?.includes(qualifyTool('verify_citations')) === true &&
-      rev.tools?.includes('ToolSearch') === false &&
-      rev.tools?.includes(qualifyTool('get_section')) === false,
-    'reviewer is validate-only',
+    rev.tools?.length === 1 && rev.tools[0] === qualifyTool('verify_citations'),
+    'reviewer is validate-only (verify_citations only)',
   );
   assert(allowedTools.includes('Task') && allowedTools.includes(qualifyTool('search_corpus')), 'allow-list unions Task + specialist tools');
   assert(agents['oim-access-governance'].prompt.length > 200, 'specialist prompt text loaded from server');

@@ -39,10 +39,11 @@ configuration: whatever ships as the build's defaults, the user can change.
   always wins on load, so existing user profiles pick up updated exclusions automatically on startup
   without requiring a migration.
 - **Shipped product defaults prioritize speed for single-agent and deep reasoning for investigations.**
-  The bundled settings default single-agent chat to `haiku` with `high` thinking. For multi-agent
-  investigations, the shipped defaults assign `sonnet` with `medium` thinking to the lead orchestrator
-  and the reviewer, and `haiku` with `high` thinking to specialists, aligned across both bundled
-  configuration and code fallbacks.
+  The bundled settings default single-agent chat to `haiku` with `high` thinking (the code fallback
+  intentionally defaults to empty model and off thinking, deferring to the Claude agent SDK defaults).
+  For multi-agent investigations, the shipped defaults assign `sonnet` with `medium` thinking to the
+  lead orchestrator and the reviewer, and `haiku` with `high` thinking to specialists, aligned across
+  both bundled configuration and the `DEFAULT_ORCHESTRATOR_SETTINGS` code fallback.
 - **The theme's *System* setting stays live.** It keeps following the operating system for as long as
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.

@@ -262,8 +262,8 @@ describe('spec/ modular structure', () => {
     // spec/03: end-of-turn verdict limit removed
     expect(multiAgent).not.toContain('Verdicts and specialist results appear only when the whole turn ends');
 
-    // spec/03: review is always code-enforced
-    expect(multiAgent).toContain('Review is always code-enforced');
+    // spec/03: review is required by the playbook and enforced in code
+    expect(multiAgent).toContain('Review is required by the playbook and enforced in code');
 
     // spec/06: review toggle removed from Agents row
     expect(settings).not.toContain('whether review is enforced in code');
