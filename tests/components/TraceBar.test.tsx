@@ -105,4 +105,68 @@ describe('tool labelling', () => {
     expect(describeResult(tool({ result: 'ok' }))).toBeUndefined();
     expect(describeResult(tool())).toBeUndefined();
   });
+
+  it('extracts code argument for mcp__compute__execute_code and returns undefined for whitespace-only code', () => {
+    expect(
+      describeArgs(
+        tool({
+          name: 'mcp__compute__execute_code',
+          input: { code: 'const x = 1 + 2;\nreturn x;' },
+        }),
+      ),
+    ).toBe('const x = 1 + 2; return x;');
+    expect(
+      describeArgs(
+        tool({
+          name: 'mcp__compute__execute_code',
+          input: { code: '   ' },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('skips the corpus retrieval JSON-array "N results" heuristic for mcp__compute__execute_code while preserving error/empty/size labels', () => {
+    expect(
+      describeResult(
+        tool({
+          name: 'mcp__compute__execute_code',
+          result: '[1, 2, 3]',
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      describeResult(
+        tool({
+          name: 'mcp__compute__execute_code',
+          result: '{"rows":[1,2]}',
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      describeResult(
+        tool({
+          name: 'mcp__compute__execute_code',
+          result: 'Error: Execution timed out',
+          isError: true,
+        }),
+      ),
+    ).toEqual({ text: 'failed' });
+    expect(
+      describeResult(
+        tool({
+          name: 'mcp__compute__execute_code',
+          result: '   ',
+        }),
+      ),
+    ).toEqual({ text: 'empty' });
+    expect(
+      describeResult(
+        tool({
+          name: 'mcp__compute__execute_code',
+          result: 'x'.repeat(500),
+        }),
+      ),
+    ).toEqual({ text: '0.5k chars' });
+  });
 });
+

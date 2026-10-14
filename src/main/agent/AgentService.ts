@@ -664,8 +664,8 @@ export class AgentService {
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
       allowedTools: buildAutoApproveTools(allowedToolsList),
-      // Hard-block the shell everywhere: the safe mcp__compute__* tools replace it, and this
-      // ensures the model is never even offered Bash regardless of the allow-list.
+      // Hard-block the shell everywhere: the safe mcp__compute__execute_code tool replaces it, and
+      // this ensures the model is never even offered Bash regardless of the allow-list.
       disallowedTools: ['Bash'],
       // The FULL grant, which is what the playbook gate inside the callback compares against.
       canUseTool: buildCanUseTool(this.deps.getSettings, thread.id, onClarifyingQuestion, allowedToolsList,

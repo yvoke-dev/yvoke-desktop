@@ -9,7 +9,7 @@ import {
   normalizeClarifyingInput,
   qualifyTool,
 } from '../../shared/types';
-import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX } from './computeTools';
+import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX, isComputeTool } from './computeTools';
 
 
 /**
@@ -246,10 +246,10 @@ export function buildAllowedTools(
 ): string[] {
   // If the playbook defines allowed tools, we ONLY allow those tools!
   // If not, we allow the standard knowledge-base tools.
-  // Web tools are stripped here and re-added below under the settings gate, so a declaration alone
-  // can never grant them.
+  // Web and compute tools are stripped here and re-added below under their respective gates, so a
+  // declaration alone can never grant them or mis-qualify a compute tool as mcp__yvoke__*.
   const tools = playbookTools !== undefined
-    ? playbookTools.filter((tool) => !isWebTool(tool)).map(qualifyTool)
+    ? playbookTools.filter((tool) => !isWebTool(tool) && !isComputeTool(tool)).map(qualifyTool)
     : DEFAULT_KB_TOOLS.map(qualifyTool);
 
   const allowed = [...tools];
@@ -257,8 +257,8 @@ export function buildAllowedTools(
   // We only allow ToolSearch by default
   allowed.push('ToolSearch');
 
-  // Safe in-process compute tools (calculate/statistics/date_diff) replace the general Bash
-  // tool: they run purely in-memory with no shell, filesystem, or network access. Bash is
+  // Safe in-process compute tool (execute_code) replaces the general Bash
+  // tool: it runs purely in-memory with no shell, filesystem, or network access. Bash is
   // never allow-listed (and is hard-blocked via disallowedTools in AgentService) so that
   // prompt-injected corpus content can never reach a shell.
   //
@@ -323,12 +323,12 @@ export function isToolAllowed(
   if (toolName.startsWith(MCP_TOOL_PREFIX)) {
     return true;
   }
-  // Safe in-process compute tools — no shell/fs/network, but still only for playbooks that
+  // Safe in-process compute tool — no shell/fs/network, but still only for playbooks that
   // declare code execution. Gated in both places on purpose: an entry on the SDK's auto-approval
   // list never reaches this callback at all, so whichever of the two you leave open is the one that
   // waves them through for a codeExecution:false playbook.
   if (toolName.startsWith(COMPUTE_TOOL_PREFIX)) {
-    return codeExecution !== false;
+    return codeExecution !== false && (COMPUTE_TOOLS as readonly string[]).includes(toolName);
   }
   // ToolSearch is harness-internal, read-only: the runtime loads MCP tool schemas on demand
   // through it (verified in the Wave-0 spike) — denying it would break tool discovery.

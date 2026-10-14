@@ -39,16 +39,46 @@ describe('parseVerdict', () => {
 });
 
 describe('mapSpecialistTools', () => {
-  it('prefixes bare tool names and adds ToolSearch + compute tools; never Bash', () => {
+  it('prefixes bare tool names and adds ToolSearch + mcp__compute__execute_code when codeExecution !== false; never Bash', () => {
     const info = { tools: ['search_corpus', 'get_section'] } as McpPromptInfo;
     const tools = mapSpecialistTools(info, baseSettings);
     expect(tools).toContain(qualifyTool('search_corpus'));
     expect(tools).toContain(qualifyTool('get_section'));
     expect(tools).toContain('ToolSearch');
+    expect(tools).toContain('mcp__compute__execute_code');
     for (const t of COMPUTE_TOOLS) expect(tools).toContain(t);
     expect(tools).not.toContain('Bash');
     expect(tools).not.toContain('WebSearch');
     expect(tools).not.toContain('WebFetch');
+  });
+  it('omits mcp__compute__execute_code when specialist declares codeExecution === false', () => {
+    const info = { tools: ['search_corpus'], codeExecution: false } as McpPromptInfo;
+    const tools = mapSpecialistTools(info, baseSettings);
+    expect(tools).not.toContain('mcp__compute__execute_code');
+  });
+  it('strips execute_code and legacy compute tool names from specialist info.tools without qualifying them as mcp__yvoke__*', () => {
+    const forbidden = {
+      tools: ['search_corpus', 'execute_code', 'calculate', 'statistics', 'date_diff', 'mcp__yvoke__calculate'],
+      codeExecution: false,
+    } as McpPromptInfo;
+    const deniedTools = mapSpecialistTools(forbidden, baseSettings);
+    expect(deniedTools).toContain(qualifyTool('search_corpus'));
+    expect(deniedTools).not.toContain('mcp__compute__execute_code');
+    expect(deniedTools).not.toContain('mcp__yvoke__execute_code');
+    expect(deniedTools).not.toContain('mcp__yvoke__calculate');
+    expect(deniedTools).not.toContain('mcp__yvoke__statistics');
+    expect(deniedTools).not.toContain('mcp__yvoke__date_diff');
+
+    const allowed = {
+      tools: ['search_corpus', 'execute_code', 'calculate', 'statistics', 'date_diff'],
+      codeExecution: true,
+    } as McpPromptInfo;
+    const grantedTools = mapSpecialistTools(allowed, baseSettings);
+    expect(grantedTools.filter((t) => t === 'mcp__compute__execute_code')).toHaveLength(1);
+    expect(grantedTools).not.toContain('mcp__yvoke__execute_code');
+    expect(grantedTools).not.toContain('mcp__yvoke__calculate');
+    expect(grantedTools).not.toContain('mcp__yvoke__statistics');
+    expect(grantedTools).not.toContain('mcp__yvoke__date_diff');
   });
   it('never gives a specialist Bash (code execution is unavailable)', () => {
     const info = { tools: ['search_corpus'] } as McpPromptInfo;

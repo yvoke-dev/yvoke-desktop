@@ -1,7 +1,7 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
 import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel, type ValidSystemPromptName } from '../../shared/types';
-import { COMPUTE_TOOLS } from './computeTools';
+import { COMPUTE_TOOLS, isComputeTool } from './computeTools';
 import { isWebTool, webToolDeclared } from './policy';
 import type { McpPrompts } from './McpPrompts';
 import { loadDesignatedSystemPrompt } from './systemPrompt';
@@ -25,13 +25,14 @@ function effortFor(level: ThinkingLevel): 'low' | 'medium' | 'high' {
 /** Map a playbook's declared tool names to the SDK's fully-qualified allow-list for a specialist. */
 export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: AppSettings): string[] {
   const declared = info?.tools;
-  // Web tools stripped here and re-added below under the settings gate — same reason as policy.ts:
-  // `qualifyTool` passes built-ins through, so a declaration would otherwise be its own grant.
+  // Web and compute tools stripped here and re-added below under their respective gates — same
+  // reason as policy.ts: `qualifyTool` passes built-ins through and would otherwise qualify
+  // compute tool names as `mcp__yvoke__*`.
   const tools =
     declared && declared.length > 0
-      ? declared.filter((tool) => !isWebTool(tool)).map(qualifyTool)
+      ? declared.filter((tool) => !isWebTool(tool) && !isComputeTool(tool)).map(qualifyTool)
       : DEFAULT_KB_TOOLS.map(qualifyTool);
-  // Specialists get the safe compute tools instead of Bash, and only when their playbook declares
+  // Specialists get the safe compute tool instead of Bash, and only when their playbook declares
   // code execution — same rule as the single-agent path in policy.ts.
   const out = [...tools, 'ToolSearch'];
   if (info?.codeExecution !== false) out.push(...COMPUTE_TOOLS);
