@@ -14,7 +14,7 @@ server.
 | **A toolbox, not a search box** | The assistant can search the corpus, list an area's documents, read a table of contents, read a whole section, look a thing up in the knowledge graph and follow its connections, query structured records, read their declared shape, and check its own citations. Nine of these are granted by default. |
 | **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name is stored. |
 | **Playbook preflight** | Before the first message in a conversation runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
-| **Arithmetic without a shell** | Three in-app tools — a calculator, a summary-statistics tool and a date-difference tool — let the assistant do numeric work. They run inside the app with no shell, no file access and no network. |
+| **Sandboxed computation without a shell** | An in-app JavaScript execution tool lets the assistant run arithmetic, statistics, date math and data transformations inside an isolated in-memory sandbox with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
 | **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options (including descriptive explanations), and continue from the answer. |
 | **Choose how hard it thinks** | Four thinking levels per conversation. |
@@ -32,7 +32,7 @@ server.
   hard-coded copy would drift from the server's and quietly contradict the playbooks; running with
   none at all is worse still.
 - **Deny by default.** The assistant is granted the knowledge-base tools, a tool-discovery helper, the
-  three compute tools and (when enabled) web search and page fetch. Every other tool the runtime knows about is
+  in-app computation tool and (when enabled) web search and page fetch. Every other tool the runtime knows about is
   refused the moment it is called, with a message telling the assistant to use the knowledge-base
   tools instead.
 - **Being granted a tool and being pre-approved for it are two different things.** Pre-approval makes
@@ -44,11 +44,11 @@ server.
   policy that could be misconfigured. This is what makes it safe for the assistant to read a corpus
   that anybody could have written into.
 - **A playbook's tool list replaces the default one, and three things are added regardless.** Declare
-  tools and the assistant gets exactly those; declare none and it gets the nine defaults. Either way
-  the tool-discovery helper, the compute tools and — when the setting is on — web search and fetch are appended.
+  tools and the assistant gets those (ignoring any computation tool names listed there); declare none and it gets the nine defaults. Either way
+  the tool-discovery helper, the computation tool and — when the setting is on — web search and fetch are appended.
   A playbook cannot opt out of any of the three, except by declaring that it may not compute.
-- **A playbook can withhold computation.** A playbook that declares no code execution loses the compute
-  tools, checked in two independent places. A playbook that declares nothing at all keeps them: the
+- **A playbook can withhold computation.** A playbook that declares no code execution loses the computation
+  tool, checked in two independent places. A playbook that declares nothing at all keeps it: the
   grant is opt-out, not opt-in.
 - **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
   the app loads that prompt from the server on session creation to replace the default chat base instructions.
@@ -147,12 +147,7 @@ server.
 - **Mid-turn token expiry is unhandled.** MCP authentication headers are updated when a turn starts, not during tool execution. An exceptionally long turn or multi-stage review round exceeding the token's remaining buffer can lose knowledge-base access mid-answer.
 - **A turn that crashes leaves its runtime process behind.** The session is dropped without being shut
   down; only a clean close reclaims it.
-- **The calculator is arithmetic only** — a fixed list of functions and constants, expressions up to
-  1,000 characters, no variables. Note that `log` is base ten and `ln` is the natural logarithm, which
-  is the opposite of the convention most programming languages use, and nothing in the tool's own
-  description disambiguates them.
-- **The statistics tool reports the *sample* variance and standard deviation** (dividing by n−1), and
-  reports neither for a single value. Date differences are signed and fractional, never rounded.
+- **The computation tool runs pure JavaScript in an isolated in-memory sandbox** — expressions or scripts up to 10,000 characters, bounded by a 1-second execution timeout and a 32,000-character output cap. Standard ECMAScript built-ins (`Math`, `Date`, `Intl`, `JSON`, `Array`, `Object`, `Map`, `Set`, `RegExp`, `BigInt`, `console`) are available, while dynamic code generation from strings or WebAssembly (`eval`, `Function`, `WebAssembly`), timers, network, filesystem and host process access are disabled.
 - **Nothing checks that a cited passage supports the sentence it is attached to.** The citation check
   the assistant can run confirms a source exists; it never reads it.
 - **Nothing here is rate-limited, and nothing warns when the subscription's allowance runs out.** The
@@ -164,7 +159,7 @@ server.
 
 ## Not supported
 
-- Running code, opening a shell, or reading files on the machine. There is no path to any of them.
+- Opening a shell, running machine commands or arbitrary processes, or reading files on the machine. Beyond the isolated in-memory computation sandbox, there is no path to the host system.
 - Answering without the server. The knowledge base, the playbooks and the base instructions are all
   remote, so an offline app can read old conversations but cannot answer a new question.
 - Answering without a Claude sign-in. The app cannot sign in for you; it can only tell you to.
