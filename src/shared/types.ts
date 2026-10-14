@@ -445,7 +445,7 @@ export interface McpPromptInfo {
   arguments: { name: string; description?: string; required?: boolean }[];
   /** Allowed tools for this playbook (if any). */
   tools?: string[];
-  /** Whether this playbook may compute (the safe mcp__compute__* tools). Undefined = not declared. */
+  /** Whether this playbook may compute (the safe mcp__compute__* tool, execute_code). Undefined = not declared. */
   codeExecution?: boolean;
   /** Whether this playbook is marked as an experimental/prototype playbook. */
   prototype?: boolean;
@@ -732,6 +732,7 @@ export function builtinTool(tool: string): string | undefined {
  * Built-ins are returned as-is: they are the runtime's own tools, not the server's.
  */
 export function qualifyTool(tool: string): string {
+  if (tool.startsWith('mcp__compute__')) return tool;
   return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(MCP_PREFIX_RE, '')}`;
 }
 

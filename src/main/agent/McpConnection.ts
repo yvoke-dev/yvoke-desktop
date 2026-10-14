@@ -22,7 +22,7 @@ export function buildMcpServers(
       url,
       ...(Object.keys(headers).length > 0 ? { headers } : {}),
     },
-    // Safe, in-process compute tools (calculate/statistics/date_diff). No shell/fs/network.
+    // Safe, in-process compute tool (execute_code). No shell/fs/network.
     [COMPUTE_SERVER_NAME]: buildComputeServer(),
   };
 }

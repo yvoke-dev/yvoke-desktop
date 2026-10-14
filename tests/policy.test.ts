@@ -246,7 +246,8 @@ describe('tool confinement (Correctness Property 1)', () => {
     expect(isToolAllowed('Bash', base)).toBe(false);
   });
 
-  it('exposes the safe in-process compute tools when the playbook does not forbid it', () => {
+  it('exposes the safe in-process compute tool (mcp__compute__execute_code) when the playbook does not forbid it', () => {
+    expect(COMPUTE_TOOLS).toEqual(['mcp__compute__execute_code']);
     for (const t of COMPUTE_TOOLS) {
       expect(buildAllowedTools(base)).toContain(t);
       expect(isToolAllowed(t, base)).toBe(true);
@@ -257,18 +258,57 @@ describe('tool confinement (Correctness Property 1)', () => {
   // tools went in unconditionally, so a playbook that had declared codeExecution:false silently got
   // computation back. Both layers have to agree: an allow-list entry is auto-approved before
   // canUseTool ever runs, so gating only isToolAllowed would not have held.
-  it('withholds the compute tools from a playbook that declares codeExecution:false', () => {
+  it('withholds the compute tool from a playbook that declares codeExecution:false', () => {
     for (const t of COMPUTE_TOOLS) {
       expect(buildAllowedTools(base, ['search_corpus'], false)).not.toContain(t);
       expect(isToolAllowed(t, base, false)).toBe(false);
     }
   });
 
-  it('grants them when the playbook declares codeExecution:true', () => {
+  it('grants mcp__compute__execute_code when the playbook declares codeExecution:true', () => {
     for (const t of COMPUTE_TOOLS) {
       expect(buildAllowedTools(base, ['search_corpus'], true)).toContain(t);
       expect(isToolAllowed(t, base, true)).toBe(true);
     }
+  });
+
+  it('rejects removed legacy compute tools (calculate, statistics, date_diff) even when codeExecution is true', () => {
+    for (const legacy of [
+      'mcp__compute__calculate',
+      'mcp__compute__statistics',
+      'mcp__compute__date_diff',
+    ]) {
+      expect(isToolAllowed(legacy, base, true)).toBe(false);
+      expect(isToolAllowed(legacy, base, undefined)).toBe(false);
+      expect(isToolAllowed(legacy, base, false)).toBe(false);
+    }
+  });
+
+  it('strips execute_code and legacy compute tool names from playbookTools so they are never qualified as mcp__yvoke__* or bypass codeExecution:false', () => {
+    const playbookTools = [
+      'search_corpus',
+      'execute_code',
+      'calculate',
+      'statistics',
+      'date_diff',
+      'mcp__yvoke__calculate',
+      'mcp__compute__execute_code',
+    ];
+
+    const denied = buildAllowedTools(base, playbookTools, false);
+    expect(denied).toContain(qualifyTool('search_corpus'));
+    expect(denied).not.toContain('mcp__compute__execute_code');
+    expect(denied).not.toContain('mcp__yvoke__execute_code');
+    expect(denied).not.toContain('mcp__yvoke__calculate');
+    expect(denied).not.toContain('mcp__yvoke__statistics');
+    expect(denied).not.toContain('mcp__yvoke__date_diff');
+
+    const granted = buildAllowedTools(base, playbookTools, true);
+    expect(granted.filter((t) => t === 'mcp__compute__execute_code')).toHaveLength(1);
+    expect(granted).not.toContain('mcp__yvoke__execute_code');
+    expect(granted).not.toContain('mcp__yvoke__calculate');
+    expect(granted).not.toContain('mcp__yvoke__statistics');
+    expect(granted).not.toContain('mcp__yvoke__date_diff');
   });
 
   it('canUseTool denies disallowed tools with a message', async () => {
