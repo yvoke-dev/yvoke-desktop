@@ -306,15 +306,112 @@ describe('videoOrchestratorPreflight', () => {
     });
   });
 
+  describe('DEMO_MODEL_DEFAULTS & formatTimestampSuffix', () => {
+    it('exports DEMO_MODEL_DEFAULTS, VALID_DEMO_MODELS, and VALID_DEMO_THINKING with expected values', async () => {
+      const { DEMO_MODEL_DEFAULTS, VALID_DEMO_MODELS, VALID_DEMO_THINKING } = await import(
+        '../scripts/generate-demo-video'
+      );
+      expect(VALID_DEMO_MODELS).toEqual(['opus', 'sonnet', 'haiku']);
+      expect(VALID_DEMO_THINKING).toEqual(['low', 'medium', 'high', 'off']);
+      expect(DEMO_MODEL_DEFAULTS).toEqual({
+        model: 'haiku',
+        thinking: 'high',
+        orchestratorModel: 'sonnet',
+        orchestratorThinking: 'medium',
+        specialistModel: 'haiku',
+        specialistThinking: 'high',
+        reviewerModel: 'sonnet',
+        reviewerThinking: 'medium',
+      });
+    });
+
+    it('formats local dates with zero-padded single-digit components, 1-3 digit positive years, and boundary dates', async () => {
+      const { formatTimestampSuffix } = await import('../scripts/generate-demo-video');
+      expect(formatTimestampSuffix(new Date(2026, 0, 5, 9, 4, 7))).toBe('20260105-090407');
+      expect(formatTimestampSuffix(new Date(2026, 0, 1, 0, 0, 0))).toBe('20260101-000000');
+      expect(formatTimestampSuffix(new Date(2026, 11, 31, 23, 59, 59))).toBe('20261231-235959');
+      expect(formatTimestampSuffix()).toMatch(/^\d{8}-\d{6}$/);
+
+      const makeYearDate = (year: number) => {
+        const d = new Date(2026, 0, 5, 9, 4, 7);
+        d.setFullYear(year);
+        return d;
+      };
+      expect(formatTimestampSuffix(makeYearDate(500))).toBe('05000105-090407');
+      expect(formatTimestampSuffix(makeYearDate(42))).toBe('00420105-090407');
+      expect(formatTimestampSuffix(makeYearDate(0))).toBe('00000105-090407');
+      expect(formatTimestampSuffix(makeYearDate(9999))).toBe('99990105-090407');
+    });
+
+    it('throws Error when invalid Date, non-Date inputs, or out-of-range years (< 0 or > 9999) are provided to formatTimestampSuffix', async () => {
+      const { formatTimestampSuffix } = await import('../scripts/generate-demo-video');
+      expect(() => formatTimestampSuffix(new Date('invalid'))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(new Date(NaN))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(null as unknown as Date)).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix('2026-01-01' as unknown as Date)).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+
+      const makeYearDate = (year: number) => {
+        const d = new Date(2026, 0, 5, 9, 4, 7);
+        d.setFullYear(year);
+        return d;
+      };
+      expect(() => formatTimestampSuffix(makeYearDate(-1))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(-500))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(10000))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(99999))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+    });
+  });
+
   describe('parseArgs', () => {
-    it('parses default CLI options when no arguments provided', async () => {
+    it('parses default CLI options with timestamped outputPath and DEMO_MODEL_DEFAULTS when no arguments provided', async () => {
       const { parseArgs } = await import('../scripts/generate-demo-video');
       const opts = parseArgs([]);
       expect(opts.skipTts).toBe(false);
       expect(opts.skipBackend).toBe(false);
       expect(opts.backendUrl).toBe('http://localhost:8080');
-      expect(opts.outputPath).toContain('artifacts/yvoke-desktop-demo.mp4');
+      expect(opts.outputPath).toMatch(/artifacts[\\/]yvoke-desktop-demo-\d{8}-\d{6}\.mp4$/);
       expect(opts.maxScenes).toBeUndefined();
+      expect(opts.model).toBe('haiku');
+      expect(opts.thinking).toBe('high');
+      expect(opts.orchestratorModel).toBe('sonnet');
+      expect(opts.orchestratorThinking).toBe('medium');
+      expect(opts.specialistModel).toBe('haiku');
+      expect(opts.specialistThinking).toBe('high');
+      expect(opts.reviewerModel).toBe('sonnet');
+      expect(opts.reviewerThinking).toBe('medium');
+    });
+
+    it('falls back to timestamped outputPath when --output is missing a value, whitespace, or collides with another flag', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      expect(parseArgs(['--output']).outputPath).toMatch(
+        /artifacts[\\/]yvoke-desktop-demo-\d{8}-\d{6}\.mp4$/,
+      );
+      expect(parseArgs(['--output', '']).outputPath).toMatch(
+        /artifacts[\\/]yvoke-desktop-demo-\d{8}-\d{6}\.mp4$/,
+      );
+      expect(parseArgs(['--output', '   ']).outputPath).toMatch(
+        /artifacts[\\/]yvoke-desktop-demo-\d{8}-\d{6}\.mp4$/,
+      );
+
+      const collided = parseArgs(['--output', '--skip-tts']);
+      expect(collided.outputPath).toMatch(/artifacts[\\/]yvoke-desktop-demo-\d{8}-\d{6}\.mp4$/);
+      expect(collided.skipTts).toBe(true);
     });
 
     it('parses --max-scenes and --scenes flags correctly', async () => {
@@ -348,45 +445,108 @@ describe('videoOrchestratorPreflight', () => {
       expect(parseArgs(['--scenes', '3,1,5,4']).scenes).toEqual([3, 1, 5, 4]);
     });
 
-    it('parses --model and --thinking parameters with opus and low as defaults', async () => {
+    it('respects explicit CLI overrides for --output, single-agent, --specialist-*, and --worker-* flags', async () => {
       const { parseArgs } = await import('../scripts/generate-demo-video');
-      const defaultOpts = parseArgs([]);
-      expect(defaultOpts.model).toBe('opus');
-      expect(defaultOpts.thinking).toBe('low');
-
-      const customOpts = parseArgs(['--model', 'sonnet', '--thinking', 'medium']);
-      expect(customOpts.model).toBe('sonnet');
-      expect(customOpts.thinking).toBe('medium');
-
-      const masOpts = parseArgs(['--mas-model', 'haiku']);
-      expect(masOpts.model).toBe('haiku');
-
-      const granularOpts = parseArgs([
+      const customOpts = parseArgs([
+        '--output',
+        'artifacts/custom-demo.mp4',
         '--model',
-        'haiku',
+        'opus',
         '--thinking',
-        'high',
+        'low',
         '--orchestrator-model',
-        'sonnet',
+        'opus',
         '--orchestrator-thinking',
-        'medium',
-        '--worker-model',
-        'haiku',
-        '--worker-thinking',
         'high',
-        '--reviewer-model',
+        '--specialist-model',
         'sonnet',
-        '--reviewer-thinking',
+        '--specialist-thinking',
         'medium',
+        '--reviewer-model',
+        'haiku',
+        '--reviewer-thinking',
+        'off',
       ]);
-      expect(granularOpts.model).toBe('haiku');
-      expect(granularOpts.thinking).toBe('high');
-      expect(granularOpts.orchestratorModel).toBe('sonnet');
-      expect(granularOpts.orchestratorThinking).toBe('medium');
-      expect(granularOpts.specialistModel).toBe('haiku');
-      expect(granularOpts.specialistThinking).toBe('high');
-      expect(granularOpts.reviewerModel).toBe('sonnet');
-      expect(granularOpts.reviewerThinking).toBe('medium');
+      expect(customOpts.outputPath).toBe(path.resolve(process.cwd(), 'artifacts/custom-demo.mp4'));
+      expect(customOpts.model).toBe('opus');
+      expect(customOpts.thinking).toBe('low');
+      expect(customOpts.orchestratorModel).toBe('opus');
+      expect(customOpts.orchestratorThinking).toBe('high');
+      expect(customOpts.specialistModel).toBe('sonnet');
+      expect(customOpts.specialistThinking).toBe('medium');
+      expect(customOpts.reviewerModel).toBe('haiku');
+      expect(customOpts.reviewerThinking).toBe('off');
+
+      const workerOpts = parseArgs(['--worker-model', 'opus', '--worker-thinking', 'low']);
+      expect(workerOpts.specialistModel).toBe('opus');
+      expect(workerOpts.specialistThinking).toBe('low');
+    });
+
+    it('isolates single-agent --model and --thinking overrides without mutating MAS role defaults', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      const opts = parseArgs(['--model', 'opus', '--thinking', 'low']);
+      expect(opts.model).toBe('opus');
+      expect(opts.thinking).toBe('low');
+      expect(opts.orchestratorModel).toBe('sonnet');
+      expect(opts.orchestratorThinking).toBe('medium');
+      expect(opts.specialistModel).toBe('haiku');
+      expect(opts.specialistThinking).toBe('high');
+      expect(opts.reviewerModel).toBe('sonnet');
+      expect(opts.reviewerThinking).toBe('medium');
+    });
+
+    it('applies --mas-model as fallback for MAS roles without mutating single-agent model and respects role flag precedence', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      const masOpts = parseArgs(['--mas-model', 'opus']);
+      expect(masOpts.model).toBe('haiku');
+      expect(masOpts.orchestratorModel).toBe('opus');
+      expect(masOpts.specialistModel).toBe('opus');
+      expect(masOpts.reviewerModel).toBe('opus');
+
+      const precedenceOpts = parseArgs([
+        '--mas-model',
+        'opus',
+        '--orchestrator-model',
+        'invalid-model',
+        '--specialist-model',
+        'sonnet',
+      ]);
+      expect(precedenceOpts.model).toBe('haiku');
+      expect(precedenceOpts.orchestratorModel).toBe('opus');
+      expect(precedenceOpts.specialistModel).toBe('sonnet');
+      expect(precedenceOpts.reviewerModel).toBe('opus');
+    });
+
+    it('safely falls back to DEMO_MODEL_DEFAULTS when invalid model or thinking CLI strings are provided', async () => {
+      const { parseArgs } = await import('../scripts/generate-demo-video');
+      const invalidOpts = parseArgs([
+        '--model',
+        'gpt-4',
+        '--thinking',
+        'extreme',
+        '--orchestrator-model',
+        'invalid',
+        '--orchestrator-thinking',
+        'ultra',
+        '--specialist-model',
+        'bad',
+        '--specialist-thinking',
+        'none',
+        '--reviewer-model',
+        'wrong',
+        '--reviewer-thinking',
+        'max',
+        '--mas-model',
+        'unknown',
+      ]);
+      expect(invalidOpts.model).toBe('haiku');
+      expect(invalidOpts.thinking).toBe('high');
+      expect(invalidOpts.orchestratorModel).toBe('sonnet');
+      expect(invalidOpts.orchestratorThinking).toBe('medium');
+      expect(invalidOpts.specialistModel).toBe('haiku');
+      expect(invalidOpts.specialistThinking).toBe('high');
+      expect(invalidOpts.reviewerModel).toBe('sonnet');
+      expect(invalidOpts.reviewerThinking).toBe('medium');
     });
   });
 
@@ -493,7 +653,7 @@ describe('videoOrchestratorPreflight', () => {
       createdDirs = [];
     });
 
-    it('writes expected settings.json with dev auth mode, mcp transport, web search, and appearance', async () => {
+    it('writes expected settings.json with DEMO_MODEL_DEFAULTS, dev auth mode, mcp transport, web search, and appearance', async () => {
       const { seedUserData } = await import('../scripts/generate-demo-video');
       const dir = seedUserData('http://localhost:9090');
       createdDirs.push(dir);
@@ -507,8 +667,15 @@ describe('videoOrchestratorPreflight', () => {
       expect(settings.authMode).toBe('dev');
       expect(settings.devToken).toBe('dev-demo-token');
       expect(settings.mcpTransport).toBe('http');
-      expect(settings.defaultModel).toBe('opus');
-      expect(settings.defaultThinkingLevel).toBe('low');
+      expect(settings.defaultModel).toBe('haiku');
+      expect(settings.defaultThinkingLevel).toBe('high');
+      expect(settings.orchestrator).toEqual(
+        expect.objectContaining({
+          orchestrator: { model: 'sonnet', thinkingLevel: 'medium' },
+          specialist: { model: 'haiku', thinkingLevel: 'high' },
+          reviewer: { model: 'sonnet', thinkingLevel: 'medium' },
+        }),
+      );
       expect(settings.playbookValidationEnabled).toBe(true);
       expect(settings.webSearch).toEqual({
         enabled: true,
@@ -516,6 +683,44 @@ describe('videoOrchestratorPreflight', () => {
       });
       expect(settings.appearance.theme).toBe('dark');
       expect(settings.appearance.density).toBe('comfortable');
+    });
+
+    it('respects custom overrides for single-agent and MAS roles when provided to seedUserData', async () => {
+      const { seedUserData } = await import('../scripts/generate-demo-video');
+      const dir = seedUserData('http://localhost:8080', {
+        model: 'opus',
+        thinking: 'low',
+        orchestratorModel: 'opus',
+        orchestratorThinking: 'high',
+        specialistModel: 'sonnet',
+        specialistThinking: 'medium',
+        reviewerModel: 'haiku',
+        reviewerThinking: 'off',
+      });
+      createdDirs.push(dir);
+
+      const settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+      expect(settings.defaultModel).toBe('opus');
+      expect(settings.defaultThinkingLevel).toBe('low');
+      expect(settings.orchestrator.orchestrator).toEqual({ model: 'opus', thinkingLevel: 'high' });
+      expect(settings.orchestrator.specialist).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+      expect(settings.orchestrator.reviewer).toEqual({ model: 'haiku', thinkingLevel: 'off' });
+    });
+
+    it('isolates single-agent model/thinking overrides in seedUserData without falling back MAS roles to single-agent values', async () => {
+      const { seedUserData } = await import('../scripts/generate-demo-video');
+      const dir = seedUserData('http://localhost:8080', {
+        model: 'opus',
+        thinking: 'low',
+      });
+      createdDirs.push(dir);
+
+      const settings = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+      expect(settings.defaultModel).toBe('opus');
+      expect(settings.defaultThinkingLevel).toBe('low');
+      expect(settings.orchestrator.orchestrator).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
+      expect(settings.orchestrator.specialist).toEqual({ model: 'haiku', thinkingLevel: 'high' });
+      expect(settings.orchestrator.reviewer).toEqual({ model: 'sonnet', thinkingLevel: 'medium' });
     });
 
     it('seeds exactly two background history threads and removes demo-thread mocks', async () => {

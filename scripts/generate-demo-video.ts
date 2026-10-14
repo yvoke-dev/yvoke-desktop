@@ -107,6 +107,40 @@ export const SCENE_PRESETS: Record<string, number[]> = {
   'no-clarification': [1, 3, 4, 5, 7],
 };
 
+export const VALID_DEMO_MODELS = ['opus', 'sonnet', 'haiku'] as const;
+export type DemoModel = (typeof VALID_DEMO_MODELS)[number];
+
+export const VALID_DEMO_THINKING = ['low', 'medium', 'high', 'off'] as const;
+export type DemoThinking = (typeof VALID_DEMO_THINKING)[number];
+
+export const DEMO_MODEL_DEFAULTS = {
+  model: 'haiku',
+  thinking: 'high',
+  orchestratorModel: 'sonnet',
+  orchestratorThinking: 'medium',
+  specialistModel: 'haiku',
+  specialistThinking: 'high',
+  reviewerModel: 'sonnet',
+  reviewerThinking: 'medium',
+} as const;
+
+export function formatTimestampSuffix(date: Date = new Date()): string {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    throw new Error('Invalid date provided to formatTimestampSuffix');
+  }
+  const year = date.getFullYear();
+  if (year < 0 || year > 9999) {
+    throw new Error('Invalid date provided to formatTimestampSuffix');
+  }
+  const yyyy = String(year).padStart(4, '0');
+  const MM = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const HH = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  return `${yyyy}${MM}${dd}-${HH}${mm}${ss}`;
+}
+
 export interface DemoOptions {
   skipTts: boolean;
   skipBackend: boolean;
@@ -115,14 +149,22 @@ export interface DemoOptions {
   maxScenes?: number;
   singleScene?: number;
   scenes?: number[];
-  model: 'opus' | 'sonnet' | 'haiku';
-  thinking: 'low' | 'medium' | 'high' | 'off';
-  orchestratorModel?: 'opus' | 'sonnet' | 'haiku';
-  orchestratorThinking?: 'low' | 'medium' | 'high' | 'off';
-  specialistModel?: 'opus' | 'sonnet' | 'haiku';
-  specialistThinking?: 'low' | 'medium' | 'high' | 'off';
-  reviewerModel?: 'opus' | 'sonnet' | 'haiku';
-  reviewerThinking?: 'low' | 'medium' | 'high' | 'off';
+  model: DemoModel;
+  thinking: DemoThinking;
+  orchestratorModel: DemoModel;
+  orchestratorThinking: DemoThinking;
+  specialistModel: DemoModel;
+  specialistThinking: DemoThinking;
+  reviewerModel: DemoModel;
+  reviewerThinking: DemoThinking;
+}
+
+function isValidModel(val: string | undefined): val is DemoModel {
+  return val !== undefined && (VALID_DEMO_MODELS as readonly string[]).includes(val);
+}
+
+function isValidThinking(val: string | undefined): val is DemoThinking {
+  return val !== undefined && (VALID_DEMO_THINKING as readonly string[]).includes(val);
 }
 
 export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOptions {
@@ -135,10 +177,11 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
       ? args[backendIdx + 1]
       : (process.env.YVOKE_SERVER ?? process.env.YVOKE_SERVER_URL ?? 'http://localhost:8080');
   const outIdx = args.indexOf('--output');
+  const rawOutVal = outIdx !== -1 ? args[outIdx + 1] : undefined;
   const outputPath =
-    outIdx !== -1 && args[outIdx + 1]
-      ? path.resolve(process.cwd(), args[outIdx + 1])
-      : path.resolve(process.cwd(), 'artifacts/yvoke-desktop-demo.mp4');
+    rawOutVal && rawOutVal.trim().length > 0 && !rawOutVal.trim().startsWith('-')
+      ? path.resolve(process.cwd(), rawOutVal.trim())
+      : path.resolve(process.cwd(), `artifacts/yvoke-desktop-demo-${formatTimestampSuffix()}.mp4`);
 
   const maxScenesIdx = args.indexOf('--max-scenes');
   let maxScenes: number | undefined;
@@ -199,72 +242,62 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
   }
 
   const modelIdx = args.indexOf('--model');
+  const modelVal = modelIdx !== -1 ? args[modelIdx + 1] : undefined;
+  const model: DemoModel = isValidModel(modelVal) ? modelVal : DEMO_MODEL_DEFAULTS.model;
+
   const masModelIdx = args.indexOf('--mas-model');
-  const modelVal =
-    modelIdx !== -1
-      ? args[modelIdx + 1]
-      : masModelIdx !== -1
-        ? args[masModelIdx + 1]
-        : undefined;
-  const model: 'opus' | 'sonnet' | 'haiku' =
-    modelVal === 'opus' || modelVal === 'sonnet' || modelVal === 'haiku'
-      ? modelVal
-      : 'opus';
+  const masModelVal = masModelIdx !== -1 ? args[masModelIdx + 1] : undefined;
+  const masModelFallback: DemoModel | undefined = isValidModel(masModelVal)
+    ? masModelVal
+    : undefined;
 
   const thinkingIdx = args.indexOf('--thinking');
   const thinkingVal = thinkingIdx !== -1 ? args[thinkingIdx + 1] : undefined;
-  const thinking: 'low' | 'medium' | 'high' | 'off' =
-    thinkingVal === 'low' || thinkingVal === 'medium' || thinkingVal === 'high' || thinkingVal === 'off'
-      ? thinkingVal
-      : 'low';
+  const thinking: DemoThinking = isValidThinking(thinkingVal)
+    ? thinkingVal
+    : DEMO_MODEL_DEFAULTS.thinking;
 
   const orchModelIdx = args.indexOf('--orchestrator-model');
   const orchModelVal = orchModelIdx !== -1 ? args[orchModelIdx + 1] : undefined;
-  const orchestratorModel: 'opus' | 'sonnet' | 'haiku' | undefined =
-    orchModelVal === 'opus' || orchModelVal === 'sonnet' || orchModelVal === 'haiku'
-      ? orchModelVal
-      : undefined;
+  const orchestratorModel: DemoModel = isValidModel(orchModelVal)
+    ? orchModelVal
+    : (masModelFallback ?? DEMO_MODEL_DEFAULTS.orchestratorModel);
 
   const orchThinkingIdx = args.indexOf('--orchestrator-thinking');
   const orchThinkingVal = orchThinkingIdx !== -1 ? args[orchThinkingIdx + 1] : undefined;
-  const orchestratorThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
-    orchThinkingVal === 'low' || orchThinkingVal === 'medium' || orchThinkingVal === 'high' || orchThinkingVal === 'off'
-      ? orchThinkingVal
-      : undefined;
+  const orchestratorThinking: DemoThinking = isValidThinking(orchThinkingVal)
+    ? orchThinkingVal
+    : DEMO_MODEL_DEFAULTS.orchestratorThinking;
 
   const specModelIdx =
     args.indexOf('--specialist-model') !== -1
       ? args.indexOf('--specialist-model')
       : args.indexOf('--worker-model');
   const specModelVal = specModelIdx !== -1 ? args[specModelIdx + 1] : undefined;
-  const specialistModel: 'opus' | 'sonnet' | 'haiku' | undefined =
-    specModelVal === 'opus' || specModelVal === 'sonnet' || specModelVal === 'haiku'
-      ? specModelVal
-      : undefined;
+  const specialistModel: DemoModel = isValidModel(specModelVal)
+    ? specModelVal
+    : (masModelFallback ?? DEMO_MODEL_DEFAULTS.specialistModel);
 
   const specThinkingIdx =
     args.indexOf('--specialist-thinking') !== -1
       ? args.indexOf('--specialist-thinking')
       : args.indexOf('--worker-thinking');
   const specThinkingVal = specThinkingIdx !== -1 ? args[specThinkingIdx + 1] : undefined;
-  const specialistThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
-    specThinkingVal === 'low' || specThinkingVal === 'medium' || specThinkingVal === 'high' || specThinkingVal === 'off'
-      ? specThinkingVal
-      : undefined;
+  const specialistThinking: DemoThinking = isValidThinking(specThinkingVal)
+    ? specThinkingVal
+    : DEMO_MODEL_DEFAULTS.specialistThinking;
 
   const revModelIdx = args.indexOf('--reviewer-model');
   const revModelVal = revModelIdx !== -1 ? args[revModelIdx + 1] : undefined;
-  const reviewerModel: 'opus' | 'sonnet' | 'haiku' | undefined =
-    revModelVal === 'opus' || revModelVal === 'sonnet' || revModelVal === 'haiku'
-      ? revModelVal
-      : undefined;
+  const reviewerModel: DemoModel = isValidModel(revModelVal)
+    ? revModelVal
+    : (masModelFallback ?? DEMO_MODEL_DEFAULTS.reviewerModel);
 
   const revThinkingIdx = args.indexOf('--reviewer-thinking');
   const revThinkingVal = revThinkingIdx !== -1 ? args[revThinkingIdx + 1] : undefined;
-  const reviewerThinking: 'low' | 'medium' | 'high' | 'off' | undefined =
-    revThinkingVal === 'low' || revThinkingVal === 'medium' || revThinkingVal === 'high' || revThinkingVal === 'off'
-      ? revThinkingVal
-      : undefined;
+  const reviewerThinking: DemoThinking = isValidThinking(revThinkingVal)
+    ? revThinkingVal
+    : DEMO_MODEL_DEFAULTS.reviewerThinking;
 
   return {
     skipTts,
@@ -497,24 +530,24 @@ export function seedUserData(
   backendUrl = 'http://localhost:8080',
   options?: {
     cloneRealThreads?: boolean;
-    model?: 'opus' | 'sonnet' | 'haiku';
-    thinking?: 'low' | 'medium' | 'high' | 'off';
-    orchestratorModel?: 'opus' | 'sonnet' | 'haiku';
-    orchestratorThinking?: 'low' | 'medium' | 'high' | 'off';
-    specialistModel?: 'opus' | 'sonnet' | 'haiku';
-    specialistThinking?: 'low' | 'medium' | 'high' | 'off';
-    reviewerModel?: 'opus' | 'sonnet' | 'haiku';
-    reviewerThinking?: 'low' | 'medium' | 'high' | 'off';
+    model?: DemoModel;
+    thinking?: DemoThinking;
+    orchestratorModel?: DemoModel;
+    orchestratorThinking?: DemoThinking;
+    specialistModel?: DemoModel;
+    specialistThinking?: DemoThinking;
+    reviewerModel?: DemoModel;
+    reviewerThinking?: DemoThinking;
   },
 ): string {
-  const model = options?.model ?? 'opus';
-  const thinkingLevel = options?.thinking ?? 'low';
-  const orchModel = options?.orchestratorModel ?? model;
-  const orchThinking = options?.orchestratorThinking ?? thinkingLevel;
-  const specModel = options?.specialistModel ?? model;
-  const specThinking = options?.specialistThinking ?? thinkingLevel;
-  const revModel = options?.reviewerModel ?? model;
-  const revThinking = options?.reviewerThinking ?? thinkingLevel;
+  const model = options?.model ?? DEMO_MODEL_DEFAULTS.model;
+  const thinkingLevel = options?.thinking ?? DEMO_MODEL_DEFAULTS.thinking;
+  const orchModel = options?.orchestratorModel ?? DEMO_MODEL_DEFAULTS.orchestratorModel;
+  const orchThinking = options?.orchestratorThinking ?? DEMO_MODEL_DEFAULTS.orchestratorThinking;
+  const specModel = options?.specialistModel ?? DEMO_MODEL_DEFAULTS.specialistModel;
+  const specThinking = options?.specialistThinking ?? DEMO_MODEL_DEFAULTS.specialistThinking;
+  const revModel = options?.reviewerModel ?? DEMO_MODEL_DEFAULTS.reviewerModel;
+  const revThinking = options?.reviewerThinking ?? DEMO_MODEL_DEFAULTS.reviewerThinking;
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yvoke-demo-video-'));
 
   // 1. Settings strictly configured for local dev environment (Streamable HTTP + Dev token)
@@ -2127,7 +2160,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               .catch(() => {});
             await appPage.waitForTimeout(250);
 
-            // Switch thinking effort to configured level (or 'low' default)
+            // Switch thinking effort to configured level
             const thinkingSelect = appPage
               .locator(
                 'select.composer-select[aria-label="Thinking effort"], select.composer-select[data-tip="Thinking effort"]',
@@ -2135,7 +2168,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               .first();
             if ((await thinkingSelect.count()) > 0) {
               await glideMouse(appPage, thinkingSelect, 15, { delayMs: 150, optional: true });
-              await thinkingSelect.selectOption(options.thinking ?? 'low').catch(() => {});
+              await thinkingSelect.selectOption(options.thinking).catch(() => {});
               await appPage.waitForTimeout(200);
             }
 
