@@ -107,6 +107,12 @@ export const SCENE_PRESETS: Record<string, number[]> = {
   'no-clarification': [1, 3, 4, 5, 7],
 };
 
+export const VALID_DEMO_MODELS = ['opus', 'sonnet', 'haiku'] as const;
+export type DemoModel = (typeof VALID_DEMO_MODELS)[number];
+
+export const VALID_DEMO_THINKING = ['low', 'medium', 'high', 'off'] as const;
+export type DemoThinking = (typeof VALID_DEMO_THINKING)[number];
+
 export const DEMO_MODEL_DEFAULTS = {
   model: 'haiku',
   thinking: 'high',
@@ -122,7 +128,11 @@ export function formatTimestampSuffix(date: Date = new Date()): string {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
     throw new Error('Invalid date provided to formatTimestampSuffix');
   }
-  const yyyy = String(date.getFullYear());
+  const year = date.getFullYear();
+  if (year < 0 || year > 9999) {
+    throw new Error('Invalid date provided to formatTimestampSuffix');
+  }
+  const yyyy = String(year).padStart(4, '0');
   const MM = String(date.getMonth() + 1).padStart(2, '0');
   const dd = String(date.getDate()).padStart(2, '0');
   const HH = String(date.getHours()).padStart(2, '0');
@@ -139,22 +149,22 @@ export interface DemoOptions {
   maxScenes?: number;
   singleScene?: number;
   scenes?: number[];
-  model: 'opus' | 'sonnet' | 'haiku';
-  thinking: 'low' | 'medium' | 'high' | 'off';
-  orchestratorModel: 'opus' | 'sonnet' | 'haiku';
-  orchestratorThinking: 'low' | 'medium' | 'high' | 'off';
-  specialistModel: 'opus' | 'sonnet' | 'haiku';
-  specialistThinking: 'low' | 'medium' | 'high' | 'off';
-  reviewerModel: 'opus' | 'sonnet' | 'haiku';
-  reviewerThinking: 'low' | 'medium' | 'high' | 'off';
+  model: DemoModel;
+  thinking: DemoThinking;
+  orchestratorModel: DemoModel;
+  orchestratorThinking: DemoThinking;
+  specialistModel: DemoModel;
+  specialistThinking: DemoThinking;
+  reviewerModel: DemoModel;
+  reviewerThinking: DemoThinking;
 }
 
-function isValidModel(val: string | undefined): val is 'opus' | 'sonnet' | 'haiku' {
-  return val === 'opus' || val === 'sonnet' || val === 'haiku';
+function isValidModel(val: string | undefined): val is DemoModel {
+  return val !== undefined && (VALID_DEMO_MODELS as readonly string[]).includes(val);
 }
 
-function isValidThinking(val: string | undefined): val is 'low' | 'medium' | 'high' | 'off' {
-  return val === 'low' || val === 'medium' || val === 'high' || val === 'off';
+function isValidThinking(val: string | undefined): val is DemoThinking {
+  return val !== undefined && (VALID_DEMO_THINKING as readonly string[]).includes(val);
 }
 
 export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOptions {
@@ -233,31 +243,29 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
 
   const modelIdx = args.indexOf('--model');
   const modelVal = modelIdx !== -1 ? args[modelIdx + 1] : undefined;
-  const model: 'opus' | 'sonnet' | 'haiku' = isValidModel(modelVal)
-    ? modelVal
-    : DEMO_MODEL_DEFAULTS.model;
+  const model: DemoModel = isValidModel(modelVal) ? modelVal : DEMO_MODEL_DEFAULTS.model;
 
   const masModelIdx = args.indexOf('--mas-model');
   const masModelVal = masModelIdx !== -1 ? args[masModelIdx + 1] : undefined;
-  const masModelFallback: 'opus' | 'sonnet' | 'haiku' | undefined = isValidModel(masModelVal)
+  const masModelFallback: DemoModel | undefined = isValidModel(masModelVal)
     ? masModelVal
     : undefined;
 
   const thinkingIdx = args.indexOf('--thinking');
   const thinkingVal = thinkingIdx !== -1 ? args[thinkingIdx + 1] : undefined;
-  const thinking: 'low' | 'medium' | 'high' | 'off' = isValidThinking(thinkingVal)
+  const thinking: DemoThinking = isValidThinking(thinkingVal)
     ? thinkingVal
     : DEMO_MODEL_DEFAULTS.thinking;
 
   const orchModelIdx = args.indexOf('--orchestrator-model');
   const orchModelVal = orchModelIdx !== -1 ? args[orchModelIdx + 1] : undefined;
-  const orchestratorModel: 'opus' | 'sonnet' | 'haiku' = isValidModel(orchModelVal)
+  const orchestratorModel: DemoModel = isValidModel(orchModelVal)
     ? orchModelVal
     : (masModelFallback ?? DEMO_MODEL_DEFAULTS.orchestratorModel);
 
   const orchThinkingIdx = args.indexOf('--orchestrator-thinking');
   const orchThinkingVal = orchThinkingIdx !== -1 ? args[orchThinkingIdx + 1] : undefined;
-  const orchestratorThinking: 'low' | 'medium' | 'high' | 'off' = isValidThinking(orchThinkingVal)
+  const orchestratorThinking: DemoThinking = isValidThinking(orchThinkingVal)
     ? orchThinkingVal
     : DEMO_MODEL_DEFAULTS.orchestratorThinking;
 
@@ -266,7 +274,7 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
       ? args.indexOf('--specialist-model')
       : args.indexOf('--worker-model');
   const specModelVal = specModelIdx !== -1 ? args[specModelIdx + 1] : undefined;
-  const specialistModel: 'opus' | 'sonnet' | 'haiku' = isValidModel(specModelVal)
+  const specialistModel: DemoModel = isValidModel(specModelVal)
     ? specModelVal
     : (masModelFallback ?? DEMO_MODEL_DEFAULTS.specialistModel);
 
@@ -275,19 +283,19 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
       ? args.indexOf('--specialist-thinking')
       : args.indexOf('--worker-thinking');
   const specThinkingVal = specThinkingIdx !== -1 ? args[specThinkingIdx + 1] : undefined;
-  const specialistThinking: 'low' | 'medium' | 'high' | 'off' = isValidThinking(specThinkingVal)
+  const specialistThinking: DemoThinking = isValidThinking(specThinkingVal)
     ? specThinkingVal
     : DEMO_MODEL_DEFAULTS.specialistThinking;
 
   const revModelIdx = args.indexOf('--reviewer-model');
   const revModelVal = revModelIdx !== -1 ? args[revModelIdx + 1] : undefined;
-  const reviewerModel: 'opus' | 'sonnet' | 'haiku' = isValidModel(revModelVal)
+  const reviewerModel: DemoModel = isValidModel(revModelVal)
     ? revModelVal
     : (masModelFallback ?? DEMO_MODEL_DEFAULTS.reviewerModel);
 
   const revThinkingIdx = args.indexOf('--reviewer-thinking');
   const revThinkingVal = revThinkingIdx !== -1 ? args[revThinkingIdx + 1] : undefined;
-  const reviewerThinking: 'low' | 'medium' | 'high' | 'off' = isValidThinking(revThinkingVal)
+  const reviewerThinking: DemoThinking = isValidThinking(revThinkingVal)
     ? revThinkingVal
     : DEMO_MODEL_DEFAULTS.reviewerThinking;
 
@@ -522,14 +530,14 @@ export function seedUserData(
   backendUrl = 'http://localhost:8080',
   options?: {
     cloneRealThreads?: boolean;
-    model?: 'opus' | 'sonnet' | 'haiku';
-    thinking?: 'low' | 'medium' | 'high' | 'off';
-    orchestratorModel?: 'opus' | 'sonnet' | 'haiku';
-    orchestratorThinking?: 'low' | 'medium' | 'high' | 'off';
-    specialistModel?: 'opus' | 'sonnet' | 'haiku';
-    specialistThinking?: 'low' | 'medium' | 'high' | 'off';
-    reviewerModel?: 'opus' | 'sonnet' | 'haiku';
-    reviewerThinking?: 'low' | 'medium' | 'high' | 'off';
+    model?: DemoModel;
+    thinking?: DemoThinking;
+    orchestratorModel?: DemoModel;
+    orchestratorThinking?: DemoThinking;
+    specialistModel?: DemoModel;
+    specialistThinking?: DemoThinking;
+    reviewerModel?: DemoModel;
+    reviewerThinking?: DemoThinking;
   },
 ): string {
   const model = options?.model ?? DEMO_MODEL_DEFAULTS.model;

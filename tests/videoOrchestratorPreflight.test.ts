@@ -307,8 +307,12 @@ describe('videoOrchestratorPreflight', () => {
   });
 
   describe('DEMO_MODEL_DEFAULTS & formatTimestampSuffix', () => {
-    it('exports DEMO_MODEL_DEFAULTS with expected single-agent and MAS role defaults', async () => {
-      const { DEMO_MODEL_DEFAULTS } = await import('../scripts/generate-demo-video');
+    it('exports DEMO_MODEL_DEFAULTS, VALID_DEMO_MODELS, and VALID_DEMO_THINKING with expected values', async () => {
+      const { DEMO_MODEL_DEFAULTS, VALID_DEMO_MODELS, VALID_DEMO_THINKING } = await import(
+        '../scripts/generate-demo-video'
+      );
+      expect(VALID_DEMO_MODELS).toEqual(['opus', 'sonnet', 'haiku']);
+      expect(VALID_DEMO_THINKING).toEqual(['low', 'medium', 'high', 'off']);
       expect(DEMO_MODEL_DEFAULTS).toEqual({
         model: 'haiku',
         thinking: 'high',
@@ -321,15 +325,25 @@ describe('videoOrchestratorPreflight', () => {
       });
     });
 
-    it('formats local dates with zero-padded single-digit components and boundary dates', async () => {
+    it('formats local dates with zero-padded single-digit components, 1-3 digit positive years, and boundary dates', async () => {
       const { formatTimestampSuffix } = await import('../scripts/generate-demo-video');
       expect(formatTimestampSuffix(new Date(2026, 0, 5, 9, 4, 7))).toBe('20260105-090407');
       expect(formatTimestampSuffix(new Date(2026, 0, 1, 0, 0, 0))).toBe('20260101-000000');
       expect(formatTimestampSuffix(new Date(2026, 11, 31, 23, 59, 59))).toBe('20261231-235959');
       expect(formatTimestampSuffix()).toMatch(/^\d{8}-\d{6}$/);
+
+      const makeYearDate = (year: number) => {
+        const d = new Date(2026, 0, 5, 9, 4, 7);
+        d.setFullYear(year);
+        return d;
+      };
+      expect(formatTimestampSuffix(makeYearDate(500))).toBe('05000105-090407');
+      expect(formatTimestampSuffix(makeYearDate(42))).toBe('00420105-090407');
+      expect(formatTimestampSuffix(makeYearDate(0))).toBe('00000105-090407');
+      expect(formatTimestampSuffix(makeYearDate(9999))).toBe('99990105-090407');
     });
 
-    it('throws Error when invalid Date or non-Date inputs are provided to formatTimestampSuffix', async () => {
+    it('throws Error when invalid Date, non-Date inputs, or out-of-range years (< 0 or > 9999) are provided to formatTimestampSuffix', async () => {
       const { formatTimestampSuffix } = await import('../scripts/generate-demo-video');
       expect(() => formatTimestampSuffix(new Date('invalid'))).toThrow(
         'Invalid date provided to formatTimestampSuffix',
@@ -341,6 +355,24 @@ describe('videoOrchestratorPreflight', () => {
         'Invalid date provided to formatTimestampSuffix',
       );
       expect(() => formatTimestampSuffix('2026-01-01' as unknown as Date)).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+
+      const makeYearDate = (year: number) => {
+        const d = new Date(2026, 0, 5, 9, 4, 7);
+        d.setFullYear(year);
+        return d;
+      };
+      expect(() => formatTimestampSuffix(makeYearDate(-1))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(-500))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(10000))).toThrow(
+        'Invalid date provided to formatTimestampSuffix',
+      );
+      expect(() => formatTimestampSuffix(makeYearDate(99999))).toThrow(
         'Invalid date provided to formatTimestampSuffix',
       );
     });
