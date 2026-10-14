@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import {
+  AbortError,
+  query,
+  type McpSdkServerConfigWithInstance,
+  type Options,
+  type Query,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import type {
   AgentEvent,
   AppSettings,
@@ -45,7 +52,7 @@ import {
   REVIEW_SERVER_NAME,
   REVIEW_SUBMIT_TOOL,
 } from './reviewTools';
-import { buildReviewServer } from './reviewServer';
+import { buildReviewServer, buildSubmitAnswerServer } from './reviewServer';
 import {
   afterAnswerMarker,
   buildOrchestrator,
@@ -185,6 +192,8 @@ interface ReviewTurnState {
   reviewerSessionId?: string;
   processedCallIds: Set<string>;
   originalQuestion: string;
+  submittedAnswer?: string;
+  settled?: boolean;
 }
 
 interface ThreadSession {
@@ -202,6 +211,8 @@ interface ThreadSession {
   orchestratorProfile?: string;
   /** Resolved orchestrator build (including ReviewerConfig) when in orchestrator mode. */
   orchestrator?: ResolvedOrchestrator;
+  /** In-process MCP server exposing `mcp__review__submit_answer` when in orchestrator mode. */
+  submitAnswerServer?: McpSdkServerConfigWithInstance;
   /** In-flight Reviewer SDK query, if a review pass is currently running. */
   activeReviewerQuery?: Query;
   /** Per-turn review state (evidence accumulator, SentLedger, reviewerSessionId). */
@@ -504,7 +515,10 @@ export class AgentService {
 
         if (hasAuthChanged) {
           try {
-            const mcpServers = buildMcpServers(this.deps.getSettings(), headers);
+            const mcpServers = {
+              ...buildMcpServers(this.deps.getSettings(), headers),
+              ...(existing.submitAnswerServer ? { [REVIEW_SERVER_NAME]: existing.submitAnswerServer } : {}),
+            };
             let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutPromise = new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
@@ -711,9 +725,22 @@ export class AgentService {
       resolvedHeaders = await this.deps.mcpAuthProvider.headers();
     }
 
+    const sessionRef: { current?: ThreadSession } = {};
+    const submitAnswerServer = orchestrator
+      ? buildSubmitAnswerServer((answer) => {
+          if (!sessionRef.current) {
+            return Promise.resolve({ text: 'Session not ready.', isError: true });
+          }
+          return this.handleSubmittedAnswer(thread.id, sessionRef.current, answer);
+        })
+      : undefined;
+
     const options: Options = {
       systemPrompt: orchestrator ? '' : singleAgentPrompt,
-      mcpServers: buildMcpServers(settings, resolvedHeaders),
+      mcpServers: {
+        ...buildMcpServers(settings, resolvedHeaders),
+        ...(submitAnswerServer ? { [REVIEW_SERVER_NAME]: submitAnswerServer } : {}),
+      },
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
@@ -759,8 +786,10 @@ export class AgentService {
       playbookName: thread.orchestratorProfile ? undefined : playbookName,
       orchestratorProfile: thread.orchestratorProfile,
       orchestrator,
+      submitAnswerServer,
       lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };
+    sessionRef.current = session;
     this.sessions.set(thread.id, session);
     void this.consume(thread.id, session);
     return session;
@@ -1262,6 +1291,233 @@ export class AgentService {
     return { status: 'finalize', isError: false, aborted: false };
   }
 
+  /**
+   * Handle an orchestrator `mcp__review__submit_answer` tool call in-turn:
+   * - If the turn's review is already settled, return the delivery notice immediately.
+   * - If no specialist delegations occurred, record `draftAnswer` as settled without running Reviewer.
+   * - Otherwise harvest specialist tool results, run the Reviewer query (resuming `reviewerSessionId`
+   *   across revision rounds), and either return `buildRevisionPrompt(...)` for an in-turn revision
+   *   or settle `submittedAnswer` and return the terminal delivery notice.
+   */
+  private async handleSubmittedAnswer(
+    threadId: string,
+    session: ThreadSession,
+    rawDraft: string,
+  ): Promise<{ text: string; isError?: boolean }> {
+    const draftAnswer = afterAnswerMarker(rawDraft);
+    const reviewState = (session.reviewState ??= {
+      allEvidence: [],
+      reviewerSent: new SentLedger(),
+      processedCallIds: new Set(),
+      originalQuestion: session.pendingUser?.content ?? '',
+    });
+
+    if (reviewState.settled) {
+      return {
+        text: 'APPROVED — your answer has already been delivered to the user. End your turn now without repeating the answer.',
+      };
+    }
+
+    const hasSpecialistDelegation = session.turn.toolCalls.some(
+      (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
+    );
+    if (!hasSpecialistDelegation && reviewState.allEvidence.length === 0) {
+      reviewState.submittedAnswer = draftAnswer;
+      reviewState.settled = true;
+      return {
+        text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
+      };
+    }
+
+    const newSpecialistCalls = session.turn.toolCalls.filter(
+      (c) =>
+        c.name === 'Agent' &&
+        c.subagentType !== REVIEWER_SUBAGENT &&
+        !reviewState.processedCallIds.has(c.id),
+    );
+    for (const c of newSpecialistCalls) {
+      reviewState.processedCallIds.add(c.id);
+    }
+    const newEvidence = harvestSpecialistEvidence(newSpecialistCalls, [this.deps.sandboxDir]);
+    reviewState.allEvidence.push(...newEvidence);
+
+    const round = session.turn.revisionRounds ?? 0;
+    const reviewPrompt =
+      round === 0
+        ? renderReviewTask(
+            reviewState.originalQuestion,
+            draftAnswer,
+            reviewState.allEvidence,
+            reviewState.reviewerSent,
+          )
+        : renderReviewFollowUp(draftAnswer, reviewState.allEvidence, reviewState.reviewerSent);
+
+    const reviewerCallId = randomUUID();
+    const reviewerCall: ToolCallInfo = {
+      id: reviewerCallId,
+      name: 'Agent',
+      subagentType: REVIEWER_SUBAGENT,
+      input: { prompt: reviewPrompt },
+      subagentBlocks: [],
+    };
+    session.turn.toolCalls.push(reviewerCall);
+    session.turn.blocks.push({ toolCalls: [reviewerCall] });
+
+    const startEvent: AgentEvent = {
+      kind: 'subagent-start',
+      threadId,
+      toolUseId: reviewerCallId,
+      subagentType: REVIEWER_SUBAGENT,
+      question: reviewPrompt.slice(0, 2000),
+    };
+    this.logOrchestrationEvent(startEvent);
+    this.deps.emit(startEvent);
+    this.deps.emit({
+      kind: 'assistant-block',
+      threadId,
+      text: '',
+      toolCalls: [reviewerCall],
+    });
+
+    const revOutcome = await this.executeReviewerQuery(
+      threadId,
+      session,
+      reviewPrompt,
+      reviewerCall,
+      reviewState,
+    );
+
+    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, revOutcome.usage);
+    if (revOutcome.costUsd != null) {
+      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + revOutcome.costUsd;
+    }
+
+    if (session.interrupted) {
+      reviewState.submittedAnswer = draftAnswer;
+      reviewState.settled = true;
+      return { text: 'Turn interrupted by user.', isError: true };
+    }
+
+    if (revOutcome.failed && !revOutcome.verdict) {
+      const errText = revOutcome.errorMessage || 'Reviewer failed';
+      reviewerCall.isError = true;
+      reviewerCall.result = errText;
+      this.deps.emit({
+        kind: 'tool-result',
+        threadId,
+        toolUseId: reviewerCallId,
+        result: errText,
+        isError: true,
+      });
+      const completeEvt: AgentEvent = {
+        kind: 'subagent-complete',
+        threadId,
+        toolUseId: reviewerCallId,
+        subagentType: REVIEWER_SUBAGENT,
+        result: errText,
+        isError: true,
+      };
+      this.logOrchestrationEvent(completeEvt);
+      this.deps.emit(completeEvt);
+      logError('orch', `⚖ reviewer pass failed on round ${round}: ${errText}`);
+
+      const unreviewedContent = draftAnswer + unreviewedNote();
+      reviewState.submittedAnswer = unreviewedContent;
+      reviewState.settled = true;
+      return {
+        text: 'The automated review could not be completed. The answer you passed to submit_answer has been delivered to the user with an unverified notice. End your turn now without repeating the answer.',
+      };
+    }
+
+    const verdict =
+      revOutcome.verdict ??
+      (revOutcome.resultText ? parseVerdict(revOutcome.resultText) ?? undefined : undefined);
+    const resultSummary = verdict
+      ? formatVerdictSummary(verdict)
+      : revOutcome.resultText || '(no verdict)';
+
+    reviewerCall.verdict = verdict;
+    reviewerCall.result = resultSummary;
+    reviewerCall.isError = false;
+
+    this.deps.emit({
+      kind: 'tool-result',
+      threadId,
+      toolUseId: reviewerCallId,
+      result: resultSummary,
+      isError: false,
+    });
+    const completeEvt: AgentEvent = {
+      kind: 'subagent-complete',
+      threadId,
+      toolUseId: reviewerCallId,
+      subagentType: REVIEWER_SUBAGENT,
+      result: resultSummary,
+      isError: false,
+    };
+    this.logOrchestrationEvent(completeEvt);
+    this.deps.emit(completeEvt);
+
+    if (verdict) {
+      const verdictEvt: AgentEvent = {
+        kind: 'review-verdict',
+        threadId,
+        toolUseId: reviewerCallId,
+        approved: verdict.approved,
+        feedback: verdict.feedback,
+      };
+      this.logOrchestrationEvent(verdictEvt);
+      this.deps.emit(verdictEvt);
+    }
+
+    if (verdict?.approved) {
+      reviewState.submittedAnswer = draftAnswer;
+      reviewState.settled = true;
+      return {
+        text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
+      };
+    }
+
+    const maxRounds = this.deps.getSettings().orchestrator?.maxReviewRounds ?? 0;
+    const doneRounds = session.turn.revisionRounds ?? 0;
+
+    if (doneRounds < maxRounds) {
+      const nextRound = doneRounds + 1;
+      session.turn.revisionRounds = nextRound;
+      reviewState.submittedAnswer = undefined;
+      const reason: 'rejected' | 'unclear' = verdict ? 'rejected' : 'unclear';
+      const revisionPrompt = buildRevisionPrompt({
+        verdict,
+        feedback: verdict?.feedback,
+        newEvidence,
+        allEvidence: reviewState.allEvidence,
+        draft: draftAnswer,
+        round: nextRound,
+        maxRounds,
+      });
+      log(
+        'orch',
+        `⚖ reviewer ${reason === 'unclear' ? 'returned no clear verdict' : 'REJECTED'} — ` +
+          `revision round ${nextRound}/${maxRounds}: returning revision prompt via submit_answer tool result`,
+      );
+      session.turn.turnText = '';
+      session.turn.liveText = '';
+      session.turn.blocks = session.turn.blocks
+        .map((block) => ({ ...block, text: undefined }))
+        .filter((block) => block.thinking || (block.toolCalls?.length ?? 0) > 0);
+      this.deps.emit({ kind: 'review-enforced', threadId, reason, round: nextRound });
+      return { text: revisionPrompt };
+    }
+
+    const flaggedContent =
+      draftAnswer + reviewFlagNote(reviewAttempts(session.turn.toolCalls), verdict?.feedback);
+    reviewState.submittedAnswer = flaggedContent;
+    reviewState.settled = true;
+    return {
+      text: 'The maximum number of review rounds has been reached. Your latest answer has been delivered to the user with a reviewer note. End your turn now without repeating the answer.',
+    };
+  }
+
   private async completeTurn(
     threadId: string,
     session: ThreadSession,
@@ -1277,7 +1533,18 @@ export class AgentService {
     let costOverride: number | undefined;
     let errorOverride: string | undefined;
 
-    if (session.orchestratorProfile && session.orchestrator && !isError && !aborted) {
+    if (
+      session.orchestratorProfile &&
+      session.orchestrator &&
+      session.reviewState?.submittedAnswer !== undefined
+    ) {
+      isError = false;
+      session.turn.turnText = session.reviewState.submittedAnswer;
+      session.turn.blocks = stripBeforeAnswerMarker(
+        session.turn.blocks,
+        session.reviewState.submittedAnswer,
+      );
+    } else if (session.orchestratorProfile && session.orchestrator && !isError && !aborted) {
       const hasSpecialistDelegation = session.turn.toolCalls.some(
         (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
       );

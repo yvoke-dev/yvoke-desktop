@@ -6,7 +6,13 @@ import { z } from 'zod';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ReviewVerdict } from '../../shared/types';
-import { REVIEW_SERVER_NAME, SUBMIT_REVIEW_DESCRIPTION, submitReviewCall } from './reviewTools';
+import {
+  REVIEW_SERVER_NAME,
+  SUBMIT_ANSWER_DESCRIPTION,
+  SUBMIT_REVIEW_DESCRIPTION,
+  submitAnswerCall,
+  submitReviewCall,
+} from './reviewTools';
 
 /**
  * Build a per-review-turn in-process MCP server that captures the reviewer's structured verdict
@@ -46,6 +52,39 @@ export function buildReviewServer(onVerdict: (verdict: ReviewVerdict) => void): 
         },
         async (args): Promise<CallToolResult> => {
           const res = submitReviewCall(args, onVerdict);
+          return {
+            content: [{ type: 'text', text: res.text }],
+            ...(res.isError ? { isError: true } : {}),
+          };
+        },
+      ),
+    ],
+  });
+}
+
+/**
+ * Build the in-process MCP server mounted on the Orchestrator session so the lead agent submits its
+ * candidate answer via `mcp__review__submit_answer({ answer })`.
+ */
+export function buildSubmitAnswerServer(
+  onSubmitAnswer: (answer: string) => Promise<{ text: string; isError?: boolean }>,
+): McpSdkServerConfigWithInstance {
+  return createSdkMcpServer({
+    name: REVIEW_SERVER_NAME,
+    version: '1.0.0',
+    instructions:
+      'Candidate answer submission server. Call submit_answer with your complete Markdown answer once ready.',
+    tools: [
+      tool(
+        'submit_answer',
+        SUBMIT_ANSWER_DESCRIPTION,
+        {
+          answer: z
+            .string()
+            .describe('The complete, cited Markdown answer to deliver to the user after review.'),
+        },
+        async (args): Promise<CallToolResult> => {
+          const res = await submitAnswerCall(args, onSubmitAnswer);
           return {
             content: [{ type: 'text', text: res.text }],
             ...(res.isError ? { isError: true } : {}),

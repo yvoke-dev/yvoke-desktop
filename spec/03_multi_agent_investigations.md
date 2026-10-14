@@ -39,12 +39,12 @@ profiles and the playbooks; there is no way to build one from the app.
   specialists do. The reviewer emits a plain verdict rather than prose, so those rules would be noise
   in its context. The playbook is layered last, so a role's own rules win any conflict.
 - **The reviewer sees the raw evidence the specialists retrieved, scoped to what the answer cites.**
-  When the lead finishes its draft (preceded by `<<<FINAL_ANSWER>>>`), the app harvests the tool results
-  the specialists actually received from the knowledge base, strips any chunk the draft does not cite,
-  deduplicates passages retrieved by more than one specialist, and hands that digest to the reviewer
-  alongside the original question and the candidate answer. Across revision rounds, the reviewer's own
-  session is resumed and receives only newly cited sources that were not already shown in an earlier
-  round. The reviewer may check that the cited ids are real and submits a structured verdict (`approved`,
+  When the lead submits its candidate answer, the app harvests the tool results the specialists
+  actually received from the knowledge base, strips any chunk the draft does not cite, deduplicates
+  passages retrieved by more than one specialist, and hands that digest to the reviewer alongside the
+  original question and the candidate answer. Across revision rounds, the reviewer's own session is
+  resumed and receives only newly cited sources that were not already shown in an earlier round. The
+  reviewer may check that the cited ids are real and submits a structured verdict (`approved`,
   `feedback`, `unsupported_claims`, and `citation_fixes`). It cannot search or open sections on its own:
   what it is entitled to see is already in front of it, so a claim the evidence does not settle is a
   finding to report rather than a reason to go looking.
@@ -53,7 +53,7 @@ profiles and the playbooks; there is no way to build one from the app.
   spending a whole review round learning the same thing. This says nothing about whether a real
   source supports the claim it sits on — that stays the reviewer's job.
 - **Review is driven by the app in code, and cannot be switched off.** Every turn that consulted at
-  least one specialist is automatically handed to the reviewer once the lead finishes its draft. A turn
+  least one specialist is automatically handed to the reviewer once the lead submits its draft. A turn
   the reviewer rejected — or on which it returned no readable verdict — is handed the structured
   feedback (*citation fixes* repairable from existing sources versus *unsupported claims* that need new
   evidence) and the deduplicated evidence back to the lead to revise, up to the configured number of
@@ -61,9 +61,9 @@ profiles and the playbooks; there is no way to build one from the app.
   the sources already in hand without consulting any specialist again. If the reviewer itself fails to
   run, a non-blank draft still ships with an *unreviewed* warning rather than throwing away the work.
 - **Pre-answer notes and held-back drafts are discarded from the answer, not from the record.** Anything
-  the lead writes before `<<<FINAL_ANSWER>>>` and any draft rejected by the reviewer are stripped so the
-  delivered answer contains only the final answer prose — while each candidate draft and verdict remains
-  readable inside the reviewer's card and in the uploaded trace.
+  the lead writes while coordinating specialists and any draft rejected by the reviewer are stripped so
+  the delivered answer contains only the final answer prose — while each candidate draft and verdict
+  remains readable inside the reviewer's card and in the uploaded trace.
 - **Out of rounds, the answer ships flagged.** The warning (including the reviewer's notes) goes into
   the answer's own text, not only into the on-screen badge — that is what gets synced to the server and
   what the copy button copies.

@@ -172,7 +172,18 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
       setMcpServers: setMcpServersSpy,
     };
   };
-  return { ...actual, query };
+  const createSdkMcpServer = (cfg: Record<string, any>) => {
+    const res = actual.createSdkMcpServer(cfg as any);
+    const handlers: Record<string, (args: any) => Promise<any>> = {};
+    for (const t of (cfg.tools as Array<{ name?: string; handler?: (args: any, extra: any) => Promise<any> }>) ?? []) {
+      if (t && typeof t.name === 'string' && typeof t.handler === 'function') {
+        const fn = t.handler;
+        handlers[t.name] = (args: any) => fn(args, {});
+      }
+    }
+    return Object.assign(res, { _testHandlers: handlers });
+  };
+  return { ...actual, query, createSdkMcpServer };
 });
 
 const { AgentService } = await import('../src/main/agent/AgentService');
@@ -2315,6 +2326,659 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
     >;
     expect(complete.message.content).toBe('Direct greeting without delegation.');
     expect(complete.message.review).toBeUndefined();
+    svc.closeAll();
+  });
+
+  async function invokeSubmitAnswer(
+    session: { options: Record<string, unknown> },
+    emit: (m: unknown) => void,
+    callId: string,
+    answer: string,
+  ): Promise<{ text: string; isError?: boolean }> {
+    emit({
+      type: 'assistant',
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: callId,
+            name: 'mcp__review__submit_answer',
+            input: { answer },
+          },
+        ],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const reviewSrv = (session.options.mcpServers as Record<string, any> | undefined)?.review;
+    if (!reviewSrv || !reviewSrv._testHandlers?.submit_answer) {
+      throw new Error('mcpServers.review.submit_answer handler not mounted on orchestrator session');
+    }
+    const res = await reviewSrv._testHandlers.submit_answer({ answer });
+    const text = res?.content?.[0]?.text ?? '';
+    const isError = Boolean(res?.isError);
+    emit({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: callId,
+            content: text,
+            is_error: isError,
+          },
+        ],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    return { text, isError };
+  }
+
+  it('7. Task 4.2: runs Reviewer inside submit_answer MCP tool handler on approval, strips intermediate orchestrator text, and ignores redundant second submit_answer calls', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+
+    let firstToolReply = '';
+    let secondToolReply = '';
+
+    h.turnHandler = async (session, _promptText, emit, id) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: `orch-sub-ans-${id}`,
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-1', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        emit({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'I have synthesized the USR findings and will now submit.' }],
+          },
+        });
+        const first = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-ans-1',
+          `The USR table stores user accounts [${CITED_ID}].`,
+        );
+        firstToolReply = first.text;
+
+        // Redundant second call after settled must NOT spawn a second Reviewer query or overwrite answer
+        const second = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-ans-2',
+          'Accidental duplicate submission that must be ignored.',
+        );
+        secondToolReply = second.text;
+
+        emit({
+          type: 'result',
+          subtype: 'error_max_turns',
+          is_error: true,
+          result: 'Maximum turns reached after submit_answer already settled',
+          usage: { input_tokens: 110, output_tokens: 45 },
+        });
+      } else {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'rev-sub-ans-1',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'rev-submit-1',
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: true,
+                  feedback: 'Verified via submit_answer tool.',
+                  unsupported_claims: [],
+                  citation_fixes: [],
+                },
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'rev-submit-1',
+                content: 'Verdict recorded.',
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: { input_tokens: 35, output_tokens: 15 },
+        });
+      }
+    };
+
+    await ask(svc, meta, 'What does the USR table store?');
+
+    // Only 1 orchestrator session + 1 reviewer session (the 2nd submit_answer was short-circuited)
+    expect(h.sessions).toHaveLength(2);
+    expect(firstToolReply).toContain('APPROVED');
+    expect(secondToolReply).toContain('APPROVED');
+
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete).toBeDefined();
+    expect(complete.isError).toBe(false);
+    expect(complete.message.content).toBe(`The USR table stores user accounts [${CITED_ID}].`);
+    // Intermediate reasoning text stripped; only final submitted answer remains in blocks
+    expect(complete.message.blocks?.map((b) => b.text).filter(Boolean)).toEqual([
+      `The USR table stores user accounts [${CITED_ID}].`,
+    ]);
+    // Internal submit_answer tool call must not appear in message.toolCalls
+    expect(complete.message.toolCalls?.some((c) => c.name === 'mcp__review__submit_answer')).toBe(false);
+    expect(complete.message.review).toEqual({
+      outcome: 'approved',
+      feedback: 'Verified via submit_answer tool.',
+    });
+    expect(complete.usage.inputTokens).toBe(145);
+    expect(complete.usage.outputTokens).toBe(60);
+    svc.closeAll();
+  });
+
+  it('8. Task 4.2: returns buildRevisionPrompt as submit_answer tool result on rejection so orchestrator revises in-turn and resumes Reviewer session on second submit_answer call', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+
+    const CHUNK_A = 'aaaaaaaa-1111-2222-3333-444444444444';
+    const CHUNK_B = 'bbbbbbbb-1111-2222-3333-444444444444';
+    const TWO_CHUNKS_AB = [
+      'Found 2 chunks:',
+      `### doc/Part A  (score=0.900  id=${CHUNK_A}  doc_id=${DOC_ID})`,
+      '_Section: A_',
+      'Body of chunk A.',
+      '',
+      `### doc/Part B  (score=0.850  id=${CHUNK_B}  doc_id=${DOC_ID})`,
+      '_Section: B_',
+      'Body of chunk B.',
+    ].join('\n');
+
+    let revRound = 0;
+    let firstSubmitResult = '';
+    let secondSubmitResult = '';
+
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-in-turn-rev',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-ab', 'oim-schema', TWO_CHUNKS_AB);
+
+        // Round 0 submission (rejected by Reviewer)
+        const r0 = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-ans-r0',
+          `Draft 1 citing only A [${CHUNK_A}].`,
+        );
+        firstSubmitResult = r0.text;
+
+        // Round 1 submission in the SAME orchestrator turn (approved by Reviewer)
+        const r1 = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-ans-r1',
+          `Revised draft citing A [${CHUNK_A}] and B [${CHUNK_B}].`,
+        );
+        secondSubmitResult = r1.text;
+
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: { input_tokens: 120, output_tokens: 55 },
+        });
+      } else {
+        if (revRound === 0) {
+          revRound++;
+          emit({
+            type: 'system',
+            subtype: 'init',
+            session_id: 'rev-session-in-tool',
+            mcp_servers: [],
+            tools: [],
+            slash_commands: [],
+          });
+          emit({
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'rev-sub-0',
+                  name: 'mcp__review__submit_review',
+                  input: {
+                    approved: false,
+                    feedback: 'Add citation for chunk B.',
+                    unsupported_claims: [],
+                    citation_fixes: [`Also cite [${CHUNK_B}] for Part B.`],
+                  },
+                },
+              ],
+            },
+          });
+          emit({
+            type: 'user',
+            message: {
+              content: [{ type: 'tool_result', tool_use_id: 'rev-sub-0', content: 'Verdict recorded.' }],
+            },
+          });
+          emit({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            result: '',
+            usage: { input_tokens: 30, output_tokens: 15 },
+          });
+        } else {
+          revRound++;
+          emit({
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'rev-sub-1',
+                  name: 'mcp__review__submit_review',
+                  input: {
+                    approved: true,
+                    feedback: 'Both A and B are properly cited.',
+                  },
+                },
+              ],
+            },
+          });
+          emit({
+            type: 'user',
+            message: {
+              content: [{ type: 'tool_result', tool_use_id: 'rev-sub-1', content: 'Verdict recorded.' }],
+            },
+          });
+          emit({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            result: '',
+            usage: { input_tokens: 25, output_tokens: 10 },
+          });
+        }
+      }
+    };
+
+    await ask(svc, meta, 'Explain Part A and Part B.');
+
+    // Orchestrator ran in a SINGLE turn (pushed.length === 1), with 2 Reviewer sessions
+    expect(h.sessions).toHaveLength(3);
+    expect(h.sessions[0].pushed).toHaveLength(1);
+    expect(firstSubmitResult).toContain('## Citation fixes — no research needed');
+    expect(firstSubmitResult).toContain(`Also cite [${CHUNK_B}] for Part B.`);
+    expect(firstSubmitResult).toContain('submit the complete revised answer via `submit_answer`');
+    expect(secondSubmitResult).toContain('APPROVED');
+
+    // Reviewer round 1 resumed 'rev-session-in-tool' and received only newly cited CHUNK_B
+    const revRound1 = h.sessions[2];
+    expect(revRound1.options.resume).toBe('rev-session-in-tool');
+    expect(revRound1.pushed[0]).toContain('## Revised candidate answer');
+    expect(revRound1.pushed[0]).toContain('Body of chunk B.');
+    expect(revRound1.pushed[0]).not.toContain('Body of chunk A.');
+
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete.message.content).toBe(`Revised draft citing A [${CHUNK_A}] and B [${CHUNK_B}].`);
+    expect(complete.message.review).toEqual({
+      outcome: 'approved',
+      feedback: 'Both A and B are properly cited.',
+    });
+    // Usage: orchestrator (120/55) + reviewer round 0 (30/15) + reviewer round 1 (25/10) = 175/80
+    expect(complete.usage.inputTokens).toBe(175);
+    expect(complete.usage.outputTokens).toBe(80);
+    svc.closeAll();
+  });
+
+  it('9. Task 4.2: handles exhausted maxReviewRounds, Reviewer failure, and zero-specialist delegation inside submit_answer', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta, {
+      getSettings: () => ({
+        ...settings(),
+        orchestrator: {
+          ...settings().orchestrator!,
+          maxReviewRounds: 1,
+        },
+      }),
+    });
+
+    let revRound = 0;
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-exhaust-in-tool',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-1', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        await invokeSubmitAnswer(session, emit, 'sub-1', `Attempt 1 [${CITED_ID}].`);
+        await invokeSubmitAnswer(session, emit, 'sub-2', `Attempt 2 [${CITED_ID}].`);
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: { input_tokens: 50, output_tokens: 20 },
+        });
+      } else {
+        revRound++;
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: `rev-sub-${revRound}`,
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: false,
+                  feedback: revRound === 1 ? 'First rejection' : 'Second rejection note',
+                  unsupported_claims: ['Unverified'],
+                },
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'user',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: `rev-sub-${revRound}`, content: 'Verdict recorded.' }],
+          },
+        });
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: { input_tokens: 10, output_tokens: 5 },
+        });
+      }
+    };
+
+    await ask(svc, meta, 'Exhaust review rounds via submit_answer');
+    const complete1 = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete1.message.content).toContain(`Attempt 2 [${CITED_ID}].`);
+    expect(complete1.message.content).toContain(
+      'This answer did not pass automated review after 2 attempt(s). Reviewer notes: Second rejection note',
+    );
+
+    // Turn 2: Reviewer fails inside submit_answer -> delivers draft + unreviewedNote()
+    events = [];
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emitSpecialistDelegation(emit, 'spec-2', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        await invokeSubmitAnswer(session, emit, 'sub-err', `Draft when reviewer fails [${CITED_ID}].`);
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: {},
+        });
+      } else {
+        emit({
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          result: 'Reviewer crashed inside submit_answer',
+          usage: {},
+        });
+      }
+    };
+
+    await ask(svc, meta, 'Reviewer fails inside submit_answer');
+    const complete2 = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete2.isError).toBe(false);
+    expect(complete2.message.content).toContain(`Draft when reviewer fails [${CITED_ID}].`);
+    expect(complete2.message.content).toContain(
+      'This answer could not be checked — the automated review failed to run',
+    );
+
+    // Turn 3: Zero specialist delegations inside submit_answer -> bypasses Reviewer query
+    events = [];
+    const sessionsBefore = h.sessions.length;
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        await invokeSubmitAnswer(session, emit, 'sub-direct', 'Direct answer via submit_answer.');
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: {},
+        });
+      }
+    };
+
+    await ask(svc, meta, 'Hello via submit_answer');
+    expect(h.sessions.length).toBe(sessionsBefore); // No Reviewer session spawned
+    const complete3 = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete3.message.content).toBe('Direct answer via submit_answer.');
+    expect(complete3.message.review).toBeUndefined();
+    svc.closeAll();
+  });
+
+  it('10. Task 4.2: preserves mcpServers.review across warm-session Entra token rotation and falls back to runCodeDrivenReview when revision round omits submit_answer', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    let currentToken = 'Bearer tok-1';
+    const svc = new AgentService({
+      getSettings: () => ({ ...settings(), serverAuthMode: 'entra' }),
+      mcpAuthProvider: { headers: async () => ({ Authorization: currentToken }) },
+      emit: (e) => events.push(e),
+      onSessionId: (_threadId, sessionId, profile) => {
+        meta.sessionId = sessionId;
+        meta.sessionProfile = profile;
+      },
+      onTurnPersist: () => undefined,
+      sandboxDir,
+      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
+      } as never,
+      getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
+    });
+
+    // Turn 1: initial orchestrator session
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-warm-1',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        await invokeSubmitAnswer(session, emit, 'sub-w1', 'Turn 1 answer.');
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      }
+    };
+    await ask(svc, meta, 'Turn 1');
+    expect(h.sessions).toHaveLength(1);
+
+    // Turn 2: Entra token rotates -> setMcpServers must preserve mcpServers.review!
+    // Also test hybrid fallback: round 0 calls submit_answer (rejected), round 1 omits submit_answer and outputs plain text -> completeTurn runs runCodeDrivenReview fallback!
+    currentToken = 'Bearer tok-2';
+    let revCount = 0;
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emitSpecialistDelegation(emit, 'spec-w2', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        emit({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'Stale Round 0 prose that must be cleared on rejection.' }],
+          },
+        });
+        // Round 0 calls submit_answer -> rejected
+        await invokeSubmitAnswer(session, emit, 'sub-w2-r0', `Draft 1 [${CITED_ID}].`);
+        // Model forgets to call submit_answer on revision and ends turn with text!
+        emit({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: `Fallback revised answer [${CITED_ID}].` }],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      } else {
+        revCount++;
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: `rev-w2-${revCount}`,
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: revCount === 2,
+                  feedback: revCount === 1 ? 'Needs revision' : 'Fallback approved!',
+                },
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'user',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: `rev-w2-${revCount}`, content: 'Verdict recorded.' }],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      }
+    };
+
+    events = [];
+    await ask(svc, meta, 'Turn 2 with token rotation and fallback');
+
+    expect(h.sessions[0].setMcpServersSpy).toHaveBeenCalledTimes(1);
+    const updatedServers = h.sessions[0].setMcpServersSpy.mock.calls[0][0];
+    expect(updatedServers).toHaveProperty(MCP_SERVER_NAME);
+    expect(updatedServers).toHaveProperty('review');
+
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete.message.content).toBe(`Fallback revised answer [${CITED_ID}].`);
+    expect(complete.message.review).toEqual({
+      outcome: 'approved',
+      feedback: 'Fallback approved!',
+    });
+    svc.closeAll();
+  });
+
+  it('11. Task 4.2: interrupts activeReviewerQuery when user calls interrupt(threadId) during in-tool submit_answer review and returns isError without unreviewedNote', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+
+    let reviewerStartedResolve: (() => void) | null = null;
+    const reviewerStarted = new Promise<void>((resolve) => {
+      reviewerStartedResolve = resolve;
+    });
+    let submitRes: { text: string; isError?: boolean } | null = null;
+
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-int-in-tool',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-1', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        submitRes = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-int-1',
+          `Draft before interrupt [${CITED_ID}].`,
+        );
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: {},
+        });
+      } else {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'rev-int-in-tool',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        reviewerStartedResolve?.();
+        // Wait until interrupted by user
+      }
+    };
+
+    await svc.sendMessage(meta, 'Interrupt me during submit_answer review');
+    await reviewerStarted;
+
+    expect(h.sessions).toHaveLength(2);
+    await svc.interrupt(meta.id);
+    expect(h.sessions[1].interruptSpy).toHaveBeenCalledTimes(1);
+
+    for (let i = 0; i < 200; i++) {
+      if (submitRes !== null) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(submitRes).toEqual({ text: 'Turn interrupted by user.', isError: true });
+    expect(events.some((e) => e.kind === 'subagent-complete' && e.subagentType === 'reviewer')).toBe(false);
+    expect(events.some((e) => e.kind === 'review-enforced')).toBe(false);
     svc.closeAll();
   });
 });

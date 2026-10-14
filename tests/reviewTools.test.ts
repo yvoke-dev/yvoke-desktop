@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { isCitationOnlyVerdict, type ReviewVerdict } from '../src/shared/types';
 import {
   formatVerdictSummary,
+  ORCHESTRATOR_SUBMIT_ANSWER_TOOL,
+  parseSubmitAnswerArgs,
   REVIEW_SERVER_NAME,
   REVIEW_SUBMIT_TOOL,
+  submitAnswerCall,
   submitReviewCall,
 } from '../src/main/agent/reviewTools';
-import { buildReviewServer } from '../src/main/agent/reviewServer';
+import { buildReviewServer, buildSubmitAnswerServer } from '../src/main/agent/reviewServer';
 
 /**
  * Unit tests for `submit_review` (`reviewTools.ts` & `reviewServer.ts`) — ported from
@@ -16,6 +19,7 @@ describe('submitReviewCall (SubmitReviewToolTest parity)', () => {
   it('exposes canonical review server and tool names', () => {
     expect(REVIEW_SERVER_NAME).toBe('review');
     expect(REVIEW_SUBMIT_TOOL).toBe('mcp__review__submit_review');
+    expect(ORCHESTRATOR_SUBMIT_ANSWER_TOOL).toBe('mcp__review__submit_answer');
   });
 
   it('approvedTrue_capturesApprovedVerdict_returnsRecorded', () => {
@@ -163,12 +167,49 @@ describe('formatVerdictSummary', () => {
   });
 });
 
-describe('buildReviewServer', () => {
+describe('buildReviewServer & buildSubmitAnswerServer', () => {
   it('creates an in-process SDK MCP server named review', () => {
     const verdicts: ReviewVerdict[] = [];
     const server = buildReviewServer((v) => verdicts.push(v));
     expect(server.type).toBe('sdk');
     expect(server.name).toBe('review');
     expect(server.instance).toBeDefined();
+  });
+
+  it('parseSubmitAnswerArgs trims valid answer and rejects missing/blank/non-string answer', () => {
+    expect(parseSubmitAnswerArgs({ answer: '  Grounded answer [11111111].  ' })).toBe(
+      'Grounded answer [11111111].',
+    );
+    expect(parseSubmitAnswerArgs(JSON.stringify({ answer: 'From JSON string' }))).toBe(
+      'From JSON string',
+    );
+    expect(parseSubmitAnswerArgs({})).toBe('');
+    expect(parseSubmitAnswerArgs({ answer: '   \n  ' })).toBe('');
+    expect(parseSubmitAnswerArgs(null)).toBe('');
+  });
+
+  it('submitAnswerCall rejects empty/whitespace answer with isError: true without invoking handler', async () => {
+    const received: string[] = [];
+    const res = await submitAnswerCall({ answer: '   ' }, async (ans) => {
+      received.push(ans);
+      return { text: 'APPROVED' };
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('answer must be a non-empty string');
+    expect(received).toHaveLength(0);
+  });
+
+  it('submitAnswerCall invokes async handler with trimmed answer and returns handler result', async () => {
+    const received: string[] = [];
+    const res = await submitAnswerCall({ answer: '  The USR table [11111111]. ' }, async (ans) => {
+      received.push(ans);
+      return { text: 'APPROVED — delivered to user.' };
+    });
+    expect(res).toEqual({ text: 'APPROVED — delivered to user.' });
+    expect(received).toEqual(['The USR table [11111111].']);
+
+    const server = buildSubmitAnswerServer(async (ans) => ({ text: `Reviewed: ${ans}` }));
+    expect(server.type).toBe('sdk');
+    expect(server.name).toBe('review');
   });
 });

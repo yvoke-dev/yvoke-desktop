@@ -11,12 +11,59 @@ import type { ReviewVerdict } from '../../shared/types';
 export const REVIEW_SERVER_NAME = 'review';
 export const REVIEW_TOOL_PREFIX = `mcp__${REVIEW_SERVER_NAME}__`;
 export const REVIEW_SUBMIT_TOOL = `${REVIEW_TOOL_PREFIX}submit_review`;
+export const ORCHESTRATOR_SUBMIT_ANSWER_TOOL = `${REVIEW_TOOL_PREFIX}submit_answer`;
 
 export const SUBMIT_REVIEW_DESCRIPTION =
   'Submit your final review verdict. You MUST call this exactly once as your ' +
   'last action. Set approved=true only if every claim in the answer is supported ' +
   'by the supplied evidence; otherwise approved=false with concrete feedback the ' +
   'orchestrator can act on.';
+
+export const SUBMIT_ANSWER_DESCRIPTION =
+  'Submit your complete, user-facing Markdown answer for automated review and delivery. ' +
+  'Call this tool once you have gathered all necessary specialist evidence and verified every ' +
+  'citation id via verify_citations. If the reviewer approves your answer, it is delivered to ' +
+  'the user and you must end your turn immediately without repeating the answer. If the reviewer ' +
+  'rejects your answer, the tool returns the reviewer feedback and evidence so you can revise and ' +
+  'call submit_answer again.';
+
+/**
+ * Extract and trim the `answer` string from raw `submit_answer` arguments, returning `''` when
+ * missing, non-string, or malformed.
+ */
+export function parseSubmitAnswerArgs(rawArgs: unknown): string {
+  try {
+    let parsed: unknown = rawArgs;
+    if (typeof rawArgs === 'string') {
+      parsed = JSON.parse(rawArgs);
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return '';
+    }
+    const answer = (parsed as Record<string, unknown>).answer;
+    return typeof answer === 'string' ? answer.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Validate `submit_answer` arguments and invoke `onSubmitAnswer(answer)`. Rejects missing or
+ * whitespace-only `answer` with `isError: true` without invoking `onSubmitAnswer`.
+ */
+export async function submitAnswerCall(
+  rawArgs: unknown,
+  onSubmitAnswer: (answer: string) => Promise<{ text: string; isError?: boolean }>,
+): Promise<{ text: string; isError?: boolean }> {
+  const answer = parseSubmitAnswerArgs(rawArgs);
+  if (answer.length === 0) {
+    return {
+      text: 'Error: answer must be a non-empty string.',
+      isError: true,
+    };
+  }
+  return onSubmitAnswer(answer);
+}
 
 function coerceStringArray(val: unknown): string[] {
   if (!Array.isArray(val)) return [];

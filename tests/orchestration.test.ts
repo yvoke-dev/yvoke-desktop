@@ -275,10 +275,11 @@ describe('buildOrchestrator prompt composition', () => {
     expect(built.reviewer.playbookName).toBe('oim-orchestrator-reviewer');
   });
 
-  it('includes ANSWER_MARKER_CONTRACT in the orchestrator prompt and does not instruct calling subagent_type: "reviewer"', async () => {
+  it('includes SUBMIT_ANSWER_CONTRACT in the orchestrator prompt and does not instruct calling subagent_type: "reviewer"', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     const p = built.agents[ORCHESTRATOR_AGENT].prompt;
-    expect(p).toContain('<<<FINAL_ANSWER>>>');
+    expect(p).toContain('submit_answer');
+    expect(p).not.toContain('<<<FINAL_ANSWER>>>');
     expect(p).not.toContain('subagent_type: "reviewer"');
   });
 
@@ -339,13 +340,13 @@ describe('buildOrchestrator tool grants', () => {
     getText: async (name: string) => `PLAYBOOK(${name})`,
   } as unknown as McpPrompts;
 
-  it('grants the orchestrator verify_citations — its playbook makes it mandatory', async () => {
-    // Web parity: OrchestrationService grants List.of("ask_clarifying_question",
-    // "verify_citations"). Without it the pre-flight check the playbook requires is impossible,
-    // and a fabricated id costs a full ~50k-token review round to learn what one call answers.
+  it('grants the orchestrator verify_citations and submit_answer — its playbook and runtime contract make them mandatory', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('verify_citations'));
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
+    expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain('mcp__review__submit_answer');
+    // Specialist must not receive submit_answer
+    expect(built.agents['oim-access-governance'].tools).not.toContain('mcp__review__submit_answer');
   });
 
   it('keeps the reviewer validate-only — verify_citations and submit_review, nothing else', async () => {
@@ -374,6 +375,7 @@ describe('buildOrchestrator tool grants', () => {
       DELEGATE_ALLOW_TOKEN,
       qualifyTool('ask_clarifying_question'),
       qualifyTool('verify_citations'),
+      'mcp__review__submit_answer',
     ]);
     expect(built.reviewer.tools).toEqual([
       qualifyTool('verify_citations'),

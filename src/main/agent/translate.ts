@@ -1,6 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentEvent, MessageBlock, ReviewStatus, ToolCallInfo, UsageTotals } from '../../shared/types';
 import { clarificationState, isClarificationTool, parseVerdict } from '../../shared/types';
+import { ORCHESTRATOR_SUBMIT_ANSWER_TOOL } from './reviewTools';
 
 /** In-stream tool_use name for a delegation (the allow-list token is 'Task'; see orchestration.ts). */
 const DELEGATE_TOOL_NAME = 'Agent';
@@ -25,6 +26,8 @@ export interface TurnContext {
   /** Orchestrator mode: Agent (delegation) tool calls keyed by their tool_use id, for attributing
    *  forwarded sub-agent messages (parent_tool_use_id) back to the delegation that spawned them. */
   agentCalls: Map<string, ToolCallInfo>;
+  /** Tool-use IDs of internal protocol tools (e.g. `mcp__review__submit_answer`) suppressed from UI cards. */
+  internalToolUseIds: Set<string>;
   /** Set once the runtime has re-prompted this turn for a missing review pass (at most once). */
   reviewEnforced?: boolean;
   /** Revision rounds the runtime has driven this turn after a rejected/unclear verdict. */
@@ -46,6 +49,7 @@ export function newTurnContext(threadId: string, orchestratorMode = false): Turn
     toolCalls: [],
     blocks: [],
     agentCalls: new Map(),
+    internalToolUseIds: new Set(),
   };
 }
 
@@ -222,7 +226,13 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
         } else if (block.type === 'text' && typeof block.text === 'string') {
           blockText += block.text;
         } else if (block.type === 'tool_use') {
-          const call: ToolCallInfo = { id: String(block.id), name: String(block.name), input: block.input };
+          const toolName = String(block.name);
+          const toolId = String(block.id);
+          if (toolName === ORCHESTRATOR_SUBMIT_ANSWER_TOOL) {
+            ctx.internalToolUseIds.add(toolId);
+            continue;
+          }
+          const call: ToolCallInfo = { id: toolId, name: toolName, input: block.input };
           if (ctx.orchestratorMode && call.name === DELEGATE_TOOL_NAME) {
             const input = (block.input ?? {}) as { subagent_type?: string; prompt?: string; description?: string };
             call.subagentType = input.subagent_type;
@@ -281,6 +291,9 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
         const result = stringifyToolResult(block.content);
         const isError = block.is_error === true;
         const toolUseId = String(block.tool_use_id);
+        if (ctx.internalToolUseIds.has(toolUseId)) {
+          continue;
+        }
 
         if (parentId) {
           // Result of a tool the sub-agent itself called → attribute to the delegation's nested trace.

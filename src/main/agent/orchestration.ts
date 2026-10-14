@@ -21,7 +21,7 @@ import {
 import { COMPUTE_TOOLS, isComputeTool } from './computeTools';
 import { citeScoped, deduped, type SentLedger } from './evidenceDigest';
 import { isWebTool, webToolDeclared } from './policy';
-import { REVIEW_SUBMIT_TOOL } from './reviewTools';
+import { ORCHESTRATOR_SUBMIT_ANSWER_TOOL, REVIEW_SUBMIT_TOOL } from './reviewTools';
 import type { McpPrompts } from './McpPrompts';
 import { loadDesignatedSystemPrompt } from './systemPrompt';
 
@@ -79,21 +79,23 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
 export const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`, REVIEW_SUBMIT_TOOL];
 
 /**
- * The boundary the orchestrator marks between anything it says about the work and the answer
- * (ported from `OrchestrationService.ANSWER_MARKER` in `yvoke-web`).
+ * Fallback delimiter if the model ever emits `<<<FINAL_ANSWER>>>` in plain text without calling
+ * `submit_answer`.
  */
 export const ANSWER_MARKER = '<<<FINAL_ANSWER>>>';
 
 /**
- * Stated once, in the system prompt every orchestrator turn receives — the role's output contract,
- * ported from `OrchestrationService.ANSWER_MARKER_CONTRACT`.
+ * Output contract for the orchestrator: submit the final answer via `submit_answer({ answer })`.
  */
-export const ANSWER_MARKER_CONTRACT =
-  'Your reply to a question is delivered to the user verbatim as the answer. Write the line ' +
-  ANSWER_MARKER +
-  ' on its own immediately before the answer begins, and put nothing after that line except the ' +
-  'answer itself. Anything before it — planning, notes on what you changed, sign-offs — ' +
-  'is discarded, so it is the place for that, not the answer.';
+export const SUBMIT_ANSWER_CONTRACT =
+  'When your answer is ready and every citation id has been checked with `verify_citations`, ' +
+  'call `submit_answer` (`mcp__review__submit_answer`) with your complete, cited Markdown answer ' +
+  'in the `answer` parameter. Do not write the user-facing answer as plain text outside `submit_answer`.';
+
+/**
+ * Keep `ANSWER_MARKER_CONTRACT` exported for backwards compatibility with existing unit tests.
+ */
+export const ANSWER_MARKER_CONTRACT = SUBMIT_ANSWER_CONTRACT;
 
 /**
  * Everything after the LAST marker, or the whole text when there is none
@@ -144,12 +146,15 @@ result is that specialist's grounded, cited answer. You may delegate to several 
 parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total.
 
 ### Output & Automated Review
-${ANSWER_MARKER_CONTRACT}
+${SUBMIT_ANSWER_CONTRACT}
 
-When your turn ends, the runtime automatically validates your candidate answer against the raw evidence
-retrieved by the specialists. If the reviewer rejects your draft, the runtime hands the feedback and
-relevant source evidence back to you for a revision round — up to ${maxReviewRounds}. Fix the answer and
-precede the revised answer with ${ANSWER_MARKER} on its own line; do not argue with the reviewer.
+When you call \`submit_answer\`, the runtime automatically validates your candidate answer against the
+raw evidence retrieved by the specialists:
+- If the reviewer **approves** your answer, \`submit_answer\` returns an approval confirmation and your
+  answer is delivered to the user — end your turn immediately without repeating the answer.
+- If the reviewer **rejects** your draft, \`submit_answer\` returns the reviewer feedback and relevant
+  source evidence as its tool result (for up to ${maxReviewRounds} revision rounds). Revise the answer
+  and call \`submit_answer\` again with the complete revised answer; do not argue with the reviewer.
 Never add a "did not pass review" note yourself: the runtime appends one if the rounds run out.
 
 Available specialists (\`subagent_type\` → coverage):
@@ -343,7 +348,8 @@ export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
     sb += '\n';
   }
 
-  sb += 'Revise the answer you just gave. Keep everything the reviewer did not object to.';
+  sb +=
+    'Revise the answer you just gave and submit the complete revised answer via `submit_answer`. Keep everything the reviewer did not object to.';
   if (isCitationOnlyVerdict(verdict)) {
     sb +=
       ' Every objection above is a citation fix, so this revision needs no new ' +
@@ -518,6 +524,7 @@ export async function buildOrchestrator(
     DELEGATE_ALLOW_TOKEN,
     `${MCP_TOOL_PREFIX}ask_clarifying_question`,
     `${MCP_TOOL_PREFIX}verify_citations`,
+    ORCHESTRATOR_SUBMIT_ANSWER_TOOL,
   ];
 
   agents[ORCHESTRATOR_AGENT] = {
