@@ -127,13 +127,31 @@ describe('executeCode — positive evaluation', () => {
     });
   });
 
-  it('drains Promise.resolve microtasks queued during synchronous evaluation', () => {
+  it('drains Promise.resolve microtasks, resolves handled rejections, and returns empty result for never-settling promises', () => {
     const res = executeCode('let x = 0; Promise.resolve(42).then(v => { x = v; });');
     expect(res.result).toBe('');
     const res2 = executeCode(
       'Promise.resolve("microtask-done").then(v => console.log(v)); "sync-result"',
     );
     expect(res2).toEqual({ result: 'sync-result', stdout: 'microtask-done' });
+    expect(executeCode('Promise.resolve(42)')).toEqual({ result: '42', stdout: '' });
+
+    const pending = executeCode('new Promise(() => {})');
+    expect(pending).toEqual({ result: '', stdout: '' });
+    expect(formatExecuteCodeOutput(pending)).toBe('(no output)');
+
+    expect(executeCode('Promise.reject(new Error("caught")).catch(() => "recovered")')).toEqual({
+      result: 'recovered',
+      stdout: '',
+    });
+    expect(
+      executeCode(
+        '(async () => { try { await Promise.reject(new Error("caught-await")); } catch { return "recovered-await"; } })()',
+      ),
+    ).toEqual({
+      result: 'recovered-await',
+      stdout: '',
+    });
   });
 
   it('captures console.log, console.info, console.warn, and console.error in order', () => {
@@ -173,7 +191,7 @@ describe('executeCode — negative, security & boundary tests (Gate 2)', () => {
     expect(() => executeCode('return (')).toThrow(/SyntaxError/);
   });
 
-  it('3. surfaces runtime exceptions inside guest without leaking host stack frames', () => {
+  it('3. surfaces runtime exceptions inside guest and sanitizes Error.stack without leaking host paths', () => {
     expect(() => executeCode('throw new Error("boom")')).toThrow('Error: boom');
     expect(() => executeCode('throw "string error"')).toThrow('string error');
     expect(() => executeCode('throw { code: "ERR_SCRIPT_EXECUTION_TIMEOUT" }')).toThrow(
@@ -190,6 +208,20 @@ describe('executeCode — negative, security & boundary tests (Gate 2)', () => {
       expect(msg).toBe('TypeError: bad type');
       expect(msg).not.toContain('computeTools.ts');
     }
+
+    const stackProbe = executeCode('(function inner() { return new Error("probe").stack; })()');
+    expect(stackProbe.result).toBe('Error: probe');
+    expect(stackProbe.result).not.toContain('computeTools.ts');
+    expect(stackProbe.result).not.toContain('node:vm');
+    expect(stackProbe.result).not.toContain('runInContext');
+
+    const tamperProbe = executeCode(
+      'Error.prepareStackTrace = (_, s) => s.map(x => x.getFileName()).join(","); new Error("after").stack',
+    );
+    expect(tamperProbe.result).toBe('Error: after');
+    expect(() =>
+      executeCode('Object.defineProperty(Error, "prepareStackTrace", { value: () => "hacked" });'),
+    ).toThrow(/TypeError/);
   });
 
   it('4. blocks dynamic code generation (eval, new Function) and WebAssembly', () => {
@@ -290,6 +322,44 @@ describe('executeCode — negative, security & boundary tests (Gate 2)', () => {
     expect(returnFlood.result).toContain('…[truncated]');
     expect(returnFlood.result.length).toBeLessThanOrEqual(MAX_OUTPUT_LENGTH + 20);
   });
+
+  it('10. intercepts returned and detached unhandled promise rejections inside the VM without firing host unhandledRejection', async () => {
+    const hostUnhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      hostUnhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      expect(() => executeCode('Promise.reject(new Error("direct reject"))')).toThrow(
+        'Error: direct reject',
+      );
+      expect(() =>
+        executeCode('Promise.resolve().then(() => { throw new Error("chained reject"); })'),
+      ).toThrow('Error: chained reject');
+      expect(() =>
+        executeCode(
+          'Promise.resolve().then(() => { throw new Error("detached microtask"); }); 1 + 1',
+        ),
+      ).toThrow('Error: detached microtask');
+      expect(() => executeCode('Promise.reject("detached string reject"); 1 + 1')).toThrow(
+        'detached string reject',
+      );
+      expect(() =>
+        executeCode('(async () => { throw new Error("detached async throw"); })(); 1 + 1'),
+      ).toThrow('Error: detached async throw');
+      expect(() =>
+        executeCode(
+          'Promise.resolve().then(() => { throw new Proxy({ a: 1 }, { get() { while (true) {} } }); }); 1 + 1',
+          { timeoutMs: 50 },
+        ),
+      ).toThrow(/timed out/i);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(hostUnhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });
 
 describe('buildComputeServer', () => {
@@ -326,7 +396,7 @@ describe('buildComputeServer', () => {
     expect(shape).not.toHaveProperty('timeoutMs');
   });
 
-  it('executes code and returns formatted MCP text on success and isError: true on failure', async () => {
+  it('executes code and returns formatted MCP text on success and isError: true without doubled Error prefix on failure', async () => {
     const tools = getRegisteredTools();
     const okRes = await tools.execute_code.handler({ code: 'console.log("step"); 6 * 7' }, {});
     expect(okRes.isError).toBeUndefined();
@@ -334,7 +404,18 @@ describe('buildComputeServer', () => {
 
     const errRes = await tools.execute_code.handler({ code: 'throw new Error("bad input")' }, {});
     expect(errRes.isError).toBe(true);
-    expect(errRes.content[0].type).toBe('text');
-    expect(errRes.content[0].text).toMatch(/^Error:.*bad input/);
+    expect(errRes.content).toEqual([{ type: 'text', text: 'Error: bad input' }]);
+
+    const typeErrRes = await tools.execute_code.handler(
+      { code: 'throw new TypeError("wrong type")' },
+      {},
+    );
+    expect(typeErrRes.isError).toBe(true);
+    expect(typeErrRes.content).toEqual([{ type: 'text', text: 'TypeError: wrong type' }]);
+
+    const emptyRes = await tools.execute_code.handler({ code: '' }, {});
+    expect(emptyRes.isError).toBe(true);
+    expect(emptyRes.content).toEqual([{ type: 'text', text: 'Error: Code must be a non-empty string' }]);
   });
 });
+

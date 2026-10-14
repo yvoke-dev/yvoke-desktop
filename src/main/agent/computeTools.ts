@@ -8,6 +8,7 @@
  * unit tests stay lightweight.
  */
 import { types as utilTypes } from 'node:util';
+import { promiseHooks } from 'node:v8';
 import vm from 'node:vm';
 import { MCP_PREFIX_RE } from '../../shared/types';
 
@@ -55,6 +56,8 @@ export interface ExecuteCodeResult {
 
 interface BootstrapHooks {
   recordOutcome: (ok: boolean, val: unknown) => void;
+  trackPromise: (promise: unknown, parent: unknown) => void;
+  silenceLeaves: () => void;
 }
 
 const bootstrapScript = new vm.Script(
@@ -76,6 +79,7 @@ const bootstrapScript = new vm.Script(
     const setHas = uncurryThis(Set.prototype.has);
     const setAdd = uncurryThis(Set.prototype.add);
     const setDelete = uncurryThis(Set.prototype.delete);
+    const setClear = uncurryThis(Set.prototype.clear);
     const MapCtor = Map;
     const mapEntries = uncurryThis(Map.prototype.entries);
     const DateCtor = Date;
@@ -94,6 +98,8 @@ const bootstrapScript = new vm.Script(
     let caughtInVm = false;
     let outcomeOk = true;
     let outcomeVal = undefined;
+    const leafPromises = new SetCtor();
+    const noop = function () {};
 
     function truncate(str) {
       if (str.length <= MAX_OUT) return str;
@@ -220,6 +226,15 @@ const bootstrapScript = new vm.Script(
       return truncate(StringCtor(err));
     }
 
+    defineProperty(ErrorCtor, "prepareStackTrace", {
+      value: function (err) {
+        return formatError(err);
+      },
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+
     function writeConsole() {
       if (stdoutTruncated) return;
       let line = "";
@@ -243,6 +258,26 @@ const bootstrapScript = new vm.Script(
       error: writeConsole,
     };
 
+    function trackPromise(p, parent) {
+      if (parent !== undefined) {
+        setDelete(leafPromises, parent);
+      }
+      if (p !== undefined) {
+        setAdd(leafPromises, p);
+      }
+    }
+
+    function silenceLeaves() {
+      const leaves = arrayFrom(leafPromises);
+      setClear(leafPromises);
+      for (let i = 0; i < leaves.length; i++) {
+        const leaf = leaves[i];
+        if (leaf instanceof PromiseCtor) {
+          promiseThen(leaf, undefined, noop);
+        }
+      }
+    }
+
     function catchOutcome(err) {
       caughtInVm = true;
       outcomeOk = false;
@@ -258,6 +293,7 @@ const bootstrapScript = new vm.Script(
     function settleOutcome() {
       if (outcomeOk && outcomeVal instanceof PromiseCtor) {
         const p = outcomeVal;
+        setDelete(leafPromises, p);
         outcomeVal = undefined;
         promiseThen(
           p,
@@ -269,6 +305,23 @@ const bootstrapScript = new vm.Script(
             outcomeVal = err;
           },
         );
+      }
+      const leaves = arrayFrom(leafPromises);
+      setClear(leafPromises);
+      for (let i = 0; i < leaves.length; i++) {
+        const leaf = leaves[i];
+        if (leaf instanceof PromiseCtor) {
+          promiseThen(
+            leaf,
+            undefined,
+            function (err) {
+              if (outcomeOk) {
+                outcomeOk = false;
+                outcomeVal = err;
+              }
+            },
+          );
+        }
       }
     }
 
@@ -328,7 +381,7 @@ const bootstrapScript = new vm.Script(
       configurable: false,
     });
 
-    return { recordOutcome };
+    return { recordOutcome, trackPromise, silenceLeaves };
   })()`,
   { filename: 'bootstrap.js' },
 );
@@ -423,6 +476,11 @@ export function executeCode(code: string, options?: ExecuteCodeOptions): Execute
     breakOnSigint: false,
   }) as BootstrapHooks;
 
+  const stopPromiseHook = promiseHooks.createHook({
+    init(promise, parent) {
+      hooks.trackPromise(promise, parent);
+    },
+  });
   try {
     const val = userScript.runInContext(context, {
       timeout: remaining(),
@@ -431,9 +489,12 @@ export function executeCode(code: string, options?: ExecuteCodeOptions): Execute
     hooks.recordOutcome(true, val);
   } catch (err) {
     if (isVmTimeoutError(err)) {
+      hooks.silenceLeaves();
       throw new Error(`Execution timed out after ${timeoutMs}ms`);
     }
     hooks.recordOutcome(false, err);
+  } finally {
+    stopPromiseHook();
   }
 
   let raw: unknown;
@@ -447,6 +508,7 @@ export function executeCode(code: string, options?: ExecuteCodeOptions): Execute
       breakOnSigint: false,
     });
   } catch (err) {
+    hooks.silenceLeaves();
     if (isVmTimeoutError(err)) {
       throw new Error(`Execution timed out after ${timeoutMs}ms`);
     }

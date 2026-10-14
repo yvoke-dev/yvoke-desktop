@@ -17,8 +17,11 @@ function fail(message: string): CallToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+const ERROR_PREFIX_RE = /^[A-Za-z0-9_]*Error:/;
+
+function formatFailure(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return ERROR_PREFIX_RE.test(msg) ? msg : `Error: ${msg}`;
 }
 
 /** Fresh in-process compute server; the SDK namespaces its tools as `mcp__compute__<name>`. */
@@ -45,7 +48,7 @@ export function buildComputeServer(): McpSdkServerConfigWithInstance {
           try {
             return ok(formatExecuteCodeOutput(executeCode(code)));
           } catch (err) {
-            return fail(`Error: ${messageOf(err)}`);
+            return fail(formatFailure(err));
           }
         },
       ),
