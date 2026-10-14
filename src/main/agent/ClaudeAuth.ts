@@ -120,6 +120,9 @@ export function sanitizedEnv(base: NodeJS.ProcessEnv = process.env): Record<stri
   const env: Record<string, string | undefined> = { ...base };
   delete env.ANTHROPIC_API_KEY;
   env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  if (!env.MAX_MCP_OUTPUT_TOKENS) {
+    env.MAX_MCP_OUTPUT_TOKENS = '100000';
+  }
   return env;
 }
 
