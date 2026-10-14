@@ -194,7 +194,16 @@ interface ReviewTurnState {
   originalQuestion: string;
   submittedAnswer?: string;
   settled?: boolean;
+  settledApproved?: boolean;
+  inFlight?: Promise<void>;
 }
+
+type ReviewPassOutcome =
+  | { kind: 'approved'; content: string }
+  | { kind: 'revise'; revisionPrompt: string }
+  | { kind: 'flagged'; content: string }
+  | { kind: 'unreviewed'; content: string; errorMessage: string }
+  | { kind: 'aborted'; content: string };
 
 interface ThreadSession {
   query: Query;
@@ -973,8 +982,12 @@ export class AgentService {
               const name = String(block.name);
               const input = block.input;
               log('orch', `   [reviewer] tool ${name}(${AgentService.preview(JSON.stringify(input ?? {}), 300)})`);
-              if (name === REVIEW_SUBMIT_TOOL && !capturedVerdict) {
-                capturedVerdict = parseSubmitReviewArgs(input);
+              if (name === REVIEW_SUBMIT_TOOL) {
+                try {
+                  capturedVerdict = parseSubmitReviewArgs(input);
+                } catch {
+                  // MCP tool handler reports the validation error so the reviewer can retry
+                }
               }
               innerToolCalls.push({
                 id: String(block.id),
@@ -1060,38 +1073,29 @@ export class AgentService {
     };
   }
 
-  /**
-   * Code-driven Reviewer loop (ported from `OrchestrationService.java` in `yvoke-web`).
-   *
-   * Harvests raw specialist tool outputs from `subagentBlocks`, cite-scopes and deduplicates them via
-   * `EvidenceDigest`, and runs the Reviewer in its own SDK `query()` session (resumed across rounds
-   * via `resume: reviewerSessionId`).
-   */
-  private async runCodeDrivenReview(
-    threadId: string,
-    session: ThreadSession,
-    result: Extract<Awaited<ReturnType<Query['next']>>['value'], { type: 'result' }>,
-    resultUsage: UsageTotals,
-    resultCostUsd: number | undefined,
-  ): Promise<
-    | { status: 'continue' }
-    | { status: 'finalize'; isError: boolean; aborted: boolean; errorMessage?: string }
-  > {
-    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
-    if (resultCostUsd != null) {
-      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + resultCostUsd;
-    }
-
-    const rawDraft = session.turn.turnText || String((result as { result?: string }).result ?? '');
-    const draftAnswer = afterAnswerMarker(rawDraft);
-
-    const reviewState = (session.reviewState ??= {
+  private ensureReviewState(session: ThreadSession): ReviewTurnState {
+    return (session.reviewState ??= {
       allEvidence: [],
       reviewerSent: new SentLedger(),
       processedCallIds: new Set(),
       originalQuestion: session.pendingUser?.content ?? '',
     });
+  }
 
+  /**
+   * Shared single review pass used by both `handleSubmittedAnswer` (in-turn MCP tool) and
+   * `runCodeDrivenReview` (fallback when the orchestrator ends its turn without calling `submit_answer`).
+   *
+   * Harvests new specialist tool outputs, emits the synthetic Reviewer `SubagentCard` events, runs
+   * `executeReviewerQuery` (resuming `reviewerSessionId` across rounds), accumulates usage, and
+   * classifies the pass into `approved`, `revise`, `flagged`, `unreviewed`, or `aborted`.
+   */
+  private async runReviewPass(
+    threadId: string,
+    session: ThreadSession,
+    draftAnswer: string,
+    reviewState: ReviewTurnState,
+  ): Promise<ReviewPassOutcome> {
     const newSpecialistCalls = session.turn.toolCalls.filter(
       (c) =>
         c.name === 'Agent' &&
@@ -1156,9 +1160,7 @@ export class AgentService {
     }
 
     if (session.interrupted) {
-      session.turn.turnText = draftAnswer;
-      session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, draftAnswer);
-      return { status: 'finalize', isError: false, aborted: true };
+      return { kind: 'aborted', content: draftAnswer };
     }
 
     if (revOutcome.failed && !revOutcome.verdict) {
@@ -1184,20 +1186,8 @@ export class AgentService {
       this.deps.emit(completeEvt);
       logError('orch', `⚖ reviewer pass failed on round ${round}: ${errText}`);
 
-      if (draftAnswer.trim().length > 0) {
-        const unreviewedContent = draftAnswer + unreviewedNote();
-        session.turn.turnText = unreviewedContent;
-        session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, unreviewedContent);
-        return { status: 'finalize', isError: false, aborted: false };
-      }
-      session.turn.turnText = '';
-      session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, '');
-      return {
-        status: 'finalize',
-        isError: true,
-        aborted: false,
-        errorMessage: tagAttributedError('Claude', errText),
-      };
+      const unreviewedContent = draftAnswer.trim().length > 0 ? draftAnswer + unreviewedNote() : '';
+      return { kind: 'unreviewed', content: unreviewedContent, errorMessage: errText };
     }
 
     const verdict =
@@ -1242,9 +1232,7 @@ export class AgentService {
     }
 
     if (verdict?.approved) {
-      session.turn.turnText = draftAnswer;
-      session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, draftAnswer);
-      return { status: 'finalize', isError: false, aborted: false };
+      return { kind: 'approved', content: draftAnswer };
     }
 
     const maxRounds = this.deps.getSettings().orchestrator?.maxReviewRounds ?? 0;
@@ -1276,45 +1264,100 @@ export class AgentService {
         .filter((block) => block.thinking || (block.toolCalls?.length ?? 0) > 0);
 
       this.deps.emit({ kind: 'review-enforced', threadId, reason, round: nextRound });
+      return { kind: 'revise', revisionPrompt };
+    }
+
+    const flaggedContent =
+      draftAnswer + reviewFlagNote(reviewAttempts(session.turn.toolCalls), verdict?.feedback);
+    return { kind: 'flagged', content: flaggedContent };
+  }
+
+  /**
+   * Fallback code-driven Reviewer loop when the orchestrator ends its turn without calling `submit_answer`.
+   */
+  private async runCodeDrivenReview(
+    threadId: string,
+    session: ThreadSession,
+    result: Extract<Awaited<ReturnType<Query['next']>>['value'], { type: 'result' }>,
+    resultUsage: UsageTotals,
+    resultCostUsd: number | undefined,
+  ): Promise<
+    | { status: 'continue' }
+    | { status: 'finalize'; isError: boolean; aborted: boolean; errorMessage?: string }
+  > {
+    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
+    if (resultCostUsd != null) {
+      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + resultCostUsd;
+    }
+
+    const rawDraft = session.turn.turnText || String((result as { result?: string }).result ?? '');
+    const draftAnswer = afterAnswerMarker(rawDraft);
+    const reviewState = this.ensureReviewState(session);
+
+    const outcome = await this.runReviewPass(threadId, session, draftAnswer, reviewState);
+    if (outcome.kind === 'revise') {
       session.queue.push({
         type: 'user',
-        message: { role: 'user', content: revisionPrompt },
+        message: { role: 'user', content: outcome.revisionPrompt },
         parent_tool_use_id: null,
       });
       return { status: 'continue' };
     }
 
-    const flaggedContent =
-      draftAnswer + reviewFlagNote(reviewAttempts(session.turn.toolCalls), verdict?.feedback);
-    session.turn.turnText = flaggedContent;
-    session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, flaggedContent);
+    session.turn.turnText = outcome.content;
+    session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, outcome.content);
+
+    if (outcome.kind === 'aborted') {
+      return { status: 'finalize', isError: false, aborted: true };
+    }
+    if (outcome.kind === 'unreviewed' && outcome.content.length === 0) {
+      return {
+        status: 'finalize',
+        isError: true,
+        aborted: false,
+        errorMessage: tagAttributedError('Claude', outcome.errorMessage),
+      };
+    }
     return { status: 'finalize', isError: false, aborted: false };
   }
 
   /**
-   * Handle an orchestrator `mcp__review__submit_answer` tool call in-turn:
-   * - If the turn's review is already settled, return the delivery notice immediately.
-   * - If no specialist delegations occurred, record `draftAnswer` as settled without running Reviewer.
-   * - Otherwise harvest specialist tool results, run the Reviewer query (resuming `reviewerSessionId`
-   *   across revision rounds), and either return `buildRevisionPrompt(...)` for an in-turn revision
-   *   or settle `submittedAnswer` and return the terminal delivery notice.
+   * Handle an orchestrator `mcp__review__submit_answer` tool call in-turn, serialized through
+   * `reviewState.inFlight` so concurrent `submit_answer` tool_use blocks cannot race.
    */
   private async handleSubmittedAnswer(
     threadId: string,
     session: ThreadSession,
     rawDraft: string,
   ): Promise<{ text: string; isError?: boolean }> {
-    const draftAnswer = afterAnswerMarker(rawDraft);
-    const reviewState = (session.reviewState ??= {
-      allEvidence: [],
-      reviewerSent: new SentLedger(),
-      processedCallIds: new Set(),
-      originalQuestion: session.pendingUser?.content ?? '',
+    const reviewState = this.ensureReviewState(session);
+    const prev = reviewState.inFlight ?? Promise.resolve();
+    let release!: () => void;
+    reviewState.inFlight = new Promise<void>((resolve) => {
+      release = resolve;
     });
+
+    await prev;
+    try {
+      return await this.handleSubmittedAnswerLocked(threadId, session, rawDraft, reviewState);
+    } finally {
+      release();
+    }
+  }
+
+  private async handleSubmittedAnswerLocked(
+    threadId: string,
+    session: ThreadSession,
+    rawDraft: string,
+    reviewState: ReviewTurnState,
+  ): Promise<{ text: string; isError?: boolean }> {
+    const draftAnswer = afterAnswerMarker(rawDraft);
 
     if (reviewState.settled) {
       return {
-        text: 'APPROVED — your answer has already been delivered to the user. End your turn now without repeating the answer.',
+        text: reviewState.settledApproved
+          ? 'APPROVED — your answer has already been delivered to the user. End your turn now without repeating the answer.'
+          : 'Your answer has already been delivered to the user. End your turn now without repeating the answer.',
       };
     }
 
@@ -1325,197 +1368,39 @@ export class AgentService {
       reviewState.submittedAnswer = draftAnswer;
       reviewState.settled = true;
       return {
-        text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
+        text: 'Your answer has been delivered to the user. End your turn now without repeating the answer.',
       };
     }
 
-    const newSpecialistCalls = session.turn.toolCalls.filter(
-      (c) =>
-        c.name === 'Agent' &&
-        c.subagentType !== REVIEWER_SUBAGENT &&
-        !reviewState.processedCallIds.has(c.id),
-    );
-    for (const c of newSpecialistCalls) {
-      reviewState.processedCallIds.add(c.id);
+    const outcome = await this.runReviewPass(threadId, session, draftAnswer, reviewState);
+    switch (outcome.kind) {
+      case 'aborted':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return { text: 'Turn interrupted by user.', isError: true };
+      case 'unreviewed':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return {
+          text: 'The automated review could not be completed. The answer you passed to submit_answer has been delivered to the user with an unverified notice. End your turn now without repeating the answer.',
+        };
+      case 'approved':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        reviewState.settledApproved = true;
+        return {
+          text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
+        };
+      case 'revise':
+        reviewState.submittedAnswer = undefined;
+        return { text: outcome.revisionPrompt };
+      case 'flagged':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return {
+          text: 'The maximum number of review rounds has been reached. Your latest answer has been delivered to the user with a reviewer note. End your turn now without repeating the answer.',
+        };
     }
-    const newEvidence = harvestSpecialistEvidence(newSpecialistCalls, [this.deps.sandboxDir]);
-    reviewState.allEvidence.push(...newEvidence);
-
-    const round = session.turn.revisionRounds ?? 0;
-    const reviewPrompt =
-      round === 0
-        ? renderReviewTask(
-            reviewState.originalQuestion,
-            draftAnswer,
-            reviewState.allEvidence,
-            reviewState.reviewerSent,
-          )
-        : renderReviewFollowUp(draftAnswer, reviewState.allEvidence, reviewState.reviewerSent);
-
-    const reviewerCallId = randomUUID();
-    const reviewerCall: ToolCallInfo = {
-      id: reviewerCallId,
-      name: 'Agent',
-      subagentType: REVIEWER_SUBAGENT,
-      input: { prompt: reviewPrompt },
-      subagentBlocks: [],
-    };
-    session.turn.toolCalls.push(reviewerCall);
-    session.turn.blocks.push({ toolCalls: [reviewerCall] });
-
-    const startEvent: AgentEvent = {
-      kind: 'subagent-start',
-      threadId,
-      toolUseId: reviewerCallId,
-      subagentType: REVIEWER_SUBAGENT,
-      question: reviewPrompt.slice(0, 2000),
-    };
-    this.logOrchestrationEvent(startEvent);
-    this.deps.emit(startEvent);
-    this.deps.emit({
-      kind: 'assistant-block',
-      threadId,
-      text: '',
-      toolCalls: [reviewerCall],
-    });
-
-    const revOutcome = await this.executeReviewerQuery(
-      threadId,
-      session,
-      reviewPrompt,
-      reviewerCall,
-      reviewState,
-    );
-
-    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, revOutcome.usage);
-    if (revOutcome.costUsd != null) {
-      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + revOutcome.costUsd;
-    }
-
-    if (session.interrupted) {
-      reviewState.submittedAnswer = draftAnswer;
-      reviewState.settled = true;
-      return { text: 'Turn interrupted by user.', isError: true };
-    }
-
-    if (revOutcome.failed && !revOutcome.verdict) {
-      const errText = revOutcome.errorMessage || 'Reviewer failed';
-      reviewerCall.isError = true;
-      reviewerCall.result = errText;
-      this.deps.emit({
-        kind: 'tool-result',
-        threadId,
-        toolUseId: reviewerCallId,
-        result: errText,
-        isError: true,
-      });
-      const completeEvt: AgentEvent = {
-        kind: 'subagent-complete',
-        threadId,
-        toolUseId: reviewerCallId,
-        subagentType: REVIEWER_SUBAGENT,
-        result: errText,
-        isError: true,
-      };
-      this.logOrchestrationEvent(completeEvt);
-      this.deps.emit(completeEvt);
-      logError('orch', `⚖ reviewer pass failed on round ${round}: ${errText}`);
-
-      const unreviewedContent = draftAnswer + unreviewedNote();
-      reviewState.submittedAnswer = unreviewedContent;
-      reviewState.settled = true;
-      return {
-        text: 'The automated review could not be completed. The answer you passed to submit_answer has been delivered to the user with an unverified notice. End your turn now without repeating the answer.',
-      };
-    }
-
-    const verdict =
-      revOutcome.verdict ??
-      (revOutcome.resultText ? parseVerdict(revOutcome.resultText) ?? undefined : undefined);
-    const resultSummary = verdict
-      ? formatVerdictSummary(verdict)
-      : revOutcome.resultText || '(no verdict)';
-
-    reviewerCall.verdict = verdict;
-    reviewerCall.result = resultSummary;
-    reviewerCall.isError = false;
-
-    this.deps.emit({
-      kind: 'tool-result',
-      threadId,
-      toolUseId: reviewerCallId,
-      result: resultSummary,
-      isError: false,
-    });
-    const completeEvt: AgentEvent = {
-      kind: 'subagent-complete',
-      threadId,
-      toolUseId: reviewerCallId,
-      subagentType: REVIEWER_SUBAGENT,
-      result: resultSummary,
-      isError: false,
-    };
-    this.logOrchestrationEvent(completeEvt);
-    this.deps.emit(completeEvt);
-
-    if (verdict) {
-      const verdictEvt: AgentEvent = {
-        kind: 'review-verdict',
-        threadId,
-        toolUseId: reviewerCallId,
-        approved: verdict.approved,
-        feedback: verdict.feedback,
-      };
-      this.logOrchestrationEvent(verdictEvt);
-      this.deps.emit(verdictEvt);
-    }
-
-    if (verdict?.approved) {
-      reviewState.submittedAnswer = draftAnswer;
-      reviewState.settled = true;
-      return {
-        text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
-      };
-    }
-
-    const maxRounds = this.deps.getSettings().orchestrator?.maxReviewRounds ?? 0;
-    const doneRounds = session.turn.revisionRounds ?? 0;
-
-    if (doneRounds < maxRounds) {
-      const nextRound = doneRounds + 1;
-      session.turn.revisionRounds = nextRound;
-      reviewState.submittedAnswer = undefined;
-      const reason: 'rejected' | 'unclear' = verdict ? 'rejected' : 'unclear';
-      const revisionPrompt = buildRevisionPrompt({
-        verdict,
-        feedback: verdict?.feedback,
-        newEvidence,
-        allEvidence: reviewState.allEvidence,
-        draft: draftAnswer,
-        round: nextRound,
-        maxRounds,
-      });
-      log(
-        'orch',
-        `⚖ reviewer ${reason === 'unclear' ? 'returned no clear verdict' : 'REJECTED'} — ` +
-          `revision round ${nextRound}/${maxRounds}: returning revision prompt via submit_answer tool result`,
-      );
-      session.turn.turnText = '';
-      session.turn.liveText = '';
-      session.turn.blocks = session.turn.blocks
-        .map((block) => ({ ...block, text: undefined }))
-        .filter((block) => block.thinking || (block.toolCalls?.length ?? 0) > 0);
-      this.deps.emit({ kind: 'review-enforced', threadId, reason, round: nextRound });
-      return { text: revisionPrompt };
-    }
-
-    const flaggedContent =
-      draftAnswer + reviewFlagNote(reviewAttempts(session.turn.toolCalls), verdict?.feedback);
-    reviewState.submittedAnswer = flaggedContent;
-    reviewState.settled = true;
-    return {
-      text: 'The maximum number of review rounds has been reached. Your latest answer has been delivered to the user with a reviewer note. End your turn now without repeating the answer.',
-    };
   }
 
   private async completeTurn(
@@ -1575,9 +1460,7 @@ export class AgentService {
     const usage =
       usageOverride ??
       (session.turn.carriedUsage ? addUsage(session.turn.carriedUsage, resultUsage) : resultUsage);
-    const review = session.orchestratorProfile
-      ? reviewStatusOf(session.turn.toolCalls, session.turn.reviewEnforced)
-      : undefined;
+    const review = session.orchestratorProfile ? reviewStatusOf(session.turn.toolCalls) : undefined;
     const content =
       session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
     const assistantMessage: ChatMessage = {
@@ -1606,7 +1489,7 @@ export class AgentService {
       `turn ${aborted ? 'stopped' : isError ? 'error' : 'complete'} thread=${threadId} ` +
         `in=${usage.inputTokens} out=${usage.outputTokens} cacheRead=${usage.cacheReadTokens} ` +
         `tools=${session.turn.toolCalls.length} ` +
-        (review ? `review=${review.outcome}${review.enforced ? '(enforced)' : ''} ` : '') +
+        (review ? `review=${review.outcome} ` : '') +
         (session.turn.revisionRounds ? `revisions=${session.turn.revisionRounds} ` : '') +
         `${costUsd != null ? `cost=$${costUsd.toFixed(4)} ` : ''}` +
         `${errorMessage ? `error="${errorMessage}" ` : ''}` +

@@ -98,6 +98,10 @@ profiles and the playbooks; there is no way to build one from the app.
   reviewer's citation fixes.
 - **A specialist whose call failed is omitted from that evidence entirely**, so the reviewer is not
   told that part of the investigation is missing.
+- **If the lead ends its turn in plain text without submitting its answer, coordination prose is not
+  stripped.** When the lead ignores the submission contract and omits the fallback delimiter, the app
+  reviews and delivers the turn's full text rather than discarding the answer, so any planning remarks
+  written in that turn remain visible.
 - **Setting a role's thinking to *off* does not switch thinking off** for specialists or the reviewer —
   their effort floor is *low*. The lead is worse: its budget says zero while its effort setting says
   low, and the two disagree.

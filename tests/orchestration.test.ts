@@ -272,7 +272,6 @@ describe('buildOrchestrator prompt composition', () => {
     expect(built.agents[REVIEWER_SUBAGENT]).toBeUndefined();
     expect(built.reviewer.prompt).not.toContain(BASE);
     expect(built.reviewer.prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
-    expect(built.reviewer.playbookName).toBe('oim-orchestrator-reviewer');
   });
 
   it('includes SUBMIT_ANSWER_CONTRACT in the orchestrator prompt and does not instruct calling subagent_type: "reviewer"', async () => {

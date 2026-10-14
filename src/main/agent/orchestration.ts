@@ -6,7 +6,6 @@ import type {
   OrchestratorProfile,
   ReviewVerdict,
   ThinkingLevel,
-  ToolCallInfo,
 } from '../../shared/types';
 import {
   BASE_SYSTEM_PROMPT_NAME,
@@ -93,11 +92,6 @@ export const SUBMIT_ANSWER_CONTRACT =
   'in the `answer` parameter. Do not write the user-facing answer as plain text outside `submit_answer`.';
 
 /**
- * Keep `ANSWER_MARKER_CONTRACT` exported for backwards compatibility with existing unit tests.
- */
-export const ANSWER_MARKER_CONTRACT = SUBMIT_ANSWER_CONTRACT;
-
-/**
  * Everything after the LAST marker, or the whole text when there is none
  * (ported from `OrchestrationService.afterAnswerMarker`).
  */
@@ -167,31 +161,6 @@ ${roster}
  */
 export const REVIEW_FEEDBACK_HEADING = '## Reviewer feedback to address';
 export const EVIDENCE_HEADING = '## Evidence gathered by the specialists (the ONLY basis for validation)';
-
-/** Per-specialist cap when re-rendering specialist prose fallback. */
-const MAX_EVIDENCE_CHARS = 12_000;
-
-/**
- * Legacy helper rendering specialist prose summaries from `ToolCallInfo[]`.
- */
-export function renderSpecialistEvidence(toolCalls: ToolCallInfo[]): string {
-  const specialists = (toolCalls ?? []).filter(
-    (c) => c.name === DELEGATE_TOOL_NAME && c.subagentType !== REVIEWER_SUBAGENT && !c.isError && c.result?.trim(),
-  );
-  if (specialists.length === 0) return '(no specialist evidence was captured)';
-
-  return specialists
-    .map((c) => {
-      const question = String((c.input as { prompt?: string; description?: string })?.prompt ?? '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 200);
-      const body = c.result!.trim();
-      const text = body.length > MAX_EVIDENCE_CHARS ? `${body.slice(0, MAX_EVIDENCE_CHARS)}\n…[truncated]` : body;
-      return `### Specialist \`${c.subagentType ?? '?'}\`${question ? ` — asked: ${question}` : ''}\n${text}`;
-    })
-    .join('\n\n');
-}
 
 /**
  * Render the initial review prompt for the Reviewer session (ported from
@@ -380,14 +349,13 @@ export function unreviewedNote(): string {
   );
 }
 
-/** Configuration for the code-driven Reviewer session (`AgentService.runReviewerPass`). */
+/** Configuration for the code-driven Reviewer session (`AgentService.runReviewPass`). */
 export interface ReviewerConfig {
   prompt: string;
   model: string;
   thinkingLevel: ThinkingLevel;
   effort: 'low' | 'medium' | 'high';
   tools: string[];
-  playbookName: string;
 }
 
 export interface ResolvedOrchestrator {
@@ -579,7 +547,6 @@ export async function buildOrchestrator(
     thinkingLevel: cfg.reviewer.thinkingLevel,
     effort: effortFor(cfg.reviewer.thinkingLevel),
     tools: [...REVIEWER_TOOLS],
-    playbookName: profile.reviewerPlaybook,
   };
 
   // Spread the orchestrator's OWN grant plus specialist tools.

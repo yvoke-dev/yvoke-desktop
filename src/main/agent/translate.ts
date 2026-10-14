@@ -28,8 +28,6 @@ export interface TurnContext {
   agentCalls: Map<string, ToolCallInfo>;
   /** Tool-use IDs of internal protocol tools (e.g. `mcp__review__submit_answer`) suppressed from UI cards. */
   internalToolUseIds: Set<string>;
-  /** Set once the runtime has re-prompted this turn for a missing review pass (at most once). */
-  reviewEnforced?: boolean;
   /** Revision rounds the runtime has driven this turn after a rejected/unclear verdict. */
   revisionRounds?: number;
   /** Usage from the result(s) already consumed by this turn (a re-prompt produces a second result). */
@@ -95,76 +93,23 @@ export function addUsage(a: UsageTotals, b: UsageTotals): UsageTotals {
  * Classify a finished turn's review state from its delegations. Returns undefined when the turn
  * delegated to nobody — that is a plain (non-orchestrated) answer with nothing to review.
  *
- * Whether the turn ran in orchestrator mode at all is the caller's to establish, and both callers
- * do (see `nextReviewAction` below and AgentService.completeTurn); a third copy of that check in
- * here could only ever agree with them.
- *
  * The LAST reviewer delegation wins: with maxReviewRounds > 1 the orchestrator may be REJECTED,
  * revise, and be APPROVED on the next round, and it is the final verdict that ships.
  */
-export function reviewStatusOf(toolCalls: ToolCallInfo[], enforced = false): ReviewStatus | undefined {
+export function reviewStatusOf(toolCalls: ToolCallInfo[]): ReviewStatus | undefined {
   const delegations = toolCalls.filter((c) => c.name === DELEGATE_TOOL_NAME);
   if (delegations.length === 0) return undefined;
 
   const reviews = delegations.filter((c) => c.subagentType === REVIEWER_SUBAGENT);
-  if (reviews.length === 0) return { outcome: 'skipped', ...(enforced ? { enforced } : {}) };
+  if (reviews.length === 0) return { outcome: 'skipped' };
 
   const last = reviews[reviews.length - 1];
   // A reviewer that errored, or answered without a parseable APPROVED/REJECTED, is not a pass.
-  if (last.isError || !last.verdict) return { outcome: 'unclear', ...(enforced ? { enforced } : {}) };
+  if (last.isError || !last.verdict) return { outcome: 'unclear' };
   return {
     outcome: last.verdict.approved ? 'approved' : 'rejected',
     ...(last.verdict.feedback ? { feedback: last.verdict.feedback } : {}),
-    ...(enforced ? { enforced } : {}),
   };
-}
-
-/**
- * What the runtime must do with a finished orchestrated turn:
- *   deliver — ship it (approved, opted out, or out of revision rounds);
- *   enforce — no reviewer ran; re-prompt for a review pass;
- *   revise  — the reviewer rejected (or gave no clear verdict); hand the feedback back for a fix.
- */
-export type ReviewAction =
-  | { kind: 'deliver' }
-  | { kind: 'enforce' }
-  | { kind: 'revise'; outcome: 'rejected' | 'unclear'; feedback?: string; round: number };
-
-/**
- * Gate for the code-driven review loop. Kept pure (and separate from the AgentService plumbing)
- * because it decides whether an answer reaches the user, so it must be directly testable.
- *
- * Mirrors the web harness (OrchestrationService): it re-runs the orchestrator with the reviewer's
- * feedback while `round < maxReviewRounds`, then delivers the last answer flagged. Desktop counts
- * rounds the same way — `revisionRounds` is how many the runtime has already driven this turn.
- *
- * Errored and user-aborted turns are left alone: there is no composed answer worth reviewing, and
- * re-prompting an interrupted turn would fight the user's Stop.
- */
-export function nextReviewAction(params: {
-  orchestratorMode: boolean;
-  isError: boolean;
-  aborted: boolean;
-  alreadyEnforced: boolean;
-  /** Revision rounds already driven this turn (TurnContext.revisionRounds). */
-  revisionRounds?: number;
-  /** OrchestratorSettings.maxReviewRounds — 0/undefined disables revision rounds. */
-  maxReviewRounds?: number;
-  toolCalls: ToolCallInfo[];
-}): ReviewAction {
-  const deliver: ReviewAction = { kind: 'deliver' };
-  if (!params.orchestratorMode || params.isError || params.aborted) return deliver;
-
-  const status = reviewStatusOf(params.toolCalls);
-  if (!status || status.outcome === 'approved') return deliver;
-
-  if (status.outcome === 'skipped') {
-    return params.alreadyEnforced ? deliver : { kind: 'enforce' }; // one attempt per turn; never loop
-  }
-
-  const done = params.revisionRounds ?? 0;
-  if (done >= (params.maxReviewRounds ?? 0)) return deliver; // out of rounds — ship it flagged
-  return { kind: 'revise', outcome: status.outcome, feedback: status.feedback, round: done + 1 };
 }
 
 /** Reviewer delegations in a turn = how many validation attempts the answer went through. */

@@ -1,6 +1,6 @@
 /**
- * Delegation spike: proves a REAL orchestrator turn gets answers back from its specialists and a
- * parseable verdict from the reviewer — not "Async agent launched successfully" launch receipts.
+ * Delegation spike: proves a REAL orchestrator turn gets synchronous answers back from its specialists —
+ * not "Async agent launched successfully" launch receipts.
  *
  *   npm run spike:delegation -- "your question"
  *
@@ -9,23 +9,19 @@
  * switch that keeps delegation synchronous. Unit tests cannot: what the CLI does with the Agent tool
  * is only visible in a live run, and a regression there fails silently — answers still read well.
  *
- * Exits non-zero if any delegation returns a receipt, if nothing was delegated, or if a reviewer reply
- * carries no APPROVED/REJECTED verdict. Whether the lead chooses to consult the reviewer at all is the
- * model's call, and the app re-prompts for it in code (REVIEW_ENFORCEMENT_PROMPT), so a run without one
- * is reported, not failed — run it again to exercise the reviewer.
+ * Exits non-zero if any delegation returns a receipt or if nothing was delegated.
  */
 import fs from 'node:fs';
 import { query, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   BASE_SYSTEM_PROMPT_NAME,
-  parseVerdict,
   resolveCanonicalModel,
   type AppSettings,
   type OrchestratorProfile,
 } from '../src/shared/types';
 import { McpPrompts } from '../src/main/agent/McpPrompts';
 import { buildMcpServers } from '../src/main/agent/McpConnection';
-import { buildOrchestrator, ORCHESTRATOR_AGENT, REVIEWER_SUBAGENT } from '../src/main/agent/orchestration';
+import { buildOrchestrator, ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
 import { buildAutoApproveTools, buildCanUseTool } from '../src/main/agent/policy';
 import { claudeBinaryPath, debugEnv } from '../src/main/agent/AgentService';
 import { SyncClient } from '../src/main/sync/SyncClient';
@@ -105,14 +101,8 @@ async function main(): Promise<void> {
     }
   }
 
-  const reviewer = results.filter((r) => r.subagent === REVIEWER_SUBAGENT);
   assert(results.length > 0, `the orchestrator delegated (${results.length} delegation result(s))`);
   assert(results.every((r) => !RECEIPT.test(r.text)), 'no delegation came back as an "Async agent launched" receipt');
-  if (reviewer.length === 0) {
-    console.log('NOTE  the lead answered without consulting the reviewer this run; re-run to exercise the reviewer');
-  } else {
-    assert(reviewer.every((r) => parseVerdict(r.text) !== null), "every reviewer reply carries a verdict");
-  }
 }
 
 main().catch((e) => {

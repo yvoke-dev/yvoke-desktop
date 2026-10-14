@@ -264,6 +264,9 @@ describe('spec/ modular structure', () => {
 
     // spec/03: review is driven by the app in code and cannot be switched off
     expect(multiAgent).toContain('Review is driven by the app in code, and cannot be switched off');
+    expect(multiAgent).toContain(
+      'If the lead ends its turn in plain text without submitting its answer, coordination prose is not\n  stripped.',
+    );
     expect(multiAgent).not.toContain('NOT APPROVED');
     expect(multiAgent).not.toContain("always reports `reviewer` as the reviewer's playbook name");
 

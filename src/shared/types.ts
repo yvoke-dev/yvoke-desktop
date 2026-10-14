@@ -310,8 +310,6 @@ export type ReviewOutcome = 'approved' | 'rejected' | 'unclear' | 'skipped';
 export interface ReviewStatus {
   outcome: ReviewOutcome;
   feedback?: string;
-  /** True when the runtime had to re-prompt the orchestrator to run the reviewer. */
-  enforced?: boolean;
 }
 
 /** Parse a reviewer sub-agent's plain-text verdict (first line APPROVED/REJECTED + feedback). */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addUsage, nextReviewAction, reviewAttempts, reviewStatusOf } from '../src/main/agent/translate';
+import { addUsage, reviewAttempts, reviewStatusOf } from '../src/main/agent/translate';
 import {
   afterAnswerMarker,
   ANSWER_MARKER,
@@ -72,100 +72,6 @@ describe('reviewStatusOf', () => {
       delegation('reviewer', { verdict: { approved: true } }),
     ];
     expect(reviewStatusOf(calls)?.outcome).toBe('approved');
-  });
-
-  it('marks the status as enforced when the runtime had to re-prompt', () => {
-    expect(reviewStatusOf([delegation('reviewer', { verdict: { approved: true } })], true)).toEqual({
-      outcome: 'approved',
-      enforced: true,
-    });
-    expect(reviewStatusOf([delegation('oim-customers')], true)).toEqual({ outcome: 'skipped', enforced: true });
-  });
-});
-
-describe('nextReviewAction', () => {
-  const base = {
-    orchestratorMode: true,
-    isError: false,
-    aborted: false,
-    alreadyEnforced: false,
-    maxReviewRounds: 2,
-    toolCalls: [delegation('oim-customers')],
-  };
-  const rejected = (feedback = 'claim 2 unsupported'): ToolCallInfo[] => [
-    delegation('oim-customers'),
-    delegation('reviewer', { verdict: { approved: false, feedback } }),
-  ];
-
-  it('is never consulted for a single-agent turn — nextReviewAction short-circuits first', () => {
-    const calls = [delegation('oim-customers')];
-    expect(nextReviewAction({ ...base, orchestratorMode: false, toolCalls: calls })).toEqual({ kind: 'deliver' });
-    expect(
-      nextReviewAction({
-        ...base,
-        orchestratorMode: false,
-        toolCalls: [delegation('reviewer', { verdict: { approved: false } })],
-      }),
-    ).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, orchestratorMode: true, toolCalls: calls })).toEqual({ kind: 'enforce' });
-  });
-
-  it('enforces a review when an orchestrated turn skipped the reviewer', () => {
-    expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
-  });
-
-  it('drives a revision round when the reviewer rejected the draft', () => {
-    expect(nextReviewAction({ ...base, toolCalls: rejected() })).toEqual({
-      kind: 'revise',
-      outcome: 'rejected',
-      feedback: 'claim 2 unsupported',
-      round: 1,
-    });
-  });
-
-  it('counts rounds and stops at maxReviewRounds, delivering the answer flagged', () => {
-    const rejectedTwice = [...rejected(), delegation('reviewer', { verdict: { approved: false } })];
-    expect(nextReviewAction({ ...base, toolCalls: rejectedTwice, revisionRounds: 1 })).toMatchObject({
-      kind: 'revise',
-      round: 2,
-    });
-    expect(nextReviewAction({ ...base, toolCalls: rejectedTwice, revisionRounds: 2 })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, toolCalls: rejected(), maxReviewRounds: 0 })).toEqual({ kind: 'deliver' });
-  });
-
-  it('revises on an unclear verdict too — an unparseable reviewer is not a pass', () => {
-    const unclear = [delegation('reviewer', { result: 'looks fine to me' })];
-    expect(nextReviewAction({ ...base, toolCalls: unclear })).toMatchObject({ kind: 'revise', outcome: 'unclear' });
-  });
-
-  it('delivers an approved answer untouched', () => {
-    const approved = [delegation('oim-customers'), delegation('reviewer', { verdict: { approved: true } })];
-    expect(nextReviewAction({ ...base, toolCalls: approved })).toEqual({ kind: 'deliver' });
-  });
-
-  it('never re-prompts twice for a skipped review, so a stubborn orchestrator cannot loop the turn', () => {
-    expect(nextReviewAction({ ...base, alreadyEnforced: true })).toEqual({ kind: 'deliver' });
-  });
-
-  it('always code-enforces review — review toggle cannot be turned off', () => {
-    expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
-    expect(nextReviewAction({ ...base, toolCalls: rejected() })).toEqual({
-      kind: 'revise',
-      outcome: 'rejected',
-      feedback: 'claim 2 unsupported',
-      round: 1,
-    });
-  });
-
-  it('leaves single-agent, errored and stopped turns alone', () => {
-    expect(nextReviewAction({ ...base, orchestratorMode: false })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, isError: true })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, aborted: true })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, toolCalls: rejected(), aborted: true })).toEqual({ kind: 'deliver' });
-  });
-
-  it('does not fire on a turn that delegated to nobody', () => {
-    expect(nextReviewAction({ ...base, toolCalls: [] })).toEqual({ kind: 'deliver' });
   });
 });
 

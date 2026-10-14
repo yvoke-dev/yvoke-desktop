@@ -12,7 +12,7 @@ import {
   type ThreadMeta,
 } from '../src/shared/types';
 import { buildMcpServers } from '../src/main/agent/McpConnection';
-import { ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
+import { ORCHESTRATOR_AGENT, unreviewedNote } from '../src/main/agent/orchestration';
 
 /**
  * Session lifecycle, against a stand-in for the Agent SDK.
@@ -2284,8 +2284,9 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
     >;
     expect(complete).toBeDefined();
     expect(complete.aborted).toBe(true);
-    expect(complete.message.content).not.toContain('verification step did not complete');
-    expect(complete.message.content).not.toContain('could not be fully verified');
+    expect(complete.message.content).toBe(`Draft before stop [${CITED_ID}].`);
+    expect(complete.message.content).not.toContain(unreviewedNote());
+    expect(complete.message.content).not.toContain('did not pass automated review');
     svc.closeAll();
   });
 
@@ -2968,17 +2969,204 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
     await reviewerStarted;
 
     expect(h.sessions).toHaveLength(2);
+    // Let the orchestrator session emit its final result message after submit_answer resolves
+    h.sessions[0].interruptSpy.mockImplementation(async () => undefined);
     await svc.interrupt(meta.id);
+    expect(h.sessions[0].interruptSpy).toHaveBeenCalledTimes(1);
     expect(h.sessions[1].interruptSpy).toHaveBeenCalledTimes(1);
 
     for (let i = 0; i < 200; i++) {
-      if (submitRes !== null) break;
+      if (events.some((e) => e.kind === 'turn-complete')) break;
       await new Promise((r) => setTimeout(r, 0));
     }
 
     expect(submitRes).toEqual({ text: 'Turn interrupted by user.', isError: true });
     expect(events.some((e) => e.kind === 'subagent-complete' && e.subagentType === 'reviewer')).toBe(false);
     expect(events.some((e) => e.kind === 'review-enforced')).toBe(false);
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete).toBeDefined();
+    expect(complete.aborted).toBe(true);
+    expect(complete.message.content).toBe(`Draft before interrupt [${CITED_ID}].`);
+    expect(complete.message.content).not.toContain(unreviewedNote());
+    expect(complete.message.content).not.toContain('did not pass automated review');
+    svc.closeAll();
+  });
+
+  it('12. Task 5.2: status-neutral settled notice on non-approved settles, malformed submit_review recovery, and concurrent submit_answer serialization', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta, {
+      getSettings: () => ({
+        ...settings(),
+        orchestrator: {
+          ...settings().orchestrator!,
+          maxReviewRounds: 0,
+        },
+      }),
+    });
+
+    // Part A: Duplicate submit_answer after a non-approved settle (out of rounds) returns status-neutral notice (not APPROVED)
+    const partAResults: Array<{ text: string; isError?: boolean }> = [];
+
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-wave5-a',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-w5-a', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        partAResults.push(await invokeSubmitAnswer(session, emit, 'sub-w5-1', `Draft 1 [${CITED_ID}].`));
+        partAResults.push(
+          await invokeSubmitAnswer(session, emit, 'sub-w5-2', `Duplicate draft [${CITED_ID}].`),
+        );
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      } else {
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'rev-w5-1',
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: false,
+                  feedback: 'Rejected with 0 maxReviewRounds',
+                },
+              },
+            ],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      }
+    };
+
+    await ask(svc, meta, 'Test non-approved settled notice');
+    expect(partAResults[0]?.text).toContain('maximum number of review rounds');
+    expect(partAResults[1]?.text).toBe(
+      'Your answer has already been delivered to the user. End your turn now without repeating the answer.',
+    );
+    expect(partAResults[1]?.text).not.toContain('APPROVED');
+
+    // Part B: Malformed submit_review tool_use in Reviewer stream does not crash executeReviewerQuery; second valid submit_review succeeds
+    events = [];
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emitSpecialistDelegation(emit, 'spec-w5-b', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        await invokeSubmitAnswer(session, emit, 'sub-w5-b', `Draft B [${CITED_ID}].`);
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      } else {
+        // First assistant message has malformed input (null) which throws in parseSubmitReviewArgs
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'rev-malformed',
+                name: 'mcp__review__submit_review',
+                input: null,
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'rev-malformed',
+                content: 'Validation error: expected object',
+                is_error: true,
+              },
+            ],
+          },
+        });
+        // Second assistant message in same Reviewer session has valid submit_review
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'rev-valid-retry',
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: true,
+                  feedback: 'Recovered after malformed tool_use!',
+                },
+              },
+            ],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      }
+    };
+
+    await ask(svc, meta, 'Test malformed submit_review recovery');
+    const completeB = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(completeB.message.content).toBe(`Draft B [${CITED_ID}].`);
+    expect(completeB.message.content).not.toContain(unreviewedNote());
+    expect(completeB.message.review).toEqual({
+      outcome: 'approved',
+      feedback: 'Recovered after malformed tool_use!',
+    });
+
+    // Part C: Concurrent submit_answer calls serialize via in-flight lock so only ONE Reviewer query runs when the first settles
+    events = [];
+    const sessionsBeforeC = h.sessions.length;
+    let concurrentResults: Array<{ text: string; isError?: boolean }> = [];
+
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emitSpecialistDelegation(emit, 'spec-w5-c', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        concurrentResults = await Promise.all([
+          invokeSubmitAnswer(session, emit, 'sub-c1', `Concurrent draft 1 [${CITED_ID}].`),
+          invokeSubmitAnswer(session, emit, 'sub-c2', `Concurrent draft 2 [${CITED_ID}].`),
+        ]);
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      } else {
+        await new Promise((r) => setTimeout(r, 10));
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'rev-conc-1',
+                name: 'mcp__review__submit_review',
+                input: {
+                  approved: true,
+                  feedback: 'Approved first concurrent call.',
+                },
+              },
+            ],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+      }
+    };
+
+    await ask(svc, meta, 'Test concurrent submit_answer serialization');
+    // Only ONE Reviewer query should have been spawned for the two concurrent calls
+    expect(h.sessions.length - sessionsBeforeC).toBe(1);
+    expect(concurrentResults[0].text).toContain('APPROVED — the answer you passed to submit_answer');
+    expect(concurrentResults[1].text).toContain('APPROVED — your answer has already been delivered');
+    const completeC = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(completeC.message.content).toBe(`Concurrent draft 1 [${CITED_ID}].`);
     svc.closeAll();
   });
 });
