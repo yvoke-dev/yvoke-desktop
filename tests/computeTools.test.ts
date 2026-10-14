@@ -360,6 +360,80 @@ describe('executeCode — negative, security & boundary tests (Gate 2)', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  it('11. resists watchdog-escape freezes when leaf/returned promises or Set.prototype[Symbol.iterator] are poisoned on timeout paths', async () => {
+    const hostUnhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      hostUnhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      // Throw-trap variants (pinning that guest iterators/prototypes are not invoked)
+      expect(() =>
+        executeCode(
+          'Set.prototype[Symbol.iterator] = () => { throw new Error("iterator trap"); }; while (true) {}',
+          { timeoutMs: 50 },
+        ),
+      ).toThrow(/timed out/i);
+
+      expect(() =>
+        executeCode(
+          'const p = new Promise(() => {}); Object.setPrototypeOf(p, new Proxy({}, { getPrototypeOf() { throw new Error("proto trap"); } })); while (true) {}',
+          { timeoutMs: 50 },
+        ),
+      ).toThrow(/timed out/i);
+
+      // Probe 1: Leaf promise with infinite-loop getPrototypeOf Proxy + CPU timeout
+      expect(() =>
+        executeCode(
+          'const p = new Promise(() => {}); Object.setPrototypeOf(p, new Proxy({}, { getPrototypeOf() { while (true) {} } })); while (true) {}',
+          { timeoutMs: 50 },
+        ),
+      ).toThrow(/timed out/i);
+
+      // Probe 2: Poisoned Set.prototype[Symbol.iterator] with infinite-loop next() + rejected leaf + CPU timeout
+      expect(() =>
+        executeCode(
+          'Set.prototype[Symbol.iterator] = () => ({ next() { while (true) {} } }); Promise.reject(new Error("boom")); while (true) {}',
+          { timeoutMs: 50 },
+        ),
+      ).toThrow(/timed out/i);
+
+      // Probe 3: Poisoned outcomeVal promise prototype (extensible -> sanitized and resolved; frozen -> safe no-op)
+      expect(
+        executeCode(
+          'const p = Promise.resolve(42); Object.setPrototypeOf(p, new Proxy({}, { getPrototypeOf() { while (true) {} } })); p',
+          { timeoutMs: 50 },
+        ).result,
+      ).toBe('42');
+
+      expect(
+        executeCode(
+          'const p = Promise.resolve(42); Object.defineProperty(p, "constructor", { configurable: true, get() { while (true) {} } }); p',
+          { timeoutMs: 50 },
+        ).result,
+      ).toBe('42');
+
+      expect(
+        executeCode(
+          'const p = Promise.resolve(42); Object.defineProperty(p, "constructor", { get() { while (true) {} } }); p',
+          { timeoutMs: 50 },
+        ).result,
+      ).toBe('');
+
+      expect(
+        executeCode(
+          'const p = Promise.resolve(42); Object.setPrototypeOf(p, new Proxy({}, { getPrototypeOf() { while (true) {} } })); Object.freeze(p); p',
+          { timeoutMs: 50 },
+        ).result,
+      ).toBe('');
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(hostUnhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });
 
 describe('buildComputeServer', () => {

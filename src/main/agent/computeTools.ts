@@ -57,8 +57,9 @@ export interface ExecuteCodeResult {
 interface BootstrapHooks {
   recordOutcome: (ok: boolean, val: unknown) => void;
   trackPromise: (promise: unknown, parent: unknown) => void;
-  silenceLeaves: () => void;
 }
+
+const SILENCE_TIMEOUT_MS = 50;
 
 const bootstrapScript = new vm.Script(
   `(function () {
@@ -69,9 +70,9 @@ const bootstrapScript = new vm.Script(
     const StringCtor = String;
     const ErrorCtor = Error;
     const isArray = Array.isArray;
-    const arrayFrom = Array.from;
     const objectKeys = Object.keys;
     const objectCreate = Object.create;
+    const getPrototypeOf = Object.getPrototypeOf;
     const setPrototypeOf = Object.setPrototypeOf;
     const defineProperty = Object.defineProperty;
     const hasOwn = uncurryThis(Object.prototype.hasOwnProperty);
@@ -80,24 +81,40 @@ const bootstrapScript = new vm.Script(
     const setAdd = uncurryThis(Set.prototype.add);
     const setDelete = uncurryThis(Set.prototype.delete);
     const setClear = uncurryThis(Set.prototype.clear);
+    const setForEach = uncurryThis(Set.prototype.forEach);
     const MapCtor = Map;
-    const mapEntries = uncurryThis(Map.prototype.entries);
+    const mapForEach = uncurryThis(Map.prototype.forEach);
     const DateCtor = Date;
     const dateToISOString = uncurryThis(Date.prototype.toISOString);
     const dateGetTime = uncurryThis(Date.prototype.getTime);
     const RegExpCtor = RegExp;
     const regExpToString = uncurryThis(RegExp.prototype.toString);
     const PromiseCtor = Promise;
-    const promiseThen = uncurryThis(Promise.prototype.then);
+    const PromisePrototype = PromiseCtor.prototype;
+    const promiseThen = uncurryThis(PromisePrototype.then);
     const isNaN = Number.isNaN;
     const isFinite = Number.isFinite;
     const strSlice = uncurryThis(String.prototype.slice);
+
+    defineProperty(PromisePrototype, "constructor", {
+      value: PromiseCtor,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+    defineProperty(PromiseCtor, Symbol.species, {
+      value: PromiseCtor,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
 
     let stdout = "";
     let stdoutTruncated = false;
     let caughtInVm = false;
     let outcomeOk = true;
     let outcomeVal = undefined;
+    const allPromises = new SetCtor();
     const leafPromises = new SetCtor();
     const noop = function () {};
 
@@ -118,15 +135,15 @@ const bootstrapScript = new vm.Script(
         return StringCtor(v);
       }
       if (typeof v === "object") {
+        if (setHas(allPromises, v)) {
+          return "[Promise]";
+        }
         if (v instanceof DateCtor) {
           const t = dateGetTime(v);
           return isNaN(t) ? "Invalid Date" : dateToISOString(v);
         }
         if (v instanceof RegExpCtor) {
           return regExpToString(v);
-        }
-        if (v instanceof PromiseCtor) {
-          return "[Promise]";
         }
         if (v instanceof ErrorCtor) {
           const eName =
@@ -149,23 +166,21 @@ const bootstrapScript = new vm.Script(
         }
         if (v instanceof SetCtor) {
           setAdd(seen, v);
-          const arr = arrayFrom(v);
           const out = [];
           setPrototypeOf(out, null);
-          for (let i = 0; i < arr.length; i++) {
-            out[i] = toSerializable(arr[i], seen);
-          }
+          let idx = 0;
+          setForEach(v, function (item) {
+            out[idx++] = toSerializable(item, seen);
+          });
           setDelete(seen, v);
           return out;
         }
         if (v instanceof MapCtor) {
           setAdd(seen, v);
           const obj = objectCreate(null);
-          const entries = arrayFrom(mapEntries(v));
-          for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
-            obj[StringCtor(entry[0])] = toSerializable(entry[1], seen);
-          }
+          mapForEach(v, function (val, key) {
+            obj[StringCtor(key)] = toSerializable(val, seen);
+          });
           setDelete(seen, v);
           return obj;
         }
@@ -263,19 +278,34 @@ const bootstrapScript = new vm.Script(
         setDelete(leafPromises, parent);
       }
       if (p !== undefined) {
+        setAdd(allPromises, p);
         setAdd(leafPromises, p);
       }
     }
 
-    function silenceLeaves() {
-      const leaves = arrayFrom(leafPromises);
-      setClear(leafPromises);
-      for (let i = 0; i < leaves.length; i++) {
-        const leaf = leaves[i];
-        if (leaf instanceof PromiseCtor) {
-          promiseThen(leaf, undefined, noop);
+    function safePromiseThen(p, onFulfilled, onRejected) {
+      try {
+        if (getPrototypeOf(p) !== PromisePrototype) {
+          setPrototypeOf(p, PromisePrototype);
         }
+        if (hasOwn(p, "constructor")) {
+          delete p.constructor;
+        }
+        promiseThen(p, onFulfilled, onRejected);
+      } catch {
+        // Ignore if guest froze a promise after tampering with its prototype or own constructor.
       }
+    }
+
+    function silenceLeaves() {
+      const snapshot = new SetCtor();
+      setForEach(leafPromises, function (leaf) {
+        setAdd(snapshot, leaf);
+      });
+      setClear(leafPromises);
+      setForEach(snapshot, function (leaf) {
+        safePromiseThen(leaf, undefined, noop);
+      });
     }
 
     function catchOutcome(err) {
@@ -291,11 +321,16 @@ const bootstrapScript = new vm.Script(
     }
 
     function settleOutcome() {
-      if (outcomeOk && outcomeVal instanceof PromiseCtor) {
+      const snapshot = new SetCtor();
+      setForEach(leafPromises, function (leaf) {
+        setAdd(snapshot, leaf);
+      });
+      setClear(leafPromises);
+      if (outcomeOk && setHas(allPromises, outcomeVal)) {
         const p = outcomeVal;
-        setDelete(leafPromises, p);
+        setDelete(snapshot, p);
         outcomeVal = undefined;
-        promiseThen(
+        safePromiseThen(
           p,
           function (res) {
             outcomeVal = res;
@@ -306,23 +341,18 @@ const bootstrapScript = new vm.Script(
           },
         );
       }
-      const leaves = arrayFrom(leafPromises);
-      setClear(leafPromises);
-      for (let i = 0; i < leaves.length; i++) {
-        const leaf = leaves[i];
-        if (leaf instanceof PromiseCtor) {
-          promiseThen(
-            leaf,
-            undefined,
-            function (err) {
-              if (outcomeOk) {
-                outcomeOk = false;
-                outcomeVal = err;
-              }
-            },
-          );
-        }
-      }
+      setForEach(snapshot, function (leaf) {
+        safePromiseThen(
+          leaf,
+          undefined,
+          function (err) {
+            if (outcomeOk) {
+              outcomeOk = false;
+              outcomeVal = err;
+            }
+          },
+        );
+      });
     }
 
     function makeEnvelope(ok, resultOrError, out) {
@@ -374,6 +404,13 @@ const bootstrapScript = new vm.Script(
       configurable: false,
     });
 
+    defineProperty(globalThis, "__yvoke_silence__", {
+      value: silenceLeaves,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+
     defineProperty(globalThis, "__yvoke_finalize__", {
       value: finalize,
       writable: false,
@@ -381,7 +418,7 @@ const bootstrapScript = new vm.Script(
       configurable: false,
     });
 
-    return { recordOutcome, trackPromise, silenceLeaves };
+    return { recordOutcome, trackPromise };
   })()`,
   { filename: 'bootstrap.js' },
 );
@@ -390,9 +427,24 @@ const settleScript = new vm.Script('globalThis.__yvoke_settle__()', {
   filename: 'settle.js',
 });
 
+const silenceScript = new vm.Script('globalThis.__yvoke_silence__()', {
+  filename: 'silence.js',
+});
+
 const finalizeScript = new vm.Script('globalThis.__yvoke_finalize__()', {
   filename: 'finalize.js',
 });
+
+function runSilence(context: vm.Context): void {
+  try {
+    silenceScript.runInContext(context, {
+      timeout: SILENCE_TIMEOUT_MS,
+      breakOnSigint: false,
+    });
+  } catch {
+    // Best-effort cleanup under V8 Watchdog timeout.
+  }
+}
 
 function compileUserScript(code: string): vm.Script {
   let executableCode = code;
@@ -489,7 +541,7 @@ export function executeCode(code: string, options?: ExecuteCodeOptions): Execute
     hooks.recordOutcome(true, val);
   } catch (err) {
     if (isVmTimeoutError(err)) {
-      hooks.silenceLeaves();
+      runSilence(context);
       throw new Error(`Execution timed out after ${timeoutMs}ms`);
     }
     hooks.recordOutcome(false, err);
@@ -508,7 +560,7 @@ export function executeCode(code: string, options?: ExecuteCodeOptions): Execute
       breakOnSigint: false,
     });
   } catch (err) {
-    hooks.silenceLeaves();
+    runSilence(context);
     if (isVmTimeoutError(err)) {
       throw new Error(`Execution timed out after ${timeoutMs}ms`);
     }
