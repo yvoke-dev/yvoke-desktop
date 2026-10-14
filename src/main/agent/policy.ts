@@ -9,7 +9,12 @@ import {
   normalizeClarifyingInput,
   qualifyTool,
 } from '../../shared/types';
+<<<<<<< HEAD
 import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX, isComputeTool } from './computeTools';
+=======
+import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX } from './computeTools';
+import { REVIEW_TOOL_PREFIX } from './reviewTools';
+>>>>>>> 1c11215 (feat(agent): add submit_review MCP tool and web-parity review prompt builders)
 
 
 /**
@@ -321,6 +326,9 @@ export function isToolAllowed(
     return true;
   }
   if (toolName.startsWith(MCP_TOOL_PREFIX)) {
+    return true;
+  }
+  if (toolName.startsWith(REVIEW_TOOL_PREFIX)) {
     return true;
   }
   // Safe in-process compute tool — no shell/fs/network, but still only for playbooks that

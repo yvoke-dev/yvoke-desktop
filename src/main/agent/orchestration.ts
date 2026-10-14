@@ -1,8 +1,27 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
-import type { AppSettings, McpPromptInfo, OrchestratorProfile, ThinkingLevel, ToolCallInfo } from '../../shared/types';
-import { BASE_SYSTEM_PROMPT_NAME, DEFAULT_KB_TOOLS, isValidSystemPromptName, MCP_TOOL_PREFIX, qualifyTool, resolveCanonicalModel, type ValidSystemPromptName } from '../../shared/types';
+import type {
+  AppSettings,
+  McpPromptInfo,
+  MessageBlock,
+  OrchestratorProfile,
+  ReviewVerdict,
+  ThinkingLevel,
+  ToolCallInfo,
+} from '../../shared/types';
+import {
+  BASE_SYSTEM_PROMPT_NAME,
+  DEFAULT_KB_TOOLS,
+  isCitationOnlyVerdict,
+  isValidSystemPromptName,
+  MCP_TOOL_PREFIX,
+  qualifyTool,
+  resolveCanonicalModel,
+  type ValidSystemPromptName,
+} from '../../shared/types';
 import { COMPUTE_TOOLS, isComputeTool } from './computeTools';
+import { citeScoped, deduped, type SentLedger } from './evidenceDigest';
 import { isWebTool, webToolDeclared } from './policy';
+import { REVIEW_SUBMIT_TOOL } from './reviewTools';
 import type { McpPrompts } from './McpPrompts';
 import { loadDesignatedSystemPrompt } from './systemPrompt';
 
@@ -18,7 +37,7 @@ export const REVIEWER_SUBAGENT = 'reviewer';
 export const ORCHESTRATOR_AGENT = 'orchestrator';
 
 /** thinkingLevel → sub-agent reasoning effort (AgentDefinition has no thinking-budget field). */
-function effortFor(level: ThinkingLevel): 'low' | 'medium' | 'high' {
+export function effortFor(level: ThinkingLevel): 'low' | 'medium' | 'high' {
   return level === 'high' ? 'high' : level === 'off' || level === 'low' ? 'low' : 'medium';
 }
 
@@ -49,15 +68,68 @@ export function mapSpecialistTools(info: McpPromptInfo | undefined, settings: Ap
 }
 
 /**
- * The reviewer is a validate-only agent with `verify_citations` and nothing else — matching
- * `OrchestrationService.java`, which grants it exactly `List.of("verify_citations")`.
+ * The reviewer is a validate-only agent with `verify_citations` and `submit_review` — matching
+ * `OrchestrationService.java`, which grants it `verify_citations` plus the per-run `SubmitReviewTool`.
  *
  * It has no search, read or compute tools (`code_execution: false`), and does not receive
  * `ToolSearch` because local MCP tools are directly available without tool discovery.
  * `get_section` was deliberately removed: returning the whole section around a passage lets the
  * reviewer judge claims against neighbouring text no specialist ever retrieved, defeating cite-scoping.
  */
-const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`];
+export const REVIEWER_TOOLS = [`${MCP_TOOL_PREFIX}verify_citations`, REVIEW_SUBMIT_TOOL];
+
+/**
+ * The boundary the orchestrator marks between anything it says about the work and the answer
+ * (ported from `OrchestrationService.ANSWER_MARKER` in `yvoke-web`).
+ */
+export const ANSWER_MARKER = '<<<FINAL_ANSWER>>>';
+
+/**
+ * Stated once, in the system prompt every orchestrator turn receives — the role's output contract,
+ * ported from `OrchestrationService.ANSWER_MARKER_CONTRACT`.
+ */
+export const ANSWER_MARKER_CONTRACT =
+  'Your reply to a question is delivered to the user verbatim as the answer. Write the line ' +
+  ANSWER_MARKER +
+  ' on its own immediately before the answer begins, and put nothing after that line except the ' +
+  'answer itself. Anything before it — planning, notes on what you changed, sign-offs — ' +
+  'is discarded, so it is the place for that, not the answer.';
+
+/**
+ * Everything after the LAST marker, or the whole text when there is none
+ * (ported from `OrchestrationService.afterAnswerMarker`).
+ */
+export function afterAnswerMarker(text: string): string {
+  const at = text.lastIndexOf(ANSWER_MARKER);
+  if (at < 0) {
+    return text;
+  }
+  const tail = text.slice(at + ANSWER_MARKER.length).trim();
+  // The marker is a control token; it must not reach the reader on either branch.
+  return tail.length === 0 ? text.replaceAll(ANSWER_MARKER, '').trim() : tail;
+}
+
+/**
+ * Strip pre-marker planning prose from `MessageBlock[]` while preserving all `thinking` and
+ * `toolCalls` blocks, appending the clean `finalAnswer` as the final text block.
+ */
+export function stripBeforeAnswerMarker(blocks: MessageBlock[], finalAnswer: string): MessageBlock[] {
+  const cleaned: MessageBlock[] = [];
+  for (const block of blocks) {
+    const hasThinking = Boolean(block.thinking && block.thinking.length > 0);
+    const hasTools = Boolean(block.toolCalls && block.toolCalls.length > 0);
+    if (hasThinking || hasTools) {
+      cleaned.push({
+        ...(hasThinking ? { thinking: block.thinking } : {}),
+        ...(hasTools ? { toolCalls: block.toolCalls } : {}),
+      });
+    }
+  }
+  if (finalAnswer.length > 0) {
+    cleaned.push({ text: finalAnswer });
+  }
+  return cleaned;
+}
 
 function orchestratorAdapter(roster: string, maxReviewRounds: number, maxSpecialistCalls: number): string {
   return `
@@ -71,23 +143,13 @@ You have NO \`call_specialist\` tool. To consult a specialist, call the **Task**
 result is that specialist's grounded, cited answer. You may delegate to several specialists in
 parallel. Aim for at most ${maxSpecialistCalls} specialist calls in total.
 
-### Reviewer
-Before delivering an answer to the user, consult the reviewer.
-Once your specialists have responded, call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`
-and a prompt containing all three of:
-1. \`## Original question\` — the user's question.
-2. \`## Candidate answer\` — your composed candidate answer in full.
-3. \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim, citation markers intact: the bare
-   \`[<uuid>]\` ids specialists now write, plus \`[chunk_id=…]\`, \`[document_id=…]\` and \`[N]\` where
-   one still uses the older form. The evidence is filtered down to the sources the answer cites, so
-   an id you drop here takes its source out of the reviewer's view.
+### Output & Automated Review
+${ANSWER_MARKER_CONTRACT}
 
-The reviewer cannot see this conversation and validates only against what you paste under (3); a review
-request without that section will be rejected for missing evidence.
-
-When the reviewer replies \`APPROVED\`, deliver the finalized answer to the user.
-If the reviewer replies \`REJECTED\`, the runtime hands the feedback (and the evidence) back to you for a
-revision round — up to ${maxReviewRounds}. Fix the answer and re-review; do not argue with the reviewer.
+When your turn ends, the runtime automatically validates your candidate answer against the raw evidence
+retrieved by the specialists. If the reviewer rejects your draft, the runtime hands the feedback and
+relevant source evidence back to you for a revision round — up to ${maxReviewRounds}. Fix the answer and
+precede the revised answer with ${ANSWER_MARKER} on its own line; do not argue with the reviewer.
 Never add a "did not pass review" note yourself: the runtime appends one if the rounds run out.
 
 Available specialists (\`subagent_type\` → coverage):
@@ -96,27 +158,19 @@ ${roster}
 }
 
 /**
- * Headings the SERVER orchestrator playbook keys its behaviour off — it has a
- * "Handling reviewer feedback (revision rounds)" section that triggers on the feedback heading, and
- * the web harness (OrchestrationService) renders the reviewer's task with the evidence heading.
- * The web injects both from code around each orchestrator turn; on desktop the orchestrator drives
- * its own reviewer calls, so the runtime injects them into the running turn instead. Keep these
- * strings byte-identical to the server's — they are the contract, not decoration.
+ * Headings the SERVER orchestrator playbook and web harness (`OrchestrationService.java`) use.
  */
-export const REVIEW_FEEDBACK_HEADING = '## Reviewer feedback to address (revise your previous answer)';
+export const REVIEW_FEEDBACK_HEADING = '## Reviewer feedback to address';
 export const EVIDENCE_HEADING = '## Evidence gathered by the specialists (the ONLY basis for validation)';
 
-/** Per-specialist cap when re-rendering evidence into a revision notice (keeps the re-prompt bounded). */
+/** Per-specialist cap when re-rendering specialist prose fallback. */
 const MAX_EVIDENCE_CHARS = 12_000;
 
 /**
- * Re-render the specialists' answers as the evidence block the reviewer must be given. The web
- * harness owns this section (it collects evidence as specialists run); here the same material is
- * recovered from the turn's completed delegations, so a revision round can hand the orchestrator
- * exactly what it must forward — the failure mode being fixed is a review request sent WITHOUT it.
+ * Legacy helper rendering specialist prose summaries from `ToolCallInfo[]`.
  */
 export function renderSpecialistEvidence(toolCalls: ToolCallInfo[]): string {
-  const specialists = toolCalls.filter(
+  const specialists = (toolCalls ?? []).filter(
     (c) => c.name === DELEGATE_TOOL_NAME && c.subagentType !== REVIEWER_SUBAGENT && !c.isError && c.result?.trim(),
   );
   if (specialists.length === 0) return '(no specialist evidence was captured)';
@@ -135,92 +189,208 @@ export function renderSpecialistEvidence(toolCalls: ToolCallInfo[]): string {
 }
 
 /**
- * Injected by AgentService when the reviewer rejected the draft (or returned no clear verdict) and
- * revision rounds remain. Mirrors the web harness, which re-runs the orchestrator with the feedback
- * appended to the question under `REVIEW_FEEDBACK_HEADING`; the playbook's "revision rounds" section
- * keys off exactly that heading, so it fires here too.
+ * Render the initial review prompt for the Reviewer session (ported from
+ * `OrchestrationService.renderReviewTask` in `yvoke-web`).
  */
-export function buildRevisionPrompt(params: {
+export function renderReviewTask(
+  question: string,
+  answer: string,
+  evidence: string[],
+  sent?: SentLedger | null,
+): string {
+  let sb =
+    'Validate the candidate answer below. Do NOT search for new information — check ' +
+    'it ONLY against the supplied evidence, then call submit_review.\n\n';
+  sb += `## Original question\n${question}\n\n`;
+  sb += `## Candidate answer\n${answer}\n\n`;
+  sb += `${EVIDENCE_HEADING}\n`;
+  if (evidence.length === 0) {
+    sb += '(no evidence was captured)\n';
+  } else {
+    sb +=
+      'You are shown the sources this answer cites, and only those. The ' +
+      'specialists retrieved others that the answer does not cite; those are not ' +
+      'shown here. So when a claim is not supported by the evidence below, the fault ' +
+      'may be a missing or wrong citation rather than a missing source — say the ' +
+      'answer must cite what supports the claim, rather than concluding no source ' +
+      'exists.\n\n';
+    sb += `${citeScoped(evidence, answer, sent)}\n`;
+  }
+  return sb;
+}
+
+/**
+ * Render the follow-up review prompt on revision rounds (round > 0), carrying only the revised
+ * candidate answer and newly cited sources not yet shown in earlier rounds (ported from
+ * `OrchestrationService.renderReviewFollowUp` in `yvoke-web`).
+ */
+export function renderReviewFollowUp(
+  answer: string,
+  evidence: string[],
+  sent?: SentLedger | null,
+): string {
+  const fresh = evidence.length === 0 ? '' : citeScoped(evidence, answer, sent);
+  let sb =
+    'The answer has been revised in response to your review. Re-validate it, then ' +
+    'call submit_review. Your earlier notes and every source you were already shown are ' +
+    'above in this conversation.\n\n';
+  sb += `## Revised candidate answer\n${answer}\n\n`;
+  sb += '## Sources this revision cites that you have not been shown yet\n';
+  sb +=
+    fresh.trim().length === 0
+      ? '(none — every source this revision cites is already above)\n'
+      : `${fresh}\n`;
+  return sb;
+}
+
+const UUID_ANYWHERE_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+
+/**
+ * The ids the reviewer's objection actually names, as a bracketed list `citeScoped` can scope to —
+ * falling back to the whole draft when it names none (ported from `OrchestrationService.idsUnderReview`).
+ */
+export function idsUnderReview(verdict: ReviewVerdict | undefined | null, draft: string): string {
+  let objection = '';
+  if (verdict) {
+    if (verdict.feedback) {
+      objection += `${verdict.feedback}\n`;
+    }
+    for (const fix of verdict.citationFixes ?? []) {
+      objection += `${fix}\n`;
+    }
+    for (const claim of verdict.unsupportedClaims ?? []) {
+      objection += `${claim}\n`;
+    }
+  }
+  const matches = objection.match(UUID_ANYWHERE_RE);
+  if (!matches || matches.length === 0) {
+    return draft;
+  }
+  return matches.map((id) => `[${id}]\n`).join('');
+}
+
+export interface BuildRevisionPromptParams {
+  verdict?: ReviewVerdict | null;
   feedback?: string;
-  toolCalls: ToolCallInfo[];
-  round: number;
-  maxRounds: number;
-}): string {
-  const { feedback, toolCalls, round, maxRounds } = params;
-  return `⚠️ Runtime check: the reviewer did not approve your answer, so it was NOT delivered. This is revision round ${round} of ${maxRounds}.
-
-${REVIEW_FEEDBACK_HEADING}
-${feedback?.trim() || '(the reviewer returned no parseable verdict — treat the answer as unvalidated)'}
-
-${EVIDENCE_HEADING}
-${renderSpecialistEvidence(toolCalls)}
-
-Now: re-call whichever specialists are needed to close the gaps (an unsupported claim, a missing or
-document-level citation, a wrong version), correct the answer, and call the **Task** tool with
-\`subagent_type: "${REVIEWER_SUBAGENT}"\` again — passing the user's original question, your corrected
-answer in full, and the evidence section above VERBATIM under its heading. The reviewer sees only what
-you paste. Do not argue with the reviewer — fix the answer.
-
-Your previous draft has been discarded, so whatever you write after the review is exactly what the user
-sees. Restate the corrected answer in full. Do not mention this notice.`;
+  newEvidence?: string[];
+  allEvidence?: string[];
+  draft?: string;
+  round?: number;
+  maxRounds?: number;
 }
 
 /**
- * Appended in code when an answer ships without passing review (mirrors the web harness's flagNote).
- * The reviewer's own notes are NOT repeated here — the renderer's review badge already shows them —
- * but the warning has to live in the message content, which is what gets synced and copied.
+ * Render the revision task sent back to the orchestrator after a non-approving review verdict
+ * (ported from `OrchestrationService.renderRevisionTask` in `yvoke-web`, adapted for the Desktop
+ * `Task` delegation tool).
  */
-export function reviewFlagNote(attempts: number): string {
-  return `\n\n---\n⚠️ *This answer did not pass automated review after ${attempts} attempt${attempts === 1 ? '' : 's'}. See the reviewer's notes.*`;
+export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
+  const newEvidence = params.newEvidence ?? [];
+  const allEvidence = params.allEvidence ?? [];
+  const draft = params.draft ?? '';
+  const verdict: ReviewVerdict = params.verdict ?? {
+    approved: false,
+    feedback: params.feedback,
+    unsupportedClaims: [],
+    citationFixes: [],
+  };
+  const feedbackText =
+    verdict.feedback?.trim() ||
+    params.feedback?.trim() ||
+    '(the reviewer returned no parseable verdict — treat the answer as unvalidated)';
+  const citationFixes = verdict.citationFixes ?? [];
+  const unsupportedClaims = verdict.unsupportedClaims ?? [];
+
+  let sb = '';
+  if (newEvidence.length > 0) {
+    sb += `## Source evidence behind the specialist answers above\n${deduped(newEvidence)}\n\n`;
+  } else if (allEvidence.length > 0 && draft.length > 0) {
+    const cited = citeScoped(allEvidence, idsUnderReview(verdict, draft), null);
+    if (cited.trim().length > 0) {
+      sb +=
+        '## The sources your answer currently cites\n' +
+        'Re-read these before moving any citation: they are what the reviewer ' +
+        'judged, and a claim is mis-cited only if the text below does not say ' +
+        'it.\n\n' +
+        `${cited}\n\n`;
+    }
+  }
+
+  sb += `${REVIEW_FEEDBACK_HEADING}\n${feedbackText}\n\n`;
+
+  if (citationFixes.length > 0) {
+    sb += '## Citation fixes — no research needed\n';
+    sb +=
+      'Each of these is repairable from evidence **already supplied** above: the ' +
+      'source was retrieved, the citation on it is wrong, missing or duplicated. Apply ' +
+      'them by editing the answer\'s citations and `## References` — do NOT call ' +
+      'the Task tool for any of them.\n';
+    for (const fix of citationFixes) {
+      sb += `- ${fix}\n`;
+    }
+    sb += '\n';
+  }
+
+  if (unsupportedClaims.length > 0) {
+    sb += '## Unsupported claims\n';
+    sb +=
+      'Nothing supplied supports these. Either remove the claim, or delegate to a ' +
+      'specialist for the material — this is the only part of the feedback that may ' +
+      'warrant a new specialist call.\n';
+    for (const claim of unsupportedClaims) {
+      sb += `- ${claim}\n`;
+    }
+    sb += '\n';
+  }
+
+  sb += 'Revise the answer you just gave. Keep everything the reviewer did not object to.';
+  if (isCitationOnlyVerdict(verdict)) {
+    sb +=
+      ' Every objection above is a citation fix, so this revision needs no new ' +
+      'evidence at all — do NOT call the Task tool.';
+  } else {
+    sb += ' Delegate again only for material that is genuinely missing above.';
+  }
+  return sb;
 }
 
 /**
- * Injected by AgentService when a turn consulted specialists but ended without a review pass.
- * The adapter above only *asks* for review; this is what makes it happen. Written as a runtime
- * notice rather than a user turn, because that is what it is — the user never sees it.
+ * Appended in code when an answer ships without passing review after exhausting review rounds
+ * (ported from `OrchestrationService.flagNote` in `yvoke-web`).
  */
-export const REVIEW_ENFORCEMENT_PROMPT = `⚠️ Runtime check: you ended your turn without having the answer reviewed, which this deployment requires.
+export function reviewFlagNote(attempts: number, feedback?: string): string {
+  const reason = feedback && feedback.trim().length > 0 ? feedback.trim() : 'unspecified concerns';
+  return `\n\n---\n⚠️ *This answer did not pass automated review after ${attempts} attempt(s). Reviewer notes: ${reason}*`;
+}
 
-Call the **Task** tool now with \`subagent_type: "${REVIEWER_SUBAGENT}"\`, passing the user's original question, your candidate answer in full, and — under the heading \`${EVIDENCE_HEADING}\` — each specialist's answer verbatim (keep every source id exactly as written — the bare \`[<uuid>]\` markers, and the older \`[chunk_id=…]\` / \`[document_id=…]\` form where a specialist used it). The reviewer validates only against that section.
+/**
+ * Appended in code when the automated reviewer failed to run at all (ported from
+ * `OrchestrationService.unreviewedNote` in `yvoke-web`).
+ */
+export function unreviewedNote(): string {
+  return (
+    '\n\n---\n⚠️ *This answer could not be checked — the automated review failed to ' +
+    'run, so nothing has validated its claims or citations. Treat it as unverified.*'
+  );
+}
 
-Do not output conversational prose or explanations before consulting the reviewer. Call the **Task** tool with \`subagent_type: "${REVIEWER_SUBAGENT}"\`.
-
-Once the reviewer responds, deliver the final answer:
-- reviewer says \`APPROVED\` → restate the answer in full;
-- reviewer says \`REJECTED\` → fix the claims it flagged, then give the corrected answer in full.
-
-Your earlier draft has been discarded, so whatever you write now is exactly what the user sees. Do not mention this notice.`;
-
-const REVIEWER_ADAPTER = `
-
----
-## Desktop runtime adapter — read this over the playbook's "## Verdict" section
-
-**This runtime has no \`submit_review\` tool.** The playbook's "## Verdict" section is written around
-one: ignore that call, and its claim that ending the turn without it "is read as a rejection". Use the
-plain-text form below. Everything else in the playbook stands unchanged — what you check, and what
-counts as approvable, are exactly as written there.
-
-Your reply must BEGIN with the verdict word, alone on the first line, before any prose, heading or
-table:
-
-\`APPROVED\`  or  \`REJECTED\`
-
-Then, as ordinary prose beneath it, the feedback the playbook asks for: concise, actionable, naming
-every unsupported or fabricated claim the orchestrator must fix. What the playbook itemises as
-\`feedback\`, \`unsupported_claims\` and \`citation_fixes\` all simply go there, in that order, with the
-same care about which category a defect belongs to.
-
-Do **not** open with a summary of what you checked ("All N citation ids were checked and are REAL…")
-or with a citation table. A verdict that arrives after other text cannot be read, and an unreadable
-verdict is treated as a rejection with no feedback — which costs the run a whole round and repairs
-nothing. If you want to tabulate the ids you verified, put the table below the feedback.`;
+/** Configuration for the code-driven Reviewer session (`AgentService.runReviewerPass`). */
+export interface ReviewerConfig {
+  prompt: string;
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  effort: 'low' | 'medium' | 'high';
+  tools: string[];
+  playbookName: string;
+}
 
 export interface ResolvedOrchestrator {
   agents: Record<string, AgentDefinition>;
   allowedTools: string[];
   /** Set of sub-agent names that are specialists (not the reviewer) — for trace labelling. */
   specialistNames: string[];
+  /** Code-driven reviewer configuration (never exposed as a Task sub-agent to the orchestrator). */
+  reviewer: ReviewerConfig;
 }
 
 /**
@@ -389,28 +559,26 @@ export async function buildOrchestrator(
     };
   }
 
-  // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt).
+  // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt), in its own
+  // runtime-driven query() session rather than as an orchestrator-callable Task sub-agent.
   // If a custom designated system prompt is specified and loads successfully, it is layered on top.
   // If absent, not found (404), or empty, it falls back to empty string (playbook alone, NO baseSystemPrompt).
   const customRevPrompt = resolveDesignatedPrompt(profile.reviewerPlaybook);
   const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
 
-  agents[REVIEWER_SUBAGENT] = {
-    description: 'Validates the composed answer against the gathered evidence. Never searches anew.',
-    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? '') + REVIEWER_ADAPTER,
-    tools: REVIEWER_TOOLS,
-    background: BACKGROUND_DELEGATION,
+  const reviewer: ReviewerConfig = {
+    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? ''),
     model: resolveCanonicalModel(cfg.reviewer.model),
+    thinkingLevel: cfg.reviewer.thinkingLevel,
     effort: effortFor(cfg.reviewer.thinkingLevel),
-    maxTurns: cfg.specialistMaxTurns,
+    tools: [...REVIEWER_TOOLS],
+    playbookName: profile.reviewerPlaybook,
   };
 
-  // Spread the orchestrator's OWN grant rather than re-listing it: `verify_citations` reached this
-  // list only because the reviewer happened to carry it too, so narrowing REVIEWER_TOOLS would have
-  // silently revoked the orchestrator's pre-flight check.
+  // Spread the orchestrator's OWN grant plus specialist tools.
   const allowedTools = [
-    ...new Set([...orchestratorTools, ...specialistToolSets.flat(), ...REVIEWER_TOOLS]),
+    ...new Set([...orchestratorTools, ...specialistToolSets.flat()]),
   ];
 
-  return { agents, allowedTools, specialistNames };
+  return { agents, allowedTools, specialistNames, reviewer };
 }

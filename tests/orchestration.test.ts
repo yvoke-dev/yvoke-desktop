@@ -36,6 +36,15 @@ describe('parseVerdict', () => {
   it('returns null when no verdict token is present', () => {
     expect(parseVerdict('hmm, unsure')).toBeNull();
   });
+  it('never treats NOT APPROVED as approved: true', () => {
+    const res = parseVerdict('The answer is NOT APPROVED because of missing citations.');
+    expect(res).toEqual({
+      approved: false,
+      feedback: undefined,
+    });
+    const multiline = parseVerdict('Summary:\nThis draft is NOT APPROVED.\nFix claim 1.');
+    expect(multiline?.approved).toBe(false);
+  });
 });
 
 describe('mapSpecialistTools', () => {
@@ -256,11 +265,21 @@ describe('buildOrchestrator prompt composition', () => {
     expect(built.agents['oim-access-governance'].prompt).toContain(BASE);
   });
 
-  it('leaves the reviewer on its playbook alone', async () => {
-    // Deliberate: it emits a plain-text verdict, so answer-formatting rules are noise for it.
+  it('leaves the reviewer on its playbook alone and out of built.agents', async () => {
+    // Deliberate: the reviewer runs in its own query() session via built.reviewer, not as an
+    // orchestrator-invoked Task subagent, and uses its playbook without baseSystemPrompt.
     const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
-    const reviewer = Object.entries(built.agents).find(([k]) => k.includes('review'))?.[1];
-    expect(reviewer?.prompt).not.toContain(BASE);
+    expect(built.agents[REVIEWER_SUBAGENT]).toBeUndefined();
+    expect(built.reviewer.prompt).not.toContain(BASE);
+    expect(built.reviewer.prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+    expect(built.reviewer.playbookName).toBe('oim-orchestrator-reviewer');
+  });
+
+  it('includes ANSWER_MARKER_CONTRACT in the orchestrator prompt and does not instruct calling subagent_type: "reviewer"', async () => {
+    const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
+    const p = built.agents[ORCHESTRATOR_AGENT].prompt;
+    expect(p).toContain('<<<FINAL_ANSWER>>>');
+    expect(p).not.toContain('subagent_type: "reviewer"');
   });
 
   it('puts the playbook after the base prompt so role rules win on conflict', async () => {
@@ -279,10 +298,10 @@ describe('buildOrchestrator prompt composition', () => {
    * agent. That guarantee is `sanitizedEnv` (tests/sanitizedEnv.test.ts, tests/agentSession.test.ts)
    * and is only provable live: `npm run spike:delegation`.
    */
-  it('declares background: false on the orchestrator, every specialist, and the reviewer', async () => {
+  it('declares background: false on the orchestrator and every specialist', async () => {
     const built = await buildOrchestrator(profile, settings, fakePrompts, BASE, noopLoadPrompt);
     const names = Object.keys(built.agents);
-    expect(names.length).toBeGreaterThan(2);
+    expect(names.length).toBeGreaterThanOrEqual(2);
     for (const name of names) {
       expect(built.agents[name].background, `${name} must not be backgrounded`).toBe(false);
     }
@@ -320,9 +339,6 @@ describe('buildOrchestrator tool grants', () => {
     getText: async (name: string) => `PLAYBOOK(${name})`,
   } as unknown as McpPrompts;
 
-  const reviewerOf = (agents: Record<string, { tools?: string[] }>): string[] =>
-    Object.entries(agents).find(([k]) => k.includes('review'))?.[1].tools ?? [];
-
   it('grants the orchestrator verify_citations — its playbook makes it mandatory', async () => {
     // Web parity: OrchestrationService grants List.of("ask_clarifying_question",
     // "verify_citations"). Without it the pre-flight check the playbook requires is impossible,
@@ -332,13 +348,16 @@ describe('buildOrchestrator tool grants', () => {
     expect(built.agents[ORCHESTRATOR_AGENT].tools).toContain(qualifyTool('ask_clarifying_question'));
   });
 
-  it('keeps the reviewer validate-only — verify_citations and nothing else', async () => {
+  it('keeps the reviewer validate-only — verify_citations and submit_review, nothing else', async () => {
     // Its playbook states it cannot open a section any more, with the reason: get_section returns
     // the whole section around a passage, so the reviewer would judge claims against neighbouring
     // text no specialist retrieved — defeating the cite-scoping that makes a citation testable.
     const built = await buildOrchestrator(profile, settings, fakePrompts, 'BASE', noopLoadPrompt);
-    expect(reviewerOf(built.agents)).toEqual([qualifyTool('verify_citations')]);
-    expect(reviewerOf(built.agents)).not.toContain(qualifyTool('get_section'));
+    expect(built.reviewer.tools).toEqual([
+      qualifyTool('verify_citations'),
+      'mcp__review__submit_review',
+    ]);
+    expect(built.reviewer.tools).not.toContain(qualifyTool('get_section'));
   });
 
   it('keeps the orchestrator out of the corpus — it composes, it does not retrieve', async () => {
@@ -356,8 +375,9 @@ describe('buildOrchestrator tool grants', () => {
       qualifyTool('ask_clarifying_question'),
       qualifyTool('verify_citations'),
     ]);
-    expect(reviewerOf(built.agents)).toEqual([
+    expect(built.reviewer.tools).toEqual([
       qualifyTool('verify_citations'),
+      'mcp__review__submit_review',
     ]);
   });
 
@@ -399,7 +419,7 @@ describe('buildOrchestrator tool grants', () => {
     const built = await buildOrchestrator(profile, aliasSettings, fakePrompts, 'BASE', noopLoadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].model).toBe('claude-sonnet-5-5');
     expect(built.agents['oim-access-governance'].model).toBe('claude-sonnet-5-5');
-    expect(built.agents[REVIEWER_SUBAGENT].model).toBe('claude-opus-5-5');
+    expect(built.reviewer.model).toBe('claude-opus-5-5');
   });
 
   it('layers designated custom system prompts onto orchestrator, specialist, and reviewer', async () => {
@@ -417,7 +437,7 @@ describe('buildOrchestrator tool grants', () => {
     const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('CUSTOM_SYS(custom-orch-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator)');
     expect(built.agents['oim-access-governance'].prompt).toBe('CUSTOM_SYS(custom-spec-prompt)\n\n---\n\nPLAYBOOK(oim-access-governance)');
-    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('CUSTOM_SYS(custom-rev-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator-reviewer)');
+    expect(built.reviewer.prompt).toContain('CUSTOM_SYS(custom-rev-prompt)\n\n---\n\nPLAYBOOK(oim-orchestrator-reviewer)');
   });
 
   it('falls back to baseSystemPrompt for orchestrator and specialists, and to empty for reviewer when designated system prompt cannot be resolved', async () => {
@@ -437,8 +457,8 @@ describe('buildOrchestrator tool grants', () => {
     const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
     expect(built.agents[ORCHESTRATOR_AGENT].prompt).toContain('BASE\n\n---\n\nPLAYBOOK(oim-orchestrator)');
     expect(built.agents['oim-access-governance'].prompt).toBe('BASE\n\n---\n\nPLAYBOOK(oim-access-governance)');
-    expect(built.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE');
-    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+    expect(built.reviewer.prompt).not.toContain('BASE');
+    expect(built.reviewer.prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
   });
 
   it('falls back to empty string for reviewer when designated prompt is empty or whitespace', async () => {
@@ -452,8 +472,8 @@ describe('buildOrchestrator tool grants', () => {
     const loadPrompt = async (_name: string) => '   \n   ';
 
     const built = await buildOrchestrator(profile, settings, customPrompts, 'BASE', loadPrompt);
-    expect(built.agents[REVIEWER_SUBAGENT].prompt).not.toContain('BASE');
-    expect(built.agents[REVIEWER_SUBAGENT].prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+    expect(built.reviewer.prompt).not.toContain('BASE');
+    expect(built.reviewer.prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
   });
 
   it('deduplicates prompt loads across roles internally', async () => {

@@ -54,6 +54,32 @@ describe('qualifyTool', () => {
       expect(qualifyTool(input)).toBe(`${MCP_TOOL_PREFIX}search_corpus`);
     }
   });
+
+  it('preserves in-process MCP tool prefixes (mcp__review__* and mcp__compute__*) without re-namespacing to mcp__yvoke__*', () => {
+    expect(qualifyTool('mcp__review__submit_review')).toBe('mcp__review__submit_review');
+    expect(qualifyTool('mcp__compute__calculate')).toBe('mcp__compute__calculate');
+  });
+});
+
+describe('reviewer submit_review policy', () => {
+  it('allows mcp__review__submit_review when included in allowedTools (with updatedInput) and denies when omitted', async () => {
+    expect(isToolAllowed('mcp__review__submit_review', base)).toBe(true);
+
+    const reviewerAllowed = [qualifyTool('verify_citations'), 'mcp__review__submit_review'];
+    const canUseReviewer = buildCanUseTool(() => base, 'th', undefined, reviewerAllowed, false, false);
+    const input = { approved: true, feedback: 'All good' };
+    const allowedResult = await canUseReviewer('mcp__review__submit_review', input, callOptions);
+    expect(allowedResult).toEqual({
+      behavior: 'allow',
+      updatedInput: input,
+    });
+
+    const singleAgentAllowed = buildAllowedTools(base);
+    expect(singleAgentAllowed).not.toContain('mcp__review__submit_review');
+    const canUseSingle = buildCanUseTool(() => base, 'th', undefined, singleAgentAllowed, undefined, false);
+    const deniedResult = await canUseSingle('mcp__review__submit_review', input, callOptions);
+    expect(deniedResult.behavior).toBe('deny');
+  });
 });
 
 /**
