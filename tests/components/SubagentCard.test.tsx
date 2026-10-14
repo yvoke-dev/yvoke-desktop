@@ -164,5 +164,23 @@ describe('SubagentCard', () => {
       expect(container.querySelector('.verdict-badge')).toBeNull();
       expect(container.querySelector('.tool-status.error')).not.toBeNull();
     });
+
+    it('falls back to structured call.verdict when call.result has no APPROVED/REJECTED header', () => {
+      const call: ToolCallInfo = {
+        id: 'call-rev-structured',
+        name: 'Agent',
+        subagentType: 'reviewer',
+        input: { prompt: 'Review candidate answer' },
+        result: 'Submitted via submit_review tool.',
+        verdict: {
+          approved: false,
+          feedback: 'Citation fix needed.',
+          citationFixes: ['Replace [11111111] with [22222222].'],
+        },
+      };
+      const { container } = render(<SubagentCard call={call} />);
+      expect(screen.getByText('Rejected')).toBeTruthy();
+      expect(container.querySelector('.tool-status.error')).not.toBeNull();
+    });
   });
 });
