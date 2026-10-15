@@ -16,7 +16,10 @@ export interface BuildRunTraceParams {
   profileName: string;
   profile?: OrchestratorProfile;
   orchestrator: OrchestratorSettings;
+  playbookVersions?: ReadonlyMap<string, number>;
 }
+
+export type RunTraceInput = BuildRunTraceParams;
 
 /**
  * Assemble a completed multi-agent run from the finished assistant message. Each Agent (delegation)
@@ -24,7 +27,7 @@ export interface BuildRunTraceParams {
  * answer. Returns null when the turn had no delegations (i.e. not an orchestrated turn worth tracing).
  */
 export function buildRunTrace(params: BuildRunTraceParams): OrchestratorRunPayload | null {
-  const { conversationId, userText, assistant, profileName, profile, orchestrator } = params;
+  const { conversationId, userText, assistant, profileName, profile, orchestrator, playbookVersions } = params;
   const delegations: ToolCallInfo[] = (assistant.toolCalls ?? []).filter((c) => c.name === 'Agent');
   if (delegations.length === 0) {
     return null;
@@ -40,6 +43,7 @@ export function buildRunTrace(params: BuildRunTraceParams): OrchestratorRunPaylo
     role: 'orchestrator',
     round: 0,
     playbookName: profile?.orchestratorPlaybook,
+    playbookVersion: profile?.orchestratorPlaybook ? playbookVersions?.get(profile.orchestratorPlaybook) : undefined,
     model: orchestrator.orchestrator.model,
     thinkingLevel: orchestrator.orchestrator.thinkingLevel,
     input: userText,
@@ -60,11 +64,14 @@ export function buildRunTrace(params: BuildRunTraceParams): OrchestratorRunPaylo
   delegations.forEach((c, i) => {
     const isReviewer = c.subagentType === REVIEWER_SUBAGENT;
     const role = isReviewer ? 'reviewer' : 'specialist';
+    const versionKey = isReviewer ? (profile?.reviewerPlaybook ?? c.subagentType) : c.subagentType;
+    const playbookVersion = versionKey ? playbookVersions?.get(versionKey) : undefined;
     steps.push({
       seq: i + 1,
       role,
       round: reviewersSeen,
       playbookName: c.subagentType,
+      playbookVersion,
       model: isReviewer ? orchestrator.reviewer.model : orchestrator.specialist.model,
       thinkingLevel: isReviewer ? orchestrator.reviewer.thinkingLevel : orchestrator.specialist.thinkingLevel,
       input: promptInput(c),

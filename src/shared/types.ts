@@ -162,6 +162,7 @@ export interface OrchestratorRunStep {
   role: 'orchestrator' | 'specialist' | 'reviewer';
   round: number;
   playbookName?: string;
+  playbookVersion?: number;
   model?: string;
   thinkingLevel?: string;
   input?: string;
@@ -397,6 +398,8 @@ export interface ChatMessage {
   review?: ReviewStatus;
   /** Title of the MCP prompt/playbook injected with this (user) message, if any. */
   playbook?: string;
+  /** Positive integer version of the MCP prompt/playbook injected with this (user) message, if any. */
+  playbookVersion?: number;
   usage?: UsageTotals;
   createdAt: string;
   feedback?: { rating: 1 | -1; comment?: string };
@@ -453,6 +456,8 @@ export interface McpPromptInfo {
   targetAgent?: PlaybookRole | string;
   /** Optional base instruction / system prompt designated for this playbook. */
   systemPrompt?: string;
+  /** Positive integer version of this playbook (>= 1), when reported by the server. */
+  version?: number;
 }
 
 /** Maximum length matching system_prompts.name VARCHAR(255). */

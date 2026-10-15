@@ -162,6 +162,7 @@ interface ThreadSession {
   turn: TurnContext;
   lastActiveAt: number;
   playbookName?: string;
+  playbookVersion?: number;
   /** Selected multi-agent profile for this session, if orchestrator mode is active. */
   orchestratorProfile?: string;
   /** The user message for the in-flight turn, persisted once the turn completes. */
@@ -279,6 +280,7 @@ export class AgentService {
       role: 'user',
       content: text,
       playbook: opts.playbook,
+      playbookVersion: opts.playbook ? session.playbookVersion : undefined,
       createdAt: new Date().toISOString(),
       images: opts.images && opts.images.length > 0 ? opts.images : undefined,
     };
@@ -544,6 +546,7 @@ export class AgentService {
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
     let playbookSystemPrompt: string | undefined;
+    let playbookVersion: number | undefined;
     let playbookText: string | undefined;
     if (playbookName && !thread.orchestratorProfile) {
       try {
@@ -553,6 +556,7 @@ export class AgentService {
           playbookTools = p.tools;
           playbookCodeExecution = p.codeExecution;
           playbookSystemPrompt = p.systemPrompt;
+          playbookVersion = p.version;
           log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
         }
         playbookText = await this.deps.mcpPrompts.getText(playbookName);
@@ -703,6 +707,7 @@ export class AgentService {
       turn: newTurnContext(thread.id, Boolean(thread.orchestratorProfile)),
       lastActiveAt: Date.now(),
       playbookName: thread.orchestratorProfile ? undefined : playbookName,
+      playbookVersion: thread.orchestratorProfile ? undefined : playbookVersion,
       orchestratorProfile: thread.orchestratorProfile,
       lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };

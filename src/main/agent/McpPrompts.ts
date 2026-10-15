@@ -75,6 +75,10 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     const safeName = sanitizeLogContent(rawString).slice(0, 80);
     log('mcp', `Playbook "${raw.name}" declared invalid systemPrompt "${safeName}"; ignoring`);
   }
+  const version =
+    typeof meta.version === 'number' && Number.isInteger(meta.version) && meta.version >= 1
+      ? meta.version
+      : undefined;
   return {
     name: raw.name,
     title: raw.title ?? raw.name,
@@ -89,6 +93,7 @@ export function toPromptInfo(raw: RawPrompt): McpPromptInfo {
     prototype: typeof meta.prototype === 'boolean' ? meta.prototype : undefined,
     targetAgent: typeof meta.targetAgent === 'string' ? meta.targetAgent : undefined,
     systemPrompt,
+    version,
   };
 }
 

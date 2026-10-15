@@ -92,4 +92,66 @@ describe('buildRunTrace', () => {
     const run = buildRunTrace({ conversationId: 'c1', userText: 'q', assistant: msg, profileName: 'OIM', profile, orchestrator })!;
     expect(run.steps[1].messages).toEqual({ transcript: [{ text: 'searching', toolCalls: [{ id: 'i1', name: qualifyTool('search_corpus'), input: {} }] }] });
   });
+
+  it('stamps distinct playbookVersion values onto orchestrator, specialist, and reviewer steps', () => {
+    const msg = assistant([
+      agentCall({ id: 'd1', subagentType: 'oim-access-governance', input: { prompt: 'roles?' }, result: 'roles answer' }),
+      agentCall({ id: 'd2', subagentType: 'oim-developer-api', input: { prompt: 'rest?' }, result: 'rest answer' }),
+      agentCall({ id: 'r1', subagentType: 'reviewer', input: { prompt: 'check' }, result: 'APPROVED\nok', verdict: { approved: true, feedback: 'ok' } }),
+    ]);
+    const playbookVersions = new Map<string, number>([
+      ['oim-orchestrator', 2],
+      ['oim-access-governance', 4],
+      ['oim-developer-api', 5],
+      ['oim-orchestrator-reviewer', 3],
+    ]);
+
+    const run = buildRunTrace({
+      conversationId: 'c1',
+      userText: 'the question',
+      assistant: msg,
+      profileName: 'OIM',
+      profile,
+      orchestrator,
+      playbookVersions,
+    })!;
+
+    expect(run.steps[0]).toMatchObject({ seq: 0, role: 'orchestrator', playbookName: 'oim-orchestrator', playbookVersion: 2 });
+    expect(run.steps[1]).toMatchObject({ seq: 1, role: 'specialist', playbookName: 'oim-access-governance', playbookVersion: 4 });
+    expect(run.steps[2]).toMatchObject({ seq: 2, role: 'specialist', playbookName: 'oim-developer-api', playbookVersion: 5 });
+    // Reviewer subagent is invoked with subagentType='reviewer', so its version is resolved via profile.reviewerPlaybook
+    expect(run.steps[3]).toMatchObject({ seq: 3, role: 'reviewer', playbookName: 'reviewer', playbookVersion: 3 });
+  });
+
+  it('leaves playbookVersion undefined when playbookVersions map is omitted or playbook is absent', () => {
+    const msg = assistant([
+      agentCall({ id: 'd1', subagentType: 'oim-access-governance', input: { prompt: 'roles?' }, result: 'roles answer' }),
+      agentCall({ id: 'r1', subagentType: 'reviewer', input: { prompt: 'check' }, result: 'APPROVED\nok', verdict: { approved: true, feedback: 'ok' } }),
+    ]);
+
+    const runOmitted = buildRunTrace({
+      conversationId: 'c1',
+      userText: 'the question',
+      assistant: msg,
+      profileName: 'OIM',
+      profile,
+      orchestrator,
+    })!;
+    expect(runOmitted.steps[0].playbookVersion).toBeUndefined();
+    expect(runOmitted.steps[1].playbookVersion).toBeUndefined();
+    expect(runOmitted.steps[2].playbookVersion).toBeUndefined();
+
+    const runAbsent = buildRunTrace({
+      conversationId: 'c1',
+      userText: 'the question',
+      assistant: msg,
+      profileName: 'OIM',
+      profile,
+      orchestrator,
+      playbookVersions: new Map([['other-playbook', 9]]),
+    })!;
+    expect(runAbsent.steps[0].playbookVersion).toBeUndefined();
+    expect(runAbsent.steps[1].playbookVersion).toBeUndefined();
+    expect(runAbsent.steps[2].playbookVersion).toBeUndefined();
+  });
 });

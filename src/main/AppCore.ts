@@ -383,7 +383,12 @@ export class AppCore {
       threadId,
       localIds: [userMessage.localId, assistantMessage.localId],
       messages: [
-        { role: 'user', content: formatSyncedUserContent(userMessage.content, userMessage.images) },
+        {
+          role: 'user',
+          content: formatSyncedUserContent(userMessage.content, userMessage.images),
+          playbook: userMessage.playbook,
+          playbookVersion: userMessage.playbookVersion,
+        },
         {
           role: 'assistant',
           content: serializeAssistantContent(assistantMessage, isOrchestrator),
@@ -407,6 +412,18 @@ export class AppCore {
     if (!orchestrator || !thread.orchestratorProfile) return;
     try {
       const profile = await this.resolveOrchestratorProfile(thread.orchestratorProfile);
+      let playbookVersions: Map<string, number> | undefined;
+      try {
+        const prompts = await this.mcpPrompts.list();
+        playbookVersions = new Map<string, number>();
+        for (const p of prompts) {
+          if (typeof p.version === 'number') {
+            playbookVersions.set(p.name, p.version);
+          }
+        }
+      } catch {
+        playbookVersions = undefined;
+      }
       const payload = buildRunTrace({
         conversationId: thread.id,
         userText: userMessage.content,
@@ -414,6 +431,7 @@ export class AppCore {
         profileName: thread.orchestratorProfile,
         profile,
         orchestrator,
+        playbookVersions,
       });
       if (payload) {
         this.pendingRuns.set(assistantMessage.localId, payload);
@@ -613,6 +631,17 @@ export class AppCore {
 
   private fromDto(dto: MessageDto): ChatMessage {
     const parsed = parseStoredContent(dto.content);
+    const playbook =
+      typeof dto.playbook === 'string' && dto.playbook.trim().length > 0
+        ? dto.playbook.trim()
+        : undefined;
+    const playbookVersion =
+      playbook !== undefined &&
+      typeof dto.playbookVersion === 'number' &&
+      Number.isInteger(dto.playbookVersion) &&
+      dto.playbookVersion >= 1
+        ? dto.playbookVersion
+        : undefined;
     return {
       localId: dto.id,
       serverId: dto.id,
@@ -621,6 +650,8 @@ export class AppCore {
       thinking: parsed.thinking,
       toolCalls: parsed.toolCalls,
       blocks: parsed.blocks,
+      playbook,
+      playbookVersion,
       usage:
         dto.promptTokens != null || dto.completionTokens != null
           ? {

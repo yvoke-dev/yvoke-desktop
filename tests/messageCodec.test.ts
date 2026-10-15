@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import { AppCore } from '../src/main/AppCore';
+import { ThreadStore } from '../src/main/store/ThreadStore';
 import {
   findArgsCloseParen,
   parseStoredContent,
@@ -67,4 +72,79 @@ describe('serialize/parse round-trip', () => {
     const parsed = parseStoredContent(raw);
     expect(parsed.toolCalls?.[0].result).toBe(REHYDRATED_TOOL_RESULT_PLACEHOLDER);
   });
+
+  it('preserves playbook and playbookVersion across disk persistence and server rehydration round-trip', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msg-codec-ver-'));
+    const appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+    try {
+      const threadId = 't-codec-ver';
+      appCore.threads.upsert({
+        id: threadId,
+        title: 'Codec Version Thread',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: '2026-10-15T10:00:00Z',
+        updatedAt: '2026-10-15T10:00:00Z',
+        totals: ThreadStore.emptyTotals(),
+        syncState: 'synced',
+      });
+
+      vi.spyOn(appCore.syncClient, 'getMessages').mockResolvedValueOnce([
+        {
+          id: 'm-user-1',
+          role: 'user',
+          content: 'Question under v2 playbook',
+          playbook: 'oim-full',
+          playbookVersion: 2,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          cachedTokens: null,
+          thoughtTokens: null,
+          createdAt: '2026-10-15T10:00:00Z',
+          feedbackRating: null,
+          feedbackComment: null,
+        },
+        {
+          id: 'm-asst-1',
+          role: 'assistant',
+          content: serializeAssistantContent({ content: 'Answer', thinking: 'thought' }, false),
+          playbook: null,
+          playbookVersion: null,
+          promptTokens: 10,
+          completionTokens: 20,
+          totalTokens: 30,
+          cachedTokens: 0,
+          thoughtTokens: 0,
+          createdAt: '2026-10-15T10:00:05Z',
+          feedbackRating: null,
+          feedbackComment: null,
+        },
+      ]);
+
+      // 1st call rehydrates via fromDto + parseStoredContent and persists to ThreadStore on disk
+      const rehydrated = await appCore.getMessages(threadId);
+      expect(rehydrated[0].playbook).toBe('oim-full');
+      expect(rehydrated[0].playbookVersion).toBe(2);
+
+      // Reopen a fresh ThreadStore from disk to prove JSONL persistence preserved playbookVersion
+      const reopenedStore = new ThreadStore(path.join(tmpDir, 'threads'));
+      const fromDisk = await reopenedStore.readMessages(threadId);
+      expect(fromDisk[0].playbook).toBe('oim-full');
+      expect(fromDisk[0].playbookVersion).toBe(2);
+      expect(fromDisk[1].playbook).toBeUndefined();
+      expect(fromDisk[1].playbookVersion).toBeUndefined();
+    } finally {
+      await appCore.drain();
+      appCore.dispose();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
+
