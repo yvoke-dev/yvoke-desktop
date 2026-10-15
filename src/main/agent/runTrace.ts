@@ -4,6 +4,7 @@ import type {
   OrchestratorRunPayload,
   OrchestratorRunStep,
   OrchestratorSettings,
+  ReviewVerdict,
   ToolCallInfo,
 } from '../../shared/types';
 
@@ -55,7 +56,7 @@ export function buildRunTrace(params: BuildRunTraceParams): OrchestratorRunPaylo
   const steps: OrchestratorRunStep[] = [orchestratorStep];
   /** Reviewer passes so far; also the step-level `round`, since round N's review is its last step. */
   let reviewersSeen = 0;
-  let lastVerdict: { approved: boolean; feedback?: string } | undefined;
+  let lastVerdict: ReviewVerdict | undefined;
 
   delegations.forEach((c, i) => {
     const isReviewer = c.subagentType === REVIEWER_SUBAGENT;
@@ -64,7 +65,7 @@ export function buildRunTrace(params: BuildRunTraceParams): OrchestratorRunPaylo
       seq: i + 1,
       role,
       round: reviewersSeen,
-      playbookName: c.subagentType,
+      playbookName: isReviewer ? (profile?.reviewerPlaybook ?? c.subagentType) : c.subagentType,
       model: isReviewer ? orchestrator.reviewer.model : orchestrator.specialist.model,
       thinkingLevel: isReviewer ? orchestrator.reviewer.thinkingLevel : orchestrator.specialist.thinkingLevel,
       input: promptInput(c),

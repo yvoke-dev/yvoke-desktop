@@ -38,39 +38,44 @@ profiles and the playbooks; there is no way to build one from the app.
   writes the user-facing answer, so it needs the citation and formatting contract exactly as the
   specialists do. The reviewer emits a plain verdict rather than prose, so those rules would be noise
   in its context. The playbook is layered last, so a role's own rules win any conflict.
-- **The reviewer sees only what the lead pastes.** It is given the original question, the candidate
-  answer, and the specialists' answers verbatim; it may re-check that the cited ids are real, and
-  nothing else. It cannot search, and it can no longer open a section either — that returned the
-  whole section around a passage, which let it judge a claim against neighbouring text no specialist
-  ever retrieved. What it is entitled to see is already in front of it, so a claim the evidence does
-  not settle is a finding to report rather than a reason to go looking. That is what makes each
-  citation testable as the claim it is.
+- **The reviewer sees the raw evidence the specialists retrieved, scoped to what the answer cites.**
+  When the lead submits its candidate answer, the app harvests the tool results the specialists
+  actually received from the knowledge base, strips any chunk the draft does not cite, deduplicates
+  passages retrieved by more than one specialist, and hands that digest to the reviewer alongside the
+  original question and the candidate answer. Across revision rounds, the reviewer's own session is
+  resumed and receives only newly cited sources that were not already shown in an earlier round. The
+  reviewer may check that the cited ids are real and submits a structured verdict (`approved`,
+  `feedback`, `unsupported_claims`, and `citation_fixes`). It cannot search or open sections on its own:
+  what it is entitled to see is already in front of it, so a claim the evidence does not settle is a
+  finding to report rather than a reason to go looking.
 - **The lead checks its own citations before delivering.** An invented id is the one citation fault a
   machine can settle on its own, so the lead verifies every id it is about to write rather than
   spending a whole review round learning the same thing. This says nothing about whether a real
   source supports the claim it sits on — that stays the reviewer's job.
-- **Review is required by the playbook and enforced in code, and cannot be switched off.** A turn that consulted specialists but
-  never called the reviewer is re-prompted once to run one. A turn the reviewer rejected — or on which
-  it returned no readable verdict — is handed the feedback *and* the evidence again and asked to
-  revise, up to the configured number of rounds. Both were observed being ignored when they were only
-  asked for.
-- **A held-back draft is discarded from the answer, not from the record.** The prose written so far is
-  dropped so the delivered answer is the corrected one rather than draft-plus-final — but the draft is
-  still readable inside the reviewer's card, because the lead had to paste it there, and it is in the
-  uploaded trace.
-- **Out of rounds, the answer ships flagged.** The warning goes into the answer's own text, not only
-  into the on-screen badge — that is what gets synced to the server and what the copy button copies.
+- **Review is driven by the app in code, and cannot be switched off.** Every turn that consulted at
+  least one specialist is automatically handed to the reviewer once the lead submits its draft. A turn
+  the reviewer rejected — or on which it returned no readable verdict — is handed the structured
+  feedback (*citation fixes* repairable from existing sources versus *unsupported claims* that need new
+  evidence) and the deduplicated evidence back to the lead to revise, up to the configured number of
+  rounds. When every objection is a citation fix, the lead is instructed to repair the citations from
+  the sources already in hand without consulting any specialist again. If the reviewer itself fails to
+  run, a non-blank draft still ships with an *unreviewed* warning rather than throwing away the work.
+- **Pre-answer notes and held-back drafts are discarded from the answer, not from the record.** Anything
+  the lead writes while coordinating specialists and any draft rejected by the reviewer are stripped so
+  the delivered answer contains only the final answer prose — while each candidate draft and verdict
+  remains readable inside the reviewer's card and in the uploaded trace.
+- **Out of rounds, the answer ships flagged.** The warning (including the reviewer's notes) goes into
+  the answer's own text, not only into the on-screen badge — that is what gets synced to the server and
+  what the copy button copies.
 - **The last verdict is the verdict.** A turn rejected and then approved on the next round reads as
   approved.
-- **Only what follows the verdict line is carried back as feedback.** When the verdict is buried in a
-  longer reply, the reviewer's own thinking-aloud above it is dropped rather than replayed to the lead
-  as objections to address.
 - **A specialist's own output never reaches the answer.** Its text, reasoning and tool calls are
   attributed to its delegation card; nothing it says can leak into the composed answer.
-- **An interrupted or failed turn is left alone.** Neither is re-prompted for review: there is no
-  composed answer worth reviewing, and re-prompting a stopped turn would fight the user's Stop.
+- **An interrupted or failed turn is left alone.** Stopping a turn while the lead or the reviewer is
+  running cancels the active pass immediately and does not start a revision round or append an
+  unreviewed warning.
 - **A lead that answers without consulting anyone is not a multi-agent turn at all.** No review is
-  demanded, no banner appears, and no trace is recorded.
+  run, no banner appears, and no trace is recorded.
 - **The trace is uploaded only once the answer has synced**, because it has to name the message it
   belongs to. Until then it is held in memory, and the upload itself is best-effort.
 
@@ -80,23 +85,23 @@ profiles and the playbooks; there is no way to build one from the app.
   the settings panel's own worst-case figure is **30 model calls** for a single question — three lead
   passes, three reviews and twenty-four specialist calls — each on the model bound to its role. Do not
   offer it as a free quality upgrade.
-- **A reviewer that says "NOT APPROVED" is read as approved.** When no line is exactly the verdict, the
-  fallback accepts any reply containing the word *APPROVED* and not the word *REJECTED* — so a
-  negative phrased around the positive word passes.
 - **The specialist budget is advisory.** The lead is *told* how many specialist calls to aim for; no
   code counts them or stops it. Only the lead's own turn ceiling — 60 as shipped — actually bounds the
   run.
-- **The reviewer has no ceiling of its own.** It runs under the specialists' turn limit, 20 as shipped.
-- **Review enforcement happens at most once per turn.** A lead that ends a second time without a
-  reviewer ships unreviewed, with the banner saying so.
+- **The reviewer is capped at 6 turns per review pass**, enough to verify citations and submit its
+  verdict.
 - **Two revision rounds by default**, counted as revisions rather than reviews: a first-pass approval
   is zero rounds, and the default allows a draft plus two corrections.
-- **A revision notice re-sends every previous round's evidence.** Each specialist's answer is capped at
-  12,000 characters, but nothing caps how many are included, and every non-failed delegation from every
-  earlier round is included again — so at the shipped budget one revision can carry roughly a hundred
-  thousand characters, and the next carries them again.
+- **A revision notice sends only new or cited evidence.** When the lead consulted new specialists during
+  a revision, only those new tool results (deduplicated across specialists) are sent; when no new
+  specialists were called, the app re-supplies only the chunks cited by the draft or named in the
+  reviewer's citation fixes.
 - **A specialist whose call failed is omitted from that evidence entirely**, so the reviewer is not
   told that part of the investigation is missing.
+- **If the lead ends its turn in plain text without submitting its answer, coordination prose is not
+  stripped.** When the lead ignores the submission contract and omits the fallback delimiter, the app
+  reviews and delivers the turn's full text rather than discarding the answer, so any planning remarks
+  written in that turn remain visible.
 - **Setting a role's thinking to *off* does not switch thinking off** for specialists or the reviewer —
   their effort floor is *low*. The lead is worse: its budget says zero while its effort setting says
   low, and the two disagree.
@@ -105,10 +110,8 @@ profiles and the playbooks; there is no way to build one from the app.
   the session starts. Changing the profile, an eviction, a failed turn or a restart is what picks them
   up.
 - **The uploaded trace has no size limit.** Each step carries that sub-agent's whole transcript
-  including every tool result verbatim — full corpus-search payloads — with none of the truncation
-  applied to revision evidence. The upload is fire-and-forget: a failure is logged and nothing else.
-- **The trace names the reviewer's playbook as "reviewer"** rather than the profile's actual reviewer
-  playbook, so the web app's trace viewer cannot tell which one ran.
+  including every tool result verbatim — full corpus-search payloads — with none of the cite-scoping
+  applied to reviewer evidence. The upload is fire-and-forget: a failure is logged and nothing else.
 - **A run whose answer the server rejects loses its trace silently**, and at most fifty pending traces
   are held before the oldest are dropped.
 - **A specialist that asks a clarifying question locks the composer with no question on screen.** The

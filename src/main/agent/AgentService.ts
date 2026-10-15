@@ -1,9 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { AbortError, query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentEvent, AppSettings, ChatMessage, ClarificationOption, ImageAttachment, ImageMediaType, LoginVerificationResult, OrchestratorProfile, ThinkingLevel, ThreadMeta, McpPromptInfo } from '../../shared/types';
-import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveCanonicalModel } from '../../shared/types';
+import {
+  AbortError,
+  query,
+  type McpSdkServerConfigWithInstance,
+  type Options,
+  type Query,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
+import type {
+  AgentEvent,
+  AppSettings,
+  ChatMessage,
+  ClarificationOption,
+  ImageAttachment,
+  ImageMediaType,
+  LoginVerificationResult,
+  McpPromptInfo,
+  OrchestratorProfile,
+  ReviewVerdict,
+  ThinkingLevel,
+  ThreadMeta,
+  ToolCallInfo,
+  UsageTotals,
+} from '../../shared/types';
+import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, parseVerdict, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
 import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
 import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
@@ -15,7 +37,6 @@ import { thinkingBudget } from './thinking';
 import {
   addUsage,
   newTurnContext,
-  nextReviewAction,
   reviewAttempts,
   reviewStatusOf,
   translateMessage,
@@ -24,12 +45,26 @@ import {
 } from './translate';
 import { SyncClient } from '../sync/SyncClient';
 import { McpPrompts } from './McpPrompts';
+import { harvestSpecialistEvidence, SentLedger } from './evidenceDigest';
 import {
+  formatVerdictSummary,
+  parseSubmitReviewArgs,
+  REVIEW_SERVER_NAME,
+  REVIEW_SUBMIT_TOOL,
+} from './reviewTools';
+import { buildReviewServer, buildSubmitAnswerServer } from './reviewServer';
+import {
+  afterAnswerMarker,
   buildOrchestrator,
   buildRevisionPrompt,
   ORCHESTRATOR_AGENT,
-  REVIEW_ENFORCEMENT_PROMPT,
+  renderReviewFollowUp,
+  renderReviewTask,
+  REVIEWER_SUBAGENT,
   reviewFlagNote,
+  stripBeforeAnswerMarker,
+  unreviewedNote,
+  type ResolvedOrchestrator,
 } from './orchestration';
 import {
   BASE_SYSTEM_PROMPT_NAME,
@@ -151,6 +186,25 @@ export interface SendOptions {
   images?: ImageAttachment[];
 }
 
+interface ReviewTurnState {
+  allEvidence: string[];
+  reviewerSent: SentLedger;
+  reviewerSessionId?: string;
+  processedCallIds: Set<string>;
+  originalQuestion: string;
+  submittedAnswer?: string;
+  settled?: boolean;
+  settledApproved?: boolean;
+  inFlight?: Promise<void>;
+}
+
+type ReviewPassOutcome =
+  | { kind: 'approved'; content: string }
+  | { kind: 'revise'; revisionPrompt: string }
+  | { kind: 'flagged'; content: string }
+  | { kind: 'unreviewed'; content: string; errorMessage: string }
+  | { kind: 'aborted'; content: string };
+
 interface ThreadSession {
   query: Query;
   queue: MessageQueue;
@@ -164,6 +218,14 @@ interface ThreadSession {
   playbookName?: string;
   /** Selected multi-agent profile for this session, if orchestrator mode is active. */
   orchestratorProfile?: string;
+  /** Resolved orchestrator build (including ReviewerConfig) when in orchestrator mode. */
+  orchestrator?: ResolvedOrchestrator;
+  /** In-process MCP server exposing `mcp__review__submit_answer` when in orchestrator mode. */
+  submitAnswerServer?: McpSdkServerConfigWithInstance;
+  /** In-flight Reviewer SDK query, if a review pass is currently running. */
+  activeReviewerQuery?: Query;
+  /** Per-turn review state (evidence accumulator, SentLedger, reviewerSessionId). */
+  reviewState?: ReviewTurnState;
   /** The user message for the in-flight turn, persisted once the turn completes. */
   pendingUser?: ChatMessage;
   /** Last resolved MCP headers serialized to JSON for change detection. */
@@ -272,6 +334,14 @@ export class AgentService {
     session.lastActiveAt = Date.now();
     session.turn = newTurnContext(thread.id, Boolean(thread.orchestratorProfile));
     session.turn.sessionId = thread.sessionId;
+    session.reviewState = session.orchestrator
+      ? {
+          allEvidence: [],
+          reviewerSent: new SentLedger(),
+          processedCallIds: new Set(),
+          originalQuestion: text,
+        }
+      : undefined;
     this.deps.emit({ kind: 'turn-start', threadId: thread.id });
 
     const userMessage: ChatMessage = {
@@ -319,7 +389,10 @@ export class AgentService {
     const session = this.sessions.get(threadId);
     if (session) {
       session.interrupted = true;
-      await session.query.interrupt();
+      await Promise.all([
+        session.query.interrupt(),
+        session.activeReviewerQuery ? session.activeReviewerQuery.interrupt() : Promise.resolve(),
+      ]);
     }
     // A pending clarifying question would otherwise leave its promise (and resolver) hanging forever.
     this.cancelClarifications(threadId);
@@ -330,6 +403,7 @@ export class AgentService {
     if (session) {
       session.queue.close();
       session.query.close();
+      session.activeReviewerQuery?.close();
       this.sessions.delete(threadId);
     }
     this.cancelClarifications(threadId);
@@ -450,7 +524,10 @@ export class AgentService {
 
         if (hasAuthChanged) {
           try {
-            const mcpServers = buildMcpServers(this.deps.getSettings(), headers);
+            const mcpServers = {
+              ...buildMcpServers(this.deps.getSettings(), headers),
+              ...(existing.submitAnswerServer ? { [REVIEW_SERVER_NAME]: existing.submitAnswerServer } : {}),
+            };
             let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutPromise = new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
@@ -657,9 +734,22 @@ export class AgentService {
       resolvedHeaders = await this.deps.mcpAuthProvider.headers();
     }
 
+    const sessionRef: { current?: ThreadSession } = {};
+    const submitAnswerServer = orchestrator
+      ? buildSubmitAnswerServer((answer) => {
+          if (!sessionRef.current) {
+            return Promise.resolve({ text: 'Session not ready.', isError: true });
+          }
+          return this.handleSubmittedAnswer(thread.id, sessionRef.current, answer);
+        })
+      : undefined;
+
     const options: Options = {
       systemPrompt: orchestrator ? '' : singleAgentPrompt,
-      mcpServers: buildMcpServers(settings, resolvedHeaders),
+      mcpServers: {
+        ...buildMcpServers(settings, resolvedHeaders),
+        ...(submitAnswerServer ? { [REVIEW_SERVER_NAME]: submitAnswerServer } : {}),
+      },
       // NOT the full grant: `allowedTools` auto-approves, and an auto-approved tool never reaches
       // canUseTool. Web access and the clarifying question are enforced/intercepted only in that
       // callback, so they are withheld here and answered there instead — see policy.ts.
@@ -704,8 +794,11 @@ export class AgentService {
       lastActiveAt: Date.now(),
       playbookName: thread.orchestratorProfile ? undefined : playbookName,
       orchestratorProfile: thread.orchestratorProfile,
+      orchestrator,
+      submitAnswerServer,
       lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };
+    sessionRef.current = session;
     this.sessions.set(thread.id, session);
     void this.consume(thread.id, session);
     return session;
@@ -796,7 +889,7 @@ export class AgentService {
           this.deps.onSessionId(threadId, message.session_id, session.orchestratorProfile);
         }
         if (message.type === 'result') {
-          this.completeTurn(threadId, session, message, startedAt);
+          await this.completeTurn(threadId, session, message, startedAt);
         }
       }
     } catch (error) {
@@ -810,106 +903,566 @@ export class AgentService {
   }
 
   /**
-   * Code-driven review loop (Correctness Property: an orchestrated answer is never delivered
-   * unreviewed, and a rejected one is never delivered without a revision attempt).
-   *
-   * The orchestrator adapter only *asks* for a reviewer pass and for revisions, so a model that
-   * judges its answer obvious can skip the review, and one that disagrees with the reviewer can ship
-   * the rejected draft anyway (both observed). The web harness drives these rounds from code; here we
-   * do the same by discarding the draft, pushing a runtime notice back into the same session and
-   * letting the turn continue — the next `result` completes it for real.
-   *
-   * Returns true when the turn was extended (the caller must not finalise it yet).
+   * Execute one Reviewer SDK `query()` pass with `verify_citations` + `submit_review`, resuming
+   * `reviewState.reviewerSessionId` across revision rounds.
    */
-  private maybeContinueForReview(threadId: string, session: ThreadSession, isError: boolean, aborted: boolean): boolean {
-    const cfg = this.deps.getSettings().orchestrator;
-    const action = nextReviewAction({
-      orchestratorMode: !!session.orchestratorProfile && !!cfg,
-      isError,
-      aborted,
-      alreadyEnforced: !!session.turn.reviewEnforced,
-      revisionRounds: session.turn.revisionRounds,
-      maxReviewRounds: cfg?.maxReviewRounds,
-      toolCalls: session.turn.toolCalls,
-    });
-    if (action.kind === 'deliver') return false;
+  private async executeReviewerQuery(
+    threadId: string,
+    session: ThreadSession,
+    reviewPrompt: string,
+    reviewerCall: ToolCallInfo,
+    reviewState: ReviewTurnState,
+  ): Promise<{
+    verdict?: ReviewVerdict;
+    resultText: string;
+    usage: UsageTotals;
+    costUsd?: number;
+    failed: boolean;
+    errorMessage?: string;
+  }> {
+    const reviewerCfg = session.orchestrator!.reviewer;
+    const settings = this.deps.getSettings();
+    let capturedVerdict: ReviewVerdict | undefined;
+    let usage: UsageTotals = { ...EMPTY_USAGE };
+    let costUsd: number | undefined;
+    let resultText = '';
+    let failed = false;
+    let errorMessage: string | undefined;
 
-    let content: string;
-    let reason: 'skipped' | 'rejected' | 'unclear';
-    let round: number | undefined;
-    if (action.kind === 'enforce') {
-      session.turn.reviewEnforced = true;
-      content = REVIEW_ENFORCEMENT_PROMPT;
-      reason = 'skipped';
-      log('orch', '⚖ turn ended with no review pass — re-prompting the orchestrator to run the reviewer');
-    } else {
-      session.turn.revisionRounds = action.round;
-      const maxRounds = cfg?.maxReviewRounds ?? 0;
-      // Re-supplying the evidence is the point: the observed failure was a review request sent
-      // without it, which the reviewer (correctly) rejected as unvalidatable.
-      content = buildRevisionPrompt({
-        feedback: action.feedback,
-        toolCalls: session.turn.toolCalls,
-        round: action.round,
-        maxRounds,
-      });
-      reason = action.outcome;
-      round = action.round;
-      log(
-        'orch',
-        `⚖ reviewer ${action.outcome === 'unclear' ? 'returned no clear verdict' : 'REJECTED'} — ` +
-          `revision round ${action.round}/${maxRounds}: handing the feedback + evidence back to the orchestrator`,
-      );
+    let revQuery: Query | undefined;
+    try {
+      const headers = await this.deps.mcpAuthProvider.headers();
+      const reviewerOptions: Options = {
+        systemPrompt: reviewerCfg.prompt,
+        mcpServers: {
+          ...buildMcpServers(settings, headers),
+          [REVIEW_SERVER_NAME]: buildReviewServer((v) => {
+            capturedVerdict = v;
+          }),
+        },
+        tools: [],
+        allowedTools: buildAutoApproveTools(reviewerCfg.tools),
+        disallowedTools: ['Bash'],
+        canUseTool: buildCanUseTool(
+          this.deps.getSettings,
+          threadId,
+          undefined,
+          reviewerCfg.tools,
+          false,
+          false,
+        ),
+        settingSources: [],
+        model: reviewerCfg.model,
+        maxThinkingTokens: thinkingBudget(reviewerCfg.thinkingLevel),
+        ...(reviewerCfg.effort ? { effort: reviewerCfg.effort } : {}),
+        maxTurns: 6,
+        cwd: this.deps.sandboxDir,
+        env: debugEnv(),
+        ...(claudeBinary ? { pathToClaudeCodeExecutable: claudeBinary } : {}),
+        ...(reviewState.reviewerSessionId ? { resume: reviewState.reviewerSessionId } : {}),
+      };
+
+      revQuery = query({ prompt: reviewPrompt, options: reviewerOptions });
+      session.activeReviewerQuery = revQuery;
+
+      for await (const msg of revQuery) {
+        if (msg.type === 'system' && msg.subtype === 'init') {
+          reviewState.reviewerSessionId = msg.session_id;
+        } else if (msg.type === 'assistant') {
+          const content = (msg.message?.content ?? []) as unknown as Array<Record<string, unknown>>;
+          let blockText = '';
+          let blockThinking = '';
+          const innerToolCalls: ToolCallInfo[] = [];
+          for (const block of content) {
+            if (block.type === 'thinking' && typeof block.thinking === 'string') {
+              blockThinking += block.thinking;
+            } else if (block.type === 'text' && typeof block.text === 'string') {
+              blockText += block.text;
+            } else if (block.type === 'tool_use') {
+              const name = String(block.name);
+              const input = block.input;
+              log('orch', `   [reviewer] tool ${name}(${AgentService.preview(JSON.stringify(input ?? {}), 300)})`);
+              if (name === REVIEW_SUBMIT_TOOL) {
+                try {
+                  capturedVerdict = parseSubmitReviewArgs(input);
+                } catch {
+                  // MCP tool handler reports the validation error so the reviewer can retry
+                }
+              }
+              innerToolCalls.push({
+                id: String(block.id),
+                name,
+                input,
+              });
+            }
+          }
+          if (blockText) {
+            resultText += (resultText ? '\n\n' : '') + blockText;
+          }
+          if (blockText || blockThinking || innerToolCalls.length > 0) {
+            (reviewerCall.subagentBlocks ??= []).push({
+              text: blockText || undefined,
+              thinking: blockThinking || undefined,
+              toolCalls: innerToolCalls.length > 0 ? innerToolCalls : undefined,
+            });
+          }
+        } else if (msg.type === 'user') {
+          const message = (msg as { message?: { content?: unknown } }).message;
+          const content = Array.isArray(message?.content) ? (message.content as Array<Record<string, unknown>>) : [];
+          for (const block of content) {
+            if (block.type !== 'tool_result') continue;
+            const toolUseId = String(block.tool_use_id);
+            const isErr = block.is_error === true;
+            const resStr =
+              typeof block.content === 'string'
+                ? block.content
+                : Array.isArray(block.content)
+                  ? block.content
+                      .map((b) =>
+                        b && typeof b === 'object' && (b as { type?: string }).type === 'text'
+                          ? ((b as { text?: string }).text ?? '')
+                          : '',
+                      )
+                      .join('\n')
+                  : block.content == null
+                    ? ''
+                    : JSON.stringify(block.content);
+            const inner = reviewerCall.subagentBlocks
+              ?.flatMap((b) => b.toolCalls ?? [])
+              .find((c) => c.id === toolUseId);
+            if (inner) {
+              inner.result = resStr;
+              inner.isError = isErr;
+            }
+          }
+        } else if (msg.type === 'result') {
+          usage = usageFromSdk(msg.usage as unknown as Record<string, unknown>);
+          costUsd = (msg as { total_cost_usd?: number }).total_cost_usd;
+          if (isResultFailure(msg)) {
+            failed = true;
+            errorMessage = String((msg as { result?: string }).result ?? msg.subtype);
+          } else if (!resultText && typeof (msg as { result?: string }).result === 'string') {
+            resultText = (msg as { result?: string }).result!;
+          }
+          break;
+        }
+      }
+    } catch (err) {
+      failed = true;
+      errorMessage = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (session.activeReviewerQuery === revQuery) {
+        session.activeReviewerQuery = undefined;
+      }
+      if (revQuery) {
+        try {
+          revQuery.close();
+        } catch {
+          // ignore
+        }
+      }
     }
 
-    // The draft is superseded by whatever comes back post-review; drop its prose so the delivered
-    // message isn't "draft + final" concatenated. Tool cards and thinking stay — that is the trace.
-    session.turn.turnText = '';
-    session.turn.liveText = '';
-    session.turn.blocks = session.turn.blocks
-      .map((block) => ({ ...block, text: undefined }))
-      .filter((block) => block.thinking || (block.toolCalls?.length ?? 0) > 0);
-
-    this.deps.emit({ kind: 'review-enforced', threadId, reason, round });
-    session.queue.push({
-      type: 'user',
-      message: { role: 'user', content },
-      parent_tool_use_id: null,
-    });
-    return true;
+    return {
+      verdict: capturedVerdict,
+      resultText,
+      usage,
+      costUsd,
+      failed,
+      errorMessage,
+    };
   }
 
-  private completeTurn(
+  private ensureReviewState(session: ThreadSession): ReviewTurnState {
+    return (session.reviewState ??= {
+      allEvidence: [],
+      reviewerSent: new SentLedger(),
+      processedCallIds: new Set(),
+      originalQuestion: session.pendingUser?.content ?? '',
+    });
+  }
+
+  /**
+   * Shared single review pass used by both `handleSubmittedAnswer` (in-turn MCP tool) and
+   * `runCodeDrivenReview` (fallback when the orchestrator ends its turn without calling `submit_answer`).
+   *
+   * Harvests new specialist tool outputs, emits the synthetic Reviewer `SubagentCard` events, runs
+   * `executeReviewerQuery` (resuming `reviewerSessionId` across rounds), accumulates usage, and
+   * classifies the pass into `approved`, `revise`, `flagged`, `unreviewed`, or `aborted`.
+   */
+  private async runReviewPass(
+    threadId: string,
+    session: ThreadSession,
+    draftAnswer: string,
+    reviewState: ReviewTurnState,
+  ): Promise<ReviewPassOutcome> {
+    const newSpecialistCalls = session.turn.toolCalls.filter(
+      (c) =>
+        c.name === 'Agent' &&
+        c.subagentType !== REVIEWER_SUBAGENT &&
+        !reviewState.processedCallIds.has(c.id),
+    );
+    for (const c of newSpecialistCalls) {
+      reviewState.processedCallIds.add(c.id);
+    }
+    const newEvidence = harvestSpecialistEvidence(newSpecialistCalls, [this.deps.sandboxDir]);
+    reviewState.allEvidence.push(...newEvidence);
+
+    const round = session.turn.revisionRounds ?? 0;
+    const reviewPrompt =
+      round === 0
+        ? renderReviewTask(
+            reviewState.originalQuestion,
+            draftAnswer,
+            reviewState.allEvidence,
+            reviewState.reviewerSent,
+          )
+        : renderReviewFollowUp(draftAnswer, reviewState.allEvidence, reviewState.reviewerSent);
+
+    const reviewerCallId = randomUUID();
+    const reviewerCall: ToolCallInfo = {
+      id: reviewerCallId,
+      name: 'Agent',
+      subagentType: REVIEWER_SUBAGENT,
+      input: { prompt: reviewPrompt },
+      subagentBlocks: [],
+    };
+    session.turn.toolCalls.push(reviewerCall);
+    session.turn.blocks.push({ toolCalls: [reviewerCall] });
+
+    const startEvent: AgentEvent = {
+      kind: 'subagent-start',
+      threadId,
+      toolUseId: reviewerCallId,
+      subagentType: REVIEWER_SUBAGENT,
+      question: reviewPrompt.slice(0, 2000),
+    };
+    this.logOrchestrationEvent(startEvent);
+    this.deps.emit(startEvent);
+    this.deps.emit({
+      kind: 'assistant-block',
+      threadId,
+      text: '',
+      toolCalls: [reviewerCall],
+    });
+
+    const revOutcome = await this.executeReviewerQuery(
+      threadId,
+      session,
+      reviewPrompt,
+      reviewerCall,
+      reviewState,
+    );
+
+    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, revOutcome.usage);
+    if (revOutcome.costUsd != null) {
+      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + revOutcome.costUsd;
+    }
+
+    if (session.interrupted) {
+      return { kind: 'aborted', content: draftAnswer };
+    }
+
+    if (revOutcome.failed && !revOutcome.verdict) {
+      const errText = revOutcome.errorMessage || 'Reviewer failed';
+      reviewerCall.isError = true;
+      reviewerCall.result = errText;
+      this.deps.emit({
+        kind: 'tool-result',
+        threadId,
+        toolUseId: reviewerCallId,
+        result: errText,
+        isError: true,
+      });
+      const completeEvt: AgentEvent = {
+        kind: 'subagent-complete',
+        threadId,
+        toolUseId: reviewerCallId,
+        subagentType: REVIEWER_SUBAGENT,
+        result: errText,
+        isError: true,
+      };
+      this.logOrchestrationEvent(completeEvt);
+      this.deps.emit(completeEvt);
+      logError('orch', `⚖ reviewer pass failed on round ${round}: ${errText}`);
+
+      const unreviewedContent = draftAnswer.trim().length > 0 ? draftAnswer + unreviewedNote() : '';
+      return { kind: 'unreviewed', content: unreviewedContent, errorMessage: errText };
+    }
+
+    const verdict =
+      revOutcome.verdict ??
+      (revOutcome.resultText ? parseVerdict(revOutcome.resultText) ?? undefined : undefined);
+    const resultSummary = verdict
+      ? formatVerdictSummary(verdict)
+      : revOutcome.resultText || '(no verdict)';
+
+    reviewerCall.verdict = verdict;
+    reviewerCall.result = resultSummary;
+    reviewerCall.isError = false;
+
+    this.deps.emit({
+      kind: 'tool-result',
+      threadId,
+      toolUseId: reviewerCallId,
+      result: resultSummary,
+      isError: false,
+    });
+    const completeEvt: AgentEvent = {
+      kind: 'subagent-complete',
+      threadId,
+      toolUseId: reviewerCallId,
+      subagentType: REVIEWER_SUBAGENT,
+      result: resultSummary,
+      isError: false,
+    };
+    this.logOrchestrationEvent(completeEvt);
+    this.deps.emit(completeEvt);
+
+    if (verdict) {
+      const verdictEvt: AgentEvent = {
+        kind: 'review-verdict',
+        threadId,
+        toolUseId: reviewerCallId,
+        approved: verdict.approved,
+        feedback: verdict.feedback,
+      };
+      this.logOrchestrationEvent(verdictEvt);
+      this.deps.emit(verdictEvt);
+    }
+
+    if (verdict?.approved) {
+      return { kind: 'approved', content: draftAnswer };
+    }
+
+    const maxRounds = this.deps.getSettings().orchestrator?.maxReviewRounds ?? 0;
+    const doneRounds = session.turn.revisionRounds ?? 0;
+
+    if (doneRounds < maxRounds) {
+      const nextRound = doneRounds + 1;
+      session.turn.revisionRounds = nextRound;
+      const reason: 'rejected' | 'unclear' = verdict ? 'rejected' : 'unclear';
+      const revisionPrompt = buildRevisionPrompt({
+        verdict,
+        feedback: verdict?.feedback,
+        newEvidence,
+        allEvidence: reviewState.allEvidence,
+        draft: draftAnswer,
+        round: nextRound,
+        maxRounds,
+      });
+      log(
+        'orch',
+        `⚖ reviewer ${reason === 'unclear' ? 'returned no clear verdict' : 'REJECTED'} — ` +
+          `revision round ${nextRound}/${maxRounds}: handing feedback + evidence back to the orchestrator`,
+      );
+
+      session.turn.turnText = '';
+      session.turn.liveText = '';
+      session.turn.blocks = session.turn.blocks
+        .map((block) => ({ ...block, text: undefined }))
+        .filter((block) => block.thinking || (block.toolCalls?.length ?? 0) > 0);
+
+      this.deps.emit({ kind: 'review-enforced', threadId, reason, round: nextRound });
+      return { kind: 'revise', revisionPrompt };
+    }
+
+    const flaggedContent =
+      draftAnswer + reviewFlagNote(reviewAttempts(session.turn.toolCalls), verdict?.feedback);
+    return { kind: 'flagged', content: flaggedContent };
+  }
+
+  /**
+   * Fallback code-driven Reviewer loop when the orchestrator ends its turn without calling `submit_answer`.
+   */
+  private async runCodeDrivenReview(
+    threadId: string,
+    session: ThreadSession,
+    result: Extract<Awaited<ReturnType<Query['next']>>['value'], { type: 'result' }>,
+    resultUsage: UsageTotals,
+    resultCostUsd: number | undefined,
+  ): Promise<
+    | { status: 'continue' }
+    | { status: 'finalize'; isError: boolean; aborted: boolean; errorMessage?: string }
+  > {
+    session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
+    if (resultCostUsd != null) {
+      session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + resultCostUsd;
+    }
+
+    const rawDraft = session.turn.turnText || String((result as { result?: string }).result ?? '');
+    const draftAnswer = afterAnswerMarker(rawDraft);
+    const reviewState = this.ensureReviewState(session);
+
+    const outcome = await this.runReviewPass(threadId, session, draftAnswer, reviewState);
+    if (outcome.kind === 'revise') {
+      session.queue.push({
+        type: 'user',
+        message: { role: 'user', content: outcome.revisionPrompt },
+        parent_tool_use_id: null,
+      });
+      return { status: 'continue' };
+    }
+
+    session.turn.turnText = outcome.content;
+    session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, outcome.content);
+
+    if (outcome.kind === 'aborted') {
+      return { status: 'finalize', isError: false, aborted: true };
+    }
+    if (outcome.kind === 'unreviewed' && outcome.content.length === 0) {
+      return {
+        status: 'finalize',
+        isError: true,
+        aborted: false,
+        errorMessage: tagAttributedError('Claude', outcome.errorMessage),
+      };
+    }
+    return { status: 'finalize', isError: false, aborted: false };
+  }
+
+  /**
+   * Handle an orchestrator `mcp__review__submit_answer` tool call in-turn, serialized through
+   * `reviewState.inFlight` so concurrent `submit_answer` tool_use blocks cannot race.
+   */
+  private async handleSubmittedAnswer(
+    threadId: string,
+    session: ThreadSession,
+    rawDraft: string,
+  ): Promise<{ text: string; isError?: boolean }> {
+    const reviewState = this.ensureReviewState(session);
+    const prev = reviewState.inFlight ?? Promise.resolve();
+    let release!: () => void;
+    reviewState.inFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await prev;
+    try {
+      return await this.handleSubmittedAnswerLocked(threadId, session, rawDraft, reviewState);
+    } finally {
+      release();
+    }
+  }
+
+  private async handleSubmittedAnswerLocked(
+    threadId: string,
+    session: ThreadSession,
+    rawDraft: string,
+    reviewState: ReviewTurnState,
+  ): Promise<{ text: string; isError?: boolean }> {
+    const draftAnswer = afterAnswerMarker(rawDraft);
+
+    if (reviewState.settled) {
+      return {
+        text: reviewState.settledApproved
+          ? 'APPROVED — your answer has already been delivered to the user. End your turn now without repeating the answer.'
+          : 'Your answer has already been delivered to the user. End your turn now without repeating the answer.',
+      };
+    }
+
+    const hasSpecialistDelegation = session.turn.toolCalls.some(
+      (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
+    );
+    if (!hasSpecialistDelegation && reviewState.allEvidence.length === 0) {
+      reviewState.submittedAnswer = draftAnswer;
+      reviewState.settled = true;
+      return {
+        text: 'Your answer has been delivered to the user. End your turn now without repeating the answer.',
+      };
+    }
+
+    const outcome = await this.runReviewPass(threadId, session, draftAnswer, reviewState);
+    switch (outcome.kind) {
+      case 'aborted':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return { text: 'Turn interrupted by user.', isError: true };
+      case 'unreviewed':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return {
+          text: 'The automated review could not be completed. The answer you passed to submit_answer has been delivered to the user with an unverified notice. End your turn now without repeating the answer.',
+        };
+      case 'approved':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        reviewState.settledApproved = true;
+        return {
+          text: 'APPROVED — the answer you passed to submit_answer has been delivered to the user. End your turn now without repeating the answer.',
+        };
+      case 'revise':
+        reviewState.submittedAnswer = undefined;
+        return { text: outcome.revisionPrompt };
+      case 'flagged':
+        reviewState.submittedAnswer = outcome.content;
+        reviewState.settled = true;
+        return {
+          text: 'The maximum number of review rounds has been reached. Your latest answer has been delivered to the user with a reviewer note. End your turn now without repeating the answer.',
+        };
+    }
+  }
+
+  private async completeTurn(
     threadId: string,
     session: ThreadSession,
     result: Extract<Awaited<ReturnType<Query['next']>>['value'], { type: 'result' }>,
     startedAt: number,
-  ): void {
+  ): Promise<void> {
     const resultUsage = usageFromSdk(result.usage as unknown as Record<string, unknown>);
-    const aborted = session.interrupted;
-    const isError = isResultFailure(result);
-
+    let aborted = session.interrupted;
+    let isError = isResultFailure(result);
     const resultCostUsd = (result as { total_cost_usd?: number }).total_cost_usd;
 
-    if (this.maybeContinueForReview(threadId, session, isError, aborted)) {
-      // Each extra round produces a further `result`; keep this one's tokens/cost on the books.
-      session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
-      if (resultCostUsd != null) {
-        session.turn.carriedCostUsd = (session.turn.carriedCostUsd ?? 0) + resultCostUsd;
+    let usageOverride: UsageTotals | undefined;
+    let costOverride: number | undefined;
+    let errorOverride: string | undefined;
+
+    if (
+      session.orchestratorProfile &&
+      session.orchestrator &&
+      session.reviewState?.submittedAnswer !== undefined
+    ) {
+      isError = false;
+      session.turn.turnText = session.reviewState.submittedAnswer;
+      session.turn.blocks = stripBeforeAnswerMarker(
+        session.turn.blocks,
+        session.reviewState.submittedAnswer,
+      );
+    } else if (session.orchestratorProfile && session.orchestrator && !isError && !aborted) {
+      const hasSpecialistDelegation = session.turn.toolCalls.some(
+        (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
+      );
+      if (!hasSpecialistDelegation) {
+        const rawText = session.turn.turnText || String((result as { result?: string }).result ?? '');
+        const cleanText = afterAnswerMarker(rawText);
+        session.turn.turnText = cleanText;
+        session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, cleanText);
+      } else {
+        const outcome = await this.runCodeDrivenReview(
+          threadId,
+          session,
+          result,
+          resultUsage,
+          resultCostUsd,
+        );
+        if (outcome.status === 'continue') {
+          return;
+        }
+        isError = outcome.isError;
+        aborted = outcome.aborted;
+        errorOverride = outcome.errorMessage;
+        usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
+        costOverride = session.turn.carriedCostUsd;
       }
-      return;
     }
 
-    const usage = session.turn.carriedUsage ? addUsage(session.turn.carriedUsage, resultUsage) : resultUsage;
-    const review = session.orchestratorProfile
-      ? reviewStatusOf(session.turn.toolCalls, session.turn.reviewEnforced)
-      : undefined;
-    let content = session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
-    // Out of revision rounds with the reviewer still unsatisfied: the warning ships inside the
-    // content (what gets synced and copied), not just as a renderer badge.
-    if (content && (review?.outcome === 'rejected' || review?.outcome === 'unclear')) {
-      content += reviewFlagNote(reviewAttempts(session.turn.toolCalls));
-    }
+    const usage =
+      usageOverride ??
+      (session.turn.carriedUsage ? addUsage(session.turn.carriedUsage, resultUsage) : resultUsage);
+    const review = session.orchestratorProfile ? reviewStatusOf(session.turn.toolCalls) : undefined;
+    const content =
+      session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
     const assistantMessage: ChatMessage = {
       localId: randomUUID(),
       role: 'assistant',
@@ -923,15 +1476,20 @@ export class AgentService {
     };
 
     const costUsd =
-      session.turn.carriedCostUsd != null ? session.turn.carriedCostUsd + (resultCostUsd ?? 0) : resultCostUsd;
+      costOverride !== undefined
+        ? costOverride
+        : session.turn.carriedCostUsd != null
+          ? session.turn.carriedCostUsd + (resultCostUsd ?? 0)
+          : resultCostUsd;
     const rawErrorMessage = isError ? String((result as { result?: string }).result ?? result.subtype) : undefined;
-    const errorMessage = isError && rawErrorMessage ? tagAttributedError('Claude', rawErrorMessage) : undefined;
+    const errorMessage =
+      errorOverride ?? (isError && rawErrorMessage ? tagAttributedError('Claude', rawErrorMessage) : undefined);
     log(
       'agent',
       `turn ${aborted ? 'stopped' : isError ? 'error' : 'complete'} thread=${threadId} ` +
         `in=${usage.inputTokens} out=${usage.outputTokens} cacheRead=${usage.cacheReadTokens} ` +
         `tools=${session.turn.toolCalls.length} ` +
-        (review ? `review=${review.outcome}${review.enforced ? '(enforced)' : ''} ` : '') +
+        (review ? `review=${review.outcome} ` : '') +
         (session.turn.revisionRounds ? `revisions=${session.turn.revisionRounds} ` : '') +
         `${costUsd != null ? `cost=$${costUsd.toFixed(4)} ` : ''}` +
         `${errorMessage ? `error="${errorMessage}" ` : ''}` +
@@ -957,6 +1515,7 @@ export class AgentService {
 
     session.busy = false;
     session.interrupted = false;
+    session.reviewState = undefined;
     session.lastActiveAt = Date.now();
     session.turn = newTurnContext(threadId, Boolean(session.orchestratorProfile));
   }

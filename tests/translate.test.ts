@@ -415,5 +415,46 @@ describe('SDK message translation', () => {
       expect(inner?.result).toBe('User answered: ');
       expect(inner?.isError).toBe(true);
     });
+
+    it('suppresses internal mcp__review__submit_answer tool_use and tool_result from ctx.toolCalls, ctx.blocks, and emitted events', () => {
+      const ctx = newTurnContext('t1', true);
+      const useEvents = translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'sub-ans-1',
+                name: 'mcp__review__submit_answer',
+                input: { answer: 'Final answer [11111111].' },
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+      expect(useEvents).toEqual([]);
+      expect(ctx.toolCalls).toHaveLength(0);
+      expect(ctx.blocks).toHaveLength(0);
+
+      const resEvents = translateMessage(
+        msg({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'sub-ans-1',
+                content: 'APPROVED — delivered to user.',
+                is_error: false,
+              },
+            ],
+          },
+        }),
+        ctx,
+      );
+      expect(resEvents).toEqual([]);
+    });
   });
 });

@@ -10,6 +10,7 @@ import {
   qualifyTool,
 } from '../../shared/types';
 import { COMPUTE_TOOLS, COMPUTE_TOOL_PREFIX, isComputeTool } from './computeTools';
+import { ORCHESTRATOR_SUBMIT_ANSWER_TOOL, REVIEW_SUBMIT_TOOL } from './reviewTools';
 
 
 /**
@@ -321,6 +322,9 @@ export function isToolAllowed(
     return true;
   }
   if (toolName.startsWith(MCP_TOOL_PREFIX)) {
+    return true;
+  }
+  if (toolName === REVIEW_SUBMIT_TOOL || toolName === ORCHESTRATOR_SUBMIT_ANSWER_TOOL) {
     return true;
   }
   // Safe in-process compute tool — no shell/fs/network, but still only for playbooks that
