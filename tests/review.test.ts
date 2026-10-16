@@ -1,19 +1,44 @@
 import { describe, expect, it } from 'vitest';
-import { addUsage, nextReviewAction, reviewAttempts, reviewStatusOf } from '../src/main/agent/translate';
+import { addUsage, reviewAttempts, reviewStatusOf } from '../src/main/agent/translate';
 import {
+  afterAnswerMarker,
+  ANSWER_MARKER,
   buildRevisionPrompt,
   EVIDENCE_HEADING,
-  REVIEW_ENFORCEMENT_PROMPT,
+  idsUnderReview,
+  renderReviewFollowUp,
+  renderReviewTask,
   REVIEW_FEEDBACK_HEADING,
-  renderSpecialistEvidence,
   reviewFlagNote,
+  stripBeforeAnswerMarker,
+  unreviewedNote,
 } from '../src/main/agent/orchestration';
+import { formatChunkBlocks } from '../src/main/agent/chunkBlocks';
+import { SentLedger } from '../src/main/agent/evidenceDigest';
 import { buildRunTrace } from '../src/main/agent/runTrace';
 import { qualifyTool } from '../src/shared/types';
 import type { ChatMessage, OrchestratorSettings, ToolCallInfo } from '../src/shared/types';
 
 function delegation(subagentType: string, over: Partial<ToolCallInfo> = {}): ToolCallInfo {
   return { id: `t-${subagentType}-${Math.random()}`, name: 'Agent', input: { prompt: 'q' }, subagentType, ...over };
+}
+
+const CHUNK_1_ID = '11111111-1111-1111-1111-111111111111';
+const CHUNK_2_ID = '22222222-2222-2222-2222-222222222222';
+const DOC_1_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+function makeChunkEntry(chunkId: string, body: string, title = 'Admin Guide'): string {
+  return `[oim-ops · search_corpus]\n${formatChunkBlocks([
+    {
+      id: chunkId,
+      documentId: DOC_1_ID,
+      text: body,
+      headingPath: ['Config'],
+      documentTitle: title,
+      kind: 'manual',
+      score: 0.91,
+    },
+  ])}`;
 }
 
 describe('reviewStatusOf', () => {
@@ -48,155 +73,163 @@ describe('reviewStatusOf', () => {
     ];
     expect(reviewStatusOf(calls)?.outcome).toBe('approved');
   });
+});
 
-  it('marks the status as enforced when the runtime had to re-prompt', () => {
-    expect(reviewStatusOf([delegation('reviewer', { verdict: { approved: true } })], true)).toEqual({
-      outcome: 'approved',
-      enforced: true,
-    });
-    expect(reviewStatusOf([delegation('oim-customers')], true)).toEqual({ outcome: 'skipped', enforced: true });
+describe('afterAnswerMarker and stripBeforeAnswerMarker', () => {
+  it('returns text after the LAST <<<FINAL_ANSWER>>> marker', () => {
+    const raw = `I will write ${ANSWER_MARKER} before my answer.\n${ANSWER_MARKER}\nThe real answer [${CHUNK_1_ID}].`;
+    expect(afterAnswerMarker(raw)).toBe(`The real answer [${CHUNK_1_ID}].`);
+  });
+
+  it('returns the full text untouched when no marker is present', () => {
+    expect(afterAnswerMarker('Plain answer with no marker.')).toBe('Plain answer with no marker.');
+  });
+
+  it('strips marker and returns preceding text when tail after marker is blank', () => {
+    expect(afterAnswerMarker(`Answer written before marker.\n${ANSWER_MARKER}   \n`)).toBe(
+      'Answer written before marker.',
+    );
+  });
+
+  it('stripBeforeAnswerMarker preserves thinking and toolCalls while replacing pre-marker prose with finalAnswer', () => {
+    const call1 = delegation('oim-ops');
+    const blocks = [
+      { thinking: 'step 1', text: 'Let me delegate first.', toolCalls: [call1] },
+      { text: `Planning revision...\n${ANSWER_MARKER}\nClean final answer.` },
+    ];
+    const cleaned = stripBeforeAnswerMarker(blocks, 'Clean final answer.');
+    expect(cleaned).toEqual([
+      { thinking: 'step 1', toolCalls: [call1] },
+      { text: 'Clean final answer.' },
+    ]);
   });
 });
 
-describe('nextReviewAction', () => {
-  const base = {
-    orchestratorMode: true,
-    isError: false,
-    aborted: false,
-    alreadyEnforced: false,
-    maxReviewRounds: 2,
-    toolCalls: [delegation('oim-customers')],
-  };
-  const rejected = (feedback = 'claim 2 unsupported'): ToolCallInfo[] => [
-    delegation('oim-customers'),
-    delegation('reviewer', { verdict: { approved: false, feedback } }),
+describe('renderReviewTask and renderReviewFollowUp (OrchestrationService parity)', () => {
+  const evidence = [
+    makeChunkEntry(CHUNK_1_ID, 'Body of chunk 1 about VB.Net scripts.'),
+    makeChunkEntry(CHUNK_2_ID, 'Body of chunk 2 about LDAP connectors.'),
   ];
 
-  // Outside orchestrator mode the guard belongs to the caller, not to this classifier: a
-  // single-agent session is never offered the delegation tool, so an Agent call there is not a
-  // delegation to review. `nextReviewAction` is where that decision is made.
-  it('is never consulted for a single-agent turn — nextReviewAction short-circuits first', () => {
-    const calls = [delegation('oim-customers')];
-    expect(nextReviewAction({ ...base, orchestratorMode: false, toolCalls: calls })).toEqual({ kind: 'deliver' });
-    expect(
-      nextReviewAction({
-        ...base,
-        orchestratorMode: false,
-        toolCalls: [delegation('reviewer', { verdict: { approved: false } })],
-      }),
-    ).toEqual({ kind: 'deliver' });
-    // The same calls in orchestrator mode do reach the classifier and are acted on.
-    expect(nextReviewAction({ ...base, orchestratorMode: true, toolCalls: calls })).toEqual({ kind: 'enforce' });
+  it('renderReviewTask cite-scopes evidence to cited chunks and records sent chunks in SentLedger', () => {
+    const sent = new SentLedger();
+    const answer = `Selection scripts use VB.Net [${CHUNK_1_ID}].`;
+    const task = renderReviewTask('How do scripts work?', answer, evidence, sent);
+
+    expect(task).toContain('## Original question\nHow do scripts work?');
+    expect(task).toContain(`## Candidate answer\n${answer}`);
+    expect(task).toContain(EVIDENCE_HEADING);
+    expect(task).toContain('Body of chunk 1 about VB.Net scripts.');
+    expect(task).not.toContain('Body of chunk 2 about LDAP connectors.');
+    expect(task).toContain(`id=${CHUNK_1_ID}`);
+    expect(task).not.toContain(CHUNK_2_ID);
   });
 
-  it('enforces a review when an orchestrated turn skipped the reviewer', () => {
-    expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
+  it('renderReviewTask states (no evidence was captured) when evidence list is empty', () => {
+    const task = renderReviewTask('Q?', 'A', []);
+    expect(task).toContain('(no evidence was captured)');
   });
 
-  it('drives a revision round when the reviewer rejected the draft', () => {
-    expect(nextReviewAction({ ...base, toolCalls: rejected() })).toEqual({
-      kind: 'revise',
-      outcome: 'rejected',
-      feedback: 'claim 2 unsupported',
-      round: 1,
-    });
-  });
+  it('renderReviewFollowUp sends only newly cited chunks and reports (none — ...) when all cited chunks were already sent', () => {
+    const sent = new SentLedger();
+    const draft1 = `Scripts use VB.Net [${CHUNK_1_ID}].`;
+    renderReviewTask('Q?', draft1, evidence, sent);
 
-  it('counts rounds and stops at maxReviewRounds, delivering the answer flagged', () => {
-    const rejectedTwice = [...rejected(), delegation('reviewer', { verdict: { approved: false } })];
-    expect(nextReviewAction({ ...base, toolCalls: rejectedTwice, revisionRounds: 1 })).toMatchObject({
-      kind: 'revise',
-      round: 2,
-    });
-    expect(nextReviewAction({ ...base, toolCalls: rejectedTwice, revisionRounds: 2 })).toEqual({ kind: 'deliver' });
-    // maxReviewRounds: 0 means "review once, never revise".
-    expect(nextReviewAction({ ...base, toolCalls: rejected(), maxReviewRounds: 0 })).toEqual({ kind: 'deliver' });
-  });
+    // Follow-up citing the same chunk 1 -> fresh is blank -> "(none — every source this revision cites is already above)"
+    const followUpSame = renderReviewFollowUp(draft1, evidence, sent);
+    expect(followUpSame).toContain('## Revised candidate answer');
+    expect(followUpSame).toContain('(none — every source this revision cites is already above)');
 
-  it('revises on an unclear verdict too — an unparseable reviewer is not a pass', () => {
-    const unclear = [delegation('reviewer', { result: 'looks fine to me' })];
-    expect(nextReviewAction({ ...base, toolCalls: unclear })).toMatchObject({ kind: 'revise', outcome: 'unclear' });
-  });
-
-  it('delivers an approved answer untouched', () => {
-    const approved = [delegation('oim-customers'), delegation('reviewer', { verdict: { approved: true } })];
-    expect(nextReviewAction({ ...base, toolCalls: approved })).toEqual({ kind: 'deliver' });
-  });
-
-  it('never re-prompts twice for a skipped review, so a stubborn orchestrator cannot loop the turn', () => {
-    expect(nextReviewAction({ ...base, alreadyEnforced: true })).toEqual({ kind: 'deliver' });
-  });
-
-  it('always code-enforces review — review toggle cannot be turned off', () => {
-    expect(nextReviewAction(base)).toEqual({ kind: 'enforce' });
-    expect(nextReviewAction({ ...base, toolCalls: rejected() })).toEqual({
-      kind: 'revise',
-      outcome: 'rejected',
-      feedback: 'claim 2 unsupported',
-      round: 1,
-    });
-  });
-
-  it('leaves single-agent, errored and stopped turns alone', () => {
-    expect(nextReviewAction({ ...base, orchestratorMode: false })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, isError: true })).toEqual({ kind: 'deliver' });
-    expect(nextReviewAction({ ...base, aborted: true })).toEqual({ kind: 'deliver' });
-    // A rejected verdict on a stopped turn must not restart it against the user's Stop.
-    expect(nextReviewAction({ ...base, toolCalls: rejected(), aborted: true })).toEqual({ kind: 'deliver' });
-  });
-
-  it('does not fire on a turn that delegated to nobody', () => {
-    expect(nextReviewAction({ ...base, toolCalls: [] })).toEqual({ kind: 'deliver' });
+    // Follow-up newly citing chunk 2 -> chunk 2 body is sent
+    const draft2 = `Scripts use VB.Net [${CHUNK_1_ID}] and LDAP [${CHUNK_2_ID}].`;
+    const followUpNew = renderReviewFollowUp(draft2, evidence, sent);
+    expect(followUpNew).toContain('Body of chunk 2 about LDAP connectors.');
+    expect(followUpNew).not.toContain('(none — every source this revision cites is already above)');
   });
 });
 
-describe('revision round prompt', () => {
-  const toolCalls = [
-    delegation('oim-operations-config', { result: 'Selection scripts are VB.Net [chunk_id=abc]' }),
-    delegation('oim-developer-api', { isError: true, result: 'boom' }),
-    delegation('reviewer', { result: 'REJECTED\nno evidence supplied' }),
+describe('idsUnderReview and buildRevisionPrompt (OrchestrationService.renderRevisionTask parity)', () => {
+  const evidence = [
+    makeChunkEntry(CHUNK_1_ID, 'Chunk 1 content'),
+    makeChunkEntry(CHUNK_2_ID, 'Chunk 2 content'),
   ];
 
-  it('renders each specialist answer as evidence, skipping failures and the reviewer', () => {
-    const evidence = renderSpecialistEvidence(toolCalls);
-    expect(evidence).toContain('oim-operations-config');
-    expect(evidence).toContain('[chunk_id=abc]');
-    expect(evidence).not.toContain('oim-developer-api');
-    expect(evidence).not.toContain('REJECTED');
+  it('idsUnderReview extracts UUIDs named anywhere in verdict feedback/fixes/claims, or falls back to draft', () => {
+    const verdictWithId = {
+      approved: false,
+      feedback: `Chunk ${CHUNK_2_ID} does not say this.`,
+      citationFixes: [],
+      unsupportedClaims: [],
+    };
+    expect(idsUnderReview(verdictWithId, `Draft [${CHUNK_1_ID}]`)).toBe(`[${CHUNK_2_ID}]\n`);
+
+    const verdictWithoutId = {
+      approved: false,
+      feedback: 'The second paragraph is unsupported.',
+      citationFixes: [],
+      unsupportedClaims: [],
+    };
+    expect(idsUnderReview(verdictWithoutId, `Draft [${CHUNK_1_ID}]`)).toBe(`Draft [${CHUNK_1_ID}]`);
   });
 
-  it('says so explicitly when nothing was captured, rather than rendering an empty section', () => {
-    expect(renderSpecialistEvidence([])).toMatch(/no specialist evidence/i);
-  });
+  it('buildRevisionPrompt separates citationFixes and unsupportedClaims and forbids Task delegation on citation-only verdicts', () => {
+    const prompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Wrong citation on claim 1.',
+        citationFixes: [`Swap [${CHUNK_2_ID}] to [${CHUNK_1_ID}]`],
+        unsupportedClaims: [],
+      },
+      newEvidence: [],
+      allEvidence: evidence,
+      draft: `Claim 1 [${CHUNK_2_ID}].`,
+    });
 
-  it('uses the headings the server playbook and web harness key off', () => {
-    const prompt = buildRevisionPrompt({ feedback: 'citations are document-level', toolCalls, round: 1, maxRounds: 2 });
-    // The playbook's "revision rounds" section only fires on this exact heading.
+    expect(prompt).toContain('## The sources your answer currently cites');
+    expect(prompt).toContain('Chunk 2 content');
+    expect(prompt).toContain('Chunk 1 content');
     expect(prompt).toContain(REVIEW_FEEDBACK_HEADING);
-    expect(prompt).toContain(EVIDENCE_HEADING);
-    expect(prompt).toContain('citations are document-level');
-    expect(prompt).toContain('[chunk_id=abc]');
-    expect(prompt).toContain('revision round 1 of 2');
-    expect(prompt).toMatch(/discarded/i);
+    expect(prompt).toContain('## Citation fixes — no research needed');
+    expect(prompt).not.toContain('## Unsupported claims');
+    expect(prompt).toContain('Every objection above is a citation fix, so this revision needs no new evidence at all — do NOT call the Task tool.');
   });
 
-  it('still asks for a fix when the reviewer gave no parseable feedback', () => {
-    const prompt = buildRevisionPrompt({ toolCalls, round: 2, maxRounds: 2 });
-    expect(prompt).toContain(REVIEW_FEEDBACK_HEADING);
-    expect(prompt).toMatch(/no parseable verdict/i);
-  });
+  it('buildRevisionPrompt includes deduped newEvidence when specialists ran in the round and permits delegation for unsupportedClaims', () => {
+    const prompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Claim X has no backing.',
+        citationFixes: [],
+        unsupportedClaims: ['Claim X about Kerberos delegation'],
+      },
+      newEvidence: evidence,
+      allEvidence: evidence,
+      draft: `Draft [${CHUNK_1_ID}]`,
+    });
 
-  it('does not contain run_in_background instructions in buildRevisionPrompt', () => {
-    const prompt = buildRevisionPrompt({ feedback: 'test', toolCalls, round: 1, maxRounds: 2 });
-    expect(prompt).not.toContain('run_in_background');
+    expect(prompt).toContain('## Source evidence behind the specialist answers above');
+    expect(prompt).toContain('Chunk 1 content');
+    expect(prompt).toContain('Chunk 2 content');
+    expect(prompt).toContain('## Unsupported claims');
+    expect(prompt).toContain('- Claim X about Kerberos delegation');
+    expect(prompt).toContain('Delegate again only for material that is genuinely missing above.');
   });
 });
 
-describe('reviewFlagNote', () => {
-  it('warns in the message content itself, pluralising the attempt count', () => {
-    expect(reviewFlagNote(1)).toContain('1 attempt.');
-    expect(reviewFlagNote(3)).toContain('3 attempts.');
-    expect(reviewFlagNote(3)).toMatch(/did not pass automated review/i);
+describe('reviewFlagNote and unreviewedNote', () => {
+  it('includes attempt count and reviewer feedback in reviewFlagNote (or unspecified concerns fallback)', () => {
+    expect(reviewFlagNote(1, 'Missing citation on claim 2')).toBe(
+      '\n\n---\n⚠️ *This answer did not pass automated review after 1 attempt(s). Reviewer notes: Missing citation on claim 2*',
+    );
+    expect(reviewFlagNote(3)).toBe(
+      '\n\n---\n⚠️ *This answer did not pass automated review after 3 attempt(s). Reviewer notes: unspecified concerns*',
+    );
+  });
+
+  it('renders unreviewedNote when automated review failed to run', () => {
+    expect(unreviewedNote()).toBe(
+      '\n\n---\n⚠️ *This answer could not be checked — the automated review failed to run, so nothing has validated its claims or citations. Treat it as unverified.*',
+    );
   });
 });
 
@@ -204,26 +237,6 @@ describe('reviewAttempts', () => {
   it('counts reviewer delegations only', () => {
     expect(reviewAttempts([delegation('oim-customers'), delegation('reviewer'), delegation('reviewer')])).toBe(2);
     expect(reviewAttempts([{ id: '1', name: qualifyTool('get_section'), input: {} }])).toBe(0);
-  });
-});
-
-describe('REVIEW_ENFORCEMENT_PROMPT', () => {
-  it('names the reviewer subagent and demands a full restatement', () => {
-    expect(REVIEW_ENFORCEMENT_PROMPT).toContain('subagent_type: "reviewer"');
-    expect(REVIEW_ENFORCEMENT_PROMPT).toContain('APPROVED');
-    expect(REVIEW_ENFORCEMENT_PROMPT).toContain('REJECTED');
-    // The draft is dropped, so the model must be told its next text is the whole answer.
-    expect(REVIEW_ENFORCEMENT_PROMPT).toMatch(/discarded/i);
-  });
-
-  it('does not contain run_in_background instructions in REVIEW_ENFORCEMENT_PROMPT', () => {
-    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('run_in_background');
-  });
-
-  it('does not contain contradictions or ALL-CAPS directives in REVIEW_ENFORCEMENT_PROMPT', () => {
-    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('ONLY action in this turn');
-    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('You MUST call');
-    expect(REVIEW_ENFORCEMENT_PROMPT).not.toContain('DO NOT output');
   });
 });
 

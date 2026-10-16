@@ -156,6 +156,33 @@ export interface OrchestratorProfile {
   prototype?: boolean;
 }
 
+/**
+ * The review agent's structured verdict on a candidate answer (ported from `Verdict.java`).
+ *
+ * The two rejection lists are separate because they have different remedies: a citation fix is
+ * repairable from evidence the orchestrator is already holding (no retrieval needed), whereas an
+ * unsupported claim may genuinely have nothing behind it and require delegating to a specialist.
+ */
+export interface ReviewVerdict {
+  approved: boolean;
+  feedback?: string;
+  unsupportedClaims?: string[];
+  citationFixes?: string[];
+}
+
+/**
+ * Whether every objection is repairable by re-citing (`Verdict.isCitationOnly` in `yvoke-web`).
+ * Deliberately false when the reviewer listed nothing at all: a rejection whose objections are only
+ * in prose could be anything, and forbidding delegation on that basis could strand a run that
+ * genuinely needs a search.
+ */
+export function isCitationOnlyVerdict(verdict?: ReviewVerdict | null): boolean {
+  if (!verdict) return false;
+  const fixes = verdict.citationFixes ?? [];
+  const unsupported = verdict.unsupportedClaims ?? [];
+  return fixes.length > 0 && unsupported.length === 0;
+}
+
 /** One agent invocation in a completed run, reported to the server for the admin trace viewer. */
 export interface OrchestratorRunStep {
   seq: number;
@@ -169,7 +196,7 @@ export interface OrchestratorRunStep {
   output?: string;
   /** Free-form JSONB payload — the agent's own (sub-)transcript. */
   messages?: unknown;
-  verdict?: { approved: boolean; feedback?: string };
+  verdict?: ReviewVerdict;
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
@@ -187,7 +214,7 @@ export interface OrchestratorRunPayload {
   config?: unknown;
   /** Revision rounds (web convention): a first-pass approval is 0, one rejection + redo is 1. */
   reviewRounds: number;
-  finalVerdict?: { approved: boolean; feedback?: string } | null;
+  finalVerdict?: ReviewVerdict | null;
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
@@ -267,8 +294,8 @@ export interface ToolCallInfo {
   isError?: boolean;
   /** For the Agent (delegation) tool: the specialist/reviewer this call was dispatched to. */
   subagentType?: string;
-  /** Reviewer verdict parsed from an Agent→reviewer call's result (approved/feedback). */
-  verdict?: { approved: boolean; feedback?: string };
+  /** Reviewer verdict recorded via submit_review or parsed from reviewer text. */
+  verdict?: ReviewVerdict;
   /** For an Agent call: the sub-agent's own (forwarded) transcript, for a nested/collapsed view. */
   subagentBlocks?: MessageBlock[];
 }
@@ -284,12 +311,10 @@ export type ReviewOutcome = 'approved' | 'rejected' | 'unclear' | 'skipped';
 export interface ReviewStatus {
   outcome: ReviewOutcome;
   feedback?: string;
-  /** True when the runtime had to re-prompt the orchestrator to run the reviewer. */
-  enforced?: boolean;
 }
 
 /** Parse a reviewer sub-agent's plain-text verdict (first line APPROVED/REJECTED + feedback). */
-export function parseVerdict(result: string): { approved: boolean; feedback?: string } | null {
+export function parseVerdict(result: string): ReviewVerdict | null {
   const trimmed = result.trim();
   if (!trimmed) return null;
   const [firstLine, ...rest] = trimmed.split('\n');
@@ -307,11 +332,15 @@ export function parseVerdict(result: string): { approved: boolean; feedback?: st
     -1,
   );
   if (verdictLine >= 0) {
-    const approved = /APPROVED/i.test(lines[verdictLine]);
+    const approved = /APPROVED/i.test(lines[verdictLine]) && !/\bNOT\s+APPROVED\b/i.test(lines[verdictLine]);
     return { approved, feedback: lines.slice(verdictLine + 1).join('\n').trim() || undefined };
   }
-  if (/\bAPPROVED\b/.test(trimmed) && !/\bREJECTED\b/.test(trimmed)) return { approved: true, feedback };
-  if (/\bREJECTED\b/.test(trimmed)) return { approved: false, feedback };
+  if (/\bAPPROVED\b/.test(trimmed) && !/\bNOT\s+APPROVED\b/i.test(trimmed) && !/\bREJECTED\b/.test(trimmed)) {
+    return { approved: true, feedback };
+  }
+  if (/\bREJECTED\b/.test(trimmed) || /\bNOT\s+APPROVED\b/i.test(trimmed)) {
+    return { approved: false, feedback };
+  }
   return null;
 }
 
@@ -448,7 +477,7 @@ export interface McpPromptInfo {
   arguments: { name: string; description?: string; required?: boolean }[];
   /** Allowed tools for this playbook (if any). */
   tools?: string[];
-  /** Whether this playbook may compute (the safe mcp__compute__* tools). Undefined = not declared. */
+  /** Whether this playbook may compute (the safe mcp__compute__* tool, execute_code). Undefined = not declared. */
   codeExecution?: boolean;
   /** Whether this playbook is marked as an experimental/prototype playbook. */
   prototype?: boolean;
@@ -711,6 +740,9 @@ export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
  */
 export const MCP_PREFIX_RE = /^mcp__.+?__/;
 
+/** In-process SDK MCP servers (`mcp__compute__*` and `mcp__review__*`) that must not be re-namespaced to `mcp__yvoke__*`. */
+export const IN_PROCESS_MCP_PREFIX_RE = /^mcp__(?:compute|review)__/;
+
 /**
  * Built-in tools provided by the Agent SDK itself rather than an MCP server.
  *
@@ -734,10 +766,13 @@ export function builtinTool(tool: string): string | undefined {
  * get prefixed a second time into `mcp__yvoke__mcp__oim__search_corpus`, and be silently denied —
  * which is exactly what renaming this constant would have caused for every playbook in the database.
  *
- * Built-ins are returned as-is: they are the runtime's own tools, not the server's.
+ * Built-ins and in-process MCP tools (`mcp__compute__*`, `mcp__review__*`) are returned as-is:
+ * they are the runtime's own tools, not the remote knowledge-base server's.
  */
 export function qualifyTool(tool: string): string {
-  return builtinTool(tool) ?? `${MCP_TOOL_PREFIX}${tool.replace(MCP_PREFIX_RE, '')}`;
+  const trimmed = tool.trim();
+  if (IN_PROCESS_MCP_PREFIX_RE.test(trimmed)) return trimmed;
+  return builtinTool(trimmed) ?? `${MCP_TOOL_PREFIX}${trimmed.replace(MCP_PREFIX_RE, '')}`;
 }
 
 /**

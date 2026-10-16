@@ -1,23 +1,27 @@
 /**
- * In-process MCP server exposing the safe compute helpers (computeTools.ts) to the model
- * as `mcp__compute__*` tools. Runs entirely in the main process with no shell, filesystem,
- * or network access — the cross-platform, Windows-safe alternative to the `Bash` tool.
+ * In-process MCP server exposing the sandboxed JavaScript computation helper (computeTools.ts)
+ * to the model as `mcp__compute__execute_code`. Runs inside a zero-privilege `node:vm` context
+ * in the main process with no shell, filesystem, or network access — the cross-platform,
+ * Windows-safe alternative to the `Bash` tool.
  */
 import { z } from 'zod';
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { COMPUTE_SERVER_NAME, computeStatistics, dateDiff, safeCalculate } from './computeTools';
+import { COMPUTE_SERVER_NAME, executeCode, formatExecuteCodeOutput } from './computeTools';
 
-function ok(data: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] };
+function ok(text: string): CallToolResult {
+  return { content: [{ type: 'text', text }] };
 }
 
 function fail(message: string): CallToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+const ERROR_PREFIX_RE = /^[A-Za-z0-9_]*Error:/;
+
+function formatFailure(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return ERROR_PREFIX_RE.test(msg) ? msg : `Error: ${msg}`;
 }
 
 /** Fresh in-process compute server; the SDK namespaces its tools as `mcp__compute__<name>`. */
@@ -26,49 +30,25 @@ export function buildComputeServer(): McpSdkServerConfigWithInstance {
     name: COMPUTE_SERVER_NAME,
     version: '1.0.0',
     instructions:
-      'Safe in-process computation tools. Use these for arithmetic, statistics, and date math instead of writing or running code.',
+      'Safe in-process JavaScript computation sandbox. Use execute_code for arithmetic, statistics, date math, and data transformations.',
     tools: [
       tool(
-        'calculate',
-        'Evaluate an arithmetic expression and return the numeric result. Supports + - * / % ^ (** for power), ' +
-          'parentheses, functions (abs, sign, sqrt, cbrt, round, floor, ceil, exp, ln, log, log2, sin, cos, tan, ' +
-          'pow, hypot, min, max) and constants (pi, e, tau). Pure math only — no variables or code.',
-        { expression: z.string().describe('e.g. "(1200 * 1.19) / 12"') },
-        async ({ expression }): Promise<CallToolResult> => {
-          try {
-            return ok({ expression, result: safeCalculate(expression) });
-          } catch (err) {
-            return fail(`calculate error: ${messageOf(err)}`);
-          }
-        },
-      ),
-      tool(
-        'statistics',
-        'Compute summary statistics (count, sum, mean, median, min, max, range, sample variance and standard ' +
-          'deviation) over a list of numbers.',
-        { values: z.array(z.number()).describe('the numeric values to summarize') },
-        async ({ values }): Promise<CallToolResult> => {
-          try {
-            return ok(computeStatistics(values));
-          } catch (err) {
-            return fail(`statistics error: ${messageOf(err)}`);
-          }
-        },
-      ),
-      tool(
-        'date_diff',
-        'Compute the signed difference (to − from) between two ISO-8601 date/times in the given unit.',
+        'execute_code',
+        'Execute JavaScript code in an isolated, zero-privilege in-memory sandbox (no filesystem, network, shell, or timers). ' +
+          'Standard ECMAScript built-ins (Math, Date, Intl, JSON, Array, Object, Map, Set, RegExp, BigInt, console) are available. ' +
+          'Returns the value of the final expression (or top-level return statement) along with any console.log output.',
         {
-          from: z.string().describe('ISO date/time, e.g. "2024-01-01"'),
-          to: z.string().describe('ISO date/time, e.g. "2024-03-15T12:00:00Z"'),
-          unit: z.enum(['weeks', 'days', 'hours', 'minutes', 'seconds', 'milliseconds']).optional(),
+          code: z
+            .string()
+            .describe(
+              'JavaScript expression or script to evaluate, e.g. "[12, 15, 20].reduce((a, b) => a + b, 0) / 3"',
+            ),
         },
-        async ({ from, to, unit }): Promise<CallToolResult> => {
+        async ({ code }): Promise<CallToolResult> => {
           try {
-            const resolved = unit ?? 'days';
-            return ok({ from, to, unit: resolved, difference: dateDiff(from, to, resolved) });
+            return ok(formatExecuteCodeOutput(executeCode(code)));
           } catch (err) {
-            return fail(`date_diff error: ${messageOf(err)}`);
+            return fail(formatFailure(err));
           }
         },
       ),

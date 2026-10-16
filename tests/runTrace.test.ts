@@ -53,7 +53,7 @@ describe('buildRunTrace', () => {
     expect(run.steps).toHaveLength(4);
     expect(run.steps[0]).toMatchObject({ seq: 0, role: 'orchestrator', playbookName: 'oim-orchestrator', model: 'opus', input: 'the question', output: 'Final composed answer.' });
     expect(run.steps[1]).toMatchObject({ seq: 1, role: 'specialist', playbookName: 'oim-access-governance', model: 'haiku', input: 'roles?', output: 'roles answer', round: 0 });
-    expect(run.steps[3]).toMatchObject({ seq: 3, role: 'reviewer', playbookName: 'reviewer', model: 'opus', round: 0 });
+    expect(run.steps[3]).toMatchObject({ seq: 3, role: 'reviewer', playbookName: 'oim-orchestrator-reviewer', model: 'opus', round: 0 });
     // Web convention: rounds count REVISIONS, so an answer approved on the first pass is round 0.
     expect(run.reviewRounds).toBe(0);
     expect(run.finalVerdict).toEqual({ approved: true, feedback: 'ok' });
@@ -62,21 +62,40 @@ describe('buildRunTrace', () => {
     expect(run).toMatchObject({ promptTokens: 100, completionTokens: 50, totalTokens: 150, cachedTokens: 30, thoughtTokens: 10 });
   });
 
-  it('marks delivered_flagged when the last review rejected, counting the redo as one round', () => {
+  it('marks delivered_flagged when the last review rejected, counting the redo as one round and preserving structured verdict fields', () => {
     const msg = assistant([
       agentCall({ id: 'd1', subagentType: 'oim-developer-api', input: { prompt: 'q' }, result: 'a' }),
-      agentCall({ id: 'r1', subagentType: 'reviewer', result: 'REJECTED\nfix X', verdict: { approved: false, feedback: 'fix X' } }),
+      agentCall({
+        id: 'r1',
+        subagentType: 'reviewer',
+        result: 'REJECTED\nfix X',
+        verdict: { approved: false, feedback: 'fix X', unsupportedClaims: ['claim 1'], citationFixes: ['fix 1'] },
+      }),
       agentCall({ id: 'd2', subagentType: 'oim-developer-api', input: { prompt: 'q2' }, result: 'a2' }),
-      agentCall({ id: 'r2', subagentType: 'reviewer', result: 'REJECTED\nstill bad', verdict: { approved: false, feedback: 'still bad' } }),
+      agentCall({
+        id: 'r2',
+        subagentType: 'reviewer',
+        result: 'REJECTED\nstill bad',
+        verdict: { approved: false, feedback: 'still bad', unsupportedClaims: ['claim 2'], citationFixes: [] },
+      }),
     ]);
     const run = buildRunTrace({ conversationId: 'c1', userText: 'q', assistant: msg, profileName: 'OIM', profile, orchestrator })!;
 
     // Two reviewer passes = one revision round, as the web reports it.
     expect(run.reviewRounds).toBe(1);
     expect(run.status).toBe('delivered_flagged');
-    expect(run.finalVerdict).toEqual({ approved: false, feedback: 'still bad' });
+    expect(run.finalVerdict).toEqual({ approved: false, feedback: 'still bad', unsupportedClaims: ['claim 2'], citationFixes: [] });
     // The specialist re-queried after the first rejection is in round 1.
     expect(run.steps.find((s) => s.seq === 3)).toMatchObject({ role: 'specialist', round: 1 });
+  });
+
+  it('falls back to "reviewer" playbookName when profile definition is unavailable', () => {
+    const msg = assistant([
+      agentCall({ id: 'd1', subagentType: 'oim-developer-api', input: { prompt: 'q' }, result: 'a' }),
+      agentCall({ id: 'r1', subagentType: 'reviewer', input: { prompt: 'check' }, result: 'APPROVED', verdict: { approved: true } }),
+    ]);
+    const run = buildRunTrace({ conversationId: 'c1', userText: 'q', assistant: msg, profileName: 'OIM', orchestrator })!;
+    expect(run.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'reviewer' });
   });
 
   it('nests each specialist transcript under its step', () => {
@@ -119,8 +138,8 @@ describe('buildRunTrace', () => {
     expect(run.steps[0]).toMatchObject({ seq: 0, role: 'orchestrator', playbookName: 'oim-orchestrator', playbookVersion: 2 });
     expect(run.steps[1]).toMatchObject({ seq: 1, role: 'specialist', playbookName: 'oim-access-governance', playbookVersion: 4 });
     expect(run.steps[2]).toMatchObject({ seq: 2, role: 'specialist', playbookName: 'oim-developer-api', playbookVersion: 5 });
-    // Reviewer subagent is invoked with subagentType='reviewer', so its version is resolved via profile.reviewerPlaybook
-    expect(run.steps[3]).toMatchObject({ seq: 3, role: 'reviewer', playbookName: 'reviewer', playbookVersion: 3 });
+    // Reviewer subagent is invoked with subagentType='reviewer', so its playbookName and version are resolved via profile.reviewerPlaybook
+    expect(run.steps[3]).toMatchObject({ seq: 3, role: 'reviewer', playbookName: 'oim-orchestrator-reviewer', playbookVersion: 3 });
   });
 
   it('leaves playbookVersion undefined when playbookVersions map is omitted or playbook is absent', () => {

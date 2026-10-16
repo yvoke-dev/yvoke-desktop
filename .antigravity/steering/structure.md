@@ -47,12 +47,19 @@ yvoke-desktop/
 ├── CLAUDE.md               # Claude Code authoritative project rules
 ├── src/                    # Source code
 │   ├── main/               # Electron main process (Node.js runtime)
-│   │   ├── agent/          # Claude Agent SDK runner, credentials, prompts, policy
+│   │   ├── agent/          # Claude Agent SDK runner, credentials, prompts, policy, reviewer
 │   │   │   ├── AgentService.ts
 │   │   │   ├── ClaudeAuth.ts
 │   │   │   ├── McpConnection.ts
 │   │   │   ├── McpPrompts.ts
-│   │   │   └── policy.ts
+│   │   │   ├── chunkBlocks.ts
+│   │   │   ├── evidenceDigest.ts
+│   │   │   ├── orchestration.ts
+│   │   │   ├── policy.ts
+│   │   │   ├── reviewServer.ts
+│   │   │   ├── reviewTools.ts
+│   │   │   ├── runTrace.ts
+│   │   │   └── translate.ts
 │   │   ├── auth/           # Microsoft Entra ID MSAL node authentication
 │   │   │   └── ServerAuth.ts
 │   │   ├── settings/       # Settings manager and store
@@ -78,6 +85,7 @@ yvoke-desktop/
 │   │       │   ├── Markdown.tsx
 │   │       │   ├── SettingsView.tsx
 │   │       │   ├── StatusBanners.tsx
+│   │       │   ├── SubagentCard.tsx
 │   │       │   ├── ThreadList.tsx
 │   │       │   └── ToolCallCard.tsx
 │   │       ├── App.tsx     # Main application container
@@ -93,6 +101,12 @@ yvoke-desktop/
 ├── tests/                  # Vitest unit and integration test suites
 │   ├── AgentRuleFilesParity.test.ts # Enforces parity between CLAUDE.md and AGENTS.md
 │   ├── bootstrap.test.ts   # Unit tests for bootstrap path & headless resolution
+│   ├── chunkBlocks.test.ts
+│   ├── evidenceDigest.test.ts
+│   ├── orchestration.test.ts
+│   ├── review.test.ts
+│   ├── reviewTools.test.ts
+│   ├── runTrace.test.ts
 │   ├── spec.test.ts        # Enforces modular spec/ structure and sections
 │   ├── SyncQueue.test.ts
 │   ├── ThreadStore.test.ts

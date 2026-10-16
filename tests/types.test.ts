@@ -248,6 +248,7 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
       expect(isClarificationTool('mcp__custom_server__AskUserQuestion')).toBe(true);
       expect(qualifyTool('mcp__custom_server__search_corpus')).toBe('mcp__yvoke__search_corpus');
       expect(qualifyTool('mcp__custom_server__AskUserQuestion')).toBe('AskUserQuestion');
+      expect(qualifyTool('mcp__compute__execute_code')).toBe('mcp__compute__execute_code');
     });
     it('exports expected clarification constants', () => {
       expect(CLARIFICATION_ANSWER_PREFIX).toBe('User answered: ');

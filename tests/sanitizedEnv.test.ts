@@ -28,4 +28,13 @@ describe('sanitizedEnv', () => {
       expect(sanitizedEnv({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: inherited }).CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('1');
     }
   });
+
+  it('raises MAX_MCP_OUTPUT_TOKENS to 100000 by default so large MCP tool outputs do not spill at 25k tokens', () => {
+    expect(sanitizedEnv({}).MAX_MCP_OUTPUT_TOKENS).toBe('100000');
+    expect(sanitizedEnv({ MAX_MCP_OUTPUT_TOKENS: '' }).MAX_MCP_OUTPUT_TOKENS).toBe('100000');
+  });
+
+  it('preserves an explicit MAX_MCP_OUTPUT_TOKENS override from the environment', () => {
+    expect(sanitizedEnv({ MAX_MCP_OUTPUT_TOKENS: '200000' }).MAX_MCP_OUTPUT_TOKENS).toBe('200000');
+  });
 });

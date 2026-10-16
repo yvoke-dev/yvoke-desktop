@@ -1539,7 +1539,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     expect(payload.steps).toHaveLength(3);
     expect(payload.steps[0]).toMatchObject({ role: 'orchestrator', playbookName: 'oim-orchestrator', playbookVersion: 2 });
     expect(payload.steps[1]).toMatchObject({ role: 'specialist', playbookName: 'oim-access-governance', playbookVersion: 4 });
-    expect(payload.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'reviewer', playbookVersion: 3 });
+    expect(payload.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'oim-orchestrator-reviewer', playbookVersion: 3 });
   });
 
   it('stashOrchestratorRun fails open and still records the run if mcpPrompts.list() rejects', async () => {

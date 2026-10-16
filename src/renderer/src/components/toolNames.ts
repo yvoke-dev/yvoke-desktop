@@ -49,6 +49,7 @@ export function describeArgs(call: ToolCallInfo): string | undefined {
     get_json_schema: ['table', 'collection'],
     get_graph_neighbors: ['entity', 'id', 'name'],
     verify_citations: ['answer', 'text'],
+    execute_code: ['code'],
     ToolSearch: ['query'],
     WebSearch: ['query'],
     WebFetch: ['url'],
@@ -82,19 +83,22 @@ export function describeResult(call: ToolCallInfo): { text: string; good?: boole
   }
 
   // Corpus retrieval answers as a JSON array (or an object wrapping one); a count is the only
-  // part of it worth a trace row.
-  try {
-    const parsed: unknown = JSON.parse(raw.trim());
-    if (Array.isArray(parsed)) return { text: `${parsed.length} result${parsed.length === 1 ? '' : 's'}` };
-    if (parsed && typeof parsed === 'object') {
-      for (const value of Object.values(parsed as Record<string, unknown>)) {
-        if (Array.isArray(value)) {
-          return { text: `${value.length} result${value.length === 1 ? '' : 's'}` };
+  // part of it worth a trace row. Skip for execute_code so computed arrays/objects are not
+  // mislabelled as corpus retrieval result counts.
+  if (tool !== 'execute_code') {
+    try {
+      const parsed: unknown = JSON.parse(raw.trim());
+      if (Array.isArray(parsed)) return { text: `${parsed.length} result${parsed.length === 1 ? '' : 's'}` };
+      if (parsed && typeof parsed === 'object') {
+        for (const value of Object.values(parsed as Record<string, unknown>)) {
+          if (Array.isArray(value)) {
+            return { text: `${value.length} result${value.length === 1 ? '' : 's'}` };
+          }
         }
       }
+    } catch {
+      /* not JSON — fall through to the size hint below */
     }
-  } catch {
-    /* not JSON — fall through to the size hint below */
   }
 
   const chars = raw.trim().length;
