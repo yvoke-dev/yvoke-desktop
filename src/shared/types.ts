@@ -595,8 +595,6 @@ export interface PlaybookValidation {
   reason?: string;
   /** A better-matching playbook, guaranteed to exist in the picker's list. */
   suggestedPlaybookName?: string;
-  /** Display title for `suggestedPlaybookName`, resolved main-side so the card needs no lookup. */
-  suggestedPlaybookTitle?: string;
 }
 
 /**

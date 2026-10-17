@@ -69,7 +69,6 @@ function blocksOf(message: ChatMessage): MessageBlock[] {
 interface PreflightCard {
   reason?: string;
   suggestedName?: string;
-  suggestedTitle?: string;
   forPlaybook: string;
 }
 
@@ -643,7 +642,6 @@ export function ChatView(props: {
     setPreflight({
       reason: verdict.reason,
       suggestedName: verdict.suggestedPlaybookName,
-      suggestedTitle: verdict.suggestedPlaybookTitle,
       forPlaybook: prompt.name,
     });
   };
@@ -811,7 +809,7 @@ export function ChatView(props: {
           {checking && (
             <div className="thinking-indicator preflight-checking">
               <span className="dot" />
-              Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
+              Checking whether “{activePrompt?.name ?? preflight?.forPlaybook}” fits this question…
             </div>
           )}
           {attachmentError && (
@@ -844,7 +842,7 @@ export function ChatView(props: {
                     disabled={draft.trim().length === 0 && attachments.length === 0}
                     onClick={() => send(draft.trim(), preflight.suggestedName)}
                   >
-                    Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
+                    Switch to {preflight.suggestedName}
                   </button>
                 )}
                 {/* Sends exactly what the composer shows — normally the playbook the card is
@@ -921,7 +919,7 @@ export function ChatView(props: {
                 >
                   <span className="picker-row-main">
                     <span className="picker-row-title">
-                      {prompt.title}
+                      {prompt.name}
                       {prompt.version !== undefined && (
                         <span className="playbook-version">{` v${prompt.version}`}</span>
                       )}
@@ -1049,7 +1047,7 @@ export function ChatView(props: {
                 onClick={() => pickPrompt(prompt)}
               >
                 <span className="prompt-option-title">
-                  {prompt.title}
+                  {prompt.name}
                   {prompt.version !== undefined && (
                     <span className="playbook-version">{` v${prompt.version}`}</span>
                   )}
@@ -1102,7 +1100,7 @@ export function ChatView(props: {
                     : orchestratorActive
                       ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer — ${sendShortcut} to send`
                       : activePrompt
-                        ? `Add your question for “${activePrompt.title}” — ${sendShortcut} to send`
+                        ? `Add your question for “${activePrompt.name}” — ${sendShortcut} to send`
                         : prompts.length > 0
                           ? 'Pick a playbook first — / to choose one'
                           : `Ask a question or paste/drop images — ${sendShortcut} to send`
@@ -1157,7 +1155,7 @@ export function ChatView(props: {
               {activePrompt && (
                 <span className="active-playbook" data-tip={activePrompt.description}>
                   <PlaybookIcon size={11} />
-                  {activePrompt.title}
+                  {activePrompt.name}
                   {activePrompt.version !== undefined && (
                     <span className="playbook-version">{` v${activePrompt.version}`}</span>
                   )}

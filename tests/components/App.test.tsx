@@ -167,7 +167,7 @@ describe('App conversation switching with in-progress turn', () => {
       expect(screen.getByText('Pick a playbook')).toBeTruthy();
     });
 
-    const playbookBtn = screen.getByText('Getting started').closest('button')!;
+    const playbookBtn = screen.getByText('oim-getting-started').closest('button')!;
     fireEvent.click(playbookBtn);
 
     // Type question and send
@@ -252,7 +252,7 @@ describe('App conversation switching with in-progress turn', () => {
     await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
     fireEvent.click(screen.getByText('First Conversation'));
     await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
-    fireEvent.click(screen.getByText('Getting started').closest('button')!);
+    fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
 
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Look at this screenshot' } });
@@ -276,7 +276,7 @@ describe('App conversation switching with in-progress turn', () => {
     await waitFor(() => {
       expect(screen.getByText('Pick a playbook')).toBeTruthy();
     });
-    const playbookBtn = screen.getByText('Getting started').closest('button')!;
+    const playbookBtn = screen.getByText('oim-getting-started').closest('button')!;
     fireEvent.click(playbookBtn);
 
     // Send question
@@ -333,7 +333,7 @@ describe('App conversation switching with in-progress turn', () => {
     await waitFor(() => {
       expect(screen.getByText('Pick a playbook')).toBeTruthy();
     });
-    fireEvent.click(screen.getByText('Getting started').closest('button')!);
+    fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
 
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Show me tool call' } });
@@ -382,7 +382,7 @@ describe('App conversation switching with in-progress turn', () => {
     await waitFor(() => {
       expect(screen.getByText('Pick a playbook')).toBeTruthy();
     });
-    fireEvent.click(screen.getByText('Getting started').closest('button')!);
+    fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
 
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Will fail' } });
@@ -434,7 +434,7 @@ describe('App conversation switching with in-progress turn', () => {
 
     fireEvent.click(screen.getByText('First Conversation'));
     await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
-    fireEvent.click(screen.getByText('Getting started').closest('button')!);
+    fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
 
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Q1' } });
@@ -444,11 +444,11 @@ describe('App conversation switching with in-progress turn', () => {
 
     // Away to a conversation under a DIFFERENT playbook, then back mid-turn.
     fireEvent.click(screen.getByText('Second Conversation'));
-    await waitFor(() => expect(container.querySelector('.active-playbook')?.textContent).toContain('Schema'));
+    await waitFor(() => expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema'));
     fireEvent.click(screen.getByText('First Conversation'));
 
     await waitFor(() =>
-      expect(container.querySelector('.active-playbook')?.textContent).toContain('Getting started'),
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-getting-started'),
     );
   });
 
@@ -619,7 +619,7 @@ describe('App conversation switching with in-progress turn', () => {
     fireEvent.click(screen.getByText('First Conversation'));
     await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
 
-    const schemaBtn = screen.getByText('Schema').closest('button')!;
+    const schemaBtn = screen.getByText('oim-schema').closest('button')!;
     fireEvent.click(schemaBtn);
 
     const textarea = await screen.findByPlaceholderText(/Add your question/);
@@ -659,7 +659,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(agentModeSelect.closest('.composer-select-wrapper')?.getAttribute('data-tip')).toBe(
       'Agent mode cannot be changed once a conversation has started',
     );
-    expect(screen.getByText('Schema')).toBeTruthy();
+    expect(screen.getByText('oim-schema')).toBeTruthy();
     expect(document.querySelector('.active-playbook-remove')).toBeNull();
   });
 
