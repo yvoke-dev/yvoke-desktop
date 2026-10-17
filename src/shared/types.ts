@@ -425,7 +425,7 @@ export interface ChatMessage {
   blocks?: MessageBlock[];
   /** Orchestrator mode only: whether this answer passed the reviewer. Absent = not orchestrated. */
   review?: ReviewStatus;
-  /** Title of the MCP prompt/playbook injected with this (user) message, if any. */
+  /** Canonical name of the MCP prompt/playbook injected with this (user) message, if any. */
   playbook?: string;
   /** Positive integer version of the MCP prompt/playbook injected with this (user) message, if any. */
   playbookVersion?: number;

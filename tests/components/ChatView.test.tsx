@@ -2737,70 +2737,159 @@ describe('deterministic platform shortcut labels', () => {
       expect(cUnstarted.querySelector('.composer-pill-remove')).toBeNull();
     });
   });
+});
 
-  describe('playbook version display across chat UI surfaces', () => {
-    const VERSIONED_PROMPTS: McpPromptInfo[] = [
-      {
-        name: 'oim-getting-started',
-        title: 'Getting started',
-        description: 'Onboarding.',
-        arguments: [],
-        version: 2,
-      },
+describe('playbook version display across chat UI surfaces', () => {
+  const VERSIONED_PROMPTS: McpPromptInfo[] = [
+    {
+      name: 'oim-getting-started',
+      title: 'Getting started',
+      description: 'Onboarding.',
+      arguments: [],
+      version: 2,
+    },
+    {
+      name: 'oim-schema',
+      title: 'Schema',
+      description: 'Tables and columns.',
+      arguments: [],
+    },
+  ];
+
+  it('renders version badge in empty-state picker and slash autocomplete when version is present, and omits it when absent', () => {
+    const { container } = renderChat({ prompts: VERSIONED_PROMPTS });
+
+    const pickerTitles = Array.from(container.querySelectorAll('.picker-row-title')).map(
+      (el) => el.textContent,
+    );
+    expect(pickerTitles).toEqual(['oim-getting-started v2', 'oim-schema']);
+    expect(pickerTitles.join(' ')).not.toContain('vundefined');
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '/' } });
+
+    const optionTitles = Array.from(container.querySelectorAll('.prompt-option-title')).map(
+      (el) => el.textContent,
+    );
+    expect(optionTitles).toEqual(['oim-getting-started v2', 'oim-schema']);
+    expect(optionTitles.join(' ')).not.toContain('vundefined');
+  });
+
+  it('filters empty-state picker by canonical name or description and ignores invisible title', () => {
+    const prompts: McpPromptInfo[] = [
       {
         name: 'oim-schema',
-        title: 'Schema',
-        description: 'Tables and columns.',
+        title: 'Schema Explorer',
+        description: 'Inspect tables',
+        arguments: [],
+      },
+      {
+        name: 'oim-getting-started',
+        title: 'Onboarding Guide',
+        description: 'First steps',
         arguments: [],
       },
     ];
+    const { container } = renderChat({ prompts });
+    const filterInput = container.querySelector(
+      'input[aria-label="Filter playbooks"]',
+    ) as HTMLInputElement;
 
-    it('renders version badge in empty-state picker and slash autocomplete when version is present, and omits it when absent', () => {
-      const { container } = renderChat({ prompts: VERSIONED_PROMPTS });
+    // Matching only invisible title returns zero picker rows
+    fireEvent.change(filterInput, { target: { value: 'Schema Explorer' } });
+    expect(container.querySelectorAll('.picker-row')).toHaveLength(0);
 
-      const pickerTitles = Array.from(container.querySelectorAll('.picker-row-title')).map(
-        (el) => el.textContent,
-      );
-      expect(pickerTitles).toEqual(['oim-getting-started v2', 'oim-schema']);
-      expect(pickerTitles.join(' ')).not.toContain('vundefined');
+    // Matching canonical name returns the matching row
+    fireEvent.change(filterInput, { target: { value: 'oim-schema' } });
+    expect(
+      Array.from(container.querySelectorAll('.picker-row-title')).map((el) => el.textContent),
+    ).toEqual(['oim-schema']);
 
-      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-      fireEvent.change(textarea, { target: { value: '/' } });
+    // Matching description returns the matching row
+    fireEvent.change(filterInput, { target: { value: 'Inspect' } });
+    expect(
+      Array.from(container.querySelectorAll('.picker-row-title')).map((el) => el.textContent),
+    ).toEqual(['oim-schema']);
+  });
 
-      const optionTitles = Array.from(container.querySelectorAll('.prompt-option-title')).map(
-        (el) => el.textContent,
-      );
-      expect(optionTitles).toEqual(['oim-getting-started v2', 'oim-schema']);
-      expect(optionTitles.join(' ')).not.toContain('vundefined');
+  it('filters slash autocomplete by canonical name and ignores invisible title', () => {
+    const prompts: McpPromptInfo[] = [
+      {
+        name: 'oim-schema',
+        title: 'Explorer',
+        description: 'Inspect tables',
+        arguments: [],
+      },
+      {
+        name: 'oim-getting-started',
+        title: 'Onboarding',
+        description: 'First steps',
+        arguments: [],
+      },
+    ];
+    const { container } = renderChat({ prompts });
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+
+    // Typing a slash token that matches only the invisible title hides autocomplete
+    fireEvent.change(textarea, { target: { value: '/Explorer' } });
+    expect(container.querySelector('.prompt-autocomplete')).toBeNull();
+    expect(container.querySelectorAll('.prompt-option')).toHaveLength(0);
+
+    // Typing a slash token that matches the canonical name shows autocomplete
+    fireEvent.change(textarea, { target: { value: '/oim-schema' } });
+    expect(container.querySelector('.prompt-autocomplete')).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('.prompt-option-title')).map((el) => el.textContent),
+    ).toEqual(['oim-schema']);
+  });
+
+  it('renders version badge in active playbook pill when selected in unlocked state while keeping textarea placeholder clean', () => {
+    const { container } = renderChat({ prompts: VERSIONED_PROMPTS });
+
+    const firstPickerRow = container.querySelector('.picker-row') as HTMLButtonElement;
+    fireEvent.click(firstPickerRow);
+
+    const pill = container.querySelector('.active-playbook');
+    expect(pill).not.toBeNull();
+    expect(pill?.textContent).toContain('oim-getting-started v2');
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.placeholder).toContain('Add your question for “oim-getting-started”');
+    expect(textarea.placeholder).not.toContain('v2');
+  });
+
+  it('renders catalogue version in active playbook pill for locked thread, or falls back to initial user message playbookVersion only when playbooks match', () => {
+    const userMsgWithV2: ChatMessage = {
+      localId: 'm1',
+      role: 'user',
+      content: 'How do I start?',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      playbook: 'oim-getting-started',
+      playbookVersion: 2,
+    };
+
+    // Case 1: Catalogue has version 3 -> catalogue version wins
+    const { container, rerender } = renderChat({
+      thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
+      messages: [userMsgWithV2],
+      prompts: [
+        {
+          name: 'oim-getting-started',
+          title: 'Getting started',
+          description: 'Onboarding.',
+          arguments: [],
+          version: 3,
+        },
+      ],
     });
 
-    it('renders version badge in active playbook pill when selected in unlocked state while keeping textarea placeholder clean', () => {
-      const { container } = renderChat({ prompts: VERSIONED_PROMPTS });
+    expect(container.querySelector('.active-playbook')?.textContent).toContain(
+      'oim-getting-started v3',
+    );
 
-      const firstPickerRow = container.querySelector('.picker-row') as HTMLButtonElement;
-      fireEvent.click(firstPickerRow);
-
-      const pill = container.querySelector('.active-playbook');
-      expect(pill).not.toBeNull();
-      expect(pill?.textContent).toContain('oim-getting-started v2');
-
-      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-      expect(textarea.placeholder).toContain('Add your question for “oim-getting-started”');
-      expect(textarea.placeholder).not.toContain('v2');
-    });
-
-    it('renders catalogue version in active playbook pill for locked thread, or falls back to initial user message playbookVersion', () => {
-      const userMsgWithV2: ChatMessage = {
-        localId: 'm1',
-        role: 'user',
-        content: 'How do I start?',
-        createdAt: '2026-08-01T10:00:00.000Z',
-        playbook: 'oim-getting-started',
-        playbookVersion: 2,
-      };
-
-      // Case 1: Catalogue has version 3 -> catalogue version wins
-      const { container, rerender } = renderChat({
+    // Case 2: Catalogue entry has no version -> falls back to initialUserMessage.playbookVersion (2)
+    rerender(
+      chat({
         thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
         messages: [userMsgWithV2],
         prompts: [
@@ -2809,95 +2898,107 @@ describe('deterministic platform shortcut labels', () => {
             title: 'Getting started',
             description: 'Onboarding.',
             arguments: [],
-            version: 3,
           },
         ],
-      });
+      }),
+    );
 
-      expect(container.querySelector('.active-playbook')?.textContent).toContain(
-        'oim-getting-started v3',
-      );
+    expect(container.querySelector('.active-playbook')?.textContent).toContain(
+      'oim-getting-started v2',
+    );
 
-      // Case 2: Catalogue entry has no version -> falls back to initialUserMessage.playbookVersion (2)
-      rerender(
-        chat({
-          thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
-          messages: [userMsgWithV2],
-          prompts: [
-            {
-              name: 'oim-getting-started',
-              title: 'Getting started',
-              description: 'Onboarding.',
-              arguments: [],
-            },
-          ],
-        }),
-      );
-
-      expect(container.querySelector('.active-playbook')?.textContent).toContain(
-        'oim-getting-started v2',
-      );
-
-      // Case 3: Catalogue is empty (offline / disconnected) -> synthetic fallback uses initialUserMessage.playbookVersion (2)
-      rerender(
-        chat({
-          thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
-          messages: [userMsgWithV2],
-          prompts: [],
-        }),
-      );
-
-      expect(container.querySelector('.active-playbook')?.textContent).toContain(
-        'oim-getting-started v2',
-      );
-
-      // Case 4: Catalogue is empty and message has no playbookVersion -> no vundefined
-      rerender(
-        chat({
-          thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
-          messages: [{ ...userMsgWithV2, playbookVersion: undefined }],
-          prompts: [],
-        }),
-      );
-
-      expect(container.querySelector('.active-playbook')?.textContent).toBe('oim-getting-started');
-      expect(container.querySelector('.active-playbook')?.textContent).not.toContain('vundefined');
-    });
-
-    it('renders version badge in user message kicker when playbookVersion is set and omits it when undefined', () => {
-      const messages: ChatMessage[] = [
-        {
-          localId: 'm1',
-          role: 'user',
-          content: 'Question with version',
-          createdAt: '2026-08-01T10:00:00.000Z',
-          playbook: 'oim-getting-started',
-          playbookVersion: 2,
-        },
-        {
-          localId: 'm2',
-          role: 'user',
-          content: 'Question without version',
-          createdAt: '2026-08-01T10:01:00.000Z',
-          playbook: 'oim-schema',
-        },
-      ];
-
-      const { container } = renderChat({
+    // Case 3: Catalogue is empty (offline / disconnected) -> synthetic fallback uses initialUserMessage.playbookVersion (2)
+    rerender(
+      chat({
         thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
-        messages,
-        prompts: VERSIONED_PROMPTS,
-      });
+        messages: [userMsgWithV2],
+        prompts: [],
+      }),
+    );
 
-      const kickers = Array.from(container.querySelectorAll('.user-kicker')).map(
-        (el) => el.textContent,
-      );
-      expect(kickers).toHaveLength(2);
-      expect(kickers[0]).toContain('oim-getting-started v2');
-      expect(kickers[1]).toContain('oim-schema');
-      expect(kickers[1]).not.toContain('vundefined');
-      expect(kickers[1]).not.toMatch(/oim-schema\s+v\d/);
+    expect(container.querySelector('.active-playbook')?.textContent).toContain(
+      'oim-getting-started v2',
+    );
+
+    // Case 4: Catalogue is empty and message has no playbookVersion -> no vundefined
+    rerender(
+      chat({
+        thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
+        messages: [{ ...userMsgWithV2, playbookVersion: undefined }],
+        prompts: [],
+      }),
+    );
+
+    expect(container.querySelector('.active-playbook')?.textContent).toBe('oim-getting-started');
+    expect(container.querySelector('.active-playbook')?.textContent).not.toContain('vundefined');
+
+    // Case 5: thread.initialPlaybook ('oim-schema') differs from initialUserMessage.playbook ('oim-getting-started', v2)
+    // when 'oim-schema' is in prompts with version: undefined -> must NOT attribute v2 to 'oim-schema'
+    rerender(
+      chat({
+        thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-schema' },
+        messages: [userMsgWithV2],
+        prompts: [
+          {
+            name: 'oim-schema',
+            title: 'Schema',
+            description: 'Tables and columns.',
+            arguments: [],
+          },
+        ],
+      }),
+    );
+
+    expect(container.querySelector('.active-playbook')?.textContent).toBe('oim-schema');
+    expect(container.querySelector('.active-playbook')?.textContent).not.toContain('v2');
+
+    // Case 6: thread.initialPlaybook ('oim-schema') differs from initialUserMessage.playbook ('oim-getting-started', v2)
+    // when prompts is empty -> synthetic fallback must NOT attribute v2 to 'oim-schema'
+    rerender(
+      chat({
+        thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-schema' },
+        messages: [userMsgWithV2],
+        prompts: [],
+      }),
+    );
+
+    expect(container.querySelector('.active-playbook')?.textContent).toBe('oim-schema');
+    expect(container.querySelector('.active-playbook')?.textContent).not.toContain('v2');
+  });
+
+  it('renders version badge in user message kicker when playbookVersion is set and omits it when undefined', () => {
+    const messages: ChatMessage[] = [
+      {
+        localId: 'm1',
+        role: 'user',
+        content: 'Question with version',
+        createdAt: '2026-08-01T10:00:00.000Z',
+        playbook: 'oim-getting-started',
+        playbookVersion: 2,
+      },
+      {
+        localId: 'm2',
+        role: 'user',
+        content: 'Question without version',
+        createdAt: '2026-08-01T10:01:00.000Z',
+        playbook: 'oim-schema',
+      },
+    ];
+
+    const { container } = renderChat({
+      thread: { ...THREAD, hasStarted: true, initialPlaybook: 'oim-getting-started' },
+      messages,
+      prompts: VERSIONED_PROMPTS,
     });
+
+    const kickers = Array.from(container.querySelectorAll('.user-kicker')).map(
+      (el) => el.textContent,
+    );
+    expect(kickers).toHaveLength(2);
+    expect(kickers[0]).toContain('oim-getting-started v2');
+    expect(kickers[1]).toContain('oim-schema');
+    expect(kickers[1]).not.toContain('vundefined');
+    expect(kickers[1]).not.toMatch(/oim-schema\s+v\d/);
   });
 });
 

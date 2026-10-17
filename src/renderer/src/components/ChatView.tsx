@@ -350,12 +350,16 @@ export function ChatView(props: {
     if (orchestratorActive) return null;
     if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (initialUserPlaybook) {
+      const messageVersion =
+        initialUserMessage?.playbook === initialUserPlaybook
+          ? initialUserMessage.playbookVersion
+          : undefined;
       const found = prompts.find((p) => p.name === initialUserPlaybook);
       if (found) {
         return found.version !== undefined
           ? found
-          : initialUserMessage?.playbookVersion !== undefined
-            ? { ...found, version: initialUserMessage.playbookVersion }
+          : messageVersion !== undefined
+            ? { ...found, version: messageVersion }
             : found;
       }
       return {
@@ -363,9 +367,7 @@ export function ChatView(props: {
         title: initialUserPlaybook,
         description: '',
         arguments: [],
-        ...(initialUserMessage?.playbookVersion !== undefined
-          ? { version: initialUserMessage.playbookVersion }
-          : {}),
+        ...(messageVersion !== undefined ? { version: messageVersion } : {}),
       };
     }
     return null;
@@ -413,7 +415,7 @@ export function ChatView(props: {
   const suggestions = useMemo(() => {
     if (orchestratorActive || isPlaybookLocked || slashQuery == null || prompts.length === 0) return [];
     const q = slashQuery.toLowerCase();
-    return prompts.filter((p) => p.name.toLowerCase().includes(q) || p.title.toLowerCase().includes(q));
+    return prompts.filter((p) => p.name.toLowerCase().includes(q));
   }, [orchestratorActive, isPlaybookLocked, slashQuery, prompts]);
   const showAutocomplete = suggestions.length > 0;
 
@@ -744,10 +746,7 @@ export function ChatView(props: {
     const q = pickerFilter.trim().toLowerCase();
     if (!q) return prompts;
     return prompts.filter(
-      (p) =>
-        p.title.toLowerCase().includes(q) ||
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q),
+      (p) => p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q),
     );
   }, [prompts, pickerFilter]);
 

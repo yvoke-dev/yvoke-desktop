@@ -702,5 +702,22 @@ describe('App conversation switching with in-progress turn', () => {
       expect(document.querySelector('.subagent-card .tool-status.ok')).toBeNull();
     });
   });
+
+  it('sorts visiblePrompts by canonical playbook name rather than title', async () => {
+    (window as unknown as { api: any }).api.listPrompts = vi.fn().mockResolvedValue([
+      { name: 'oim-beta', title: 'Alpha', description: 'Second by name.', arguments: [] },
+      { name: 'oim-alpha', title: 'Zebra', description: 'First by name.', arguments: [] },
+    ]);
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+    const pickerTitles = Array.from(container.querySelectorAll('.picker-row-title')).map(
+      (el) => el.textContent,
+    );
+    expect(pickerTitles).toEqual(['oim-alpha', 'oim-beta']);
+  });
 });
 
