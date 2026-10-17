@@ -6,6 +6,7 @@ import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
 import type { McpPromptInfo, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
+import * as logger from '../src/main/log';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
 
 describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
@@ -1321,4 +1322,304 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
   });
 });
 
+describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run Trace)', () => {
+  let tmpDir: string;
+  let appCore: AppCore;
 
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-pb-version-test-'));
+    appCore = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(async () => {
+    await appCore.drain();
+    appCore.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('writeTurn enqueues playbook and playbookVersion on the synced user message', async () => {
+    const threadId = 'thread-sync-ver';
+    appCore.threads.upsert({
+      id: threadId,
+      title: 'Sync Version Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      initialPlaybook: 'oim-full',
+      hasStarted: true,
+    });
+
+    const enqueueSpy = vi.spyOn(appCore.syncQueue, 'enqueue').mockImplementation(() => undefined);
+
+    (appCore as any).writeTurn(
+      threadId,
+      {
+        localId: 'u-ver-1',
+        role: 'user',
+        content: 'How does attestation work?',
+        playbook: 'oim-full',
+        playbookVersion: 2,
+        createdAt: '2026-10-15T10:01:00.000Z',
+      },
+      {
+        localId: 'a-ver-1',
+        role: 'assistant',
+        content: 'Here is how attestation works.',
+        createdAt: '2026-10-15T10:01:05.000Z',
+      },
+    );
+
+    expect(enqueueSpy).toHaveBeenCalledTimes(1);
+    const turn = enqueueSpy.mock.calls[0][0];
+    expect(turn.messages[0]).toEqual({
+      role: 'user',
+      content: 'How does attestation work?',
+      playbook: 'oim-full',
+      playbookVersion: 2,
+    });
+  });
+
+  it('fromDto restores playbook and playbookVersion from remote MessageDto and maps null to undefined', async () => {
+    const threadId = 'thread-rehydrate-ver';
+    appCore.threads.upsert({
+      id: threadId,
+      title: 'Rehydrate Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    });
+
+    vi.spyOn(appCore.syncClient, 'getMessages').mockResolvedValueOnce([
+      {
+        id: 'srv-u-1',
+        role: 'user',
+        content: 'Question with playbook v2',
+        playbook: 'oim-full',
+        playbookVersion: 2,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        cachedTokens: null,
+        thoughtTokens: null,
+        createdAt: '2026-10-15T10:00:00.000Z',
+        feedbackRating: null,
+        feedbackComment: null,
+      },
+      {
+        id: 'srv-a-1',
+        role: 'assistant',
+        content: 'Answer 1',
+        playbook: null,
+        playbookVersion: null,
+        promptTokens: 100,
+        completionTokens: 50,
+        totalTokens: 150,
+        cachedTokens: 0,
+        thoughtTokens: 0,
+        createdAt: '2026-10-15T10:00:05.000Z',
+        feedbackRating: null,
+        feedbackComment: null,
+      },
+    ]);
+
+    const messages = await appCore.getMessages(threadId);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].playbook).toBe('oim-full');
+    expect(messages[0].playbookVersion).toBe(2);
+    expect(messages[1].playbook).toBeUndefined();
+    expect(messages[1].playbookVersion).toBeUndefined();
+  });
+
+  it('fromDto drops blank playbook, invalid playbookVersion (0, -1, 1.5, "2"), and orphaned playbookVersion when playbook is null or blank', async () => {
+    const threadId = 'thread-rehydrate-tainted';
+    appCore.threads.upsert({
+      id: threadId,
+      title: 'Tainted Rehydrate Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+    });
+
+    const baseDto = {
+      role: 'user' as const,
+      content: 'Question',
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      cachedTokens: null,
+      thoughtTokens: null,
+      createdAt: '2026-10-15T10:00:00.000Z',
+      feedbackRating: null,
+      feedbackComment: null,
+    };
+
+    vi.spyOn(appCore.syncClient, 'getMessages').mockResolvedValueOnce([
+      { ...baseDto, id: 'm-blank-pb', playbook: '   ', playbookVersion: 2 },
+      { ...baseDto, id: 'm-null-pb-ver', playbook: null, playbookVersion: 3 },
+      { ...baseDto, id: 'm-ver-0', playbook: 'oim-full', playbookVersion: 0 },
+      { ...baseDto, id: 'm-ver-neg', playbook: 'oim-full', playbookVersion: -1 },
+      { ...baseDto, id: 'm-ver-float', playbook: 'oim-full', playbookVersion: 1.5 },
+      { ...baseDto, id: 'm-ver-str', playbook: 'oim-full', playbookVersion: '2' as unknown as number },
+      { ...baseDto, id: 'm-trimmed', playbook: '  oim-full  ', playbookVersion: 4 },
+    ]);
+
+    const messages = await appCore.getMessages(threadId);
+    expect(messages).toHaveLength(7);
+    expect(messages[0]).toMatchObject({ localId: 'm-blank-pb', playbook: undefined, playbookVersion: undefined });
+    expect(messages[1]).toMatchObject({ localId: 'm-null-pb-ver', playbook: undefined, playbookVersion: undefined });
+    expect(messages[2]).toMatchObject({ localId: 'm-ver-0', playbook: 'oim-full', playbookVersion: undefined });
+    expect(messages[3]).toMatchObject({ localId: 'm-ver-neg', playbook: 'oim-full', playbookVersion: undefined });
+    expect(messages[4]).toMatchObject({ localId: 'm-ver-float', playbook: 'oim-full', playbookVersion: undefined });
+    expect(messages[5]).toMatchObject({ localId: 'm-ver-str', playbook: 'oim-full', playbookVersion: undefined });
+    expect(messages[6]).toMatchObject({ localId: 'm-trimmed', playbook: 'oim-full', playbookVersion: 4 });
+  });
+
+  it('stashOrchestratorRun resolves mcpPrompts.list() versions into recorded orchestrator steps', async () => {
+    const threadId = 'thread-orch-ver';
+    const thread: ThreadMeta = {
+      id: threadId,
+      title: 'Orch Version Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    vi.spyOn(appCore.mcpPrompts, 'list').mockResolvedValue([
+      { name: 'oim-orchestrator', title: 'Orch', description: '', arguments: [], version: 2 },
+      { name: 'oim-access-governance', title: 'AG', description: '', arguments: [], version: 4 },
+      { name: 'oim-orchestrator-reviewer', title: 'Rev', description: '', arguments: [], version: 3 },
+    ]);
+    const recordRunSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-1' });
+
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-orch-1', role: 'user', content: 'Question', createdAt: 'now' },
+      {
+        localId: 'a-orch-1',
+        role: 'assistant',
+        content: 'Final answer',
+        toolCalls: [
+          { id: 'tc-1', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          { id: 'tc-2', name: 'Agent', subagentType: 'reviewer', input: { prompt: 'rev-q' }, result: 'APPROVED\nok', verdict: { approved: true, feedback: 'ok' } },
+        ],
+        createdAt: 'now',
+      },
+    );
+
+    (appCore as any).handleServerIds(threadId, { 'a-orch-1': 'srv-msg-1' });
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    const payload = recordRunSpy.mock.calls[0][0];
+    expect(payload.steps).toHaveLength(3);
+    expect(payload.steps[0]).toMatchObject({ role: 'orchestrator', playbookName: 'oim-orchestrator', playbookVersion: 2 });
+    expect(payload.steps[1]).toMatchObject({ role: 'specialist', playbookName: 'oim-access-governance', playbookVersion: 4 });
+    expect(payload.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'oim-orchestrator-reviewer', playbookVersion: 3 });
+  });
+
+  it('stashOrchestratorRun fails open, logs diagnostic under sync, and still records the run if mcpPrompts.list() rejects', async () => {
+    const threadId = 'thread-orch-failopen';
+    const thread: ThreadMeta = {
+      id: threadId,
+      title: 'Orch Fail-Open Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    const listSpy = vi
+      .spyOn(appCore.mcpPrompts, 'list')
+      .mockRejectedValueOnce(new Error('MCP server temporarily unavailable'))
+      .mockRejectedValueOnce('MCP offline');
+    const logSpy = vi.spyOn(logger, 'log');
+    const recordRunSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-2' });
+
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-orch-2', role: 'user', content: 'Question', createdAt: 'now' },
+      {
+        localId: 'a-orch-2',
+        role: 'assistant',
+        content: 'Final answer',
+        toolCalls: [
+          { id: 'tc-1', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          { id: 'tc-2', name: 'Agent', subagentType: 'reviewer', input: { prompt: 'rev-q' }, result: 'APPROVED\nok', verdict: { approved: true, feedback: 'ok' } },
+        ],
+        createdAt: 'now',
+      },
+    );
+
+    expect(logSpy).toHaveBeenCalledWith(
+      'sync',
+      'Failed to resolve playbook versions for orchestrator run trace: MCP server temporarily unavailable',
+    );
+    (appCore as any).handleServerIds(threadId, { 'a-orch-2': 'srv-msg-2' });
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    const payload = recordRunSpy.mock.calls[0][0];
+    expect(payload.steps).toHaveLength(3);
+    expect(payload.steps[0].playbookVersion).toBeUndefined();
+    expect(payload.steps[1].playbookVersion).toBeUndefined();
+    expect(payload.steps[2].playbookVersion).toBeUndefined();
+
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-orch-3', role: 'user', content: 'Question 2', createdAt: 'now' },
+      {
+        localId: 'a-orch-3',
+        role: 'assistant',
+        content: 'Final answer 2',
+        toolCalls: [
+          { id: 'tc-3', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+        ],
+        createdAt: 'now',
+      },
+    );
+
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      'sync',
+      'Failed to resolve playbook versions for orchestrator run trace: MCP offline',
+    );
+    (appCore as any).handleServerIds(threadId, { 'a-orch-3': 'srv-msg-3' });
+    expect(recordRunSpy).toHaveBeenCalledTimes(2);
+    expect(recordRunSpy.mock.calls[1][0].steps[0].playbookVersion).toBeUndefined();
+  });
+});

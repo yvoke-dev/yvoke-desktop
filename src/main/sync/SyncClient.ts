@@ -43,6 +43,8 @@ export interface MessageDto {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  playbook?: string | null;
+  playbookVersion?: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
   totalTokens: number | null;
@@ -56,6 +58,8 @@ export interface MessageDto {
 export interface NewMessagePayload {
   role: 'user' | 'assistant';
   content: string;
+  playbook?: string | null;
+  playbookVersion?: number | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
   totalTokens?: number | null;

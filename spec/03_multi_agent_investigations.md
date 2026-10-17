@@ -19,7 +19,7 @@ profiles and the playbooks; there is no way to build one from the app.
 | **See when an answer did not pass** | An answer delivered without approval carries a banner saying which of the three happened — *delivered without review*, *no clear verdict*, or *rejected* — with the reviewer's notes beneath it, and the same warning is written into the answer text itself. |
 | **Bind a model to each role** | Settings sets the model and thinking level for lead, reviewer and specialist separately, and shows the worst-case number of model calls one turn can make. |
 | **Set the budgets** | How many revision rounds a rejection may drive, how many specialist calls a question should spend, and a ceiling on the lead's and each specialist's own loop. |
-| **Have the run recorded centrally** | A completed multi-agent turn is uploaded to the server step by step — role, round, playbook, model, instructions, output, verdict and token counts — and appears in the web app's trace viewer beside the runs the web itself performed. |
+| **Have the run recorded centrally** | A completed multi-agent turn is uploaded to the server step by step — role, round, playbook, playbook version, model, instructions, output, verdict and token counts — and appears in the web app's trace viewer beside the runs the web itself performed. |
 | **Still run a specialist on its own** | Specialist playbooks stay pickable in ordinary single-agent chat. Only the lead's and the reviewer's playbooks are hidden from the picker. |
 
 ## How it behaves
@@ -77,7 +77,12 @@ profiles and the playbooks; there is no way to build one from the app.
 - **A lead that answers without consulting anyone is not a multi-agent turn at all.** No review is
   run, no banner appears, and no trace is recorded.
 - **The trace is uploaded only once the answer has synced**, because it has to name the message it
-  belongs to. Until then it is held in memory, and the upload itself is best-effort.
+  belongs to. Until then it is held in memory, and the upload itself is best-effort. Each uploaded
+  lead, specialist and reviewer step includes the playbook version number resolved from the server's
+  playbook catalogue (with the reviewer step's version looked up from — and recorded under — the
+  profile's configured reviewer playbook, falling back to the generic reviewer role name when the
+  profile names none; if the playbook catalogue cannot be reached when building the trace, the app
+  still records the steps without version numbers).
 
 ## Limits
 

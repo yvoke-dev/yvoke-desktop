@@ -12,7 +12,7 @@ server.
 | --- | --- |
 | **Every answer is grounded in a live search** | The assistant answers from what the server's knowledge-base tools return, under the server's own grounding and citation instructions. It has no other source. |
 | **A toolbox, not a search box** | The assistant can search the corpus, list an area's documents, read a table of contents, read a whole section, look a thing up in the knowledge graph and follow its connections, query structured records, read their declared shape, and check its own citations. Nine of these are granted by default. |
-| **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name is stored. |
+| **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name and positive integer version (when published by the server) are stored on the user message. |
 | **Playbook preflight** | Before the first message in a conversation runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
 | **Sandboxed computation without a shell** | An in-app JavaScript execution tool lets the assistant run arithmetic, statistics, date math and data transformations inside an isolated in-memory sandbox with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
@@ -50,6 +50,11 @@ server.
 - **A playbook can withhold computation.** A playbook that declares no code execution loses the computation
   tool, checked in two independent places. A playbook that declares nothing at all keeps it: the
   grant is opt-out, not opt-in.
+- **A playbook's version number is captured once per session and recorded on each user message.**
+  When the server publishes a positive whole-number version in a playbook's metadata, the app captures
+  that version when the single-agent session starts and records it alongside the playbook's name on
+  every user message in the conversation, across both the first turn and warm follow-up turns. Zero,
+  negative, fractional or non-numeric version metadata is ignored.
 - **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
   the app loads that prompt from the server on session creation to replace the default chat base instructions.
   In orchestrator mode, each agent's playbook template text is appended to its resolved system prompt; in
