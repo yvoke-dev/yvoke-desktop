@@ -421,7 +421,8 @@ export class AppCore {
             playbookVersions.set(p.name, p.version);
           }
         }
-      } catch {
+      } catch (err) {
+        log('sync', `Failed to resolve playbook versions for orchestrator run trace: ${err instanceof Error ? err.message : String(err)}`);
         playbookVersions = undefined;
       }
       const payload = buildRunTrace({

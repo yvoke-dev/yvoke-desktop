@@ -20,8 +20,6 @@ export interface BuildRunTraceParams {
   playbookVersions?: ReadonlyMap<string, number>;
 }
 
-export type RunTraceInput = BuildRunTraceParams;
-
 /**
  * Assemble a completed multi-agent run from the finished assistant message. Each Agent (delegation)
  * tool call becomes a specialist/reviewer step; a leading orchestrator step carries the composed

@@ -6,6 +6,7 @@ import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
 import type { McpPromptInfo, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
+import * as logger from '../src/main/log';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
 
 describe('AppCore.sendMessage - Multi-Agent Playbook Isolation', () => {
@@ -1542,7 +1543,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     expect(payload.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'oim-orchestrator-reviewer', playbookVersion: 3 });
   });
 
-  it('stashOrchestratorRun fails open and still records the run if mcpPrompts.list() rejects', async () => {
+  it('stashOrchestratorRun fails open, logs diagnostic under sync, and still records the run if mcpPrompts.list() rejects', async () => {
     const threadId = 'thread-orch-failopen';
     const thread: ThreadMeta = {
       id: threadId,
@@ -1564,7 +1565,11 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       reviewerPlaybook: 'oim-orchestrator-reviewer',
       specialistPlaybooks: ['oim-access-governance'],
     });
-    vi.spyOn(appCore.mcpPrompts, 'list').mockRejectedValue(new Error('MCP server temporarily unavailable'));
+    const listSpy = vi
+      .spyOn(appCore.mcpPrompts, 'list')
+      .mockRejectedValueOnce(new Error('MCP server temporarily unavailable'))
+      .mockRejectedValueOnce('MCP offline');
+    const logSpy = vi.spyOn(logger, 'log');
     const recordRunSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-2' });
 
     await (appCore as any).stashOrchestratorRun(
@@ -1582,6 +1587,10 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       },
     );
 
+    expect(logSpy).toHaveBeenCalledWith(
+      'sync',
+      'Failed to resolve playbook versions for orchestrator run trace: MCP server temporarily unavailable',
+    );
     (appCore as any).handleServerIds(threadId, { 'a-orch-2': 'srv-msg-2' });
     expect(recordRunSpy).toHaveBeenCalledTimes(1);
     const payload = recordRunSpy.mock.calls[0][0];
@@ -1589,8 +1598,28 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     expect(payload.steps[0].playbookVersion).toBeUndefined();
     expect(payload.steps[1].playbookVersion).toBeUndefined();
     expect(payload.steps[2].playbookVersion).toBeUndefined();
+
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-orch-3', role: 'user', content: 'Question 2', createdAt: 'now' },
+      {
+        localId: 'a-orch-3',
+        role: 'assistant',
+        content: 'Final answer 2',
+        toolCalls: [
+          { id: 'tc-3', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+        ],
+        createdAt: 'now',
+      },
+    );
+
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      'sync',
+      'Failed to resolve playbook versions for orchestrator run trace: MCP offline',
+    );
+    (appCore as any).handleServerIds(threadId, { 'a-orch-3': 'srv-msg-3' });
+    expect(recordRunSpy).toHaveBeenCalledTimes(2);
+    expect(recordRunSpy.mock.calls[1][0].steps[0].playbookVersion).toBeUndefined();
   });
 });
-
-
-
