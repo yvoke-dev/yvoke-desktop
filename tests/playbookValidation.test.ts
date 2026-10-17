@@ -67,7 +67,7 @@ describe('parseValidation', () => {
     expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
   });
 
-  it('returns the reason and the suggestion, with its display title resolved', () => {
+  it('returns the reason and the suggestion by canonical playbook name', () => {
     const raw = JSON.stringify({
       plausible: false,
       reason: 'The question is about table columns.',
@@ -77,7 +77,6 @@ describe('parseValidation', () => {
       plausible: false,
       reason: 'The question is about table columns.',
       suggestedPlaybookName: 'oim-schema',
-      suggestedPlaybookTitle: 'Schema',
     });
   });
 
@@ -118,7 +117,7 @@ describe('parseValidation', () => {
     expect(parseValidation(raw, PLAYBOOKS, SELECTED)).toEqual({ plausible: true });
   });
 
-  it('accepts a suggestion matching by title', () => {
+  it('accepts a suggestion matching by title and returns its canonical name', () => {
     const raw = JSON.stringify({
       plausible: false,
       reason: 'Table question.',
@@ -128,7 +127,6 @@ describe('parseValidation', () => {
       plausible: false,
       reason: 'Table question.',
       suggestedPlaybookName: 'oim-schema',
-      suggestedPlaybookTitle: 'Schema',
     });
   });
 

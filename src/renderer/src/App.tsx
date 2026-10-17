@@ -120,15 +120,16 @@ export default function App(): React.JSX.Element {
   // the picker (see isUserSelectablePlaybook). Specialist playbooks stay pickable — they're useful
   // on their own for a quick single-agent query even though a profile also drives them.
   //
-  // Sorted here rather than in each consumer, so the picker grid and the slash-autocomplete list
-  // the same playbooks in the same order. The server returns them in no particular order.
+  // Sorted by canonical name here rather than in each consumer, so the picker grid and the
+  // slash-autocomplete list the same playbooks in the same order. The server returns them in no
+  // particular order.
   const visiblePrompts = useMemo(() => {
     const control = controlPlaybookNames(profiles);
     const showPrototypes = Boolean(settings?.showPrototypePlaybooks);
     return prompts
       .filter((p) => isUserSelectablePlaybook(p, control, showPrototypes))
       .slice()
-      .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }));
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   }, [prompts, profiles, settings?.showPrototypePlaybooks]);
 
   useEffect(() => {

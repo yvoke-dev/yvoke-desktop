@@ -746,7 +746,6 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
       plausible: false,
       reason: 'Schema questions should use Schema Explorer',
       suggestedPlaybookName: 'oim-schema',
-      suggestedPlaybookTitle: 'Schema Explorer',
     });
 
     const result = await appCore.validatePlaybook({
@@ -759,7 +758,6 @@ describe('AppCore.validatePlaybook - Two-Stage Preflight Exclusion', () => {
       plausible: false,
       reason: 'Schema questions should use Schema Explorer',
       suggestedPlaybookName: 'oim-schema',
-      suggestedPlaybookTitle: 'Schema Explorer',
     });
     expect(validatorSpy).toHaveBeenCalledTimes(1);
   });

@@ -128,6 +128,5 @@ export function parseValidation(
     plausible: false,
     reason: reason || undefined,
     suggestedPlaybookName: suggested.name,
-    suggestedPlaybookTitle: suggested.title,
   };
 }

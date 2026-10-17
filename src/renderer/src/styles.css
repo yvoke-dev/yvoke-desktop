@@ -1846,6 +1846,15 @@ h6 {
   opacity: 1;
 }
 
+.playbook-version {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  opacity: 0.8;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 /* Slash autocomplete floats above the composer rather than pushing it down. */
 .prompt-autocomplete {
   position: absolute;

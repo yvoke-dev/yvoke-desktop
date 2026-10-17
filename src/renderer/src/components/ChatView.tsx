@@ -69,7 +69,6 @@ function blocksOf(message: ChatMessage): MessageBlock[] {
 interface PreflightCard {
   reason?: string;
   suggestedName?: string;
-  suggestedTitle?: string;
   forPlaybook: string;
 }
 
@@ -331,9 +330,14 @@ export function ChatView(props: {
    * Once at least one user message has been sent or thread.initialPlaybook is set,
    * the thread is locked to that playbook.
    */
+  const initialUserMessage = useMemo(
+    () => messages.find((m) => m.role === 'user'),
+    [messages],
+  );
+
   const initialUserPlaybook = useMemo(
-    () => thread.initialPlaybook ?? messages.find((m) => m.role === 'user')?.playbook,
-    [thread.initialPlaybook, messages],
+    () => thread.initialPlaybook ?? initialUserMessage?.playbook,
+    [thread.initialPlaybook, initialUserMessage],
   );
 
   const isConversationStarted =
@@ -346,17 +350,36 @@ export function ChatView(props: {
     if (orchestratorActive) return null;
     if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (initialUserPlaybook) {
+      const messageVersion =
+        initialUserMessage?.playbook === initialUserPlaybook
+          ? initialUserMessage.playbookVersion
+          : undefined;
       const found = prompts.find((p) => p.name === initialUserPlaybook);
-      if (found) return found;
+      if (found) {
+        return found.version !== undefined
+          ? found
+          : messageVersion !== undefined
+            ? { ...found, version: messageVersion }
+            : found;
+      }
       return {
         name: initialUserPlaybook,
         title: initialUserPlaybook,
         description: '',
         arguments: [],
+        ...(messageVersion !== undefined ? { version: messageVersion } : {}),
       };
     }
     return null;
-  }, [orchestratorActive, isPlaybookLocked, promptOverride, thread.id, initialUserPlaybook, prompts]);
+  }, [
+    orchestratorActive,
+    isPlaybookLocked,
+    promptOverride,
+    thread.id,
+    initialUserPlaybook,
+    initialUserMessage,
+    prompts,
+  ]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -392,7 +415,7 @@ export function ChatView(props: {
   const suggestions = useMemo(() => {
     if (orchestratorActive || isPlaybookLocked || slashQuery == null || prompts.length === 0) return [];
     const q = slashQuery.toLowerCase();
-    return prompts.filter((p) => p.name.toLowerCase().includes(q) || p.title.toLowerCase().includes(q));
+    return prompts.filter((p) => p.name.toLowerCase().includes(q));
   }, [orchestratorActive, isPlaybookLocked, slashQuery, prompts]);
   const showAutocomplete = suggestions.length > 0;
 
@@ -621,7 +644,6 @@ export function ChatView(props: {
     setPreflight({
       reason: verdict.reason,
       suggestedName: verdict.suggestedPlaybookName,
-      suggestedTitle: verdict.suggestedPlaybookTitle,
       forPlaybook: prompt.name,
     });
   };
@@ -724,10 +746,7 @@ export function ChatView(props: {
     const q = pickerFilter.trim().toLowerCase();
     if (!q) return prompts;
     return prompts.filter(
-      (p) =>
-        p.title.toLowerCase().includes(q) ||
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q),
+      (p) => p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q),
     );
   }, [prompts, pickerFilter]);
 
@@ -789,7 +808,7 @@ export function ChatView(props: {
           {checking && (
             <div className="thinking-indicator preflight-checking">
               <span className="dot" />
-              Checking whether “{activePrompt?.title ?? preflight?.forPlaybook}” fits this question…
+              Checking whether “{activePrompt?.name ?? preflight?.forPlaybook}” fits this question…
             </div>
           )}
           {attachmentError && (
@@ -822,7 +841,7 @@ export function ChatView(props: {
                     disabled={draft.trim().length === 0 && attachments.length === 0}
                     onClick={() => send(draft.trim(), preflight.suggestedName)}
                   >
-                    Switch to {preflight.suggestedTitle ?? preflight.suggestedName}
+                    Switch to {preflight.suggestedName}
                   </button>
                 )}
                 {/* Sends exactly what the composer shows — normally the playbook the card is
@@ -898,7 +917,12 @@ export function ChatView(props: {
                   onClick={() => pickPrompt(prompt)}
                 >
                   <span className="picker-row-main">
-                    <span className="picker-row-title">{prompt.title}</span>
+                    <span className="picker-row-title">
+                      {prompt.name}
+                      {prompt.version !== undefined && (
+                        <span className="playbook-version">{` v${prompt.version}`}</span>
+                      )}
+                    </span>
                     {prompt.description && (
                       <span className="picker-row-desc">{prompt.description}</span>
                     )}
@@ -924,6 +948,9 @@ export function ChatView(props: {
                       <span aria-hidden="true">·</span>
                       <PlaybookIcon size={11} />
                       {message.playbook}
+                      {message.playbookVersion !== undefined && (
+                        <span className="playbook-version">{` v${message.playbookVersion}`}</span>
+                      )}
                     </>
                   )}
                 </div>
@@ -1018,7 +1045,12 @@ export function ChatView(props: {
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => pickPrompt(prompt)}
               >
-                <span className="prompt-option-title">{prompt.title}</span>
+                <span className="prompt-option-title">
+                  {prompt.name}
+                  {prompt.version !== undefined && (
+                    <span className="playbook-version">{` v${prompt.version}`}</span>
+                  )}
+                </span>
                 <span className="prompt-option-desc">{prompt.description}</span>
               </button>
             ))}
@@ -1067,7 +1099,7 @@ export function ChatView(props: {
                     : orchestratorActive
                       ? `Ask ${thread.orchestratorProfile} — specialists + reviewer will answer — ${sendShortcut} to send`
                       : activePrompt
-                        ? `Add your question for “${activePrompt.title}” — ${sendShortcut} to send`
+                        ? `Add your question for “${activePrompt.name}” — ${sendShortcut} to send`
                         : prompts.length > 0
                           ? 'Pick a playbook first — / to choose one'
                           : `Ask a question or paste/drop images — ${sendShortcut} to send`
@@ -1122,7 +1154,10 @@ export function ChatView(props: {
               {activePrompt && (
                 <span className="active-playbook" data-tip={activePrompt.description}>
                   <PlaybookIcon size={11} />
-                  {activePrompt.title}
+                  {activePrompt.name}
+                  {activePrompt.version !== undefined && (
+                    <span className="playbook-version">{` v${activePrompt.version}`}</span>
+                  )}
                   {!isPlaybookLocked && (
                     <button
                       className="active-playbook-remove"
