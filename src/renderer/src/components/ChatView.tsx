@@ -331,9 +331,14 @@ export function ChatView(props: {
    * Once at least one user message has been sent or thread.initialPlaybook is set,
    * the thread is locked to that playbook.
    */
+  const initialUserMessage = useMemo(
+    () => messages.find((m) => m.role === 'user'),
+    [messages],
+  );
+
   const initialUserPlaybook = useMemo(
-    () => thread.initialPlaybook ?? messages.find((m) => m.role === 'user')?.playbook,
-    [thread.initialPlaybook, messages],
+    () => thread.initialPlaybook ?? initialUserMessage?.playbook,
+    [thread.initialPlaybook, initialUserMessage],
   );
 
   const isConversationStarted =
@@ -347,16 +352,33 @@ export function ChatView(props: {
     if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (initialUserPlaybook) {
       const found = prompts.find((p) => p.name === initialUserPlaybook);
-      if (found) return found;
+      if (found) {
+        return found.version !== undefined
+          ? found
+          : initialUserMessage?.playbookVersion !== undefined
+            ? { ...found, version: initialUserMessage.playbookVersion }
+            : found;
+      }
       return {
         name: initialUserPlaybook,
         title: initialUserPlaybook,
         description: '',
         arguments: [],
+        ...(initialUserMessage?.playbookVersion !== undefined
+          ? { version: initialUserMessage.playbookVersion }
+          : {}),
       };
     }
     return null;
-  }, [orchestratorActive, isPlaybookLocked, promptOverride, thread.id, initialUserPlaybook, prompts]);
+  }, [
+    orchestratorActive,
+    isPlaybookLocked,
+    promptOverride,
+    thread.id,
+    initialUserPlaybook,
+    initialUserMessage,
+    prompts,
+  ]);
 
   const handleClarificationSubmit = async (answer: string): Promise<void> => {
     if (!liveTurn.clarifyingQuestion) return;
@@ -898,7 +920,12 @@ export function ChatView(props: {
                   onClick={() => pickPrompt(prompt)}
                 >
                   <span className="picker-row-main">
-                    <span className="picker-row-title">{prompt.title}</span>
+                    <span className="picker-row-title">
+                      {prompt.title}
+                      {prompt.version !== undefined && (
+                        <span className="playbook-version">{` v${prompt.version}`}</span>
+                      )}
+                    </span>
                     {prompt.description && (
                       <span className="picker-row-desc">{prompt.description}</span>
                     )}
@@ -924,6 +951,9 @@ export function ChatView(props: {
                       <span aria-hidden="true">·</span>
                       <PlaybookIcon size={11} />
                       {message.playbook}
+                      {message.playbookVersion !== undefined && (
+                        <span className="playbook-version">{` v${message.playbookVersion}`}</span>
+                      )}
                     </>
                   )}
                 </div>
@@ -1018,7 +1048,12 @@ export function ChatView(props: {
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => pickPrompt(prompt)}
               >
-                <span className="prompt-option-title">{prompt.title}</span>
+                <span className="prompt-option-title">
+                  {prompt.title}
+                  {prompt.version !== undefined && (
+                    <span className="playbook-version">{` v${prompt.version}`}</span>
+                  )}
+                </span>
                 <span className="prompt-option-desc">{prompt.description}</span>
               </button>
             ))}
@@ -1123,6 +1158,9 @@ export function ChatView(props: {
                 <span className="active-playbook" data-tip={activePrompt.description}>
                   <PlaybookIcon size={11} />
                   {activePrompt.title}
+                  {activePrompt.version !== undefined && (
+                    <span className="playbook-version">{` v${activePrompt.version}`}</span>
+                  )}
                   {!isPlaybookLocked && (
                     <button
                       className="active-playbook-remove"
