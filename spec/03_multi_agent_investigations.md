@@ -79,10 +79,10 @@ profiles and the playbooks; there is no way to build one from the app.
 - **The trace is uploaded only once the answer has synced**, because it has to name the message it
   belongs to. Until then it is held in memory, and the upload itself is best-effort. Each uploaded
   lead, specialist and reviewer step includes the playbook version number resolved from the server's
-  playbook catalogue (with the reviewer step's version looked up from the profile's configured reviewer
-  playbook even though its recorded playbook label remains the generic reviewer role name; if the
-  playbook catalogue cannot be reached when building the trace, the app still records the steps
-  without version numbers).
+  playbook catalogue (with the reviewer step's version looked up from — and recorded under — the
+  profile's configured reviewer playbook, falling back to the generic reviewer role name when the
+  profile names none; if the playbook catalogue cannot be reached when building the trace, the app
+  still records the steps without version numbers).
 
 ## Limits
 

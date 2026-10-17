@@ -89,13 +89,20 @@ describe('buildRunTrace', () => {
     expect(run.steps.find((s) => s.seq === 3)).toMatchObject({ role: 'specialist', round: 1 });
   });
 
-  it('falls back to "reviewer" playbookName when profile definition is unavailable', () => {
+  it('falls back to "reviewer" playbookName and version when profile definition is unavailable', () => {
     const msg = assistant([
       agentCall({ id: 'd1', subagentType: 'oim-developer-api', input: { prompt: 'q' }, result: 'a' }),
       agentCall({ id: 'r1', subagentType: 'reviewer', input: { prompt: 'check' }, result: 'APPROVED', verdict: { approved: true } }),
     ]);
-    const run = buildRunTrace({ conversationId: 'c1', userText: 'q', assistant: msg, profileName: 'OIM', orchestrator })!;
-    expect(run.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'reviewer' });
+    const run = buildRunTrace({
+      conversationId: 'c1',
+      userText: 'q',
+      assistant: msg,
+      profileName: 'OIM',
+      orchestrator,
+      playbookVersions: new Map([['reviewer', 6]]),
+    })!;
+    expect(run.steps[2]).toMatchObject({ role: 'reviewer', playbookName: 'reviewer', playbookVersion: 6 });
   });
 
   it('nests each specialist transcript under its step', () => {
