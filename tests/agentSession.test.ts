@@ -12,7 +12,12 @@ import {
   type ThreadMeta,
 } from '../src/shared/types';
 import { buildMcpServers } from '../src/main/agent/McpConnection';
-import { ORCHESTRATOR_AGENT, unreviewedNote } from '../src/main/agent/orchestration';
+import {
+  MAX_REVISION_PROMPT_CHARS,
+  ORCHESTRATOR_AGENT,
+  REVIEW_FEEDBACK_HEADING,
+  unreviewedNote,
+} from '../src/main/agent/orchestration';
 
 /**
  * Session lifecycle, against a stand-in for the Agent SDK.
@@ -3167,6 +3172,305 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
       { kind: 'turn-complete' }
     >;
     expect(completeC.message.content).toBe(`Concurrent draft 1 [${CITED_ID}].`);
+    svc.closeAll();
+  });
+
+  it('13. caps >60 KB specialist evidence inside submit_answer revision result with feedback at index 0, suppresses pre-submission and post-approval closing chatter ("The revised answer was approved and delivered."), and preserves zero-specialist direct replies in message.blocks', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+
+    const CHUNK_A = 'aaaaaaaa-1111-2222-3333-444444444444';
+    const CHUNK_B = 'bbbbbbbb-1111-2222-3333-444444444444';
+    const fillerChunks = Array.from({ length: 20 }, (_, i) => {
+      const hex = (i + 16).toString(16).padStart(2, '0');
+      const id = `${hex}000000-1111-2222-3333-444444444444`;
+      return [
+        `### doc/Filler ${i}  (score=0.700  id=${id}  doc_id=${DOC_ID})`,
+        '_Section: Filler_',
+        `Uncited filler body ${i}: ${'X'.repeat(3200)}`,
+        '',
+      ].join('\n');
+    }).join('\n');
+
+    const OVER_60KB_SEARCH_RESULT = [
+      'Found 22 chunks:',
+      fillerChunks,
+      `### doc/Part A  (score=0.950  id=${CHUNK_A}  doc_id=${DOC_ID})`,
+      '_Section: A_',
+      'Body of chunk A about USR.',
+      '',
+      `### doc/Part B  (score=0.920  id=${CHUNK_B}  doc_id=${DOC_ID})`,
+      '_Section: B_',
+      'Body of chunk B about ACT.',
+    ].join('\n');
+    expect(OVER_60KB_SEARCH_RESULT.length).toBeGreaterThan(60_000);
+
+    let revRound = 0;
+    let firstSubmitReply = '';
+
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-spill-guard',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-huge', 'oim-schema', OVER_60KB_SEARCH_RESULT);
+
+        // Pre-submission live text delta and assistant plain text (must be suppressed from live UI events)
+        emit({
+          type: 'stream_event',
+          parent_tool_use_id: null,
+          event: {
+            type: 'content_block_delta',
+            delta: { type: 'text_delta', text: 'Synthesizing specialist evidence before submit_answer...' },
+          },
+        });
+        emit({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: {
+            content: [{ type: 'text', text: 'Synthesizing specialist evidence before submit_answer...' }],
+          },
+        });
+
+        // Round 0 submit_answer -> rejected
+        const r0 = await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-r0',
+          `Draft 1 citing A [${CHUNK_A}].`,
+        );
+        firstSubmitReply = r0.text;
+
+        // Round 1 submit_answer -> approved
+        await invokeSubmitAnswer(
+          session,
+          emit,
+          'sub-r1',
+          `Approved revised answer citing A [${CHUNK_A}] and B [${CHUNK_B}].`,
+        );
+
+        // Post-approval closing chatter (exact defect from live trace)
+        emit({
+          type: 'stream_event',
+          parent_tool_use_id: null,
+          event: {
+            type: 'content_block_delta',
+            delta: { type: 'text_delta', text: 'The revised answer was approved and delivered.' },
+          },
+        });
+        emit({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: {
+            content: [{ type: 'text', text: 'The revised answer was approved and delivered.' }],
+          },
+        });
+
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'The revised answer was approved and delivered.',
+          usage: { input_tokens: 100, output_tokens: 40 },
+        });
+      } else {
+        if (revRound === 0) {
+          revRound++;
+          emit({
+            type: 'system',
+            subtype: 'init',
+            session_id: 'rev-spill-guard',
+            mcp_servers: [],
+            tools: [],
+            slash_commands: [],
+          });
+          emit({
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'rev-sub-0',
+                  name: 'mcp__review__submit_review',
+                  input: {
+                    approved: false,
+                    feedback: `Missing ACT table citation from [${CHUNK_B}].`,
+                    citation_fixes: [`Add [${CHUNK_B}] to the ACT table claim.`],
+                    unsupported_claims: ['Unsupported claim about LDAP sync'],
+                  },
+                },
+              ],
+            },
+          });
+          emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+        } else {
+          revRound++;
+          emit({
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'rev-sub-1',
+                  name: 'mcp__review__submit_review',
+                  input: {
+                    approved: true,
+                    feedback: 'All claims grounded.',
+                  },
+                },
+              ],
+            },
+          });
+          emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+        }
+      }
+    };
+
+    await ask(svc, meta, 'Explain USR and ACT tables.');
+
+    // 1. Verify submit_answer rejection result is feedback-first and under MAX_REVISION_PROMPT_CHARS (32 KB)
+    expect(firstSubmitReply.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(firstSubmitReply.indexOf(REVIEW_FEEDBACK_HEADING)).toBe(0);
+    expect(firstSubmitReply.indexOf(REVIEW_FEEDBACK_HEADING)).toBeLessThan(
+      firstSubmitReply.indexOf('## Citation fixes — no research needed'),
+    );
+    expect(firstSubmitReply.indexOf('## Citation fixes — no research needed')).toBeLessThan(
+      firstSubmitReply.indexOf('## Unsupported claims'),
+    );
+    expect(firstSubmitReply.indexOf('## Unsupported claims')).toBeLessThan(
+      firstSubmitReply.indexOf('## Source evidence behind the specialist answers above'),
+    );
+    expect(firstSubmitReply).toContain('Body of chunk A about USR.');
+    expect(firstSubmitReply).toContain('Body of chunk B about ACT.');
+
+    // 2. Verify zero live-text and zero non-empty-text assistant-block events were emitted during the live turn
+    expect(events.filter((e) => e.kind === 'live-text')).toEqual([]);
+    const nonEmptyAssistantBlocks = events.filter(
+      (e): e is Extract<AgentEvent, { kind: 'assistant-block' }> =>
+        e.kind === 'assistant-block' && e.text.length > 0,
+    );
+    expect(nonEmptyAssistantBlocks).toEqual([]);
+
+    // 3. Verify turn-complete delivers only the approved submittedAnswer in content and blocks
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete.message.content).toBe(
+      `Approved revised answer citing A [${CHUNK_A}] and B [${CHUNK_B}].`,
+    );
+    expect(complete.message.content).not.toContain('The revised answer was approved and delivered.');
+    expect(complete.message.blocks?.map((b) => b.text).filter(Boolean)).toEqual([
+      `Approved revised answer citing A [${CHUNK_A}] and B [${CHUNK_B}].`,
+    ]);
+
+    // 4. Verify zero-specialist direct plain-text reply still populates both message.content and message.blocks
+    events = [];
+    h.turnHandler = (_session, _promptText, emit) => {
+      emit({
+        type: 'stream_event',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Direct plain-text reply.' } },
+      });
+      emit({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { content: [{ type: 'text', text: 'Direct plain-text reply.' }] },
+      });
+      emit({ type: 'result', subtype: 'success', is_error: false, result: '', usage: {} });
+    };
+
+    await ask(svc, meta, 'Quick direct question');
+    expect(events.filter((e) => e.kind === 'live-text')).toEqual([]);
+    const directComplete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(directComplete.message.content).toBe('Direct plain-text reply.');
+    expect(directComplete.message.blocks).toEqual([{ text: 'Direct plain-text reply.' }]);
+
+    svc.closeAll();
+  });
+
+  it('14. attaches cleaned turnText to message.blocks when an orchestrator turn is aborted before submit_answer, and never mistakes an is_error result string for answer prose', async () => {
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta);
+
+    // Part A: Orchestrator turn is interrupted after emitting partial plain text before submit_answer
+    h.turnHandler = async (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: 'orch-abort-before-submit',
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emitSpecialistDelegation(emit, 'spec-abort-1', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        emit({
+          type: 'assistant',
+          parent_tool_use_id: null,
+          message: {
+            content: [{ type: 'text', text: 'Planning notes...\n<<<FINAL_ANSWER>>>\nPartial answer before stop.' }],
+          },
+        });
+        // Simulate user pressing Stop before submit_answer or reviewer runs
+        session.interruptSpy.mockImplementation(async () => undefined);
+        await svc.interrupt(meta.id);
+        emit({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '',
+          usage: {},
+        });
+      }
+    };
+
+    await ask(svc, meta, 'Stop me mid-orchestration');
+    const abortComplete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(abortComplete).toBeDefined();
+    expect(abortComplete.aborted).toBe(true);
+    expect(abortComplete.message.content).toBe('Partial answer before stop.');
+    expect(abortComplete.message.blocks?.map((b) => b.text).filter(Boolean)).toEqual([
+      'Partial answer before stop.',
+    ]);
+
+    // Part B: Orchestrator turn ends with is_error: true and empty turnText -> result.result error string must NOT be copied into message.content or message.blocks
+    events = [];
+    h.turnHandler = (session, _promptText, emit) => {
+      if (session.options.agent === ORCHESTRATOR_AGENT) {
+        emitSpecialistDelegation(emit, 'spec-err-1', 'oim-schema', SEARCH_RESULT_TWO_CHUNKS);
+        emit({
+          type: 'result',
+          subtype: 'error_max_turns',
+          is_error: true,
+          result: 'Reached maximum number of turns (20)',
+          usage: {},
+        });
+      }
+    };
+
+    await ask(svc, meta, 'Hit max turns error in orchestrator');
+    const errComplete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(errComplete).toBeDefined();
+    expect(errComplete.isError).toBe(true);
+    expect(errComplete.errorMessage).toContain('Claude: Reached maximum number of turns (20)');
+    expect(errComplete.message.content).toBe('');
+    expect(errComplete.message.blocks?.map((b) => b.text).filter(Boolean)).toEqual([]);
+
     svc.closeAll();
   });
 });

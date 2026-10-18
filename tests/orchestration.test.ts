@@ -149,8 +149,26 @@ describe('orchestrator-mode translation', () => {
     const start = events.find((e) => e.kind === 'subagent-start');
     if (start?.kind !== 'subagent-start') throw new Error('expected subagent-start');
     expect(start.subagentType).toBe('oim-developer-api');
-    // The orchestrator's own text is retained; the Agent call is tracked as a tool call.
+    // The orchestrator's own text is retained in turnText for fallback, but withheld from live UI blocks.
     expect(ctx.turnText).toBe('Delegating.');
+    expect(ctx.blocks).toEqual([
+      {
+        text: undefined,
+        thinking: undefined,
+        toolCalls: [
+          {
+            id: 'agent1',
+            name: 'Agent',
+            input: { subagent_type: 'oim-developer-api', prompt: 'REST roles?' },
+            subagentType: 'oim-developer-api',
+            subagentBlocks: [],
+          },
+        ],
+      },
+    ]);
+    const assistantBlock = events.find((e) => e.kind === 'assistant-block');
+    if (assistantBlock?.kind !== 'assistant-block') throw new Error('expected assistant-block');
+    expect(assistantBlock.text).toBe('');
     expect(ctx.toolCalls.find((c) => c.id === 'agent1')?.subagentType).toBe('oim-developer-api');
   });
 
@@ -206,9 +224,9 @@ describe('orchestrator-mode translation', () => {
     expect(events.some((e) => e.kind === 'subagent-complete')).toBe(true);
   });
 
-  it('ignores stream deltas that belong to a sub-agent', () => {
+  it('ignores stream deltas that belong to a sub-agent and suppresses root text_delta in orchestratorMode while preserving root thinking_delta', () => {
     const ctx = newTurnContext('t1', true);
-    const events = translateMessage(
+    const subEvents = translateMessage(
       msg({
         type: 'stream_event',
         parent_tool_use_id: 'agent1',
@@ -216,8 +234,32 @@ describe('orchestrator-mode translation', () => {
       }),
       ctx,
     );
-    expect(events).toEqual([]);
+    expect(subEvents).toEqual([]);
     expect(ctx.liveText).toBe('');
+
+    const rootTextEvents = translateMessage(
+      msg({
+        type: 'stream_event',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Unreviewed root text' } },
+      }),
+      ctx,
+    );
+    expect(rootTextEvents).toEqual([]);
+    expect(ctx.liveText).toBe('');
+
+    const rootThinkingEvents = translateMessage(
+      msg({
+        type: 'stream_event',
+        parent_tool_use_id: null,
+        event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Planning delegation...' } },
+      }),
+      ctx,
+    );
+    expect(rootThinkingEvents).toEqual([
+      { kind: 'live-thinking', threadId: 't1', text: 'Planning delegation...' },
+    ]);
+    expect(ctx.liveThinking).toBe('Planning delegation...');
   });
 });
 

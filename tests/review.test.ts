@@ -6,6 +6,7 @@ import {
   buildRevisionPrompt,
   EVIDENCE_HEADING,
   idsUnderReview,
+  MAX_REVISION_PROMPT_CHARS,
   renderReviewFollowUp,
   renderReviewTask,
   REVIEW_FEEDBACK_HEADING,
@@ -213,6 +214,224 @@ describe('idsUnderReview and buildRevisionPrompt (OrchestrationService.renderRev
     expect(prompt).toContain('## Unsupported claims');
     expect(prompt).toContain('- Claim X about Kerberos delegation');
     expect(prompt).toContain('Delegate again only for material that is genuinely missing above.');
+  });
+
+  it('places reviewer feedback, citation fixes, unsupported claims, and revision directive BEFORE source evidence across both newEvidence and allEvidence branches', () => {
+    expect(MAX_REVISION_PROMPT_CHARS).toBe(32_000);
+
+    const newEvPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Feedback on claim 1 and claim 2.',
+        citationFixes: [`Replace [${CHUNK_2_ID}] with [${CHUNK_1_ID}]`],
+        unsupportedClaims: ['Unsupported claim about SAML'],
+      },
+      newEvidence: evidence,
+      allEvidence: evidence,
+      draft: `Draft [${CHUNK_1_ID}]`,
+    });
+
+    const fbIdx1 = newEvPrompt.indexOf(REVIEW_FEEDBACK_HEADING);
+    const fixIdx1 = newEvPrompt.indexOf('## Citation fixes — no research needed');
+    const unsupIdx1 = newEvPrompt.indexOf('## Unsupported claims');
+    const dirIdx1 = newEvPrompt.indexOf('Revise the answer you just gave');
+    const evIdx1 = newEvPrompt.indexOf('## Source evidence behind the specialist answers above');
+
+    expect(fbIdx1).toBe(0);
+    expect(fbIdx1).toBeLessThan(fixIdx1);
+    expect(fixIdx1).toBeLessThan(unsupIdx1);
+    expect(unsupIdx1).toBeLessThan(dirIdx1);
+    expect(dirIdx1).toBeLessThan(evIdx1);
+
+    const allEvPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Feedback on cited chunk.',
+        citationFixes: [`Use [${CHUNK_1_ID}] instead of [${CHUNK_2_ID}]`],
+        unsupportedClaims: ['Unsupported claim about OAuth'],
+      },
+      newEvidence: [],
+      allEvidence: evidence,
+      draft: `Draft [${CHUNK_1_ID}]`,
+    });
+
+    const fbIdx2 = allEvPrompt.indexOf(REVIEW_FEEDBACK_HEADING);
+    const fixIdx2 = allEvPrompt.indexOf('## Citation fixes — no research needed');
+    const unsupIdx2 = allEvPrompt.indexOf('## Unsupported claims');
+    const dirIdx2 = allEvPrompt.indexOf('Revise the answer you just gave');
+    const evIdx2 = allEvPrompt.indexOf('## The sources your answer currently cites');
+
+    expect(fbIdx2).toBe(0);
+    expect(fbIdx2).toBeLessThan(fixIdx2);
+    expect(fixIdx2).toBeLessThan(unsupIdx2);
+    expect(unsupIdx2).toBeLessThan(dirIdx2);
+    expect(dirIdx2).toBeLessThan(evIdx2);
+  });
+
+  it('narrows >60 KB newEvidence via citeScoped against both verdict and draft UUIDs and caps output at MAX_REVISION_PROMPT_CHARS', () => {
+    const uncitedEntries = Array.from({ length: 20 }, (_, i) => {
+      const hex = (i + 10).toString(16).padStart(2, '0');
+      const id = `${hex}000000-0000-0000-0000-000000000000`;
+      return makeChunkEntry(id, `Uncited filler chunk ${i}: ${'X'.repeat(3200)}`);
+    });
+    const bigNewEvidence = [
+      ...uncitedEntries,
+      makeChunkEntry(CHUNK_1_ID, 'Cited in draft: USR table details.'),
+      makeChunkEntry(CHUNK_2_ID, 'Named in verdict: ACT table details.'),
+    ];
+    expect(bigNewEvidence.join('\n').length).toBeGreaterThan(60_000);
+
+    const prompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: `Chunk [${CHUNK_2_ID}] contradicts the second paragraph.`,
+        citationFixes: [`Cite [${CHUNK_2_ID}] on the organization sentence.`],
+        unsupportedClaims: ['Unsupported claim Z'],
+      },
+      newEvidence: bigNewEvidence,
+      allEvidence: bigNewEvidence,
+      draft: `The USR table stores users [${CHUNK_1_ID}].`,
+    });
+
+    expect(prompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(prompt.indexOf(REVIEW_FEEDBACK_HEADING)).toBe(0);
+    expect(prompt).toContain(`Chunk [${CHUNK_2_ID}] contradicts the second paragraph.`);
+    expect(prompt).toContain(`Cite [${CHUNK_2_ID}] on the organization sentence.`);
+    expect(prompt).toContain('- Unsupported claim Z');
+    // Both the chunk cited in draft (CHUNK_1_ID) and the chunk named in verdict (CHUNK_2_ID) must be preserved
+    expect(prompt).toContain('Cited in draft: USR table details.');
+    expect(prompt).toContain('Named in verdict: ACT table details.');
+    expect(prompt).not.toContain('Uncited filler chunk 0:');
+  });
+
+  it('falls back to fullDigest and truncates cleanly when >60 KB newEvidence has only fabricated UUIDs or single-line oversized chunks', () => {
+    const FABRICATED_ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
+    const bigSingleLineEntries = Array.from({ length: 15 }, (_, i) => {
+      const hex = (i + 30).toString(16).padStart(2, '0');
+      const id = `${hex}000000-0000-0000-0000-000000000000`;
+      return makeChunkEntry(id, `Retrieved chunk ${i}: ${'Y'.repeat(4500)}`);
+    });
+
+    const prompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: `Citation [${FABRICATED_ID}] does not exist in any retrieved source.`,
+        citationFixes: [],
+        unsupportedClaims: [`Claim citing [${FABRICATED_ID}]`],
+      },
+      newEvidence: bigSingleLineEntries,
+      allEvidence: bigSingleLineEntries,
+      draft: `Claim with fabricated citation [${FABRICATED_ID}].`,
+    });
+
+    expect(prompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(prompt.indexOf(REVIEW_FEEDBACK_HEADING)).toBe(0);
+    expect(prompt).toContain(`Citation [${FABRICATED_ID}] does not exist`);
+    expect(prompt).toContain('## Source evidence behind the specialist answers above');
+    expect(prompt).toContain('Retrieved chunk 0:');
+    expect(prompt).toContain('…[additional source evidence omitted to stay within tool output limit]');
+
+    // Also test a single massive chunk with NO newlines in the body exceeding budget
+    const noNewlineChunk = `[oim-ops · search_corpus] id=${CHUNK_1_ID} ${'Z'.repeat(50_000)}`;
+    const promptNoNewline = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Check chunk 1.',
+        citationFixes: [],
+        unsupportedClaims: [],
+      },
+      newEvidence: [noNewlineChunk],
+      allEvidence: [noNewlineChunk],
+      draft: `Draft [${CHUNK_1_ID}].`,
+    });
+    expect(promptNoNewline.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(promptNoNewline).toContain('…[additional source evidence omitted to stay within tool output limit]');
+  });
+
+  it('truncates oversized allEvidence (when newEvidence is empty) and oversized header so length <= MAX_REVISION_PROMPT_CHARS holds unconditionally', () => {
+    const hugeCitedChunk = makeChunkEntry(CHUNK_1_ID, Array.from({ length: 100 }, (_, i) => `Line ${i}: ${'W'.repeat(450)}`).join('\n'));
+    const allEvPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'Re-read the cited source carefully.',
+        citationFixes: [`Check [${CHUNK_1_ID}]`],
+        unsupportedClaims: [],
+      },
+      newEvidence: [],
+      allEvidence: [hugeCitedChunk],
+      draft: `Claim [${CHUNK_1_ID}].`,
+    });
+
+    expect(allEvPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(allEvPrompt.indexOf(REVIEW_FEEDBACK_HEADING)).toBe(0);
+    expect(allEvPrompt).toContain('## The sources your answer currently cites');
+    expect(allEvPrompt).toContain('…[additional source evidence omitted to stay within tool output limit]');
+
+    // Boundary case: header leaves bodyBudget <= 0 (~31,874 and ~31,896 chars) with non-empty evidence
+    for (const feedbackSize of [31_618, 31_640]) {
+      const boundaryPrompt = buildRevisionPrompt({
+        verdict: {
+          approved: false,
+          feedback: 'B'.repeat(feedbackSize),
+          citationFixes: [],
+          unsupportedClaims: [],
+        },
+        newEvidence: evidence,
+        allEvidence: evidence,
+        draft: `Draft [${CHUNK_1_ID}].`,
+      });
+      expect(boundaryPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+      expect(boundaryPrompt).toContain(
+        'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+      );
+      expect(
+        boundaryPrompt.endsWith('…[additional source evidence omitted to stay within tool output limit]'),
+      ).toBe(true);
+    }
+
+    // Oversized header guard with evidence supplied (multi-line reviewer notes)
+    const manyLinesFeedback = Array.from({ length: 400 }, (_, i) => `Line ${i}: ${'F'.repeat(90)}`).join(
+      '\n',
+    );
+    const hugeHeaderPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: manyLinesFeedback,
+        citationFixes: ['Fix 1'],
+        unsupportedClaims: ['Claim 1'],
+      },
+      newEvidence: evidence,
+      allEvidence: evidence,
+      draft: `Draft [${CHUNK_1_ID}].`,
+    });
+    expect(hugeHeaderPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(hugeHeaderPrompt).toContain('Line 0: F');
+    expect(hugeHeaderPrompt).toContain('…[reviewer notes truncated to stay within tool output limit]');
+    expect(hugeHeaderPrompt).toContain(
+      'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+    );
+    expect(
+      hugeHeaderPrompt.endsWith('…[additional source evidence omitted to stay within tool output limit]'),
+    ).toBe(true);
+
+    // Oversized header guard without evidence supplied (single-line reviewer notes)
+    const hugeHeaderNoEvPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'F'.repeat(40_000),
+        citationFixes: [],
+        unsupportedClaims: [],
+      },
+      newEvidence: [],
+      allEvidence: [],
+      draft: 'Draft without evidence.',
+    });
+    expect(hugeHeaderNoEvPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(hugeHeaderNoEvPrompt).toContain('FFFFFFFFFF');
+    expect(hugeHeaderNoEvPrompt).toContain('…[reviewer notes truncated to stay within tool output limit]');
+    expect(hugeHeaderNoEvPrompt).toContain(
+      'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+    );
   });
 });
 
