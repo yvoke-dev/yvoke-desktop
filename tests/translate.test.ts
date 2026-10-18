@@ -456,5 +456,142 @@ describe('SDK message translation', () => {
       );
       expect(resEvents).toEqual([]);
     });
+
+    it('suppresses root text_delta and plain-text assistant blocks in orchestratorMode while preserving thinking_delta, visible tool calls, turnText, and single-agent streaming', () => {
+      const orchCtx = newTurnContext('t-orch', true);
+
+      // 1. Root text_delta in orchestratorMode emits no live-text and leaves liveText empty
+      const deltaTextEvents = translateMessage(
+        msg({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Drafting answer...' } },
+        }),
+        orchCtx,
+      );
+      expect(deltaTextEvents).toEqual([]);
+      expect(orchCtx.liveText).toBe('');
+
+      // 2. Root thinking_delta in orchestratorMode still emits live-thinking
+      const deltaThinkEvents = translateMessage(
+        msg({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Checking citations...' } },
+        }),
+        orchCtx,
+      );
+      expect(deltaThinkEvents).toEqual([
+        { kind: 'live-thinking', threadId: 't-orch', text: 'Checking citations...' },
+      ]);
+      expect(orchCtx.liveThinking).toBe('Checking citations...');
+
+      // 3. Root assistant message with plain text ONLY (e.g. post-submit_answer closing chatter)
+      // emits no assistant-block and pushes no block to ctx.blocks, while updating ctx.turnText
+      const plainOnlyEvents = translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'The revised answer was approved and delivered.' }],
+          },
+        }),
+        orchCtx,
+      );
+      expect(plainOnlyEvents).toEqual([]);
+      expect(orchCtx.blocks).toHaveLength(0);
+      expect(orchCtx.turnText).toBe('The revised answer was approved and delivered.');
+
+      // 4. Root assistant message with plain text + filtered mcp__review__submit_answer tool_use
+      // also emits no assistant-block and pushes no block to ctx.blocks
+      const textPlusSubmitEvents = translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'text', text: 'Submitting now.' },
+              {
+                type: 'tool_use',
+                id: 'sub-ans-2',
+                name: 'mcp__review__submit_answer',
+                input: { answer: 'Answer [11111111].' },
+              },
+            ],
+          },
+        }),
+        orchCtx,
+      );
+      expect(textPlusSubmitEvents).toEqual([]);
+      expect(orchCtx.blocks).toHaveLength(0);
+      expect(orchCtx.turnText).toBe('The revised answer was approved and delivered.\n\nSubmitting now.');
+
+      // 5. Root assistant message with thinking + text + visible tool call (e.g. mcp__yvoke__ask_clarifying_question)
+      // emits assistant-block with text: '' and stores text: undefined in ctx.blocks
+      const visibleToolEvents = translateMessage(
+        msg({
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'thinking', thinking: 'Need user input.' },
+              { type: 'text', text: 'Let me ask a question first.' },
+              {
+                type: 'tool_use',
+                id: 'ask-1',
+                name: qualifyTool('ask_clarifying_question'),
+                input: { question: 'Which version?' },
+              },
+            ],
+          },
+        }),
+        orchCtx,
+      );
+      expect(visibleToolEvents).toEqual([
+        {
+          kind: 'assistant-block',
+          threadId: 't-orch',
+          text: '',
+          thinking: 'Need user input.',
+          toolCalls: [
+            {
+              id: 'ask-1',
+              name: qualifyTool('ask_clarifying_question'),
+              input: { question: 'Which version?' },
+            },
+          ],
+        },
+      ]);
+      expect(orchCtx.blocks).toEqual([
+        {
+          text: undefined,
+          thinking: 'Need user input.',
+          toolCalls: [
+            {
+              id: 'ask-1',
+              name: qualifyTool('ask_clarifying_question'),
+              input: { question: 'Which version?' },
+            },
+          ],
+        },
+      ]);
+
+      // 6. Negative check: orchestratorMode = false still emits live-text and text-bearing assistant-block
+      const singleCtx = newTurnContext('t-single', false);
+      const singleDelta = translateMessage(
+        msg({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello single' } },
+        }),
+        singleCtx,
+      );
+      expect(singleDelta).toEqual([{ kind: 'live-text', threadId: 't-single', text: 'Hello single' }]);
+      const singleBlock = translateMessage(
+        msg({
+          type: 'assistant',
+          message: { content: [{ type: 'text', text: 'Hello single' }] },
+        }),
+        singleCtx,
+      );
+      expect(singleBlock).toEqual([
+        { kind: 'assistant-block', threadId: 't-single', text: 'Hello single', thinking: undefined, toolCalls: [] },
+      ]);
+      expect(singleCtx.blocks).toEqual([{ text: 'Hello single', thinking: undefined, toolCalls: undefined }]);
+    });
   });
 });

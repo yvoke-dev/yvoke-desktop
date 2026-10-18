@@ -254,9 +254,36 @@ export interface BuildRevisionPromptParams {
 }
 
 /**
+ * Hard character ceiling for the revision prompt returned by `mcp__review__submit_answer` (or
+ * re-prompted in code-driven review). Kept safely below Claude Code CLI's ~50 KB `<persisted-output>`
+ * disk-spill threshold so the orchestrator (which has no filesystem tools) always receives the
+ * prompt inline.
+ */
+export const MAX_REVISION_PROMPT_CHARS = 32_000;
+
+const EVIDENCE_OMITTED_NOTICE =
+  '\n\n…[additional source evidence omitted to stay within tool output limit]';
+
+function appendBoundedEvidenceSection(header: string, sectionPrefix: string, body: string): string {
+  if (header.length + sectionPrefix.length + body.length <= MAX_REVISION_PROMPT_CHARS) {
+    return header + sectionPrefix + body;
+  }
+  const bodyBudget =
+    MAX_REVISION_PROMPT_CHARS - header.length - sectionPrefix.length - EVIDENCE_OMITTED_NOTICE.length;
+  if (bodyBudget <= 0) {
+    return (header + sectionPrefix + EVIDENCE_OMITTED_NOTICE).slice(0, MAX_REVISION_PROMPT_CHARS);
+  }
+  const slice = body.slice(0, bodyBudget);
+  const lastNewline = slice.lastIndexOf('\n');
+  const truncated = lastNewline > 0 ? slice.slice(0, lastNewline) : slice;
+  return header + sectionPrefix + truncated + EVIDENCE_OMITTED_NOTICE;
+}
+
+/**
  * Render the revision task sent back to the orchestrator after a non-approving review verdict
  * (ported from `OrchestrationService.renderRevisionTask` in `yvoke-web`, adapted for the Desktop
- * `Task` delegation tool).
+ * `Task` delegation tool, with reviewer feedback placed first and source evidence bounded under
+ * `MAX_REVISION_PROMPT_CHARS`).
  */
 export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
   const newEvidence = params.newEvidence ?? [];
@@ -275,58 +302,72 @@ export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
   const citationFixes = verdict.citationFixes ?? [];
   const unsupportedClaims = verdict.unsupportedClaims ?? [];
 
-  let sb = '';
-  if (newEvidence.length > 0) {
-    sb += `## Source evidence behind the specialist answers above\n${deduped(newEvidence)}\n\n`;
-  } else if (allEvidence.length > 0 && draft.length > 0) {
-    const cited = citeScoped(allEvidence, idsUnderReview(verdict, draft), null);
-    if (cited.trim().length > 0) {
-      sb +=
-        '## The sources your answer currently cites\n' +
-        'Re-read these before moving any citation: they are what the reviewer ' +
-        'judged, and a claim is mis-cited only if the text below does not say ' +
-        'it.\n\n' +
-        `${cited}\n\n`;
-    }
-  }
-
-  sb += `${REVIEW_FEEDBACK_HEADING}\n${feedbackText}\n\n`;
+  let header = `${REVIEW_FEEDBACK_HEADING}\n${feedbackText}\n\n`;
 
   if (citationFixes.length > 0) {
-    sb += '## Citation fixes — no research needed\n';
-    sb +=
+    header += '## Citation fixes — no research needed\n';
+    header +=
       'Each of these is repairable from evidence **already supplied** above: the ' +
       'source was retrieved, the citation on it is wrong, missing or duplicated. Apply ' +
       'them by editing the answer\'s citations and `## References` — do NOT call ' +
       'the Task tool for any of them.\n';
     for (const fix of citationFixes) {
-      sb += `- ${fix}\n`;
+      header += `- ${fix}\n`;
     }
-    sb += '\n';
+    header += '\n';
   }
 
   if (unsupportedClaims.length > 0) {
-    sb += '## Unsupported claims\n';
-    sb +=
+    header += '## Unsupported claims\n';
+    header +=
       'Nothing supplied supports these. Either remove the claim, or delegate to a ' +
       'specialist for the material — this is the only part of the feedback that may ' +
       'warrant a new specialist call.\n';
     for (const claim of unsupportedClaims) {
-      sb += `- ${claim}\n`;
+      header += `- ${claim}\n`;
     }
-    sb += '\n';
+    header += '\n';
   }
 
-  sb +=
+  header +=
     'Revise the answer you just gave and submit the complete revised answer via `submit_answer`. Keep everything the reviewer did not object to.';
   if (isCitationOnlyVerdict(verdict)) {
-    sb +=
+    header +=
       ' Every objection above is a citation fix, so this revision needs no new ' +
       'evidence at all — do NOT call the Task tool.';
   } else {
-    sb += ' Delegate again only for material that is genuinely missing above.';
+    header += ' Delegate again only for material that is genuinely missing above.';
   }
-  return sb;
+
+  if (header.length >= MAX_REVISION_PROMPT_CHARS) {
+    return header.slice(0, MAX_REVISION_PROMPT_CHARS);
+  }
+
+  if (newEvidence.length > 0) {
+    const sectionPrefix = '\n\n## Source evidence behind the specialist answers above\n';
+    const fullDigest = deduped(newEvidence);
+    if (header.length + sectionPrefix.length + fullDigest.length <= MAX_REVISION_PROMPT_CHARS) {
+      return header + sectionPrefix + fullDigest;
+    }
+    const scopeTarget = `${idsUnderReview(verdict, draft)}\n${draft}`.trim();
+    const scoped = scopeTarget.length > 0 ? citeScoped(newEvidence, scopeTarget, null) : '';
+    const selectedEvidence = scoped.trim().length > 0 ? scoped : fullDigest;
+    return appendBoundedEvidenceSection(header, sectionPrefix, selectedEvidence);
+  }
+
+  if (allEvidence.length > 0 && draft.length > 0) {
+    const cited = citeScoped(allEvidence, idsUnderReview(verdict, draft), null);
+    if (cited.trim().length > 0) {
+      const sectionPrefix =
+        '\n\n## The sources your answer currently cites\n' +
+        'Re-read these before moving any citation: they are what the reviewer ' +
+        'judged, and a claim is mis-cited only if the text below does not say ' +
+        'it.\n\n';
+      return appendBoundedEvidenceSection(header, sectionPrefix, cited);
+    }
+  }
+
+  return header;
 }
 
 /**

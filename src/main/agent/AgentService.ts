@@ -1460,6 +1460,12 @@ export class AgentService {
         usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
         costOverride = session.turn.carriedCostUsd;
       }
+    } else if (session.orchestratorProfile && session.orchestrator) {
+      const rawText =
+        session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
+      const cleanText = afterAnswerMarker(rawText);
+      session.turn.turnText = cleanText;
+      session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, cleanText);
     }
 
     const usage =

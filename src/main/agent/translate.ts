@@ -146,13 +146,15 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
     case 'stream_event': {
       // Only stream the main-thread (orchestrator) deltas into the live area; sub-agent deltas are
       // surfaced through their delegation card, not the composed-answer live view.
+      // In orchestratorMode, root plain-text deltas are also held back so unreviewed prose and
+      // post-submit_answer closing remarks never stream live before completeTurn settles the answer.
       if (parentId) break;
       const event = msg.event as { type?: string; delta?: { type?: string; text?: string; thinking?: string } };
       if (event.type === 'content_block_delta') {
         if (event.delta?.type === 'thinking_delta' && event.delta.thinking) {
           ctx.liveThinking += event.delta.thinking;
           events.push({ kind: 'live-thinking', threadId: ctx.threadId, text: ctx.liveThinking });
-        } else if (event.delta?.type === 'text_delta' && event.delta.text) {
+        } else if (!ctx.orchestratorMode && event.delta?.type === 'text_delta' && event.delta.text) {
           ctx.liveText += event.delta.text;
           events.push({ kind: 'live-text', threadId: ctx.threadId, text: ctx.liveText });
         }
@@ -215,14 +217,23 @@ export function translateMessage(msg: SDKMessage, ctx: TurnContext): AgentEvent[
         ctx.turnText += (ctx.turnText && blockText ? '\n\n' : '') + blockText;
         ctx.turnThinking += blockThinking;
         ctx.toolCalls.push(...toolCalls);
-        ctx.blocks.push({
-          text: blockText || undefined,
-          thinking: blockThinking || undefined,
-          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        });
+        const visibleText = ctx.orchestratorMode ? '' : blockText;
+        if (visibleText || blockThinking || toolCalls.length > 0) {
+          ctx.blocks.push({
+            text: visibleText || undefined,
+            thinking: blockThinking || undefined,
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          });
+          events.push({
+            kind: 'assistant-block',
+            threadId: ctx.threadId,
+            text: visibleText,
+            thinking: blockThinking || undefined,
+            toolCalls,
+          });
+        }
         ctx.liveText = '';
         ctx.liveThinking = '';
-        events.push({ kind: 'assistant-block', threadId: ctx.threadId, text: blockText, thinking: blockThinking || undefined, toolCalls });
       }
       break;
     }
