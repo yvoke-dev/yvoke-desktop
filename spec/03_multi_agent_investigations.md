@@ -60,10 +60,11 @@ profiles and the playbooks; there is no way to build one from the app.
   rounds. When every objection is a citation fix, the lead is instructed to repair the citations from
   the sources already in hand without consulting any specialist again. If the reviewer itself fails to
   run, a non-blank draft still ships with an *unreviewed* warning rather than throwing away the work.
-- **Pre-answer notes and held-back drafts are discarded from the answer, not from the record.** Anything
-  the lead writes while coordinating specialists and any draft rejected by the reviewer are stripped so
-  the delivered answer contains only the final answer prose — while each candidate draft and verdict
-  remains readable inside the reviewer's card and in the uploaded trace.
+- **Pre-answer notes and held-back drafts are discarded from the answer, not from the record.** While a
+  multi-agent turn is running, the lead's plain-text prose is held back from live streaming — so
+  coordination remarks, unreviewed drafts, and post-review closing acknowledgements never flash in the
+  conversation view — and only the final answer prose is rendered when the turn completes, while each
+  candidate draft and verdict remains readable inside the reviewer's card and in the uploaded trace.
 - **Out of rounds, the answer ships flagged.** The warning (including the reviewer's notes) goes into
   the answer's own text, not only into the on-screen badge — that is what gets synced to the server and
   what the copy button copies.
@@ -97,10 +98,14 @@ profiles and the playbooks; there is no way to build one from the app.
   verdict.
 - **Two revision rounds by default**, counted as revisions rather than reviews: a first-pass approval
   is zero rounds, and the default allows a draft plus two corrections.
-- **A revision notice sends only new or cited evidence.** When the lead consulted new specialists during
-  a revision, only those new tool results (deduplicated across specialists) are sent; when no new
-  specialists were called, the app re-supplies only the chunks cited by the draft or named in the
-  reviewer's citation fixes.
+- **A revision notice sends only new or cited evidence.** A revision notice places the reviewer's
+  feedback, citation fixes, unsupported claims, and revision instructions ahead of the source evidence,
+  and caps the attached evidence so the notice stays within the underlying runtime's output size limit.
+  When the lead consulted new specialists, those new tool results (deduplicated across specialists) are
+  sent — narrowed first to the passages cited by the draft or named in the reviewer's objection if the
+  full set would exceed the size cap, and truncated if still oversized; when no new specialists were
+  called, the app re-supplies only the chunks cited by the draft or named in the reviewer's citation
+  fixes.
 - **A specialist whose call failed is omitted from that evidence entirely**, so the reviewer is not
   told that part of the investigation is missing.
 - **If the lead ends its turn in plain text without submitting its answer, coordination prose is not

@@ -265,6 +265,12 @@ describe('spec/ modular structure', () => {
     // spec/03: review is driven by the app in code and cannot be switched off
     expect(multiAgent).toContain('Review is driven by the app in code, and cannot be switched off');
     expect(multiAgent).toContain(
+      "the lead's plain-text prose is held back from live streaming",
+    );
+    expect(multiAgent).toContain(
+      "A revision notice places the reviewer's\n  feedback, citation fixes, unsupported claims, and revision instructions ahead of the source evidence",
+    );
+    expect(multiAgent).toContain(
       'If the lead ends its turn in plain text without submitting its answer, coordination prose is not\n  stripped.',
     );
     expect(multiAgent).not.toContain('NOT APPROVED');
