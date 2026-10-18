@@ -1423,49 +1423,42 @@ export class AgentService {
     let costOverride: number | undefined;
     let errorOverride: string | undefined;
 
-    if (
-      session.orchestratorProfile &&
-      session.orchestrator &&
-      session.reviewState?.submittedAnswer !== undefined
-    ) {
-      isError = false;
-      session.turn.turnText = session.reviewState.submittedAnswer;
-      session.turn.blocks = stripBeforeAnswerMarker(
-        session.turn.blocks,
-        session.reviewState.submittedAnswer,
-      );
-    } else if (session.orchestratorProfile && session.orchestrator && !isError && !aborted) {
-      const hasSpecialistDelegation = session.turn.toolCalls.some(
-        (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
-      );
-      if (!hasSpecialistDelegation) {
-        const rawText = session.turn.turnText || String((result as { result?: string }).result ?? '');
-        const cleanText = afterAnswerMarker(rawText);
-        session.turn.turnText = cleanText;
-        session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, cleanText);
-      } else {
-        const outcome = await this.runCodeDrivenReview(
-          threadId,
-          session,
-          result,
-          resultUsage,
-          resultCostUsd,
+    if (session.orchestratorProfile && session.orchestrator) {
+      if (session.reviewState?.submittedAnswer !== undefined) {
+        isError = false;
+        session.turn.turnText = session.reviewState.submittedAnswer;
+        session.turn.blocks = stripBeforeAnswerMarker(
+          session.turn.blocks,
+          session.reviewState.submittedAnswer,
         );
-        if (outcome.status === 'continue') {
-          return;
+      } else {
+        const hasSpecialistDelegation = session.turn.toolCalls.some(
+          (c) => c.name === 'Agent' && c.subagentType !== REVIEWER_SUBAGENT,
+        );
+        if (!isError && !aborted && hasSpecialistDelegation) {
+          const outcome = await this.runCodeDrivenReview(
+            threadId,
+            session,
+            result,
+            resultUsage,
+            resultCostUsd,
+          );
+          if (outcome.status === 'continue') {
+            return;
+          }
+          isError = outcome.isError;
+          aborted = outcome.aborted;
+          errorOverride = outcome.errorMessage;
+          usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
+          costOverride = session.turn.carriedCostUsd;
+        } else {
+          const rawText =
+            session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
+          const cleanText = afterAnswerMarker(rawText);
+          session.turn.turnText = cleanText;
+          session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, cleanText);
         }
-        isError = outcome.isError;
-        aborted = outcome.aborted;
-        errorOverride = outcome.errorMessage;
-        usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
-        costOverride = session.turn.carriedCostUsd;
       }
-    } else if (session.orchestratorProfile && session.orchestrator) {
-      const rawText =
-        session.turn.turnText || (isError ? '' : String((result as { result?: string }).result ?? ''));
-      const cleanText = afterAnswerMarker(rawText);
-      session.turn.turnText = cleanText;
-      session.turn.blocks = stripBeforeAnswerMarker(session.turn.blocks, cleanText);
     }
 
     const usage =

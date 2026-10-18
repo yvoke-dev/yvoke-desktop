@@ -235,6 +235,9 @@ describe('spec/ modular structure', () => {
     expect(askingQuestions).toContain(
       '**Conversations restored from the server show every clarification as answered.** The remote sync\n  payload does not retain tool execution results or error states, storing only that a tool was called.\n  Upon rehydration, all preserved clarification calls are restored with a placeholder result, displaying\n  them as *Clarification provided* regardless of whether the original turn was answered, cancelled, or failed.',
     );
+    expect(askingQuestions).toContain(
+      "(in a multi-agent conversation, the lead's answer text is held back until the turn finishes)",
+    );
   });
 
   it('documents preflight exclusion of oim-full, shipped defaults, and removes code fallback disagreement', () => {

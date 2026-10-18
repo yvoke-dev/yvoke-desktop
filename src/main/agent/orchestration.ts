@@ -264,6 +264,9 @@ export const MAX_REVISION_PROMPT_CHARS = 32_000;
 const EVIDENCE_OMITTED_NOTICE =
   '\n\n…[additional source evidence omitted to stay within tool output limit]';
 
+const HEADER_OMITTED_NOTICE =
+  '\n…[reviewer notes truncated to stay within tool output limit]\n\n';
+
 function appendBoundedEvidenceSection(header: string, sectionPrefix: string, body: string): string {
   if (header.length + sectionPrefix.length + body.length <= MAX_REVISION_PROMPT_CHARS) {
     return header + sectionPrefix + body;
@@ -271,7 +274,10 @@ function appendBoundedEvidenceSection(header: string, sectionPrefix: string, bod
   const bodyBudget =
     MAX_REVISION_PROMPT_CHARS - header.length - sectionPrefix.length - EVIDENCE_OMITTED_NOTICE.length;
   if (bodyBudget <= 0) {
-    return (header + sectionPrefix + EVIDENCE_OMITTED_NOTICE).slice(0, MAX_REVISION_PROMPT_CHARS);
+    return header.length + sectionPrefix.length + EVIDENCE_OMITTED_NOTICE.length <=
+      MAX_REVISION_PROMPT_CHARS
+      ? header + sectionPrefix + EVIDENCE_OMITTED_NOTICE
+      : header + EVIDENCE_OMITTED_NOTICE;
   }
   const slice = body.slice(0, bodyBudget);
   const lastNewline = slice.lastIndexOf('\n');
@@ -302,45 +308,64 @@ export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
   const citationFixes = verdict.citationFixes ?? [];
   const unsupportedClaims = verdict.unsupportedClaims ?? [];
 
-  let header = `${REVIEW_FEEDBACK_HEADING}\n${feedbackText}\n\n`;
+  let feedbackHeader = `${REVIEW_FEEDBACK_HEADING}\n${feedbackText}\n\n`;
 
   if (citationFixes.length > 0) {
-    header += '## Citation fixes — no research needed\n';
-    header +=
+    feedbackHeader += '## Citation fixes — no research needed\n';
+    feedbackHeader +=
       'Each of these is repairable from evidence **already supplied** above: the ' +
       'source was retrieved, the citation on it is wrong, missing or duplicated. Apply ' +
       'them by editing the answer\'s citations and `## References` — do NOT call ' +
       'the Task tool for any of them.\n';
     for (const fix of citationFixes) {
-      header += `- ${fix}\n`;
+      feedbackHeader += `- ${fix}\n`;
     }
-    header += '\n';
+    feedbackHeader += '\n';
   }
 
   if (unsupportedClaims.length > 0) {
-    header += '## Unsupported claims\n';
-    header +=
+    feedbackHeader += '## Unsupported claims\n';
+    feedbackHeader +=
       'Nothing supplied supports these. Either remove the claim, or delegate to a ' +
       'specialist for the material — this is the only part of the feedback that may ' +
       'warrant a new specialist call.\n';
     for (const claim of unsupportedClaims) {
-      header += `- ${claim}\n`;
+      feedbackHeader += `- ${claim}\n`;
     }
-    header += '\n';
+    feedbackHeader += '\n';
   }
 
-  header +=
+  let directive =
     'Revise the answer you just gave and submit the complete revised answer via `submit_answer`. Keep everything the reviewer did not object to.';
   if (isCitationOnlyVerdict(verdict)) {
-    header +=
+    directive +=
       ' Every objection above is a citation fix, so this revision needs no new ' +
       'evidence at all — do NOT call the Task tool.';
   } else {
-    header += ' Delegate again only for material that is genuinely missing above.';
+    directive += ' Delegate again only for material that is genuinely missing above.';
   }
 
-  if (header.length >= MAX_REVISION_PROMPT_CHARS) {
-    return header.slice(0, MAX_REVISION_PROMPT_CHARS);
+  const citedAllEvidence =
+    newEvidence.length === 0 && allEvidence.length > 0 && draft.length > 0
+      ? citeScoped(allEvidence, idsUnderReview(verdict, draft), null)
+      : '';
+  const hasEvidenceSection = newEvidence.length > 0 || citedAllEvidence.trim().length > 0;
+  const maxHeaderChars = hasEvidenceSection
+    ? MAX_REVISION_PROMPT_CHARS - EVIDENCE_OMITTED_NOTICE.length
+    : MAX_REVISION_PROMPT_CHARS;
+
+  let header: string;
+  if (feedbackHeader.length + directive.length > maxHeaderChars) {
+    const feedbackBudget = maxHeaderChars - directive.length - HEADER_OMITTED_NOTICE.length;
+    const slice = feedbackHeader.slice(0, Math.max(0, feedbackBudget));
+    const lastNl = slice.lastIndexOf('\n');
+    const truncatedFeedback =
+      lastNl > REVIEW_FEEDBACK_HEADING.length && lastNl >= slice.length - 1024
+        ? slice.slice(0, lastNl)
+        : slice;
+    header = truncatedFeedback + HEADER_OMITTED_NOTICE + directive;
+  } else {
+    header = feedbackHeader + directive;
   }
 
   if (newEvidence.length > 0) {
@@ -355,16 +380,13 @@ export function buildRevisionPrompt(params: BuildRevisionPromptParams): string {
     return appendBoundedEvidenceSection(header, sectionPrefix, selectedEvidence);
   }
 
-  if (allEvidence.length > 0 && draft.length > 0) {
-    const cited = citeScoped(allEvidence, idsUnderReview(verdict, draft), null);
-    if (cited.trim().length > 0) {
-      const sectionPrefix =
-        '\n\n## The sources your answer currently cites\n' +
-        'Re-read these before moving any citation: they are what the reviewer ' +
-        'judged, and a claim is mis-cited only if the text below does not say ' +
-        'it.\n\n';
-      return appendBoundedEvidenceSection(header, sectionPrefix, cited);
-    }
+  if (citedAllEvidence.trim().length > 0) {
+    const sectionPrefix =
+      '\n\n## The sources your answer currently cites\n' +
+      'Re-read these before moving any citation: they are what the reviewer ' +
+      'judged, and a claim is mis-cited only if the text below does not say ' +
+      'it.\n\n';
+    return appendBoundedEvidenceSection(header, sectionPrefix, citedAllEvidence);
   }
 
   return header;

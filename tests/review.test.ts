@@ -367,19 +367,71 @@ describe('idsUnderReview and buildRevisionPrompt (OrchestrationService.renderRev
     expect(allEvPrompt).toContain('## The sources your answer currently cites');
     expect(allEvPrompt).toContain('…[additional source evidence omitted to stay within tool output limit]');
 
-    // Oversized header guard
+    // Boundary case: header leaves bodyBudget <= 0 (~31,874 and ~31,896 chars) with non-empty evidence
+    for (const feedbackSize of [31_618, 31_640]) {
+      const boundaryPrompt = buildRevisionPrompt({
+        verdict: {
+          approved: false,
+          feedback: 'B'.repeat(feedbackSize),
+          citationFixes: [],
+          unsupportedClaims: [],
+        },
+        newEvidence: evidence,
+        allEvidence: evidence,
+        draft: `Draft [${CHUNK_1_ID}].`,
+      });
+      expect(boundaryPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+      expect(boundaryPrompt).toContain(
+        'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+      );
+      expect(
+        boundaryPrompt.endsWith('…[additional source evidence omitted to stay within tool output limit]'),
+      ).toBe(true);
+    }
+
+    // Oversized header guard with evidence supplied (multi-line reviewer notes)
+    const manyLinesFeedback = Array.from({ length: 400 }, (_, i) => `Line ${i}: ${'F'.repeat(90)}`).join(
+      '\n',
+    );
     const hugeHeaderPrompt = buildRevisionPrompt({
       verdict: {
         approved: false,
-        feedback: 'F'.repeat(40_000),
-        citationFixes: [],
-        unsupportedClaims: [],
+        feedback: manyLinesFeedback,
+        citationFixes: ['Fix 1'],
+        unsupportedClaims: ['Claim 1'],
       },
       newEvidence: evidence,
       allEvidence: evidence,
       draft: `Draft [${CHUNK_1_ID}].`,
     });
     expect(hugeHeaderPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(hugeHeaderPrompt).toContain('Line 0: F');
+    expect(hugeHeaderPrompt).toContain('…[reviewer notes truncated to stay within tool output limit]');
+    expect(hugeHeaderPrompt).toContain(
+      'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+    );
+    expect(
+      hugeHeaderPrompt.endsWith('…[additional source evidence omitted to stay within tool output limit]'),
+    ).toBe(true);
+
+    // Oversized header guard without evidence supplied (single-line reviewer notes)
+    const hugeHeaderNoEvPrompt = buildRevisionPrompt({
+      verdict: {
+        approved: false,
+        feedback: 'F'.repeat(40_000),
+        citationFixes: [],
+        unsupportedClaims: [],
+      },
+      newEvidence: [],
+      allEvidence: [],
+      draft: 'Draft without evidence.',
+    });
+    expect(hugeHeaderNoEvPrompt.length).toBeLessThanOrEqual(MAX_REVISION_PROMPT_CHARS);
+    expect(hugeHeaderNoEvPrompt).toContain('FFFFFFFFFF');
+    expect(hugeHeaderNoEvPrompt).toContain('…[reviewer notes truncated to stay within tool output limit]');
+    expect(hugeHeaderNoEvPrompt).toContain(
+      'Revise the answer you just gave and submit the complete revised answer via `submit_answer`.',
+    );
   });
 });
 
