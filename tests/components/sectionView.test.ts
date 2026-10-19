@@ -161,7 +161,7 @@ describe('cleanPassage', () => {
     expect(cleaned.trim().endsWith('</p></li></ul></td></tr></tbody></table>')).toBe(true);
   });
 
-  it('leaves multi-line fenced code blocks and single/multi-backtick inline code untouched while balancing real tables', () => {
+  it('leaves multi-line fenced code blocks (including fences closed by a longer delimiter) and single/multi-backtick inline code untouched while balancing real tables', () => {
     const md = [
       'Inline `</td></tr>` and `` `</td></tr>` `` and `` a`<td>`b `` and `` a`<a id="x"></a>`b ``.',
       '',
@@ -169,7 +169,7 @@ describe('cleanPassage', () => {
       '<tr>',
       '<a id="x"></a><td>x</td></tr>',
       '<!-- comment -->',
-      '```',
+      '````',
       '',
       '<table><tbody><tr><td><p>Real table cell</p>',
     ].join('\n');
@@ -178,7 +178,7 @@ describe('cleanPassage', () => {
     expect(cleaned).toContain('`` `</td></tr>` ``');
     expect(cleaned).toContain('`` a`<td>`b ``');
     expect(cleaned).toContain('`` a`<a id="x"></a>`b ``');
-    expect(cleaned).toContain('```html\n<tr>\n<a id="x"></a><td>x</td></tr>\n<!-- comment -->\n```');
+    expect(cleaned).toContain('```html\n<tr>\n<a id="x"></a><td>x</td></tr>\n<!-- comment -->\n````');
     expect(cleaned).toContain('<table><tbody><tr><td><p>Real table cell</p></td></tr></tbody></table>');
   });
 
@@ -203,12 +203,19 @@ describe('cleanPassage', () => {
     expect(cleanPassage(arbitraryLine)).toContain('Copy\nArbitrary line not a caption');
   });
 
-  it('is idempotent across split fragments and tables with unknown XML / placeholders', () => {
+  it('is idempotent across split fragments, tail fragments without tbody, and tables with unknown XML / placeholders', () => {
     const splitSample = '### Part 7\n\n                            <p>Designer</p></td></tr><tr><td><p>A</p></td><td><p>B</p>';
     const onceSplit = cleanPassage(splitSample);
     expect(onceSplit).toContain('<table><tbody><tr><td colspan="2"><p>Designer</p></td></tr>');
     expect(onceSplit.trim().endsWith('<td><p>B</p></td></tr></tbody></table>')).toBe(true);
     expect(cleanPassage(onceSplit)).toBe(onceSplit);
+
+    const prosePlusTail = 'Intro…\n</td></tr></table>\n\nAfter.';
+    const onceTail = cleanPassage(prosePlusTail);
+    expect(onceTail).toBe('<table><tr><td>Intro…\n</td></tr></table>\n\nAfter.');
+    expect(onceTail).not.toContain('<tbody><table>');
+    expect(onceTail).not.toContain('&lt;tbody&gt;');
+    expect(cleanPassage(onceTail)).toBe(onceTail);
 
     const xmlSample = '<table><tbody><tr><td><p>Specify <condition>, <column name>, and <Class Name="Group">.</p>';
     const onceXml = cleanPassage(xmlSample);

@@ -1,3 +1,5 @@
+import { normalizeMarkdownText } from './htmlTableRehype';
+
 /*
  * Splits a `get_section` result into the passages it is made of.
  *
@@ -76,8 +78,6 @@ function joinWrappedTableRows(md: string): string {
   }
   return out.join('\n');
 }
-
-import { normalizeMarkdownText } from './htmlTableRehype';
 
 /**
  * The section markdown carries invisible raw HTML (per-topic `<a id>` anchors and `<!-- … -->`

@@ -28,6 +28,7 @@ vi.mock('mermaid', () => ({
 }));
 
 import { Markdown } from '../../src/renderer/src/components/Markdown';
+import { cleanPassage } from '../../src/renderer/src/components/sectionView';
 
 afterEach(() => {
   cleanup();
@@ -464,7 +465,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(onCitation).toHaveBeenCalledWith({ id: '274b9610-9148-4621-a5a1-089e807210c1' });
   });
 
-  it('renders a mid-table split chunk ([e613e51c] part 7/11 shape) as a table with colSpan={2} and zero code blocks', () => {
+  it('renders a mid-table split chunk ([e613e51c] part 7/11 shape) via cleanPassage as a table with colSpan={2} and zero code blocks', () => {
     const md = [
       '> Section path: Target system synchronization > One Identity Manager tools (part 7/11)',
       '### One Identity Manager tools (part 7/11)',
@@ -480,7 +481,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
       '                            <p class="TableText">Imports CSV files.</p>',
     ].join('\n');
 
-    const { container } = render(<Markdown content={md} />);
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
     expect(container.querySelector('h3')?.textContent).toBe('One Identity Manager tools (part 7/11)');
     const table = container.querySelector('table');
     expect(table).not.toBeNull();
@@ -491,7 +492,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(firstTd?.textContent).toContain('The Designer is the main tool');
   });
 
-  it('renders a tail split chunk ([3bbcf4ec] part 3/3 shape) and preserves trailing Related topics markdown', () => {
+  it('renders a tail split chunk ([3bbcf4ec] part 3/3 shape) via cleanPassage and preserves trailing Related topics markdown', () => {
     const md = [
       '> Section path: Managing resources (part 3/3)',
       '### One Identity Manager users for managing resources (part 3/3)',
@@ -512,7 +513,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
       '- [Using system users](https://example.com/system-users)',
     ].join('\n');
 
-    const { container } = render(<Markdown content={md} />);
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
     expect(container.querySelector('table')).not.toBeNull();
     expect(container.querySelectorAll('table li')).toHaveLength(2);
     expect(container.querySelector('h6')?.textContent).toBe('Related topics');
@@ -520,7 +521,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(container.querySelector('.code-block-wrapper')).toBeNull();
   });
 
-  it('renders a mid-list split chunk (part 3/11 shape) with reconstructed ul/td/tr/tbody/table ancestors', () => {
+  it('renders a mid-list split chunk (part 3/11 shape) via cleanPassage with reconstructed ul/td/tr/tbody/table ancestors', () => {
     const md = [
       '### One Identity Manager tools (part 3/11)',
       '',
@@ -536,22 +537,24 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
       '                    </tr>',
     ].join('\n');
 
-    const { container } = render(<Markdown content={md} />);
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
     const table = container.querySelector('table');
     expect(table).not.toBeNull();
     expect(table?.querySelector('tr td')?.getAttribute('colspan')).toBe('2');
     expect(table?.querySelector('tr td ul li')?.textContent).toContain('Changing your own main data');
   });
 
-  it('renders a head split chunk (part 2/11 shape) and a live={true} streaming truncated table cleanly', () => {
-    const truncated = [
-      '<table class="TableStyle-ListTable">',
-      '  <thead><tr><th>Tool</th><th>Features</th></tr></thead>',
-      '  <tbody>',
-      '    <tr>',
-      '      <td><p>Manager</p></td>',
-      '      <td><ul><li><p>Master data administration',
-    ].join('\n');
+  it('renders a head split chunk (part 2/11 shape) via cleanPassage cleanly for both live={false} and live={true}', () => {
+    const truncated = cleanPassage(
+      [
+        '<table class="TableStyle-ListTable">',
+        '  <thead><tr><th>Tool</th><th>Features</th></tr></thead>',
+        '  <tbody>',
+        '    <tr>',
+        '      <td><p>Manager</p></td>',
+        '      <td><ul><li><p>Master data administration',
+      ].join('\n'),
+    );
 
     const { container: c1 } = render(<Markdown content={truncated} live={false} />);
     expect(c1.querySelector('table')).not.toBeNull();
@@ -562,8 +565,8 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(c2.querySelector('table li')?.textContent).toContain('Master data administration');
   });
 
-  it('strips leading orphan closing tags so they do not mint an empty phantom row', () => {
-    const md = '</td>\n</tr>\n<tr><td><p>Tool A</p></td><td><p>Description A</p></td></tr></tbody></table>';
+  it('strips leading orphan closing tags in cleanPassage so they do not mint an empty phantom row', () => {
+    const md = cleanPassage('</td>\n</tr>\n<tr><td><p>Tool A</p></td><td><p>Description A</p></td></tr></tbody></table>');
     const { container } = render(<Markdown content={md} />);
     expect(container.querySelectorAll('table tr')).toHaveLength(1);
   });
@@ -579,7 +582,7 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(cellText).toContain('<Class Name="Group">');
   });
 
-  it('keeps prose placeholders and uppercase XML outside tables as visible literal text while rendering real tables', () => {
+  it('keeps prose placeholders, inline HTML tag mentions, <code-execution> blocks, and uppercase XML outside tables as visible literal text', () => {
     const md = [
       '1. Select the **<table>** category.',
       '',
@@ -596,11 +599,30 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(container.textContent).toContain('<table>');
     expect(container.textContent).toContain('<table name>.<column name>');
     expect(container.textContent).toContain('<Key><T>DialogTable</T><P>RMB-T-Org</P></Key>');
+
+    const { container: proseTd } = render(<Markdown content={'The <td> element holds a cell.\n\n- one\n- two'} />);
+    expect(proseTd.querySelector('table')).toBeNull();
+    expect(proseTd.querySelectorAll('ul li')).toHaveLength(2);
+    expect(proseTd.textContent).toContain('The <td> element holds a cell.');
+
+    const { container: proseClose } = render(
+      <Markdown content="In HTML, close the cell with </td> and the row with </tr>." />,
+    );
+    expect(proseClose.querySelector('table')).toBeNull();
+    expect(proseClose.textContent).toBe('In HTML, close the cell with </td> and the row with </tr>.');
+
+    const { container: proseTr } = render(<Markdown content="Wrap rows in <tr> tags." />);
+    expect(proseTr.querySelector('table')).toBeNull();
+    expect(proseTr.textContent).toBe('Wrap rows in <tr> tags.');
+
+    const { container: codeExec } = render(<Markdown content="<code-execution>output ends with </p></code-execution>" />);
+    expect(codeExec.querySelector('table')).toBeNull();
+    expect(codeExec.querySelector('blockquote')?.textContent).toContain('output ends with </p>');
   });
 
   it('preserves unquoted/boolean table attributes while stripping className, event handlers, style, data-*, <script>, and javascript: URLs', () => {
     const md = [
-      '<table hidden>',
+      '<table hidden class="TableStyle-ListTable">',
       '  <tbody>',
       '    <tr>',
       '      <td colspan=2 nowrap class="banner error primary" onclick="alert(1)" style="color:red" data-mc-conditions="X">',
@@ -632,24 +654,26 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(img?.getAttribute('onerror')).toBeNull();
   });
 
-  it('strips fused 1..N line-number gutters and non-breaking spaces from code blocks while preserving normal lines', async () => {
+  it('strips fused 1..N line-number gutters with nbsp/4-space indent while preserving unindented numbered code blocks', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
 
-    const md = [
-      'Copy',
-      '',
-      'Example',
-      '',
-      '```vb',
-      '1',
-      '2',
-      '3',
-      '\u00a0\u00a0\u00a0\u00a0Public Sub Test()',
-      '\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0Dim x As Integer = 1',
-      '\u00a0\u00a0\u00a0\u00a0End Sub',
-      '```',
-    ].join('\n');
+    const md = cleanPassage(
+      [
+        'Copy',
+        '',
+        'Example',
+        '',
+        '```vb',
+        '1',
+        '2',
+        '3',
+        '\u00a0\u00a0\u00a0\u00a0Public Sub Test()',
+        '\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0Dim x As Integer = 1',
+        '\u00a0\u00a0\u00a0\u00a0End Sub',
+        '```',
+      ].join('\n'),
+    );
 
     const { container } = render(<Markdown content={md} />);
     expect(container.textContent).not.toContain('Example');
@@ -666,6 +690,11 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
 
     const { container: nonSeq } = render(<Markdown content={'```\n1\n3\nfoo()\n```'} />);
     expect(nonSeq.querySelector('pre code')?.textContent).toBe('1\n3\nfoo()\n');
+
+    const { container: unindentedSeq } = render(
+      <Markdown content={'```text\n1\n2\n3\n4\nactual content\n```'} />,
+    );
+    expect(unindentedSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n4\nactual content\n');
   });
 });
 

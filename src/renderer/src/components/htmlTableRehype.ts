@@ -2,17 +2,19 @@ import { fromHtml } from 'hast-util-from-html';
 
 /**
  * Matches a fenced code block in raw Markdown (` ``` ` or `~~~`), anchored at line start under `/m`
- * using a named capture group `(?<fence>...)` so combining `.source` in `MD_CODE_REGIONS` never shifts
- * backreference numbers. Uses `|(?![\s\S])` rather than `|$` so unclosed fences match to end-of-input
- * instead of stopping at the first content line's EOL under `/m`.
+ * using named capture groups `(?<btfence>...)` and `(?<tfence>...)` so combining `.source` in
+ * `MD_CODE_REGIONS` never shifts backreference numbers, and matching any closing fence of the same
+ * character whose length is `>=` the opening fence (`\k<btfence>\`*` / `\k<tfence>~*`). Uses
+ * `|(?![\s\S])` rather than `|$` so unclosed fences match to end-of-input instead of stopping at
+ * the first content line's EOL under `/m`.
  */
 export const MD_FENCE =
-  /^[ \t]*(?<fence>`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?(?:\r?\n[ \t]*\k<fence>+[ \t]*(?=\r?\n|$)|(?![\s\S]))/gm;
+  /^[ \t]*(?:(?<btfence>`{3,})[^\r\n]*\r?\n[\s\S]*?(?:\r?\n[ \t]*\k<btfence>`*[ \t]*(?=\r?\n|$)|(?![\s\S]))|(?<tfence>~{3,})[^\r\n]*\r?\n[\s\S]*?(?:\r?\n[ \t]*\k<tfence>~*[ \t]*(?=\r?\n|$)|(?![\s\S])))/gm;
 
 /**
  * Matches an inline code span in raw Markdown: either a multi-backtick span (` ``...`` `) that may
  * contain single backticks, or a single-backtick span on one line. Uses named capture group
- * `(?<span>...)` so combining `.source` with `MD_FENCE` never collides with `(?<fence>...)`.
+ * `(?<span>...)` so combining `.source` with `MD_FENCE` never collides with fence capture groups.
  */
 export const MD_CODE_SPAN = /(?<span>`{2,})(?:(?!\k<span>)[\s\S])+?\k<span>|`[^`\r\n]+`/gm;
 
@@ -88,9 +90,10 @@ export function stripCodeSnippetCopyButtons(text: string): string {
 
 /**
  * Strips a MadCap Flare `<span class="codeSnippetLineNumbers">` line-number gutter (`1\n2\n…\nN`)
- * fused onto the top of a `<pre><code>` block during HTML-to-Markdown conversion, normalizes
- * non-breaking spaces (`\u00a0`) to ASCII spaces, and removes common leading indentation on the
- * remaining code lines.
+ * fused onto the top of a `<pre><code>` block during HTML-to-Markdown conversion when accompanied
+ * by corroborating MadCap evidence (either `\u00a0` non-breaking space indentation or a `>= 4`-space
+ * common leading indent on the following code lines), normalizes `\u00a0` to ASCII spaces, and
+ * removes common leading indentation on the remaining code lines.
  */
 export function stripCodeLineNumberGutter(text: string): string {
   const lines = text.split('\n');
@@ -107,9 +110,13 @@ export function stripCodeLineNumberGutter(text: string): string {
     return text.replace(/\u00a0/g, ' ');
   }
 
+  const hasNbsp = codeLines.some((l) => l.includes('\u00a0'));
   const normalized = codeLines.map((l) => l.replace(/\u00a0/g, ' '));
   const nonEmpty = normalized.filter((l) => l.trim().length > 0);
   const minIndent = Math.min(...nonEmpty.map((l) => (l.match(/^[ \t]*/) ?? [''])[0].length));
+  if (!hasNbsp && minIndent < 4) {
+    return text.replace(/\u00a0/g, ' ');
+  }
   return normalized.map((l) => (l.trim().length > 0 ? l.slice(minIndent) : '')).join('\n');
 }
 
@@ -177,7 +184,7 @@ const ANY_ANGLE_TAG_RE = /<(\/?)([a-zA-Z][\w:.-]*)((?:\s+[^>]*?)?)(\/?)>/g;
  * - `<table inert>` (boolean attributes other than `hidden` on `<table>` with no `=`)
  */
 const REAL_TABLE_OPEN_RE =
-  /<table(?:\s+[^>]*=[^>]*|\s+hidden\b|\s*)>(?=\s*<(?:caption|colgroup|col|thead|tbody|tfoot|tr|td|th)\b)/;
+  /<table(?:\s+(?:[^>="'\s]+=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)|hidden\b))*\s*>(?=\s*<(?:caption|colgroup|col|thead|tbody|tfoot|tr|td|th)\b)/;
 
 /**
  * Corpus-scoped detector for raw HTML tables and split table/cell fragments.
@@ -307,31 +314,31 @@ function balanceTableFragment(fragment: string): string {
     allTags.add(firstTag);
   }
 
+  // `outerAncestors` wraps OUTSIDE `unmatchedClosers` and `openStack`, so an ancestor at level L in
+  // `table > tbody/thead/tfoot > tr > td/th` may only be added when no tag at level <= L is already
+  // present in `allTags` (otherwise `<tbody>` would be placed outside `<table>`).
   const outerAncestors: string[] = [];
   if (!allTags.has('table')) {
     outerAncestors.push('table');
   }
-  if (!allTags.has('tbody') && !allTags.has('thead') && !allTags.has('tfoot')) {
+  if (!allTags.has('table') && !allTags.has('tbody') && !allTags.has('thead') && !allTags.has('tfoot')) {
     if (
       allTags.has('tr') ||
       allTags.has('td') ||
       allTags.has('th') ||
-      (!allTags.has('colgroup') && !allTags.has('caption') && firstTag !== 'table')
+      (!allTags.has('colgroup') && !allTags.has('caption'))
     ) {
       outerAncestors.push('tbody');
     }
   }
-  if (!allTags.has('tr')) {
-    if (
-      allTags.has('td') ||
-      allTags.has('th') ||
-      (!allTags.has('tbody') &&
-        !allTags.has('thead') &&
-        !allTags.has('tfoot') &&
-        !allTags.has('colgroup') &&
-        !allTags.has('caption') &&
-        !allTags.has('table'))
-    ) {
+  if (
+    !allTags.has('table') &&
+    !allTags.has('tbody') &&
+    !allTags.has('thead') &&
+    !allTags.has('tfoot') &&
+    !allTags.has('tr')
+  ) {
+    if (allTags.has('td') || allTags.has('th') || (!allTags.has('colgroup') && !allTags.has('caption'))) {
       outerAncestors.push('tr');
     }
   }
@@ -366,7 +373,7 @@ function balanceTableFragment(fragment: string): string {
  * or `-1` if the table was cut off before its closing `</table>` tag.
  */
 function findMatchingTableEnd(segment: string, startIdx: number): number {
-  const tableTagRe = /<(\/?)table(?:\s+[^>]*=[^>]*|\s+hidden\b|\s*)>/g;
+  const tableTagRe = /<(\/?)table(?:\s+(?:[^>="'\s]+=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)|hidden\b))*\s*>/g;
   tableTagRe.lastIndex = startIdx;
   let depth = 0;
   let m: RegExpExecArray | null;
@@ -393,8 +400,7 @@ function appendBalancedBlock(out: string, headerPrefix: string, balancedTable: s
 
 /**
  * Unwraps `<madcap:conditionaltext>` tags and repairs complete and chunk-split HTML tables outside
- * fenced code blocks and inline code spans so manual tables render cleanly in both `Markdown` and
- * `CitationModal`.
+ * fenced code blocks and inline code spans so cited manual passages render cleanly in `CitationModal`.
  */
 export function balanceHtmlTables(text: string): string {
   return mapOutsideRegions(text, MD_CODE_REGIONS, (rawSegment) => {
@@ -471,8 +477,10 @@ export function balanceHtmlTables(text: string): string {
 }
 
 /**
- * Shared pre-parse Markdown normalization pipeline used by both `cleanPassage` (`sectionView.ts`)
- * and `preprocessMarkdown` (`Markdown.tsx`).
+ * Pre-parse Markdown normalization pipeline used by `cleanPassage` (`sectionView.ts`) for raw
+ * `get_section` manual passages (which can start or end mid-table due to chunk splitting).
+ * Deliberately NOT run on assistant prose in `Markdown.tsx`, where inline mentions of `<td>` or
+ * `</p>` must remain literal text.
  */
 export function normalizeMarkdownText(text: string): string {
   let out = stripEmptyAnchorBookmarks(text);
@@ -515,6 +523,9 @@ const ALLOWED_TABLE_HAST_PROPS = new Set([
  */
 const STRUCTURAL_TABLE_TAGS = new Set(['table', 'colgroup', 'thead', 'tbody', 'tfoot', 'tr']);
 
+/** Recursion depth ceiling for HAST traversal and sanitization. */
+const MAX_HAST_DEPTH = 64;
+
 function isSafeHref(url: string): boolean {
   const trimmed = url.trim();
   return /^(?:https?:\/\/|mailto:|#|\/|\.\.?\/|[a-zA-Z0-9_.-]+(?:[/?#]|$))/i.test(trimmed);
@@ -529,7 +540,10 @@ function isSafeSrc(url: string): boolean {
  * Sanitizes a parsed HAST table subtree against `TABLE_HTML_TAGS`, `ALLOWED_TABLE_HAST_PROPS`,
  * URL scheme allowlists, and React 19 structural table whitespace rules.
  */
-function sanitizeTableHast(nodes: HastNode[], parentTag?: string): HastNode[] {
+function sanitizeTableHast(nodes: HastNode[], parentTag?: string, depth = 0): HastNode[] {
+  if (depth >= MAX_HAST_DEPTH) {
+    return [];
+  }
   const out: HastNode[] = [];
   for (const node of nodes) {
     if (node.type === 'text') {
@@ -569,7 +583,7 @@ function sanitizeTableHast(nodes: HastNode[], parentTag?: string): HastNode[] {
       }
     }
 
-    const children = node.children ? sanitizeTableHast(node.children, tag) : [];
+    const children = node.children ? sanitizeTableHast(node.children, tag, depth + 1) : [];
     out.push({
       type: 'element',
       tagName: tag,
@@ -580,8 +594,8 @@ function sanitizeTableHast(nodes: HastNode[], parentTag?: string): HastNode[] {
   return out;
 }
 
-function walkHast(node: HastNode): void {
-  if (!Array.isArray(node.children)) {
+function walkHast(node: HastNode, depth = 0): void {
+  if (depth >= MAX_HAST_DEPTH || !Array.isArray(node.children)) {
     return;
   }
 
@@ -601,8 +615,12 @@ function walkHast(node: HastNode): void {
         i--;
         continue;
       }
-      if (isBalancedHtmlTableBlock(trimmed)) {
-        const parsed = fromHtml(escapeNonTableHtmlTags(trimmed), { fragment: true }) as unknown as HastNode;
+      const cleanedRaw = trimmed
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(MADCAP_CONDITIONAL_TAG_RE, '')
+        .trim();
+      if (isBalancedHtmlTableBlock(cleanedRaw)) {
+        const parsed = fromHtml(escapeNonTableHtmlTags(cleanedRaw), { fragment: true }) as unknown as HastNode;
         const sanitized = sanitizeTableHast(parsed.children ?? []);
         node.children.splice(i, 1, ...sanitized);
         i += sanitized.length - 1;
@@ -623,7 +641,7 @@ function walkHast(node: HastNode): void {
       }
     }
 
-    walkHast(child);
+    walkHast(child, depth + 1);
   }
 }
 
