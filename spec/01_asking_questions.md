@@ -14,7 +14,7 @@ behind it, and the work that produced it can be opened and read.
 | **Ask by typing** | The composer starts three rows high and grows with the text to a maximum of nine, with the Send button vertically centered on the right inside the input field. Enter inserts a new line, while Cmd+Enter (macOS) or Ctrl+Enter (Windows) sends. Backspace on an empty composer removes the attached playbook before any message is sent; once a message exists, the playbook is locked. |
 | **Attach images** | Attach up to five images (PNG, JPEG, WebP, GIF) using the attach button on the left of the toolbar, drag-and-drop, or clipboard paste. |
 | **Watch the answer being written** | Text and reasoning stream in as they are produced (in a multi-agent conversation, the lead's answer text is held back until the turn finishes). Until the first of either arrives, the answer shows *Working…*. |
-| **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
+| **Read a formatted answer** | Headings, tables, code blocks, mathematical formulas and drawn diagrams all render. HTML tables in imported passages — including split passages that start or end mid-table — are balanced and rendered as tables, while other markup an answer or passage quotes (an XML fragment, an angle-bracket placeholder, or a non-table HTML tag) is shown verbatim as text rather than stripped (HTML comments, empty bookmark anchors, and scraper copy-toolbar/line-number artifacts outside code are dropped instead). While the answer is still streaming a diagram shows as its source text and is drawn once the answer finishes. |
 | **Open the source behind a citation** | A source marker in the answer is a clickable pill; clicking it opens a *Citation source* panel containing the cited passage, fetched live from the server, with the section around it one click away. |
 | **See how the answer was produced** | One *Trace* line under every answer that had anything to show — *N steps · N tools · N corpus searches · N failed* plus the turn's token counts. Opening it lists every stretch of reasoning and every tool call in order; opening a step shows its arguments and its result. |
 | **Answer a clarifying question** | When the assistant needs more information a *Clarification required* card appears chronologically alongside the turn's prose in the order it occurred, with the question, any ready-made options (which may include descriptive details), and a free-text box. The composer is locked until it is answered, after which the card becomes *Clarification provided* with the answer, remaining in place alongside the turn's prose. |
@@ -188,7 +188,11 @@ behind it, and the work that produced it can be opened and read.
   confirming a claim from text the assistant never read.
 - **A passage split across parts is still shown alone.** Such a passage ends mid-content, but the
   assistant that cited it saw it end there too; padding it out with its sibling parts would hide a
-  real weakness in the citation rather than reveal one.
+  real weakness in the citation rather than reveal one. When a split passage cuts through an HTML
+  table, its missing opening or closing table tags are balanced at render time so the slice renders
+  as a table rather than an indented code block (repair is best-effort and corpus-scoped to lowercase
+  HTML table/cell tags; non-fenced indented code containing lowercase HTML closing tags like `</p>`
+  or `</td>` is therefore treated as a table fragment).
 - **A document-level citation names no passage**, so the whole section is shown with no context
   control — there is nothing to single out.
 - **The panel shows the document title and version**, from the section's own header. It still offers

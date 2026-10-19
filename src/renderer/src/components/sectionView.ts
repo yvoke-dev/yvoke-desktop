@@ -1,3 +1,5 @@
+import { normalizeMarkdownText } from './htmlTableRehype';
+
 /*
  * Splits a `get_section` result into the passages it is made of.
  *
@@ -79,13 +81,12 @@ function joinWrappedTableRows(md: string): string {
 
 /**
  * The section markdown carries invisible raw HTML (per-topic `<a id>` anchors and `<!-- … -->`
- * comments). react-markdown doesn't render HTML, so strip them rather than leaking literal tags.
+ * comments) as well as complete and chunk-split HTML tables from imported manuals. Normalize and
+ * balance those before trimming so passages render cleanly in CitationModal.
  */
 export function cleanPassage(md: string): string {
   const normalized = md.replace(/\r\n?/g, '\n');
-  return joinWrappedTableRows(normalized)
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<a\s+id="[^"]*"\s*\/?>(\s*<\/a>)?/g, '')
+  return normalizeMarkdownText(joinWrappedTableRows(normalized))
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }

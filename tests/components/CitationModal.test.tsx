@@ -152,4 +152,61 @@ describe('CitationModal', () => {
     expect(container.querySelector('.citation-section-heading')).toBeNull();
     expect(container.textContent).toContain('Getting Started');
   });
+
+  it('renders split HTML table passages ([e613e51c] part 7/11 and [3bbcf4ec] part 3/3) as HTML tables instead of code blocks', () => {
+    const e613e51c = 'e613e51c-725c-4b02-9b96-066a227319d5';
+    const servedPart7 = [
+      '# Section: One Identity Manager tools (part 7/11)',
+      '_(document: Target system synchronization  ·  tag: 9.3.1  ·  1 passage(s))_',
+      '',
+      `_(id=${e613e51c}  doc_id=${DOC})_`,
+      '> Section path: Target system synchronization > One Identity Manager tools (part 7/11)',
+      '### One Identity Manager tools (part 7/11)',
+      '',
+      '                            <p class="TableText">The Designer is the main tool for customizing One Identity Manager.</p>',
+      '                        </td>',
+      '                    </tr>',
+      '                    <tr class="TableStyle-ListTable-Body-Body1">',
+      '                        <td class="TableStyle-ListTable-BodyE-Column1-Body1">',
+      '                            <p class="TableText">Data Import</p>',
+      '                        </td>',
+      '                        <td class="TableStyle-ListTable-BodyD-Column1-Body1">',
+      '                            <p class="TableText">Imports data from CSV files.</p>',
+    ].join('\n');
+
+    const { container: c1 } = render(
+      <CitationModal state={{ loading: false, text: servedPart7, citedId: e613e51c }} onClose={noop} />,
+    );
+    expect(c1.querySelector('.citation-passage table')).not.toBeNull();
+    expect(c1.querySelector('.citation-passage table tr td')?.getAttribute('colspan')).toBe('2');
+    expect(c1.querySelector('.citation-passage .code-block-wrapper')).toBeNull();
+
+    const c3bbcf4ec = '3bbcf4ec-2211-4099-9111-112233445566';
+    const servedPart3 = [
+      '# Section: One Identity Manager users for managing resources (part 3/3)',
+      '_(document: Administration Guide  ·  tag: 9.3.1  ·  1 passage(s))_',
+      '',
+      `_(id=${c3bbcf4ec}  doc_id=${DOC})_`,
+      '> Section path: Users (part 3/3)',
+      '### One Identity Manager users for managing resources (part 3/3)',
+      '',
+      '                                    <p class="TableText">Create system users for synchronization.</p>',
+      '                                </li>',
+      '                            </ul>',
+      '                        </td>',
+      '                    </tr>',
+      '                </tbody>',
+      '            </table>',
+    ].join('\n');
+
+    const { container: c2 } = render(
+      <CitationModal state={{ loading: false, text: servedPart3, citedId: c3bbcf4ec }} onClose={noop} />,
+    );
+    expect(c2.querySelector('.citation-passage table')).not.toBeNull();
+    expect(c2.querySelector('.citation-passage table ul li')?.textContent).toContain(
+      'Create system users for synchronization.',
+    );
+    expect(c2.querySelector('.citation-passage .code-block-wrapper')).toBeNull();
+  });
 });
+

@@ -28,6 +28,7 @@ vi.mock('mermaid', () => ({
 }));
 
 import { Markdown } from '../../src/renderer/src/components/Markdown';
+import { cleanPassage } from '../../src/renderer/src/components/sectionView';
 
 afterEach(() => {
   cleanup();
@@ -427,4 +428,330 @@ describe('Mermaid diagram copy and zoom buttons', () => {
     expect(screen.queryByRole('dialog', { name: 'Diagram preview' })).toBeNull();
   });
 });
+
+describe('HTML tables, split table fragments, and MadCap artifacts', () => {
+  it('renders a complete HTML table with caption, colgroup, thead, tbody, comments, and madcap:conditionaltext', () => {
+    const md = [
+      '<table class="TableStyle-ListTable" cellspacing="0">',
+      '  <!-- comment immediately after table opener -->',
+      '  <madcap:conditionaltext data-mc-conditions="Default.ScreenOnly">',
+      '    <caption><span>Table 1: </span><span>Tools overview</span></caption>',
+      '  </madcap:conditionaltext>',
+      '  <colgroup><col /><col /></colgroup>',
+      '  <thead>',
+      '    <tr><th>Tool</th><th>Purpose</th></tr>',
+      '  </thead>',
+      '  <tbody>',
+      '    <tr>',
+      '      <td><p>Designer [274b9610-9148-4621-a5a1-089e807210c1]</p></td>',
+      '      <td><madcap:conditionaltext data-mc-conditions="Default.Print">Schema editor</madcap:conditionaltext></td>',
+      '    </tr>',
+      '  </tbody>',
+      '</table>',
+    ].join('\n');
+
+    const onCitation = vi.fn();
+    const { container } = render(<Markdown content={md} onCitation={onCitation} />);
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(table?.querySelector('caption')?.textContent).toBe('Table 1: Tools overview');
+    expect(table?.querySelectorAll('th')).toHaveLength(2);
+    expect(table?.querySelectorAll('td')).toHaveLength(2);
+    expect(table?.textContent).toContain('Schema editor');
+    expect(container.querySelector('madcap\\:conditionaltext')).toBeNull();
+    // Citation inside table cell is still interactive because rehypeHtmlTables runs before rehypeCitations
+    const pill = screen.getByRole('button', { name: '[274b9610]' });
+    fireEvent.click(pill);
+    expect(onCitation).toHaveBeenCalledWith({ id: '274b9610-9148-4621-a5a1-089e807210c1' });
+  });
+
+  it('renders a mid-table split chunk ([e613e51c] part 7/11 shape) via cleanPassage as a table with colSpan={2} and zero code blocks', () => {
+    const md = [
+      '> Section path: Target system synchronization > One Identity Manager tools (part 7/11)',
+      '### One Identity Manager tools (part 7/11)',
+      '',
+      '                            <p class="TableText">The Designer is the main tool for customizing One Identity Manager.</p>',
+      '                        </td>',
+      '                    </tr>',
+      '                    <tr class="TableStyle-ListTable-Body-Body1">',
+      '                        <td class="TableStyle-ListTable-BodyE-Column1-Body1">',
+      '                            <p class="TableText">Data Import</p>',
+      '                        </td>',
+      '                        <td class="TableStyle-ListTable-BodyD-Column1-Body1">',
+      '                            <p class="TableText">Imports CSV files.</p>',
+    ].join('\n');
+
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
+    expect(container.querySelector('h3')?.textContent).toBe('One Identity Manager tools (part 7/11)');
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(container.querySelector('.code-block-wrapper')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
+    const firstTd = table?.querySelector('tr td');
+    expect(firstTd?.getAttribute('colspan')).toBe('2');
+    expect(firstTd?.textContent).toContain('The Designer is the main tool');
+  });
+
+  it('renders a tail split chunk ([3bbcf4ec] part 3/3 shape) via cleanPassage and preserves trailing Related topics markdown', () => {
+    const md = [
+      '> Section path: Managing resources (part 3/3)',
+      '### One Identity Manager users for managing resources (part 3/3)',
+      '',
+      '                                    <p class="TableText">Create system users and assign permissions.</p>',
+      '                                </li>',
+      '                                <li>',
+      '                                    <p class="TableText">Maintain password policies.</p>',
+      '                                </li>',
+      '                            </ul>',
+      '                        </td>',
+      '                    </tr>',
+      '                </tbody>',
+      '            </table>',
+      '',
+      '###### Related topics',
+      '',
+      '- [Using system users](https://example.com/system-users)',
+    ].join('\n');
+
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
+    expect(container.querySelector('table')).not.toBeNull();
+    expect(container.querySelectorAll('table li')).toHaveLength(2);
+    expect(container.querySelector('h6')?.textContent).toBe('Related topics');
+    expect(container.querySelector('a[href="https://example.com/system-users"]')?.textContent).toBe('Using system users');
+    expect(container.querySelector('.code-block-wrapper')).toBeNull();
+  });
+
+  it('renders a mid-list split chunk (part 3/11 shape) via cleanPassage with reconstructed ul/td/tr/tbody/table ancestors', () => {
+    const md = [
+      '### One Identity Manager tools (part 3/11)',
+      '',
+      '                                <li>',
+      '                                    <p class="TableText">Changing your own main data</p>',
+      '                                </li>',
+      '                            </ul>',
+      '                        </td>',
+      '                    </tr>',
+      '                    <tr>',
+      '                        <td><p>Launchpad</p></td>',
+      '                        <td><p>Starts apps</p></td>',
+      '                    </tr>',
+    ].join('\n');
+
+    const { container } = render(<Markdown content={cleanPassage(md)} />);
+    const table = container.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(table?.querySelector('tr td')?.getAttribute('colspan')).toBe('2');
+    expect(table?.querySelector('tr td ul li')?.textContent).toContain('Changing your own main data');
+  });
+
+  it('renders a head split chunk (part 2/11 shape) via cleanPassage cleanly for both live={false} and live={true}', () => {
+    const truncated = cleanPassage(
+      [
+        '<table class="TableStyle-ListTable">',
+        '  <thead><tr><th>Tool</th><th>Features</th></tr></thead>',
+        '  <tbody>',
+        '    <tr>',
+        '      <td><p>Manager</p></td>',
+        '      <td><ul><li><p>Master data administration',
+      ].join('\n'),
+    );
+
+    const { container: c1 } = render(<Markdown content={truncated} live={false} />);
+    expect(c1.querySelector('table')).not.toBeNull();
+    expect(c1.querySelector('table li')?.textContent).toContain('Master data administration');
+
+    const { container: c2 } = render(<Markdown content={truncated} live={true} />);
+    expect(c2.querySelector('table')).not.toBeNull();
+    expect(c2.querySelector('table li')?.textContent).toContain('Master data administration');
+  });
+
+  it('strips leading orphan closing tags in cleanPassage so they do not mint an empty phantom row', () => {
+    const md = cleanPassage('</td>\n</tr>\n<tr><td><p>Tool A</p></td><td><p>Description A</p></td></tr></tbody></table>');
+    const { container } = render(<Markdown content={md} />);
+    expect(container.querySelectorAll('table tr')).toHaveLength(1);
+  });
+
+  it('preserves unknown XML tags and angle-bracket placeholders inside table cells as visible text', () => {
+    const md =
+      '<table><tbody><tr><td><p>Specify <condition>, <column name>, <form name>, and <Class Name="Group">.</p></td></tr></tbody></table>';
+    const { container } = render(<Markdown content={md} />);
+    const cellText = container.querySelector('table td')?.textContent ?? '';
+    expect(cellText).toContain('<condition>');
+    expect(cellText).toContain('<column name>');
+    expect(cellText).toContain('<form name>');
+    expect(cellText).toContain('<Class Name="Group">');
+  });
+
+  it('keeps prose placeholders, inline HTML tag mentions, <code-execution> blocks, and uppercase XML outside tables as visible literal text', () => {
+    const md = [
+      '1. Select the **<table>** category.',
+      '',
+      'Use <table name>.<column name> in your query.',
+      '',
+      '<Key><T>DialogTable</T><P>RMB-T-Org</P></Key>',
+      '',
+      '<table><tbody><tr><td><p>Actual table</p></td></tr></tbody></table>',
+    ].join('\n');
+
+    const { container } = render(<Markdown content={md} />);
+    expect(container.querySelectorAll('table')).toHaveLength(1);
+    expect(container.querySelector('table td')?.textContent).toBe('Actual table');
+    expect(container.textContent).toContain('<table>');
+    expect(container.textContent).toContain('<table name>.<column name>');
+    expect(container.textContent).toContain('<Key><T>DialogTable</T><P>RMB-T-Org</P></Key>');
+
+    const { container: proseTd } = render(<Markdown content={'The <td> element holds a cell.\n\n- one\n- two'} />);
+    expect(proseTd.querySelector('table')).toBeNull();
+    expect(proseTd.querySelectorAll('ul li')).toHaveLength(2);
+    expect(proseTd.textContent).toContain('The <td> element holds a cell.');
+
+    const { container: proseClose } = render(
+      <Markdown content="In HTML, close the cell with </td> and the row with </tr>." />,
+    );
+    expect(proseClose.querySelector('table')).toBeNull();
+    expect(proseClose.textContent).toBe('In HTML, close the cell with </td> and the row with </tr>.');
+
+    const { container: proseTr } = render(<Markdown content="Wrap rows in <tr> tags." />);
+    expect(proseTr.querySelector('table')).toBeNull();
+    expect(proseTr.textContent).toBe('Wrap rows in <tr> tags.');
+
+    const { container: codeExec } = render(<Markdown content="<code-execution>output ends with </p></code-execution>" />);
+    expect(codeExec.querySelector('table')).toBeNull();
+    expect(codeExec.querySelector('blockquote')?.textContent).toContain('output ends with </p>');
+  });
+
+  it('preserves unquoted/boolean table attributes while stripping className, event handlers, style, data-*, <script>, and javascript: URLs', () => {
+    const md = [
+      '<table hidden class="TableStyle-ListTable">',
+      '  <tbody>',
+      '    <tr>',
+      '      <td colspan=2 nowrap class="banner error primary" onclick="alert(1)" style="color:red" data-mc-conditions="X">',
+      '        <p>Safe cell</p>',
+      '        <a href="javascript:alert(1)">Bad link</a>',
+      '        <a href="https://example.com/docs">Good link</a>',
+      '        <img src="javascript:alert(1)" onerror="alert(1)" alt="bad" />',
+      '        <script>alert(1)</script>',
+      '      </td>',
+      '    </tr>',
+      '  </tbody>',
+      '</table>',
+    ].join('\n');
+
+    const { container } = render(<Markdown content={md} />);
+    const td = container.querySelector('table td');
+    expect(td).not.toBeNull();
+    expect(td?.getAttribute('colspan')).toBe('2');
+    expect(td?.getAttribute('class')).toBeNull();
+    expect(td?.getAttribute('onclick')).toBeNull();
+    expect(td?.getAttribute('style')).toBeNull();
+    expect(td?.getAttribute('data-mc-conditions')).toBeNull();
+    expect(container.querySelector('script')).toBeNull();
+    const links = container.querySelectorAll('table a');
+    expect(links[0]?.getAttribute('href')).toBeNull();
+    expect(links[1]?.getAttribute('href')).toBe('https://example.com/docs');
+    const img = container.querySelector('table img');
+    expect(img?.getAttribute('src')).toBeNull();
+    expect(img?.getAttribute('onerror')).toBeNull();
+  });
+
+  it('strips fused 1..N line-number gutters with nbsp/4-space indent while preserving unindented numbered code blocks', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    const md = cleanPassage(
+      [
+        'Copy',
+        '',
+        'Example',
+        '',
+        '```vb',
+        '1',
+        '2',
+        '3',
+        '\u00a0\u00a0\u00a0\u00a0Public Sub Test()',
+        '\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0Dim x As Integer = 1',
+        '\u00a0\u00a0\u00a0\u00a0End Sub',
+        '```',
+      ].join('\n'),
+    );
+
+    const { container } = render(<Markdown content={md} />);
+    expect(container.textContent).not.toContain('Example');
+    const code = container.querySelector('pre code')?.textContent ?? '';
+    expect(code).toBe('Public Sub Test()\n    Dim x As Integer = 1\nEnd Sub\n');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith('Public Sub Test()\n    Dim x As Integer = 1\nEnd Sub'),
+    );
+
+    const { container: singleOne } = render(<Markdown content={'```\n1\nfoo()\n```'} />);
+    expect(singleOne.querySelector('pre code')?.textContent).toBe('1\nfoo()\n');
+
+    const { container: nonSeq } = render(<Markdown content={'```\n1\n3\nfoo()\n```'} />);
+    expect(nonSeq.querySelector('pre code')?.textContent).toBe('1\n3\nfoo()\n');
+
+    const { container: unindentedSeq } = render(
+      <Markdown content={'```text\n1\n2\n3\n4\nactual content\n```'} />,
+    );
+    expect(unindentedSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n4\nactual content\n');
+
+    const { container: indentedAsciiMismatch } = render(
+      <Markdown content={'```text\n1\n2\n3\n    indented line\n```'} />,
+    );
+    expect(indentedAsciiMismatch.querySelector('pre code')?.textContent).toBe('1\n2\n3\n    indented line\n');
+
+    const { container: indentedAsciiMatchingGutter } = render(
+      <Markdown content={'```sql\n1\n2\n3\n    SELECT *\n    FROM DialogTable\n    WHERE x = 1\n```'} />,
+    );
+    expect(indentedAsciiMatchingGutter.querySelector('pre code')?.textContent).toBe(
+      'SELECT *\nFROM DialogTable\nWHERE x = 1\n',
+    );
+  });
+
+  it('renders both the code block and the table when a fence is adjacent to a split table fragment, and renders inline backticks inside table cells as <code>', () => {
+    const fenceThenFragment = cleanPassage(
+      [
+        '### Configure (part 4/9)',
+        '',
+        '```sql',
+        'SELECT 1;',
+        '```',
+        '',
+        '                            <p class="TableText">Designer</p>',
+        '                        </td>',
+        '                    </tr>',
+      ].join('\n'),
+    );
+    const { container: c1 } = render(<Markdown content={fenceThenFragment} />);
+    expect(c1.querySelector('pre code')?.textContent).toBe('SELECT 1;\n');
+    expect(c1.querySelectorAll('table')).toHaveLength(1);
+    expect(c1.querySelector('table td')?.textContent).toContain('Designer');
+
+    const fragmentThenFence = cleanPassage(
+      [
+        '                            <p class="TableText">Designer</p>',
+        '                        </td>',
+        '                    </tr>',
+        '',
+        '```sql',
+        'SELECT 1;',
+        '```',
+      ].join('\n'),
+    );
+    const { container: c2 } = render(<Markdown content={fragmentThenFence} />);
+    expect(c2.querySelectorAll('table')).toHaveLength(1);
+    expect(c2.querySelector('table td')?.textContent).toContain('Designer');
+    expect(c2.querySelector('pre code')?.textContent).toBe('SELECT 1;\n');
+
+    const tableWithBackticks = cleanPassage(
+      '<table><tbody><tr><td><p>Run `cmd`, `<td>`, and `&lt;td&gt;` now.</p></td></tr></tbody></table>',
+    );
+    const { container: c3 } = render(<Markdown content={tableWithBackticks} />);
+    expect(c3.querySelectorAll('table')).toHaveLength(1);
+    const codeNodes = Array.from(c3.querySelectorAll('table td code')).map((el) => el.textContent);
+    expect(codeNodes).toEqual(['cmd', '<td>', '&lt;td&gt;']);
+  });
+});
+
 
