@@ -91,9 +91,8 @@ export function stripCodeSnippetCopyButtons(text: string): string {
 /**
  * Strips a MadCap Flare `<span class="codeSnippetLineNumbers">` line-number gutter (`1\n2\n…\nN`)
  * fused onto the top of a `<pre><code>` block during HTML-to-Markdown conversion when accompanied
- * by corroborating MadCap evidence (either `\u00a0` non-breaking space indentation or a `>= 4`-space
- * common leading indent on the following code lines), normalizes `\u00a0` to ASCII spaces, and
- * removes common leading indentation on the remaining code lines.
+ * by MadCap's `\u00a0` non-breaking space indentation on the following code lines, normalizes
+ * `\u00a0` to ASCII spaces, and removes common leading indentation on the remaining code lines.
  */
 export function stripCodeLineNumberGutter(text: string): string {
   const lines = text.split('\n');
@@ -111,12 +110,12 @@ export function stripCodeLineNumberGutter(text: string): string {
   }
 
   const hasNbsp = codeLines.some((l) => l.includes('\u00a0'));
+  if (!hasNbsp) {
+    return text;
+  }
   const normalized = codeLines.map((l) => l.replace(/\u00a0/g, ' '));
   const nonEmpty = normalized.filter((l) => l.trim().length > 0);
   const minIndent = Math.min(...nonEmpty.map((l) => (l.match(/^[ \t]*/) ?? [''])[0].length));
-  if (!hasNbsp && minIndent < 4) {
-    return text.replace(/\u00a0/g, ' ');
-  }
   return normalized.map((l) => (l.trim().length > 0 ? l.slice(minIndent) : '')).join('\n');
 }
 
@@ -280,7 +279,7 @@ function applyLeadingPartialRowColspan(tableHtml: string): string {
  * leading row `colspan`, and collapsing internal blank lines so CommonMark parses the table as a
  * single HTML block at column 0.
  */
-function balanceTableFragment(fragment: string): string {
+function balanceTableFragment(fragment: string, codeSpans: string[]): string {
   const cleaned = fragment.replace(LEADING_EMPTY_CLOSERS_RE, '');
   const openStack: string[] = [];
   const unmatchedClosers: string[] = [];
@@ -365,6 +364,11 @@ function balanceTableFragment(fragment: string): string {
   if (unmatchedClosers.includes('tr')) {
     balanced = applyLeadingPartialRowColspan(balanced);
   }
+  // Restore any inline code spans inside the balanced HTML table with `<` and `>` escaped so
+  // `fromHtml` does not parse backticked tag names (`<td>`, `</td>`) inside a cell as real HTML.
+  balanced = balanced.replace(/\uE000CS(\d+)\uE001/g, (_m, idx: string) =>
+    (codeSpans[Number(idx)] ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+  );
   return balanced.replace(/\r?\n(?:[ \t]*\r?\n)+/g, '\n');
 }
 
@@ -401,13 +405,29 @@ function appendBalancedBlock(out: string, headerPrefix: string, balancedTable: s
 /**
  * Unwraps `<madcap:conditionaltext>` tags and repairs complete and chunk-split HTML tables outside
  * fenced code blocks and inline code spans so cited manual passages render cleanly in `CitationModal`.
+ *
+ * Splits on `MD_FENCE` (preserving blank-line separation when a balanced table is adjacent to a
+ * code fence) and masks `MD_CODE_SPAN` with placeholders before balancing so inline backticks inside
+ * a table cell never split the table in two.
  */
 export function balanceHtmlTables(text: string): string {
-  return mapOutsideRegions(text, MD_CODE_REGIONS, (rawSegment) => {
-    const segment = rawSegment.replace(MADCAP_CONDITIONAL_TAG_RE, '');
+  return mapOutsideRegions(text, MD_FENCE, (rawSegment) => {
+    const codeSpans: string[] = [];
+    const maskedSegment = rawSegment.replace(MD_CODE_SPAN, (m) => {
+      const idx = codeSpans.length;
+      codeSpans.push(m);
+      return `\uE000CS${idx}\uE001`;
+    });
+    const unmaskSpans = (s: string): string =>
+      s.replace(/\uE000CS(\d+)\uE001/g, (_m, idx: string) => codeSpans[Number(idx)] ?? '');
+
+    const segment = maskedSegment.replace(MADCAP_CONDITIONAL_TAG_RE, '');
     if (!TABLE_FRAGMENT_DETECTOR_RE.test(segment)) {
-      return segment;
+      return unmaskSpans(segment);
     }
+
+    const hasLeadingNewline = /^[ \t]*\r?\n/.test(rawSegment);
+    const hasTrailingNewline = /\r?\n[ \t]*$/.test(rawSegment);
 
     let out = '';
     let pos = 0;
@@ -422,7 +442,7 @@ export function balanceHtmlTables(text: string): string {
         const headerMatch = beforeClose.match(LEADING_MD_HEADER_RE);
         const headerPrefix = headerMatch ? headerMatch[0] : '';
         const frag = beforeClose.slice(headerPrefix.length);
-        out = appendBalancedBlock(out, headerPrefix, balanceTableFragment(frag));
+        out = appendBalancedBlock(out, headerPrefix, balanceTableFragment(frag, codeSpans));
         pos += beforeClose.length;
         const afterClose = segment.slice(pos);
         if (afterClose.trim().length > 0) {
@@ -442,7 +462,7 @@ export function balanceHtmlTables(text: string): string {
         const tableEnd = findMatchingTableEnd(segment, tableStart);
         if (tableEnd !== -1) {
           const frag = segment.slice(tableStart, tableEnd);
-          out = appendBalancedBlock(out, '', balanceTableFragment(frag));
+          out = appendBalancedBlock(out, '', balanceTableFragment(frag, codeSpans));
           pos = tableEnd;
           const afterTable = segment.slice(pos);
           if (afterTable.trim().length > 0) {
@@ -454,7 +474,7 @@ export function balanceHtmlTables(text: string): string {
           }
         } else {
           const frag = segment.slice(tableStart);
-          out = appendBalancedBlock(out, '', balanceTableFragment(frag));
+          out = appendBalancedBlock(out, '', balanceTableFragment(frag, codeSpans));
           pos = segment.length;
         }
         continue;
@@ -465,14 +485,21 @@ export function balanceHtmlTables(text: string): string {
         const headerMatch = rest.match(LEADING_MD_HEADER_RE);
         const headerPrefix = headerMatch ? headerMatch[0] : '';
         const frag = rest.slice(headerPrefix.length);
-        out = appendBalancedBlock(out, headerPrefix, balanceTableFragment(frag));
+        out = appendBalancedBlock(out, headerPrefix, balanceTableFragment(frag, codeSpans));
         break;
       }
 
       out += rest;
       break;
     }
-    return out;
+
+    if (hasLeadingNewline && !/^\r?\n/.test(out)) {
+      out = `\n\n${out}`;
+    }
+    if (hasTrailingNewline && !/\r?\n$/.test(out)) {
+      out = `${out}\n\n`;
+    }
+    return unmaskSpans(out);
   });
 }
 
@@ -541,6 +568,7 @@ function isSafeSrc(url: string): boolean {
  * URL scheme allowlists, and React 19 structural table whitespace rules.
  */
 function sanitizeTableHast(nodes: HastNode[], parentTag?: string, depth = 0): HastNode[] {
+  // Subtrees nested beyond MAX_HAST_DEPTH (64) are intentionally dropped as a defense-in-depth cap.
   if (depth >= MAX_HAST_DEPTH) {
     return [];
   }
@@ -620,10 +648,14 @@ function walkHast(node: HastNode, depth = 0): void {
         .replace(MADCAP_CONDITIONAL_TAG_RE, '')
         .trim();
       if (isBalancedHtmlTableBlock(cleanedRaw)) {
-        const parsed = fromHtml(escapeNonTableHtmlTags(cleanedRaw), { fragment: true }) as unknown as HastNode;
-        const sanitized = sanitizeTableHast(parsed.children ?? []);
-        node.children.splice(i, 1, ...sanitized);
-        i += sanitized.length - 1;
+        try {
+          const parsed = fromHtml(escapeNonTableHtmlTags(cleanedRaw), { fragment: true }) as unknown as HastNode;
+          const sanitized = sanitizeTableHast(parsed.children ?? []);
+          node.children.splice(i, 1, ...sanitized);
+          i += sanitized.length - 1;
+        } catch {
+          // Leave pathologically nested raw HTML as literal text if parse5 throws RangeError.
+        }
         continue;
       }
       continue;

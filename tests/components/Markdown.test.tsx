@@ -695,6 +695,54 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
       <Markdown content={'```text\n1\n2\n3\n4\nactual content\n```'} />,
     );
     expect(unindentedSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n4\nactual content\n');
+
+    const { container: indentedAsciiSeq } = render(
+      <Markdown content={'```text\n1\n2\n3\n    indented line\n```'} />,
+    );
+    expect(indentedAsciiSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n    indented line\n');
+  });
+
+  it('renders both the code block and the table when a fence is adjacent to a split table fragment, and keeps tables with inline backticks whole', () => {
+    const fenceThenFragment = cleanPassage(
+      [
+        '### Configure (part 4/9)',
+        '',
+        '```sql',
+        'SELECT 1;',
+        '```',
+        '',
+        '                            <p class="TableText">Designer</p>',
+        '                        </td>',
+        '                    </tr>',
+      ].join('\n'),
+    );
+    const { container: c1 } = render(<Markdown content={fenceThenFragment} />);
+    expect(c1.querySelector('pre code')?.textContent).toBe('SELECT 1;\n');
+    expect(c1.querySelectorAll('table')).toHaveLength(1);
+    expect(c1.querySelector('table td')?.textContent).toContain('Designer');
+
+    const fragmentThenFence = cleanPassage(
+      [
+        '                            <p class="TableText">Designer</p>',
+        '                        </td>',
+        '                    </tr>',
+        '',
+        '```sql',
+        'SELECT 1;',
+        '```',
+      ].join('\n'),
+    );
+    const { container: c2 } = render(<Markdown content={fragmentThenFence} />);
+    expect(c2.querySelectorAll('table')).toHaveLength(1);
+    expect(c2.querySelector('table td')?.textContent).toContain('Designer');
+    expect(c2.querySelector('pre code')?.textContent).toBe('SELECT 1;\n');
+
+    const tableWithBackticks = cleanPassage(
+      '<table><tbody><tr><td><p>Run `cmd` now.</p></td></tr></tbody></table>',
+    );
+    const { container: c3 } = render(<Markdown content={tableWithBackticks} />);
+    expect(c3.querySelectorAll('table')).toHaveLength(1);
+    expect(c3.querySelector('table td')?.textContent).toBe('Run `cmd` now.');
   });
 });
 

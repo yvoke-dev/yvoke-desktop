@@ -222,5 +222,51 @@ describe('cleanPassage', () => {
     expect(onceXml).toContain('</tbody></table>');
     expect(cleanPassage(onceXml)).toBe(onceXml);
   });
+
+  it('keeps blank-line separation when a fenced code block is adjacent to a split table fragment in either order', () => {
+    const fenceThenFragment = [
+      '### Configure (part 4/9)',
+      '',
+      '```sql',
+      'SELECT 1;',
+      '```',
+      '',
+      '                            <p class="TableText">Designer</p>',
+      '                        </td>',
+      '                    </tr>',
+    ].join('\n');
+    const cleanedFenceFirst = cleanPassage(fenceThenFragment);
+    expect(cleanedFenceFirst).not.toContain('```<table>');
+    expect(cleanedFenceFirst).toContain('```\n\n<table><tbody><tr><td><p class="TableText">Designer</p>');
+
+    const fragmentThenFence = [
+      '                            <p class="TableText">Designer</p>',
+      '                        </td>',
+      '                    </tr>',
+      '',
+      '```sql',
+      'SELECT 1;',
+      '```',
+    ].join('\n');
+    const cleanedFragmentFirst = cleanPassage(fragmentThenFence);
+    expect(cleanedFragmentFirst).not.toContain('</table>```');
+    expect(cleanedFragmentFirst).toContain('</table>\n\n```sql\nSELECT 1;\n```');
+  });
+
+  it('keeps a table or split table fragment whole when a cell contains inline backtick code spans', () => {
+    const completeWithBackticks = '<table><tbody><tr><td><p>Run `cmd` now.</p></td></tr></tbody></table>';
+    expect(cleanPassage(completeWithBackticks)).toBe(completeWithBackticks);
+
+    const splitWithBackticks = [
+      '                            <p class="TableText">Run `cmd` and `<td>` now.</p>',
+      '                        </td>',
+      '                    </tr>',
+    ].join('\n');
+    const cleanedSplit = cleanPassage(splitWithBackticks);
+    expect(cleanedSplit.match(/<table\b/g)).toHaveLength(1);
+    expect(cleanedSplit).toBe(
+      '<table><tbody><tr><td><p class="TableText">Run `cmd` and `&lt;td&gt;` now.</p>\n                        </td>\n                    </tr></tbody></table>',
+    );
+  });
 });
 
