@@ -117,4 +117,103 @@ describe('cleanPassage', () => {
     const md = '| A | B |\n| --- | --- |\n| x | first\nsecond |';
     expect(cleanPassage(md)).toBe('| A | B |\n| --- | --- |\n| x | first second |');
   });
+
+  it('balances a mid-table split HTML fragment and applies leading partial-row colspan', () => {
+    const splitPart7 = [
+      '> Section path: Target system synchronization > One Identity Manager tools (part 7/11)',
+      '### One Identity Manager tools (part 7/11)',
+      '',
+      '                            <p class="TableText">Designer is the main tool for customizing One Identity Manager.</p>',
+      '                        </td>',
+      '                    </tr>',
+      '                    <tr class="TableStyle-ListTable-Body-Body1">',
+      '                        <td class="TableStyle-ListTable-BodyE-Column1-Body1">',
+      '                            <p class="TableText">Data Import</p>',
+      '                        </td>',
+      '                        <td class="TableStyle-ListTable-BodyD-Column1-Body1">',
+      '                            <p class="TableText">Imports CSV data.</p>',
+    ].join('\n');
+    const cleaned = cleanPassage(splitPart7);
+    expect(cleaned).toContain('### One Identity Manager tools (part 7/11)');
+    expect(cleaned).toContain('<table><tbody><tr><td colspan="2">');
+    expect(cleaned.trim().endsWith('</p></td></tr></tbody></table>')).toBe(true);
+  });
+
+  it('strips leading orphan closing tags at the start of a split chunk without minting a phantom row', () => {
+    const fragment = '</td>\n</tr>\n<tr><td><p>Tool A</p></td><td><p>Description A</p></td></tr></tbody></table>';
+    const cleaned = cleanPassage(fragment);
+    expect(cleaned).toBe('<table><tbody><tr><td><p>Tool A</p></td><td><p>Description A</p></td></tr></tbody></table>');
+  });
+
+  it('wraps a mid-cell split chunk containing only indented <p> and <ul><li> with internal blank lines', () => {
+    const midCell = [
+      '### Tool details (part 5/11)',
+      '',
+      '                                <p class="TableText">First paragraph.</p>',
+      '',
+      '                                <p class="TableText">Second paragraph.</p>',
+      '                                <ul>',
+      '                                    <li><p class="TableText">Bullet one</p>',
+    ].join('\n');
+    const cleaned = cleanPassage(midCell);
+    expect(cleaned).toContain('<table><tbody><tr><td>');
+    expect(cleaned).not.toMatch(/<table>[\s\S]*\n\n[\s\S]*<\/table>/);
+    expect(cleaned.trim().endsWith('</p></li></ul></td></tr></tbody></table>')).toBe(true);
+  });
+
+  it('leaves multi-line fenced code blocks and single/multi-backtick inline code untouched while balancing real tables', () => {
+    const md = [
+      'Inline `</td></tr>` and `` `</td></tr>` `` and `` a`<td>`b `` and `` a`<a id="x"></a>`b ``.',
+      '',
+      '```html',
+      '<tr>',
+      '<a id="x"></a><td>x</td></tr>',
+      '<!-- comment -->',
+      '```',
+      '',
+      '<table><tbody><tr><td><p>Real table cell</p>',
+    ].join('\n');
+    const cleaned = cleanPassage(md);
+    expect(cleaned).toContain('`</td></tr>`');
+    expect(cleaned).toContain('`` `</td></tr>` ``');
+    expect(cleaned).toContain('`` a`<td>`b ``');
+    expect(cleaned).toContain('`` a`<a id="x"></a>`b ``');
+    expect(cleaned).toContain('```html\n<tr>\n<a id="x"></a><td>x</td></tr>\n<!-- comment -->\n```');
+    expect(cleaned).toContain('<table><tbody><tr><td><p>Real table cell</p></td></tr></tbody></table>');
+  });
+
+  it('strips standalone MadCap Copy lines and the 4 corpus captions before fences, but keeps arbitrary lines', () => {
+    const directCopy = 'Intro\nCopy\n```sql\nSELECT 1\n```';
+    expect(cleanPassage(directCopy)).toBe('Intro\n```sql\nSELECT 1\n```');
+
+    const blankCopy = 'Intro\nCopy\n\n```sql\nSELECT 1\n```';
+    expect(cleanPassage(blankCopy)).toBe('Intro\n```sql\nSELECT 1\n```');
+
+    for (const caption of [
+      'Example',
+      'Example of a multi-line statement',
+      'Schema extension file structure',
+      'Script structure',
+    ]) {
+      const withCaption = `Intro\nCopy\n\n${caption}\n\n\`\`\`vb\nDim x As Integer\n\`\`\``;
+      expect(cleanPassage(withCaption)).toBe(`Intro\n\`\`\`vb\nDim x As Integer\n\`\`\``);
+    }
+
+    const arbitraryLine = 'Intro\nCopy\nArbitrary line not a caption\n```sql\nSELECT 1\n```';
+    expect(cleanPassage(arbitraryLine)).toContain('Copy\nArbitrary line not a caption');
+  });
+
+  it('is idempotent across split fragments and tables with unknown XML / placeholders', () => {
+    const splitSample = '### Part 7\n\n                            <p>Designer</p></td></tr><tr><td><p>A</p></td><td><p>B</p>';
+    const onceSplit = cleanPassage(splitSample);
+    expect(onceSplit).toContain('<table><tbody><tr><td colspan="2"><p>Designer</p></td></tr>');
+    expect(onceSplit.trim().endsWith('<td><p>B</p></td></tr></tbody></table>')).toBe(true);
+    expect(cleanPassage(onceSplit)).toBe(onceSplit);
+
+    const xmlSample = '<table><tbody><tr><td><p>Specify <condition>, <column name>, and <Class Name="Group">.</p>';
+    const onceXml = cleanPassage(xmlSample);
+    expect(onceXml).toContain('</tbody></table>');
+    expect(cleanPassage(onceXml)).toBe(onceXml);
+  });
 });
+

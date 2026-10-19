@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import mermaid from 'mermaid';
 import type { CitationRef } from '../../../shared/types';
 import { rehypeCitations } from './citationRehype';
+import { normalizeMarkdownText, rehypeHtmlTables } from './htmlTableRehype';
 import { CopyButton, CopyImageButton, copySvgAsPng } from './CopyButton';
 import { MaximizeIcon } from './icons';
 import { DiagramModal } from './DiagramModal';
@@ -215,9 +216,10 @@ function Mermaid({ chart }: { chart: string }): React.JSX.Element {
  * fenced block came out as a mangled link.
  */
 function preprocessMarkdown(md: string): string {
-  return md.replace(/<code-execution>([\s\S]*?)<\/code-execution>/g, (_m, content) => {
+  const withCodeExec = md.replace(/<code-execution>([\s\S]*?)<\/code-execution>/g, (_m, content) => {
     return `\n\n> **Code execution**\n>\n${content.trim().split('\n').map((line: string) => `> ${line}`).join('\n')}\n\n`;
   });
+  return normalizeMarkdownText(withCodeExec);
 }
 
 function parseCitationHref(href: string): CitationRef {
@@ -304,7 +306,7 @@ export const Markdown = React.memo(function Markdown(props: {
     <div className="markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={onCitation ? [rehypeKatex, rehypeCitations] : [rehypeKatex]}
+        rehypePlugins={onCitation ? [rehypeHtmlTables, rehypeKatex, rehypeCitations] : [rehypeHtmlTables, rehypeKatex]}
         // The private citation: scheme must be listed. defaultUrlTransform allows only
         // http/https/irc/ircs/mailto/xmpp and rewrites anything else to '', which would erase
         // every citation href and leave the `a` branch above unreachable. ([N] markers are plain

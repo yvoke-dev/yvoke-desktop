@@ -14,7 +14,7 @@
 - **@anthropic-ai/claude-agent-sdk**: Embedding local agent loop (upgraded to 0.3.295 / CLI 2.1.295; maps models to Anthropic 5.5 generation).
 - **@modelcontextprotocol/sdk**: Interfacing with MCP tools.
 - **@azure/msal-node**: Entra ID PKCE browser authentication.
-- **react-markdown** & **remark-gfm**: Rendering chat markdown inside components.
+- **react-markdown**, **remark-gfm** & **hast-util-from-html**: Rendering chat markdown and sanitized HTML tables inside components.
 
 ### Development & Build Tools
 - **electron-vite**: Specialized builder for Electron processes.
