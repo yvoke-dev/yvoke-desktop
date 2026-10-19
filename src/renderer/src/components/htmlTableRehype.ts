@@ -91,8 +91,9 @@ export function stripCodeSnippetCopyButtons(text: string): string {
 /**
  * Strips a MadCap Flare `<span class="codeSnippetLineNumbers">` line-number gutter (`1\n2\n…\nN`)
  * fused onto the top of a `<pre><code>` block during HTML-to-Markdown conversion when accompanied
- * by MadCap's `\u00a0` non-breaking space indentation on the following code lines, normalizes
- * `\u00a0` to ASCII spaces, and removes common leading indentation on the remaining code lines.
+ * by MadCap's `\u00a0` non-breaking space indentation (or an ASCII `>= 4`-space indent whose
+ * non-empty code line count matches the `1..N` gutter count), normalizes `\u00a0` to ASCII spaces,
+ * and removes common leading indentation on the remaining code lines.
  */
 export function stripCodeLineNumberGutter(text: string): string {
   const lines = text.split('\n');
@@ -110,12 +111,12 @@ export function stripCodeLineNumberGutter(text: string): string {
   }
 
   const hasNbsp = codeLines.some((l) => l.includes('\u00a0'));
-  if (!hasNbsp) {
-    return text;
-  }
   const normalized = codeLines.map((l) => l.replace(/\u00a0/g, ' '));
   const nonEmpty = normalized.filter((l) => l.trim().length > 0);
   const minIndent = Math.min(...nonEmpty.map((l) => (l.match(/^[ \t]*/) ?? [''])[0].length));
+  if (!hasNbsp && (minIndent < 4 || nonEmpty.length !== gutterCount)) {
+    return text;
+  }
   return normalized.map((l) => (l.trim().length > 0 ? l.slice(minIndent) : '')).join('\n');
 }
 
@@ -364,12 +365,28 @@ function balanceTableFragment(fragment: string, codeSpans: string[]): string {
   if (unmatchedClosers.includes('tr')) {
     balanced = applyLeadingPartialRowColspan(balanced);
   }
-  // Restore any inline code spans inside the balanced HTML table with `<` and `>` escaped so
-  // `fromHtml` does not parse backticked tag names (`<td>`, `</td>`) inside a cell as real HTML.
+  // Restore any inline code spans inside the balanced HTML table as `<code>...</code>` with `&`, `<`,
+  // `>`, and `"` escaped so `fromHtml` renders them as `<code>` elements without parsing backticked
+  // tag names (`<td>`, `</td>`) or decoding entities (`&lt;td&gt;`) inside a cell.
   balanced = balanced.replace(/\uE000CS(\d+)\uE001/g, (_m, idx: string) =>
-    (codeSpans[Number(idx)] ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    codeSpanToHtml(codeSpans[Number(idx)] ?? ''),
   );
   return balanced.replace(/\r?\n(?:[ \t]*\r?\n)+/g, '\n');
+}
+
+/**
+ * Converts a Markdown inline code span (` `cmd` ` or ` `` `</td>` `` `) inside an HTML table cell
+ * into an HTML `<code>...</code>` element with `&`, `<`, `>`, and `"` escaped.
+ */
+function codeSpanToHtml(rawSpan: string): string {
+  const ticksMatch = rawSpan.match(/^`+/);
+  if (!ticksMatch) return escapeHtmlString(rawSpan);
+  const ticks = ticksMatch[0];
+  let inner = rawSpan.slice(ticks.length, rawSpan.length - ticks.length);
+  if (inner.length >= 2 && inner.startsWith(' ') && inner.endsWith(' ') && /[^ ]/.test(inner)) {
+    inner = inner.slice(1, -1);
+  }
+  return `<code>${escapeHtmlString(inner)}</code>`;
 }
 
 /**
@@ -649,7 +666,17 @@ function walkHast(node: HastNode, depth = 0): void {
         .trim();
       if (isBalancedHtmlTableBlock(cleanedRaw)) {
         try {
-          const parsed = fromHtml(escapeNonTableHtmlTags(cleanedRaw), { fragment: true }) as unknown as HastNode;
+          const tableSpans: string[] = [];
+          const maskedTable = cleanedRaw.replace(MD_CODE_SPAN, (m) => {
+            const idx = tableSpans.length;
+            tableSpans.push(m);
+            return `\uE000CS${idx}\uE001`;
+          });
+          const escapedTable = escapeNonTableHtmlTags(maskedTable).replace(
+            /\uE000CS(\d+)\uE001/g,
+            (_m, idx: string) => codeSpanToHtml(tableSpans[Number(idx)] ?? ''),
+          );
+          const parsed = fromHtml(escapedTable, { fragment: true }) as unknown as HastNode;
           const sanitized = sanitizeTableHast(parsed.children ?? []);
           node.children.splice(i, 1, ...sanitized);
           i += sanitized.length - 1;

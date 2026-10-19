@@ -253,20 +253,23 @@ describe('cleanPassage', () => {
     expect(cleanedFragmentFirst).toContain('</table>\n\n```sql\nSELECT 1;\n```');
   });
 
-  it('keeps a table or split table fragment whole when a cell contains inline backtick code spans', () => {
+  it('keeps a table or split table fragment whole when a cell contains inline backtick code spans and converts them to <code>', () => {
     const completeWithBackticks = '<table><tbody><tr><td><p>Run `cmd` now.</p></td></tr></tbody></table>';
-    expect(cleanPassage(completeWithBackticks)).toBe(completeWithBackticks);
+    const cleanedComplete = cleanPassage(completeWithBackticks);
+    expect(cleanedComplete).toBe('<table><tbody><tr><td><p>Run <code>cmd</code> now.</p></td></tr></tbody></table>');
+    expect(cleanPassage(cleanedComplete)).toBe(cleanedComplete);
 
     const splitWithBackticks = [
-      '                            <p class="TableText">Run `cmd` and `<td>` now.</p>',
+      '                            <p class="TableText">Run `cmd`, `<td>`, and `&lt;td&gt;` now.</p>',
       '                        </td>',
       '                    </tr>',
     ].join('\n');
     const cleanedSplit = cleanPassage(splitWithBackticks);
     expect(cleanedSplit.match(/<table\b/g)).toHaveLength(1);
     expect(cleanedSplit).toBe(
-      '<table><tbody><tr><td><p class="TableText">Run `cmd` and `&lt;td&gt;` now.</p>\n                        </td>\n                    </tr></tbody></table>',
+      '<table><tbody><tr><td><p class="TableText">Run <code>cmd</code>, <code>&lt;td&gt;</code>, and <code>&amp;lt;td&amp;gt;</code> now.</p>\n                        </td>\n                    </tr></tbody></table>',
     );
+    expect(cleanPassage(cleanedSplit)).toBe(cleanedSplit);
   });
 });
 

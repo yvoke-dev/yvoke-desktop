@@ -696,13 +696,20 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     );
     expect(unindentedSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n4\nactual content\n');
 
-    const { container: indentedAsciiSeq } = render(
+    const { container: indentedAsciiMismatch } = render(
       <Markdown content={'```text\n1\n2\n3\n    indented line\n```'} />,
     );
-    expect(indentedAsciiSeq.querySelector('pre code')?.textContent).toBe('1\n2\n3\n    indented line\n');
+    expect(indentedAsciiMismatch.querySelector('pre code')?.textContent).toBe('1\n2\n3\n    indented line\n');
+
+    const { container: indentedAsciiMatchingGutter } = render(
+      <Markdown content={'```sql\n1\n2\n3\n    SELECT *\n    FROM DialogTable\n    WHERE x = 1\n```'} />,
+    );
+    expect(indentedAsciiMatchingGutter.querySelector('pre code')?.textContent).toBe(
+      'SELECT *\nFROM DialogTable\nWHERE x = 1\n',
+    );
   });
 
-  it('renders both the code block and the table when a fence is adjacent to a split table fragment, and keeps tables with inline backticks whole', () => {
+  it('renders both the code block and the table when a fence is adjacent to a split table fragment, and renders inline backticks inside table cells as <code>', () => {
     const fenceThenFragment = cleanPassage(
       [
         '### Configure (part 4/9)',
@@ -738,11 +745,12 @@ describe('HTML tables, split table fragments, and MadCap artifacts', () => {
     expect(c2.querySelector('pre code')?.textContent).toBe('SELECT 1;\n');
 
     const tableWithBackticks = cleanPassage(
-      '<table><tbody><tr><td><p>Run `cmd` now.</p></td></tr></tbody></table>',
+      '<table><tbody><tr><td><p>Run `cmd`, `<td>`, and `&lt;td&gt;` now.</p></td></tr></tbody></table>',
     );
     const { container: c3 } = render(<Markdown content={tableWithBackticks} />);
     expect(c3.querySelectorAll('table')).toHaveLength(1);
-    expect(c3.querySelector('table td')?.textContent).toBe('Run `cmd` now.');
+    const codeNodes = Array.from(c3.querySelectorAll('table td code')).map((el) => el.textContent);
+    expect(codeNodes).toEqual(['cmd', '<td>', '&lt;td&gt;']);
   });
 });
 
