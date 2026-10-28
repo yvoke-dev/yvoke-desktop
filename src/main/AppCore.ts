@@ -603,21 +603,28 @@ export class AppCore {
           typeof rawRemoteProfile === 'string' && rawRemoteProfile.trim().length > 0
             ? rawRemoteProfile.trim()
             : undefined;
-        const orchestratorProfile = remoteProfile ?? existing?.orchestratorProfile;
+        const isStarted = existing ? isThreadStarted(existing) : false;
+        const isBusy = existing ? this.agent.isBusy(c.id) : false;
+        const canAdoptRemoteProfile = !isStarted && !isBusy;
+        const orchestratorProfile = canAdoptRemoteProfile
+          ? (remoteProfile ?? existing?.orchestratorProfile)
+          : existing?.orchestratorProfile;
         const modeMatches =
           existing?.sessionProfile === orchestratorProfile ||
           (!existing?.sessionProfile && !orchestratorProfile);
-        if (existing && (existing.orchestratorProfile !== orchestratorProfile || !modeMatches)) {
+        const shouldResetSession = Boolean(
+          existing && !isBusy && (existing.orchestratorProfile !== orchestratorProfile || !modeMatches),
+        );
+        if (shouldResetSession) {
           this.agent.closeThread(c.id);
         }
-        const mergedRemoteSettings =
-          c.settings || existing?.remoteSettings
-            ? { ...(existing?.remoteSettings ?? {}), ...(c.settings ?? {}) }
-            : undefined;
+        const remoteSettings = c.settings
+          ? { ...c.settings }
+          : existing?.remoteSettings;
         const upserted: ThreadMeta = {
           id: c.id,
-          sessionId: modeMatches ? existing?.sessionId : undefined,
-          sessionProfile: modeMatches ? existing?.sessionProfile : undefined,
+          sessionId: shouldResetSession ? undefined : existing?.sessionId,
+          sessionProfile: shouldResetSession ? undefined : existing?.sessionProfile,
           title: c.title,
           model: existing?.model ?? String(c.settings?.model ?? settings.defaultModel),
           thinkingLevel: existing?.thinkingLevel ?? (String(c.settings?.['thinking-level'] ?? c.settings?.thinkingLevel ?? settings.defaultThinkingLevel) as ThinkingLevel),
@@ -628,10 +635,10 @@ export class AppCore {
           orchestratorProfile,
           initialPlaybook: orchestratorProfile ? undefined : existing?.initialPlaybook,
           hasStarted: existing?.hasStarted,
-          remoteSettings: mergedRemoteSettings,
+          remoteSettings,
         };
         this.threads.upsert(upserted);
-        if (existing?.orchestratorProfile && !remoteProfile) {
+        if (existing && (orchestratorProfile ?? '') !== (remoteProfile ?? '')) {
           void this.syncClient
             .updateConversation(c.id, undefined, this.buildThreadSettings(upserted))
             .catch(() => undefined);

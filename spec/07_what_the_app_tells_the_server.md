@@ -35,13 +35,14 @@ desktop usage.
   (ignoring blank names, invalid version numbers, or version numbers without a playbook name) and locks
   the conversation's playbook from the restored transcript. Multi-agent messages carry neither on the
   messages themselves and instead report the playbook name and version number on each uploaded trace step.
-- **Conversation settings updates preserve existing server settings, adopt remote profile changes, and repair blank orchestrator profiles on refresh.**
+- **Conversation settings updates preserve existing server settings, adopt remote profile changes on unstarted conversations, and repair diverged server profiles on refresh.**
   Whenever a conversation's model, thinking level, or multi-agent profile changes, the app merges its
-  settings with the conversation's existing server settings so that updating one setting on the desktop
-  never clears web-managed settings (or vice versa). When refreshing the conversation list, if the server
-  reports a non-blank orchestrator profile that differs from the local cache, the app adopts the server's
-  profile (closing any warm local session from the previous mode); only when a locally stored multi-agent
-  conversation has a blank or missing orchestrator profile on the server does the app push the full
+  settings with the conversation's latest server settings so that updating one setting on the desktop
+  never clears web-managed settings (and keys removed on the server are not resurrected). When refreshing
+  the conversation list, if a conversation has not yet started locally and has no turn in flight, the app
+  adopts any non-blank orchestrator profile reported by the server; once a conversation has started locally
+  (or while a turn is in flight), its local agent mode is permanently locked, and whenever the server's
+  reported orchestrator profile is missing, blank, or differs from the local mode, the app pushes the full
   conversation settings back in the background to repair it.
 - **A rating is refused rather than queued** when the answer has not yet been accepted by the server —
   there is no id to attach it to.
@@ -62,8 +63,9 @@ desktop usage.
 - **A dropped turn drops its trace.** If the server rejects a turn as invalid, the multi-agent trace
   waiting to be linked to it is discarded without a word.
 - **Nothing de-duplicates.** Re-sending the same turn creates a second copy of it on the server; multi-agent
-  trace uploads therefore only retry failures where the server unambiguously refused the request before
-  executing it.
+  trace uploads therefore skip retrying network drops, internal server errors, gateway timeouts, and
+  malformed responses, though a gateway error returned after the server committed can still record a
+  duplicate trace row.
 - **Which conversations the sidebar shows is entirely the server's decision.** The app asks for the
   signed-in user's conversations and lists what comes back; it applies no filter of its own.
 

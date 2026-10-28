@@ -2282,7 +2282,39 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       client: 'desktop',
     });
 
-    // 4. createThread() captures conversation.settings into remoteSettings
+    // 4. Server-authoritative remoteSettings key deletion: keys removed on the server are not resurrected
+    updateSpy.mockClear();
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:03:00.000Z',
+        settings: {
+          model: 'opus',
+          'thinking-level': 'high',
+          'orchestrator-profile': 'OIM',
+          streaming: false,
+        },
+      },
+    ]);
+    await appCore.listThreads();
+    expect(appCore.threads.get('t-web-settings')?.remoteSettings).toEqual({
+      model: 'opus',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      streaming: false,
+    });
+    expect(appCore.threads.get('t-web-settings')?.remoteSettings).not.toHaveProperty('chat-prompt');
+
+    updateSpy.mockClear();
+    appCore.patchThread('t-web-settings', { thinkingLevel: 'low' });
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const afterDeleteSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect(afterDeleteSettings).not.toHaveProperty('chat-prompt');
+    expect(afterDeleteSettings).not.toHaveProperty('show-thinking');
+
+    // 5. createThread() captures conversation.settings into remoteSettings
     vi.spyOn(appCore.syncClient, 'createConversation').mockResolvedValueOnce({
       id: 't-created-web',
       title: 'Created Thread',
@@ -2302,11 +2334,12 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     });
   });
 
-  it('Finding 3: listThreads adopts non-blank remote orchestrator-profile, closes warm session, and only repairs when remote profile is blank/missing', async () => {
+  it('Finding 3: listThreads adopts remote orchestrator-profile only when unstarted and idle, locks started/busy threads, and repairs diverged server profiles', async () => {
     const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
     const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+    vi.spyOn(appCore.agent, 'isBusy').mockImplementation((id: string) => id === 't-busy-diverged');
 
-    // Case 1: existing.orchestratorProfile is 'OIM' (with warm session) and server returns 'Security'
+    // Case 1 (unstarted): existing.orchestratorProfile is 'OIM' (truly unstarted: no sessionId/tokens/hasStarted) and server returns 'Security'
     appCore.threads.upsert({
       id: 't-adopt-diff-profile',
       title: 'Adopt Diff Profile',
@@ -2317,11 +2350,11 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       totals: ThreadStore.emptyTotals(),
       syncState: 'synced',
       orchestratorProfile: 'OIM',
-      sessionId: 'warm-oim-sess',
-      sessionProfile: 'OIM',
+      sessionId: undefined,
+      sessionProfile: undefined,
     });
 
-    // Case 2: existing.orchestratorProfile is undefined (single-agent with warm session 'warm-1') and server returns 'OIM'
+    // Case 2 (unstarted): existing.orchestratorProfile is undefined (truly unstarted single-agent) and server returns 'OIM'
     appCore.threads.upsert({
       id: 't-adopt-from-single',
       title: 'Adopt From Single',
@@ -2332,7 +2365,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       totals: ThreadStore.emptyTotals(),
       syncState: 'synced',
       orchestratorProfile: undefined,
-      sessionId: 'warm-1',
+      sessionId: undefined,
       sessionProfile: undefined,
     });
 
@@ -2349,6 +2382,70 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       orchestratorProfile: 'OIM',
       sessionId: 'warm-keep',
       sessionProfile: 'OIM',
+    });
+
+    // Case 4 (started single-agent): hasStarted: true, initialPlaybook: 'oim-schema', warm session, server reports 'OIM'
+    appCore.threads.upsert({
+      id: 't-started-single-locked',
+      title: 'Started Single Locked',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: 'oim-schema',
+      orchestratorProfile: undefined,
+      sessionId: 'warm-single-sess',
+      sessionProfile: undefined,
+    });
+
+    // Case 5 (started multi-agent): hasStarted: true, orchestratorProfile: 'OIM', warm session, server reports 'Security'
+    appCore.threads.upsert({
+      id: 't-started-multi-locked',
+      title: 'Started Multi Locked',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      orchestratorProfile: 'OIM',
+      sessionId: 'warm-oim-sess',
+      sessionProfile: 'OIM',
+    });
+
+    // Case 6 (started idle thread with mismatched sessionProfile): keeps 'OIM', closes stale session, clears sessionId/sessionProfile
+    appCore.threads.upsert({
+      id: 't-started-mismatch-session',
+      title: 'Started Mismatch Session',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      orchestratorProfile: 'OIM',
+      sessionId: 'stale-sess',
+      sessionProfile: undefined,
+    });
+
+    // Case 7 (busy thread during listThreads when server reports differing profile): refuses adoption, does NOT close active session, repairs server
+    appCore.threads.upsert({
+      id: 't-busy-diverged',
+      title: 'Busy Thread Diverged',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: 'busy-sess',
+      sessionProfile: undefined,
     });
 
     vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
@@ -2373,36 +2470,108 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
         updatedAt: '2026-10-15T10:05:00.000Z',
         settings: { model: 'sonnet', 'orchestrator-profile': '' },
       },
+      {
+        id: 't-started-single-locked',
+        title: 'Started Single Locked',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-started-multi-locked',
+        title: 'Started Multi Locked',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
+      {
+        id: 't-started-mismatch-session',
+        title: 'Started Mismatch Session',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-busy-diverged',
+        title: 'Busy Thread Diverged',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
     ]);
 
     await appCore.listThreads();
 
-    // Case 1 assertions: adopted 'Security', closed warm session, cleared sessionId/sessionProfile, did NOT call updateConversation
+    // Case 1 assertions: unstarted thread adopted 'Security', called closeThread, did NOT call updateConversation
     const adoptedDiff = appCore.threads.get('t-adopt-diff-profile')!;
     expect(adoptedDiff.orchestratorProfile).toBe('Security');
     expect(adoptedDiff.sessionId).toBeUndefined();
     expect(adoptedDiff.sessionProfile).toBeUndefined();
     expect(closeSpy).toHaveBeenCalledWith('t-adopt-diff-profile');
 
-    // Case 2 assertions: adopted 'OIM', closed warm session, cleared sessionId, did NOT call updateConversation
+    // Case 2 assertions: unstarted thread adopted 'OIM', called closeThread, did NOT call updateConversation
     const adoptedSingle = appCore.threads.get('t-adopt-from-single')!;
     expect(adoptedSingle.orchestratorProfile).toBe('OIM');
     expect(adoptedSingle.sessionId).toBeUndefined();
     expect(adoptedSingle.sessionProfile).toBeUndefined();
     expect(closeSpy).toHaveBeenCalledWith('t-adopt-from-single');
 
-    // Case 3 assertions: kept 'OIM', preserved warm session, and called updateConversation ONLY for 't-repair-blank'
+    // Case 3 assertions: kept 'OIM', preserved warm session, and repaired server
     const repaired = appCore.threads.get('t-repair-blank')!;
     expect(repaired.orchestratorProfile).toBe('OIM');
     expect(repaired.sessionId).toBe('warm-keep');
     expect(repaired.sessionProfile).toBe('OIM');
     expect(closeSpy).not.toHaveBeenCalledWith('t-repair-blank');
-    expect(updateSpy).toHaveBeenCalledTimes(1);
     expect(updateSpy).toHaveBeenCalledWith(
       't-repair-blank',
       undefined,
       expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
     );
+
+    // Case 4 assertions: started single-agent refused 'OIM', kept initialPlaybook + warm session, did NOT closeThread, repaired server to ''
+    const startedSingle = appCore.threads.get('t-started-single-locked')!;
+    expect(startedSingle.orchestratorProfile).toBeUndefined();
+    expect(startedSingle.initialPlaybook).toBe('oim-schema');
+    expect(startedSingle.sessionId).toBe('warm-single-sess');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-started-single-locked');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-started-single-locked',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': '' }),
+    );
+
+    // Case 5 assertions: started multi-agent refused 'Security', kept 'OIM' + warm session, did NOT closeThread, repaired server to 'OIM'
+    const startedMulti = appCore.threads.get('t-started-multi-locked')!;
+    expect(startedMulti.orchestratorProfile).toBe('OIM');
+    expect(startedMulti.sessionId).toBe('warm-oim-sess');
+    expect(startedMulti.sessionProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-started-multi-locked');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-started-multi-locked',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+
+    // Case 6 assertions: started idle thread with mismatched sessionProfile kept 'OIM', closed stale session, cleared sessionId/sessionProfile
+    const mismatchSession = appCore.threads.get('t-started-mismatch-session')!;
+    expect(mismatchSession.orchestratorProfile).toBe('OIM');
+    expect(mismatchSession.sessionId).toBeUndefined();
+    expect(mismatchSession.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-started-mismatch-session');
+
+    // Case 7 assertions: busy thread refused 'Security', did NOT close active session, preserved sessionId, repaired server to 'OIM'
+    const busyDiverged = appCore.threads.get('t-busy-diverged')!;
+    expect(busyDiverged.orchestratorProfile).toBe('OIM');
+    expect(busyDiverged.sessionId).toBe('busy-sess');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-busy-diverged');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-busy-diverged',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+
+    // Total repairs: t-repair-blank, t-started-single-locked, t-started-multi-locked, t-busy-diverged
+    expect(updateSpy).toHaveBeenCalledTimes(4);
   });
 
   it('Finding 8: playbookBackfillChecked memoizes transcript backfill across getMessages and sendMessage on started playbook-less threads', async () => {
