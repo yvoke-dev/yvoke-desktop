@@ -113,7 +113,7 @@ function createInMemoryYvokeWebServer(): InMemoryWebServer {
           conv.settings = normalizeServerSettings(body.settings);
         }
         conv.updatedAt = new Date().toISOString();
-        return new Response(null, { status: 204 });
+        return new Response('', { status: 200 });
       }
 
       // DELETE /conversations/:id
@@ -422,6 +422,12 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
   it('Scenario B: Multi-Agent Round-Trip, Full Settings Retention, Server Repair, & Slow-Cache Race Proof', async () => {
     const thread = await appCore1.createThread();
 
+    // Seed web-owned settings onto the server conversation and sync via listThreads()
+    const srvConv = server.conversations.get(thread.id)!;
+    srvConv.settings['chat-prompt'] = 'corp-default';
+    srvConv.settings['show-thinking'] = true;
+    await appCore1.listThreads();
+
     // Select multi-agent profile, then subsequently patch model, thinkingLevel, and title
     appCore1.patchThread(thread.id, { orchestratorProfile: 'OIM' });
     appCore1.patchThread(thread.id, { model: 'opus' });
@@ -431,10 +437,11 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     // Wait for async PATCH calls to settle
     await new Promise((r) => setTimeout(r, 10));
 
-    // Server settings must still retain 'orchestrator-profile': 'OIM' and 'model': 'opus'
-    const srvConv = server.conversations.get(thread.id)!;
+    // Server settings must still retain 'orchestrator-profile': 'OIM', 'model': 'opus', AND web-owned sibling keys
     expect(srvConv.title).toBe('OIM Multi-Agent Deep Dive');
     expect(srvConv.settings).toMatchObject({
+      'chat-prompt': 'corp-default',
+      'show-thinking': true,
       model: 'opus',
       'thinking-level': 'high',
       'orchestrator-profile': 'OIM',
@@ -445,7 +452,14 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     delete srvConv.settings['orchestrator-profile'];
     await appCore1.listThreads();
     await new Promise((r) => setTimeout(r, 10));
-    expect(server.conversations.get(thread.id)!.settings['orchestrator-profile']).toBe('OIM');
+    expect(server.conversations.get(thread.id)!.settings).toMatchObject({
+      'chat-prompt': 'corp-default',
+      'show-thinking': true,
+      model: 'opus',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
 
     // Expire profilesCache and make both profile resolution and mcpPrompts.list() slower (40ms) than appendMessages (0ms)
     (appCore1 as any).profilesCache = null;
@@ -576,7 +590,15 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     expect(server.runs).toHaveLength(1);
     expect((appCore1 as any).failedRuns).toHaveLength(1);
 
-    // Next sync activity (listThreads) drains failedRuns and records run 2 on the server
+    // Before backoff window expires (< 5_000ms), listThreads does NOT drain the failed run
+    await appCore1.listThreads();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(server.runs).toHaveLength(1);
+    expect((appCore1 as any).failedRuns).toHaveLength(1);
+
+    // Advance Date.now past the 5_000ms backoff window; next sync activity (listThreads) drains failedRuns and records run 2
+    const futureNow = Date.now() + 6_000;
+    vi.spyOn(Date, 'now').mockReturnValue(futureNow);
     await appCore1.listThreads();
     for (let i = 0; i < 20 && server.runs.length < 2; i++) {
       await new Promise((r) => setTimeout(r, 10));

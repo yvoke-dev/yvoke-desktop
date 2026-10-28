@@ -2064,7 +2064,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     expect((appCore as any).pendingRuns.size).toBe(50);
   });
 
-  it('postOrchestratorRun buffers retriable failures (network, 401, 429, 502), drops non-retriable 4xx (400, 403, 404), caps failedRuns at 50, and drains atomically without double-POSTing', async () => {
+  it('postOrchestratorRun only retries unambiguous pre-execution HTTP errors (401, 429, 502, 503), drops ambiguous (network, 500, 504, malformed 200 JSON) and 4xx (400, 403, 404) errors, enforces exponential backoff (5s->10s->20s->40s->60s) up to MAX_RUN_RETRY_ATTEMPTS = 5, caps failedRuns at 50, and drains atomically', async () => {
     const threadId = 'thread-orch-retry';
     const makeRun = (msgId: string): OrchestratorRunPayload => ({
       conversationId: threadId,
@@ -2077,31 +2077,53 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
 
     const recordSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun');
 
-    // Non-retriable 400, 403, 404 are dropped and NOT added to failedRuns
-    for (const status of [400, 403, 404]) {
-      recordSpy.mockRejectedValueOnce(new SyncApiError(status, `Yvoke Backend: HTTP ${status}`));
-      (appCore as any).postOrchestratorRun(makeRun(`msg-${status}`));
+    // 1. Ambiguous errors (network TypeError, 500, 504, malformed 200 JSON) and 4xx client errors (400, 403, 404) are NOT pushed to failedRuns
+    const nonRetriableErrors = [
+      new TypeError('fetch failed'),
+      new SyncApiError(500, 'Yvoke Backend: HTTP 500 Internal Server Error'),
+      new SyncApiError(504, 'Yvoke Backend: HTTP 504 Gateway Timeout'),
+      new Error('Yvoke Backend: Unexpected token < in JSON at position 0'),
+      new SyncApiError(400, 'Yvoke Backend: HTTP 400'),
+      new SyncApiError(403, 'Yvoke Backend: HTTP 403'),
+      new SyncApiError(404, 'Yvoke Backend: HTTP 404'),
+    ];
+    for (let i = 0; i < nonRetriableErrors.length; i++) {
+      recordSpy.mockRejectedValueOnce(nonRetriableErrors[i]);
+      (appCore as any).postOrchestratorRun(makeRun(`msg-nonret-${i}`));
       await new Promise((r) => setTimeout(r, 0));
     }
     expect((appCore as any).failedRuns).toHaveLength(0);
 
-    // Retriable errors: network TypeError, 401, 429, 502 ARE buffered in failedRuns
-    const retriableErrors = [
-      new TypeError('fetch failed'),
-      new SyncApiError(401, 'Yvoke Backend: HTTP 401'),
-      new SyncApiError(429, 'Yvoke Backend: HTTP 429'),
-      new SyncApiError(502, 'Yvoke Backend: HTTP 502'),
-    ];
-    for (let i = 0; i < retriableErrors.length; i++) {
-      recordSpy.mockRejectedValueOnce(retriableErrors[i]);
-      (appCore as any).postOrchestratorRun(makeRun(`msg-ret-${i}`));
+    // 2. Unambiguous pre-execution HTTP errors (401, 429, 502, 503) ARE pushed to failedRuns as { run, attempts: 1, nextRetryAt }
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const retriableStatuses = [401, 429, 502, 503];
+    for (let i = 0; i < retriableStatuses.length; i++) {
+      const status = retriableStatuses[i];
+      recordSpy.mockRejectedValueOnce(new SyncApiError(status, `Yvoke Backend: HTTP ${status}`));
+      (appCore as any).postOrchestratorRun(makeRun(`msg-ret-${status}`));
       await new Promise((r) => setTimeout(r, 0));
     }
     expect((appCore as any).failedRuns).toHaveLength(4);
+    for (let i = 0; i < retriableStatuses.length; i++) {
+      expect((appCore as any).failedRuns[i]).toEqual({
+        run: expect.objectContaining({ messageId: `msg-ret-${retriableStatuses[i]}` }),
+        attempts: 1,
+        nextRetryAt: now + 5_000,
+      });
+    }
 
-    // Atomic splice proof: concurrent handleServerIds + listThreads while drain is in-flight
-    // must post each buffered run exactly ONCE
+    // 3. drainFailedRuns() does NOT retry an entry while Date.now() < entry.nextRetryAt
     recordSpy.mockClear();
+    now += 4_999; // 1_004_999 < 1_005_000
+    (appCore as any).drainFailedRuns();
+    expect(recordSpy).not.toHaveBeenCalled();
+    expect((appCore as any).failedRuns).toHaveLength(4);
+
+    // 4. Atomic splice proof once Date.now() >= entry.nextRetryAt: concurrent handleServerIds + listThreads
+    // while drain is in-flight must post each ready run exactly ONCE
+    now += 1; // 1_005_000 >= 1_005_000
     let resolveInFlightPost!: (v: { id: string }) => void;
     recordSpy.mockImplementation(
       () =>
@@ -2111,24 +2133,331 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     );
     vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValue([]);
 
-    // Trigger first drain via handleServerIds
     (appCore as any).handleServerIds(threadId, {});
-    // Immediately trigger second drain via listThreads while first drain's POSTs are still in flight
     await appCore.listThreads();
 
-    // Even with two concurrent drain triggers, recordOrchestratorRun was only called 4 times (not 8)
     expect(recordSpy).toHaveBeenCalledTimes(4);
     expect((appCore as any).failedRuns).toHaveLength(0);
     resolveInFlightPost({ id: 'ok' });
+    await new Promise((r) => setTimeout(r, 0));
 
-    // Verify failedRuns is capped at MAX_PENDING_RUNS = 50
+    // 5. Exponential backoff (5_000 -> 10_000 -> 20_000 -> 40_000 -> 60_000) and drop after MAX_RUN_RETRY_ATTEMPTS = 5
+    recordSpy.mockClear();
     recordSpy.mockRejectedValue(new SyncApiError(503, 'Service Unavailable'));
+    const backoffRun = makeRun('msg-backoff');
+    (appCore as any).postOrchestratorRun(backoffRun);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const expectedDelays = [5_000, 10_000, 20_000, 40_000, 60_000];
+    for (let attempt = 1; attempt <= expectedDelays.length; attempt++) {
+      const delay = expectedDelays[attempt - 1];
+      expect((appCore as any).failedRuns).toHaveLength(1);
+      expect((appCore as any).failedRuns[0]).toEqual({
+        run: backoffRun,
+        attempts: attempt,
+        nextRetryAt: now + delay,
+      });
+
+      // Before nextRetryAt: does not drain
+      now += delay - 1;
+      recordSpy.mockClear();
+      (appCore as any).drainFailedRuns();
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect((appCore as any).failedRuns).toHaveLength(1);
+
+      // At nextRetryAt: drains and retries
+      now += 1;
+      (appCore as any).drainFailedRuns();
+      expect(recordSpy).toHaveBeenCalledTimes(1);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    // After the 5th retry fails (6 total attempts: 1 initial + 5 retries), entry is dropped!
+    expect((appCore as any).failedRuns).toHaveLength(0);
+
+    // 6. Verify failedRuns is capped at MAX_PENDING_RUNS = 50
     for (let i = 0; i < 60; i++) {
       (appCore as any).postOrchestratorRun(makeRun(`msg-cap-${i}`));
     }
     await new Promise((r) => setTimeout(r, 0));
     expect((appCore as any).failedRuns).toHaveLength(50);
-    expect((appCore as any).failedRuns[0].messageId).toBe('msg-cap-10');
-    expect((appCore as any).failedRuns[49].messageId).toBe('msg-cap-59');
+    expect((appCore as any).failedRuns[0].run.messageId).toBe('msg-cap-10');
+    expect((appCore as any).failedRuns[49].run.messageId).toBe('msg-cap-59');
+  });
+
+  it('Finding 1: preserves web-owned remoteSettings across listThreads, createThread, patchThread (with single disk write), and blank-profile repair', async () => {
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // 1. listThreads() captures web-owned keys from c.settings into remoteSettings
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: {
+          model: 'sonnet',
+          'thinking-level': 'medium',
+          'chat-prompt': 'custom',
+          streaming: true,
+          'show-thinking': true,
+          'show-prototypes': false,
+        },
+      },
+    ]);
+
+    await appCore.listThreads();
+    const loaded = appCore.threads.get('t-web-settings')!;
+    expect(loaded.remoteSettings).toMatchObject({
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+    });
+
+    // 2. Subsequent patchThread (changing model, thinkingLevel, or orchestratorProfile) sends all sibling keys intact
+    // and calls threads.patch only ONCE per patchThread call
+    const patchStoreSpy = vi.spyOn(appCore.threads, 'patch');
+
+    appCore.patchThread('t-web-settings', { orchestratorProfile: 'OIM' });
+    expect(patchStoreSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenLastCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      'thinking-level': 'medium',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    patchStoreSpy.mockClear();
+    appCore.patchThread('t-web-settings', { model: 'opus', thinkingLevel: 'high' });
+    expect(patchStoreSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenLastCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+      model: 'opus',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 3. listThreads() blank-profile repair also sends all sibling keys from c.settings intact in updateConversation
+    updateSpy.mockClear();
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:02:00.000Z',
+        settings: {
+          model: 'opus',
+          'thinking-level': 'high',
+          'orchestrator-profile': '',
+          'chat-prompt': 'custom-v2',
+          streaming: false,
+          'show-thinking': true,
+          'show-prototypes': true,
+        },
+      },
+    ]);
+
+    await appCore.listThreads();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom-v2',
+      streaming: false,
+      'show-thinking': true,
+      'show-prototypes': true,
+      model: 'opus',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 4. createThread() captures conversation.settings into remoteSettings
+    vi.spyOn(appCore.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-created-web',
+      title: 'Created Thread',
+      createdAt: '2026-10-15T10:05:00.000Z',
+      updatedAt: '2026-10-15T10:05:00.000Z',
+      settings: {
+        model: 'sonnet',
+        'thinking-level': 'medium',
+        'chat-prompt': 'server-seeded',
+      },
+    });
+    const created = await appCore.createThread();
+    expect(created.remoteSettings).toEqual({
+      model: 'sonnet',
+      'thinking-level': 'medium',
+      'chat-prompt': 'server-seeded',
+    });
+  });
+
+  it('Finding 3: listThreads adopts non-blank remote orchestrator-profile, closes warm session, and only repairs when remote profile is blank/missing', async () => {
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+
+    // Case 1: existing.orchestratorProfile is 'OIM' (with warm session) and server returns 'Security'
+    appCore.threads.upsert({
+      id: 't-adopt-diff-profile',
+      title: 'Adopt Diff Profile',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: 'warm-oim-sess',
+      sessionProfile: 'OIM',
+    });
+
+    // Case 2: existing.orchestratorProfile is undefined (single-agent with warm session 'warm-1') and server returns 'OIM'
+    appCore.threads.upsert({
+      id: 't-adopt-from-single',
+      title: 'Adopt From Single',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+      sessionId: 'warm-1',
+      sessionProfile: undefined,
+    });
+
+    // Case 3: existing.orchestratorProfile is 'OIM' and server returns '' (blank) -> keeps 'OIM' and repairs server
+    appCore.threads.upsert({
+      id: 't-repair-blank',
+      title: 'Repair Blank Profile',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: 'warm-keep',
+      sessionProfile: 'OIM',
+    });
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-adopt-diff-profile',
+        title: 'Adopt Diff Profile',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
+      {
+        id: 't-adopt-from-single',
+        title: 'Adopt From Single',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-repair-blank',
+        title: 'Repair Blank Profile',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': '' },
+      },
+    ]);
+
+    await appCore.listThreads();
+
+    // Case 1 assertions: adopted 'Security', closed warm session, cleared sessionId/sessionProfile, did NOT call updateConversation
+    const adoptedDiff = appCore.threads.get('t-adopt-diff-profile')!;
+    expect(adoptedDiff.orchestratorProfile).toBe('Security');
+    expect(adoptedDiff.sessionId).toBeUndefined();
+    expect(adoptedDiff.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-adopt-diff-profile');
+
+    // Case 2 assertions: adopted 'OIM', closed warm session, cleared sessionId, did NOT call updateConversation
+    const adoptedSingle = appCore.threads.get('t-adopt-from-single')!;
+    expect(adoptedSingle.orchestratorProfile).toBe('OIM');
+    expect(adoptedSingle.sessionId).toBeUndefined();
+    expect(adoptedSingle.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-adopt-from-single');
+
+    // Case 3 assertions: kept 'OIM', preserved warm session, and called updateConversation ONLY for 't-repair-blank'
+    const repaired = appCore.threads.get('t-repair-blank')!;
+    expect(repaired.orchestratorProfile).toBe('OIM');
+    expect(repaired.sessionId).toBe('warm-keep');
+    expect(repaired.sessionProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-repair-blank');
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-repair-blank',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+  });
+
+  it('Finding 8: playbookBackfillChecked memoizes transcript backfill across getMessages and sendMessage on started playbook-less threads', async () => {
+    vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    // Subcase A: getMessages(threadId) called at load time -> subsequent sendMessage makes 0 additional readMessages calls
+    const threadLoaded = 't-memo-loaded';
+    appCore.threads.upsert({
+      id: threadLoaded,
+      title: 'Loaded Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 10 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadLoaded, [
+      { localId: 'u-1', role: 'user', content: 'Turn 1 plain', createdAt: 'now' },
+      { localId: 'a-1', role: 'assistant', content: 'Ans 1', createdAt: 'now' },
+    ]);
+
+    await appCore.getMessages(threadLoaded);
+
+    const readSpy = vi.spyOn(appCore.threads, 'readMessages');
+    await appCore.sendMessage({ threadId: threadLoaded, text: 'Turn 2 plain' });
+    await appCore.sendMessage({ threadId: threadLoaded, text: 'Turn 3 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(0);
+
+    // Subcase B: sendMessage called without prior getMessages -> first sendMessage calls readMessages once, second makes 0 additional calls
+    const threadUnloaded = 't-memo-unloaded';
+    appCore.threads.upsert({
+      id: threadUnloaded,
+      title: 'Unloaded Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 10 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadUnloaded, [
+      { localId: 'u-2', role: 'user', content: 'Turn 1 plain', createdAt: 'now' },
+      { localId: 'a-2', role: 'assistant', content: 'Ans 1', createdAt: 'now' },
+    ]);
+
+    readSpy.mockClear();
+    await appCore.sendMessage({ threadId: threadUnloaded, text: 'Turn 2 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(1);
+
+    await appCore.sendMessage({ threadId: threadUnloaded, text: 'Turn 3 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(1); // 0 additional calls
   });
 });

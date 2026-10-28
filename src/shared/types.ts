@@ -263,6 +263,8 @@ export interface ThreadMeta {
   initialPlaybook?: string;
   /** Whether the conversation has started (first prompt sent). */
   hasStarted?: boolean;
+  /** Server-side conversation settings map, preserved so web-owned keys survive desktop PATCHes. */
+  remoteSettings?: Record<string, unknown>;
 }
 
 /**

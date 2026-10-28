@@ -121,9 +121,11 @@ profiles and the playbooks; there is no way to build one from the app.
   up.
 - **The uploaded trace has no size limit.** Each step carries that sub-agent's whole transcript
   including every tool result verbatim — full corpus-search payloads — with none of the cite-scoping
-  applied to reviewer evidence. If uploading the run trace fails transiently, the app retains the trace
-  in memory and retries on the next sync activity during the session (traces held in memory do not
-  survive quitting the app, and permanent rejections are logged and dropped).
+  applied to reviewer evidence. If uploading the run trace is refused before the server executes it
+  (authentication refresh, rate limiting, or gateway unavailability), the app retains the trace in memory
+  and retries with exponential backoff (up to five attempts) on subsequent sync activity during the
+  session; ambiguous failures where the server may already have recorded the run are not retried so
+  traces are never duplicated, and traces held in memory do not survive quitting the app.
 - **A run whose answer the server rejects loses its trace silently**, and at most fifty pending traces
   are held before the oldest are dropped.
 - **A specialist that asks a clarifying question locks the composer with no question on screen.** The

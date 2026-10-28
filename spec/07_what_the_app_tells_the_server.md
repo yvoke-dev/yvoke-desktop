@@ -16,7 +16,7 @@ desktop usage.
 | **Write ratings** | A thumb and its comment are stored against the server's id for that answer, so they appear in the web app's feedback screens and counts. |
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
 | **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop, which is what lets the web sidebar and the admin conversation register tell them apart. |
-| **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together as the full conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
+| **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together alongside any existing server-side conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
 
 ## How it behaves
 
@@ -35,12 +35,14 @@ desktop usage.
   (ignoring blank names, invalid version numbers, or version numbers without a playbook name) and locks
   the conversation's playbook from the restored transcript. Multi-agent messages carry neither on the
   messages themselves and instead report the playbook name and version number on each uploaded trace step.
-- **Conversation settings updates send the full conversation settings and repair missing orchestrator profiles on refresh.**
-  Whenever a conversation's model, thinking level, or multi-agent profile changes, the app sends the
-  complete conversation settings so that updating one setting on the server never clears another. When
-  refreshing the conversation list, if a locally stored multi-agent conversation is missing its
-  orchestrator profile setting on the server, the app pushes the full conversation settings back to the
-  server in the background to repair it.
+- **Conversation settings updates preserve existing server settings, adopt remote profile changes, and repair blank orchestrator profiles on refresh.**
+  Whenever a conversation's model, thinking level, or multi-agent profile changes, the app merges its
+  settings with the conversation's existing server settings so that updating one setting on the desktop
+  never clears web-managed settings (or vice versa). When refreshing the conversation list, if the server
+  reports a non-blank orchestrator profile that differs from the local cache, the app adopts the server's
+  profile (closing any warm local session from the previous mode); only when a locally stored multi-agent
+  conversation has a blank or missing orchestrator profile on the server does the app push the full
+  conversation settings back in the background to repair it.
 - **A rating is refused rather than queued** when the answer has not yet been accepted by the server —
   there is no id to attach it to.
 
@@ -59,7 +61,9 @@ desktop usage.
   cover this route.
 - **A dropped turn drops its trace.** If the server rejects a turn as invalid, the multi-agent trace
   waiting to be linked to it is discarded without a word.
-- **Nothing de-duplicates.** Re-sending the same turn creates a second copy of it on the server.
+- **Nothing de-duplicates.** Re-sending the same turn creates a second copy of it on the server; multi-agent
+  trace uploads therefore only retry failures where the server unambiguously refused the request before
+  executing it.
 - **Which conversations the sidebar shows is entirely the server's decision.** The app asks for the
   signed-in user's conversations and lists what comes back; it applies no filter of its own.
 

@@ -52,6 +52,15 @@ import { SyncQueue } from './sync/SyncQueue';
 
 const MAX_PENDING_RUNS = 50;
 const RUN_TRACE_METADATA_TIMEOUT_MS = 5_000;
+const RUN_RETRY_BASE_DELAY_MS = 5_000;
+const RUN_RETRY_MAX_DELAY_MS = 60_000;
+const MAX_RUN_RETRY_ATTEMPTS = 5;
+
+interface FailedOrchestratorRun {
+  run: OrchestratorRunPayload;
+  attempts: number;
+  nextRetryAt: number;
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -156,7 +165,9 @@ export class AppCore {
     OrchestratorRunPayload | Promise<OrchestratorRunPayload | null>
   >();
   /** Resolved orchestrator runs whose POST failed transiently and will retry on next sync activity. */
-  private readonly failedRuns: OrchestratorRunPayload[] = [];
+  private readonly failedRuns: FailedOrchestratorRun[] = [];
+  /** Started threads whose message log has already been inspected once for initialPlaybook backfill. */
+  private readonly playbookBackfillChecked = new Set<string>();
   /**
    * Image descriptions in flight, keyed by the attachment array they describe.
    *
@@ -521,13 +532,21 @@ export class AppCore {
 
   private drainFailedRuns(): void {
     if (this.failedRuns.length === 0) return;
-    const batch = this.failedRuns.splice(0);
-    for (const run of batch) {
-      this.postOrchestratorRun(run);
+    const now = Date.now();
+    const ready: FailedOrchestratorRun[] = [];
+    for (let i = 0; i < this.failedRuns.length; ) {
+      if (this.failedRuns[i].nextRetryAt <= now) {
+        ready.push(...this.failedRuns.splice(i, 1));
+      } else {
+        i++;
+      }
+    }
+    for (const entry of ready) {
+      this.postOrchestratorRun(entry.run, entry.attempts);
     }
   }
 
-  private postOrchestratorRun(run: OrchestratorRunPayload): void {
+  private postOrchestratorRun(run: OrchestratorRunPayload, attempts = 0): void {
     void this.syncClient
       .recordOrchestratorRun(run)
       .then((res) =>
@@ -539,12 +558,19 @@ export class AppCore {
       .catch((err) => {
         logError('sync', `Failed to record orchestrator run: ${err instanceof Error ? err.message : String(err)}`);
         const isRetriable =
-          !(err instanceof SyncApiError) ||
-          err.status === 401 ||
-          err.status === 429 ||
-          err.status >= 500;
-        if (isRetriable) {
-          this.failedRuns.push(run);
+          err instanceof SyncApiError &&
+          (err.status === 401 || err.status === 429 || err.status === 502 || err.status === 503);
+        if (isRetriable && attempts < MAX_RUN_RETRY_ATTEMPTS) {
+          const nextAttempts = attempts + 1;
+          const delay = Math.min(
+            RUN_RETRY_MAX_DELAY_MS,
+            RUN_RETRY_BASE_DELAY_MS * 2 ** (nextAttempts - 1),
+          );
+          this.failedRuns.push({
+            run,
+            attempts: nextAttempts,
+            nextRetryAt: Date.now() + delay,
+          });
           while (this.failedRuns.length > MAX_PENDING_RUNS) {
             this.failedRuns.shift();
           }
@@ -554,6 +580,7 @@ export class AppCore {
 
   private buildThreadSettings(thread: ThreadMeta): Record<string, unknown> {
     return {
+      ...(thread.remoteSettings ?? {}),
       model: thread.model,
       thinkingLevel: thread.thinkingLevel,
       'thinking-level': thread.thinkingLevel,
@@ -571,12 +598,22 @@ export class AppCore {
       for (const c of conversations) {
         const existing = this.threads.get(c.id);
         const settings = this.settings.get();
-        const orchestratorProfile =
-          existing?.orchestratorProfile ??
-          (c.settings?.['orchestrator-profile'] ? String(c.settings['orchestrator-profile']) : undefined);
+        const rawRemoteProfile = c.settings?.['orchestrator-profile'];
+        const remoteProfile =
+          typeof rawRemoteProfile === 'string' && rawRemoteProfile.trim().length > 0
+            ? rawRemoteProfile.trim()
+            : undefined;
+        const orchestratorProfile = remoteProfile ?? existing?.orchestratorProfile;
         const modeMatches =
           existing?.sessionProfile === orchestratorProfile ||
           (!existing?.sessionProfile && !orchestratorProfile);
+        if (existing && (existing.orchestratorProfile !== orchestratorProfile || !modeMatches)) {
+          this.agent.closeThread(c.id);
+        }
+        const mergedRemoteSettings =
+          c.settings || existing?.remoteSettings
+            ? { ...(existing?.remoteSettings ?? {}), ...(c.settings ?? {}) }
+            : undefined;
         const upserted: ThreadMeta = {
           id: c.id,
           sessionId: modeMatches ? existing?.sessionId : undefined,
@@ -589,14 +626,12 @@ export class AppCore {
           totals: existing?.totals ?? ThreadStore.emptyTotals(),
           syncState: existing?.syncState ?? 'synced',
           orchestratorProfile,
-          initialPlaybook: existing?.initialPlaybook,
+          initialPlaybook: orchestratorProfile ? undefined : existing?.initialPlaybook,
           hasStarted: existing?.hasStarted,
+          remoteSettings: mergedRemoteSettings,
         };
         this.threads.upsert(upserted);
-        if (
-          existing?.orchestratorProfile &&
-          String(c.settings?.['orchestrator-profile'] ?? '') !== existing.orchestratorProfile
-        ) {
+        if (existing?.orchestratorProfile && !remoteProfile) {
           void this.syncClient
             .updateConversation(c.id, undefined, this.buildThreadSettings(upserted))
             .catch(() => undefined);
@@ -607,6 +642,7 @@ export class AppCore {
       for (const local of this.threads.list()) {
         if (!serverIds.has(local.id) && this.syncQueue.pendingCount(local.id) === 0) {
           this.threads.delete(local.id);
+          this.playbookBackfillChecked.delete(local.id);
         }
       }
       return { threads: this.threads.list(), serverReachable: true };
@@ -633,6 +669,7 @@ export class AppCore {
       updatedAt: conversation.updatedAt ?? conversation.createdAt,
       totals: ThreadStore.emptyTotals(),
       syncState: 'synced',
+      remoteSettings: conversation.settings ? { ...conversation.settings } : undefined,
     };
     this.threads.upsert(meta);
     return meta;
@@ -642,6 +679,7 @@ export class AppCore {
     this.agent.closeThread(threadId);
     await this.syncClient.deleteConversation(threadId);
     this.threads.delete(threadId);
+    this.playbookBackfillChecked.delete(threadId);
     this.searchIndex.remove(threadId);
   }
 
@@ -681,19 +719,22 @@ export class AppCore {
       patchPayload.sessionId = undefined;
       patchPayload.sessionProfile = undefined;
     }
+    const fullSettings = this.buildThreadSettings({ ...existing, ...patchPayload });
+    patchPayload.remoteSettings = fullSettings;
 
     const patched = this.threads.patch(threadId, patchPayload);
     if (patched) {
       // Undefined means "this patch is not about the title" — see updateConversation.
       const title = update.title;
       void this.syncClient
-        .updateConversation(threadId, title, this.buildThreadSettings(patched))
+        .updateConversation(threadId, title, fullSettings)
         .catch(() => undefined);
     }
     return patched;
   }
 
   private backfillInitialPlaybook(threadId: string, messages: readonly ChatMessage[]): void {
+    this.playbookBackfillChecked.add(threadId);
     const thread = this.threads.get(threadId);
     if (!thread || thread.orchestratorProfile || thread.initialPlaybook) return;
     const firstPlaybook = messages
@@ -801,7 +842,13 @@ export class AppCore {
     const isOrchestrator = Boolean(thread.orchestratorProfile);
     const wasStarted = isThreadStarted(thread);
     let storedPlaybook: string | undefined;
-    if (!isOrchestrator && !thread.initialPlaybook && wasStarted) {
+    if (
+      !isOrchestrator &&
+      !thread.initialPlaybook &&
+      wasStarted &&
+      !this.playbookBackfillChecked.has(thread.id)
+    ) {
+      this.playbookBackfillChecked.add(thread.id);
       const msgs = await this.threads.readMessages(thread.id);
       storedPlaybook = msgs
         .find((m) => m.role === 'user' && Boolean(m.playbook?.trim()))
@@ -817,7 +864,7 @@ export class AppCore {
 
     let effectiveThread = thread;
     const startPatch: Partial<ThreadMeta> = {};
-    if (!wasStarted || !thread.hasStarted) {
+    if (!thread.hasStarted) {
       startPatch.hasStarted = true;
     }
     if (!thread.initialPlaybook && effectivePlaybook) {

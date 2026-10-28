@@ -38,6 +38,63 @@ describe('SyncClient.updateConversation', () => {
     await clientRecording(bodies).updateConversation('c1', null, {});
     expect(bodies[0]).toEqual({ title: null, settings: {} });
   });
+
+  it('resolves updateConversation and deleteConversation to undefined on both 200 OK empty body and 204 No Content, including after a 401 token refresh retry', async () => {
+    // 1. 200 OK with empty body ("")
+    const empty200Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(empty200Client.updateConversation('c1', undefined, { model: 'sonnet' })).resolves.toBeUndefined();
+    await expect(empty200Client.deleteConversation('c1')).resolves.toBeUndefined();
+
+    // 2. 204 No Content
+    const noContent204Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+    await expect(noContent204Client.updateConversation('c1', undefined, { model: 'sonnet' })).resolves.toBeUndefined();
+    await expect(noContent204Client.deleteConversation('c1')).resolves.toBeUndefined();
+
+    // 3. 401 token refresh retry followed by 200 OK with empty body ("")
+    const getTokenRetry = vi
+      .fn()
+      .mockResolvedValueOnce('stale-1')
+      .mockResolvedValueOnce('fresh-1')
+      .mockResolvedValueOnce('stale-2')
+      .mockResolvedValueOnce('fresh-2');
+    const fetchRetry = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }));
+    const retryClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: getTokenRetry,
+      fetchFn: fetchRetry as unknown as typeof fetch,
+    });
+    await expect(retryClient.updateConversation('c1', 'Renamed', { model: 'opus' })).resolves.toBeUndefined();
+    await expect(retryClient.deleteConversation('c1')).resolves.toBeUndefined();
+    expect(getTokenRetry).toHaveBeenNthCalledWith(1, false);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(2, true);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(3, false);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(4, true);
+  });
+
+  it('rejects with Yvoke Backend attributed error when JSON-expecting endpoints (getSystemPrompt, listConversations) receive 200 OK with an empty body', async () => {
+    const empty200Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(empty200Client.getSystemPrompt('default-chat' as ValidSystemPromptName)).rejects.toThrow(
+      /^Yvoke Backend:/,
+    );
+    await expect(empty200Client.listConversations()).rejects.toThrow(/^Yvoke Backend:/);
+  });
 });
 
 describe('SyncClient.verifyConnection', () => {

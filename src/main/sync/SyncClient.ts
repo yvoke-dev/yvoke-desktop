@@ -94,7 +94,13 @@ export class SyncClient {
   }
 
   /** One automatic retry with a fresh (interactive if needed) token on 401. */
-  private async request<T>(method: string, p: string, body?: unknown, retried = false): Promise<T> {
+  private async request<T>(
+    method: string,
+    p: string,
+    body?: unknown,
+    retried = false,
+    allowEmpty = false,
+  ): Promise<T> {
     let token: string;
     try {
       token = await this.deps.getToken(retried);
@@ -121,7 +127,7 @@ export class SyncClient {
     }
 
     if (response.status === 401 && !retried) {
-      return this.request<T>(method, p, body, true);
+      return this.request<T>(method, p, body, true, allowEmpty);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -132,6 +138,13 @@ export class SyncClient {
       return undefined as T;
     }
     try {
+      if (allowEmpty) {
+        const text = await response.text();
+        if (!text.trim()) {
+          return undefined as T;
+        }
+        return JSON.parse(text) as T;
+      }
       return (await response.json()) as T;
     } catch (err) {
       throw new Error(tagAttributedError('Yvoke Backend', err));
@@ -155,14 +168,20 @@ export class SyncClient {
     title: string | null | undefined,
     settings?: Record<string, unknown>,
   ): Promise<void> {
-    return this.request('PATCH', `/conversations/${conversationId}`, {
-      ...(title !== undefined ? { title } : {}),
-      settings,
-    });
+    return this.request(
+      'PATCH',
+      `/conversations/${conversationId}`,
+      {
+        ...(title !== undefined ? { title } : {}),
+        settings,
+      },
+      false,
+      true,
+    );
   }
 
   deleteConversation(conversationId: string): Promise<void> {
-    return this.request('DELETE', `/conversations/${conversationId}`);
+    return this.request('DELETE', `/conversations/${conversationId}`, undefined, false, true);
   }
 
   getMessages(conversationId: string): Promise<MessageDto[]> {
