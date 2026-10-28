@@ -103,6 +103,7 @@ export class ThreadStore {
     if (!cleaned.orchestratorProfile) delete cleaned.orchestratorProfile;
     if (!cleaned.initialPlaybook || cleaned.orchestratorProfile) delete cleaned.initialPlaybook;
     if (cleaned.hasStarted === undefined) delete cleaned.hasStarted;
+    if (cleaned.remoteSettings === undefined) delete cleaned.remoteSettings;
     this.index[meta.id] = cleaned;
     this.persistIndex();
   }
@@ -131,6 +132,9 @@ export class ThreadStore {
     }
     if ('hasStarted' in update && update.hasStarted === undefined) {
       delete updated.hasStarted;
+    }
+    if ('remoteSettings' in update && update.remoteSettings === undefined) {
+      delete updated.remoteSettings;
     }
     this.index[threadId] = updated;
     this.persistIndex();

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SyncClient } from '../src/main/sync/SyncClient';
-import type { ValidSystemPromptName } from '../src/shared/types';
+import { SyncApiError, SyncClient } from '../src/main/sync/SyncClient';
+import type { OrchestratorRunPayload, ValidSystemPromptName } from '../src/shared/types';
 
 /**
  * The PATCH body is the one place a settings change can destroy something the user cares about:
@@ -37,6 +37,63 @@ describe('SyncClient.updateConversation', () => {
     const bodies: unknown[] = [];
     await clientRecording(bodies).updateConversation('c1', null, {});
     expect(bodies[0]).toEqual({ title: null, settings: {} });
+  });
+
+  it('resolves updateConversation and deleteConversation to undefined on both 200 OK empty body and 204 No Content, including after a 401 token refresh retry', async () => {
+    // 1. 200 OK with empty body ("")
+    const empty200Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(empty200Client.updateConversation('c1', undefined, { model: 'sonnet' })).resolves.toBeUndefined();
+    await expect(empty200Client.deleteConversation('c1')).resolves.toBeUndefined();
+
+    // 2. 204 No Content
+    const noContent204Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+    await expect(noContent204Client.updateConversation('c1', undefined, { model: 'sonnet' })).resolves.toBeUndefined();
+    await expect(noContent204Client.deleteConversation('c1')).resolves.toBeUndefined();
+
+    // 3. 401 token refresh retry followed by 200 OK with empty body ("")
+    const getTokenRetry = vi
+      .fn()
+      .mockResolvedValueOnce('stale-1')
+      .mockResolvedValueOnce('fresh-1')
+      .mockResolvedValueOnce('stale-2')
+      .mockResolvedValueOnce('fresh-2');
+    const fetchRetry = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }))
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }));
+    const retryClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: getTokenRetry,
+      fetchFn: fetchRetry as unknown as typeof fetch,
+    });
+    await expect(retryClient.updateConversation('c1', 'Renamed', { model: 'opus' })).resolves.toBeUndefined();
+    await expect(retryClient.deleteConversation('c1')).resolves.toBeUndefined();
+    expect(getTokenRetry).toHaveBeenNthCalledWith(1, false);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(2, true);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(3, false);
+    expect(getTokenRetry).toHaveBeenNthCalledWith(4, true);
+  });
+
+  it('rejects with Yvoke Backend attributed error when JSON-expecting endpoints (getSystemPrompt, listConversations) receive 200 OK with an empty body', async () => {
+    const empty200Client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(empty200Client.getSystemPrompt('default-chat' as ValidSystemPromptName)).rejects.toThrow(
+      /^Yvoke Backend:/,
+    );
+    await expect(empty200Client.listConversations()).rejects.toThrow(/^Yvoke Backend:/);
   });
 });
 
@@ -287,4 +344,230 @@ describe('SyncClient.getSystemPrompt', () => {
     expect(requestedUrl).toBe('https://server.example/api/chat/v1/prompts/system/..%2F..%2Fevil%3Ftest%3D1%23frag');
   });
 });
+
+describe('SyncClient full 10-endpoint contract & error handling', () => {
+  it('calls all 10 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
+    const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example///',
+      getToken: async () => 'tok-123',
+      fetchFn: (async (url: string, init: RequestInit) => {
+        const method = init.method ?? 'GET';
+        const headers = (init.headers ?? {}) as Record<string, string>;
+        const body = init.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ url, method, headers, body });
+
+        if (method === 'DELETE') {
+          return new Response(null, { status: 204 });
+        }
+        if (method === 'PATCH') {
+          return new Response(null, { status: 204 });
+        }
+        if (url.endsWith('/conversations?limit=200&offset=0')) {
+          return new Response(
+            JSON.stringify([{ id: 'c-1', title: 'Conv 1', settings: { model: 'sonnet' }, createdAt: 't0', updatedAt: 't1' }]),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith('/conversations') && method === 'POST') {
+          return new Response(
+            JSON.stringify({ id: 'c-new', title: 'New', settings: body as Record<string, unknown>, createdAt: 't0', updatedAt: 't0' }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith('/conversations/c-1/messages?limit=500&offset=0')) {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 'm-1',
+                role: 'user',
+                content: 'Hello',
+                playbook: 'oim-schema',
+                playbookVersion: 2,
+                promptTokens: null,
+                completionTokens: null,
+                totalTokens: null,
+                cachedTokens: null,
+                thoughtTokens: null,
+                createdAt: 't0',
+                feedbackRating: null,
+                feedbackComment: null,
+              },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith('/conversations/c-1/messages') && method === 'POST') {
+          return new Response(JSON.stringify({ ids: ['srv-u-1', 'srv-a-1'] }), { status: 200 });
+        }
+        if (url.endsWith('/messages/srv-a-1/feedback') && method === 'PUT') {
+          return new Response(JSON.stringify({ messageId: 'srv-a-1', rating: 1, comment: 'Great' }), { status: 200 });
+        }
+        if (url.endsWith('/prompts/system/default-chat')) {
+          return new Response(JSON.stringify({ systemPrompt: 'Default system prompt' }), { status: 200 });
+        }
+        if (url.endsWith('/orchestrator/profiles')) {
+          return new Response(
+            JSON.stringify([
+              {
+                name: 'OIM',
+                orchestratorPlaybook: 'oim-orch',
+                reviewerPlaybook: 'oim-rev',
+                specialistPlaybooks: ['oim-spec'],
+              },
+            ]),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith('/orchestrator/runs') && method === 'POST') {
+          return new Response(JSON.stringify({ id: 'run-srv-1' }), { status: 200 });
+        }
+        return new Response('Not Found', { status: 404 });
+      }) as unknown as typeof fetch,
+    });
+
+    const convs = await client.listConversations();
+    expect(convs).toHaveLength(1);
+
+    const created = await client.createConversation('My Title', { model: 'sonnet', client: 'desktop' });
+    expect(created.id).toBe('c-new');
+
+    await client.updateConversation('c-1', 'Updated Title', { model: 'opus' });
+    await client.deleteConversation('c-1');
+
+    const msgs = await client.getMessages('c-1');
+    expect(msgs[0].playbook).toBe('oim-schema');
+    expect(msgs[0].playbookVersion).toBe(2);
+
+    const appended = await client.appendMessages('c-1', [
+      { role: 'user', content: 'Q', playbook: 'oim-schema', playbookVersion: 2 },
+      { role: 'assistant', content: 'A', playbook: 'oim-schema', playbookVersion: 2, promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+    ]);
+    expect(appended.ids).toEqual(['srv-u-1', 'srv-a-1']);
+
+    const fb = await client.submitFeedback('srv-a-1', 1, 'Great');
+    expect(fb).toEqual({ messageId: 'srv-a-1', rating: 1, comment: 'Great' });
+
+    const sysPrompt = await client.getSystemPrompt('default-chat' as ValidSystemPromptName);
+    expect(sysPrompt).toBe('Default system prompt');
+
+    const profiles = await client.getOrchestratorProfiles();
+    expect(profiles[0].name).toBe('OIM');
+
+    const runPayload: OrchestratorRunPayload = {
+      conversationId: 'c-1',
+      messageId: 'srv-a-1',
+      profileName: 'OIM',
+      status: 'completed',
+      reviewRounds: 0,
+      steps: [{ seq: 1, role: 'orchestrator', round: 0, playbookName: 'oim-orch', playbookVersion: 2 }],
+    };
+    const recorded = await client.recordOrchestratorRun(runPayload);
+    expect(recorded.id).toBe('run-srv-1');
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET https://server.example/api/chat/v1/conversations?limit=200&offset=0',
+      'POST https://server.example/api/chat/v1/conversations',
+      'PATCH https://server.example/api/chat/v1/conversations/c-1',
+      'DELETE https://server.example/api/chat/v1/conversations/c-1',
+      'GET https://server.example/api/chat/v1/conversations/c-1/messages?limit=500&offset=0',
+      'POST https://server.example/api/chat/v1/conversations/c-1/messages',
+      'PUT https://server.example/api/chat/v1/messages/srv-a-1/feedback',
+      'GET https://server.example/api/chat/v1/prompts/system/default-chat',
+      'GET https://server.example/api/chat/v1/orchestrator/profiles',
+      'POST https://server.example/api/chat/v1/orchestrator/runs',
+    ]);
+    for (const c of calls) {
+      expect(c.headers.Authorization).toBe('Bearer tok-123');
+    }
+  });
+
+  it('retries once with getToken(true) on first 401 and throws SyncApiError(401) if second attempt also returns 401', async () => {
+    const getToken = vi.fn().mockResolvedValueOnce('stale-tok').mockResolvedValueOnce('fresh-tok');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Expired token', { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 'c-1', title: 'OK', settings: {}, createdAt: 't0', updatedAt: 't0' }]), { status: 200 }));
+
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken,
+      fetchFn: fetchMock as unknown as typeof fetch,
+    });
+
+    const convs = await client.listConversations();
+    expect(convs).toHaveLength(1);
+    expect(getToken).toHaveBeenNthCalledWith(1, false);
+    expect(getToken).toHaveBeenNthCalledWith(2, true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Now test double-401 throwing SyncApiError(401)
+    const getTokenFail = vi.fn().mockResolvedValue('still-bad-tok');
+    const fetchFail = vi.fn().mockImplementation(async () => new Response('Still unauthorized', { status: 401 }));
+    const failingClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: getTokenFail,
+      fetchFn: fetchFail as unknown as typeof fetch,
+    });
+
+    await expect(failingClient.listConversations()).rejects.toSatisfy((err: unknown) => {
+      return err instanceof SyncApiError && err.status === 401 && err.message.includes('Yvoke Backend:');
+    });
+    expect(getTokenFail).toHaveBeenCalledTimes(2);
+    expect(fetchFail).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([400, 404, 500])('throws SyncApiError with status %i and Yvoke Backend attribution on non-OK response', async (status) => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async () => new Response(`failure-${status}`, { status })) as unknown as typeof fetch,
+    });
+
+    await expect(client.listConversations()).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof SyncApiError &&
+        err.status === status &&
+        err.message.startsWith('Yvoke Backend:') &&
+        err.message.includes(`failure-${status}`)
+      );
+    });
+  });
+
+  it('throws attributed Yvoke Backend error when 200 OK returns malformed JSON', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async () => new Response('<<<not-json>>>', { status: 200 })) as unknown as typeof fetch,
+    });
+
+    await expect(client.listConversations()).rejects.toThrow(/^Yvoke Backend:/);
+  });
+
+  it('passes through Entra-prefixed token errors without calling fetch and attributes non-Entra token errors', async () => {
+    const fetchMock = vi.fn();
+    const entraClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => {
+        throw new Error('Entra: interactive login cancelled');
+      },
+      fetchFn: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(entraClient.listConversations()).rejects.toThrow('Entra: interactive login cancelled');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const genericTokenErrClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => {
+        throw new Error('keychain locked');
+      },
+      fetchFn: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(genericTokenErrClient.listConversations()).rejects.toThrow('Yvoke Backend: keychain locked');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 
