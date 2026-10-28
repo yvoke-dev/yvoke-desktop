@@ -12,11 +12,11 @@ desktop usage.
 | --- | --- |
 | **Read the knowledge base** | Every search, listing, table of contents, section read, graph lookup, record query and citation check goes to the server's knowledge-base connection, authenticated as the signed-in user. |
 | **Read the configuration** | The base instructions, the whole playbook library and every multi-agent profile are fetched live over the same connection. |
-| **Write conversations** | Conversations are created, retitled, re-settinged and deleted through the conversation API, and each finished turn is appended to it (including the active playbook name and version number on single-agent user messages). |
+| **Write conversations** | Conversations are created, retitled, re-settinged and deleted through the conversation API, and each finished turn is appended to it (including the active playbook name and version number on both user and assistant messages in single-agent turns). |
 | **Write ratings** | A thumb and its comment are stored against the server's id for that answer, so they appear in the web app's feedback screens and counts. |
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
 | **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop, which is what lets the web sidebar and the admin conversation register tell them apart. |
-| **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written into the conversation's settings under the keys the web app uses, so the two surfaces see the same choices. |
+| **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together as the full conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
 
 ## How it behaves
 
@@ -30,10 +30,17 @@ desktop usage.
   A multi-agent turn instead stores the composed answer and the lead's reasoning, with its team's work
   going to the trace.
 - **Playbook names and version numbers round-trip with the server.** When a single-agent turn is synced,
-  the user message includes the active playbook name and its positive whole-number version, and pulling a
-  conversation from the server restores both onto the local message (ignoring blank names, invalid version
-  numbers, or version numbers without a playbook name). Multi-agent user messages carry neither and instead
-  report the playbook name and version number on each uploaded trace step.
+  both the user message and the assistant message include the active playbook name and its positive
+  whole-number version, and pulling a conversation from the server restores both onto the local messages
+  (ignoring blank names, invalid version numbers, or version numbers without a playbook name) and locks
+  the conversation's playbook from the restored transcript. Multi-agent messages carry neither on the
+  messages themselves and instead report the playbook name and version number on each uploaded trace step.
+- **Conversation settings updates send the full conversation settings and repair missing orchestrator profiles on refresh.**
+  Whenever a conversation's model, thinking level, or multi-agent profile changes, the app sends the
+  complete conversation settings so that updating one setting on the server never clears another. When
+  refreshing the conversation list, if a locally stored multi-agent conversation is missing its
+  orchestrator profile setting on the server, the app pushes the full conversation settings back to the
+  server in the background to repair it.
 - **A rating is refused rather than queued** when the answer has not yet been accepted by the server —
   there is no id to attach it to.
 

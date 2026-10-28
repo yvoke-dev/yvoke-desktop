@@ -42,17 +42,21 @@ behind it, and the work that produced it can be opened and read.
   both the error would be one the user could not act on: a multi-agent conversation, which takes its
   playbooks from the profile, and a server that offers no playbooks at all, where the question is
   sent as it was and the assistant gets the default knowledge-base tool set.
-- **A conversation is locked to its initial playbook and agent mode after the first message is sent.** Playbook
-  instructions are combined with the resolved system prompt in the SDK system prompt rather than
+- **A conversation locks its agent mode after the first message is sent, and locks its playbook once a playbook has been selected and sent.** Playbook
+  instructions are combined with the resolved system prompt rather than
   prepended to user messages. Once a conversation has started (persisting across restarts and failed
-  or stopped initial turns), both the conversation's agent mode (Single agent vs. Multi-agent orchestrator
-  profile) and the active single-agent playbook cannot be changed or removed: the agent mode selector
-  is disabled with an explanatory tooltip, the remove button (`×`) on the active playbook indicator is
-  omitted, typing `/` does not open the autocomplete picker, and backspacing on an empty draft does not
-  clear it. Attempting to change agent mode on a started conversation is rejected. In single-agent mode,
-  the model and thinking effort selectors remain editable between turns when idle. Preflight validation
-  runs only on the conversation's first message, and preflight recommendations do not offer switching
-  playbooks mid-conversation.
+  or stopped initial turns), the conversation's agent mode (Single agent vs. Multi-agent orchestrator
+  profile) cannot be changed: the agent mode selector is disabled with an explanatory tooltip, and
+  attempting to change agent mode on a started conversation is rejected. Once a single-agent message
+  carrying a playbook has been sent, that playbook is locked and cannot be changed or removed: the remove
+  button (`×`) on the active playbook indicator is omitted, typing `/` does not open the autocomplete
+  picker, and backspacing on an empty draft does not clear it. If a single-agent conversation's first
+  turn was sent while no playbooks were available from the server, a playbook can and must be selected
+  once the playbook catalogue loads, and is then locked from that point onward (restarting the underlying
+  assistant session under the newly assigned playbook). In single-agent mode, the model and thinking
+  effort selectors remain editable between turns when idle. Preflight validation runs only on the
+  conversation's first message, and preflight recommendations do not offer switching playbooks
+  mid-conversation.
 - **Only the answer's prose is the answer.** Reasoning and tool calls live in the trace *below* it,
   collapsed to a single line by default, because process is evidence rather than content. Two things
   stay inline instead: a clarifying question, which the user has to act on, and a delegation to a
@@ -85,7 +89,7 @@ behind it, and the work that produced it can be opened and read.
 - **A turn that fails is discarded — and takes its question with it.** Only a turn that ends without
   an error is written to the conversation and queued for the server, and the question is written in
   the same act. So a failed turn leaves no record of having been asked in the transcript. The question stays on screen
-  until the conversation is reopened, which is the only sign that anything was lost (though an initial attempt permanently locks the conversation's agent mode and playbook). Reaching the
+  until the conversation is reopened, which is the only sign that anything was lost (though an initial attempt permanently locks the conversation's agent mode, as well as any playbook selected on that attempt). Reaching the
   turn ceiling counts as a failure, so a long investigation that runs out of steps loses everything.
 - **Stopping is the same act, for the same reason.** Stopping produces an error result, so the partial
   answer and the question are both discarded. The web app keeps a stopped answer; this one does not.
@@ -253,7 +257,7 @@ behind it, and the work that produced it can be opened and read.
 - Resizing or collapsing the sidebar; selecting several conversations; deleting in bulk.
 - More than one window, or more than one conversation open at once.
 - Changing agent mode, model, thinking effort, or attached playbook while a turn is in progress or while a playbook check is running.
-- Changing or removing a playbook once a conversation has started.
+- Changing or removing a playbook once a playbook has been selected and sent in the conversation.
 - Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 - **Multi-question and multi-select clarification tools are not supported as separate interactive steps.**
   When an assistant call specifies multiple questions or multi-select choices, the questions are

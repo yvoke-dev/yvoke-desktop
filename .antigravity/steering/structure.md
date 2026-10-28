@@ -108,11 +108,13 @@ yvoke-desktop/
 │   ├── reviewTools.test.ts
 │   ├── runTrace.test.ts
 │   ├── spec.test.ts        # Enforces modular spec/ structure and sections
+│   ├── SyncClient.test.ts
 │   ├── SyncQueue.test.ts
 │   ├── ThreadStore.test.ts
 │   ├── policy.test.ts
 │   ├── thinking.test.ts
-│   └── translate.test.ts
+│   ├── translate.test.ts
+│   └── webCommunicationContract.test.ts # Stateful end-to-end web sync & run trace contract suite
 ├── scripts/                # Headless spike and automation scripts
 │   └── spike.ts
 ├── tsconfig.json           # Composite typescript project references
