@@ -326,17 +326,17 @@ export function ChatView(props: {
   }, [lightboxImage]);
 
   /**
-   * The playbook the conversation's initial question carried, if any.
-   * Once at least one user message has been sent or thread.initialPlaybook is set,
-   * the thread is locked to that playbook.
+   * The playbook the conversation's first playbook-carrying user question used, if any.
+   * Agent mode locks as soon as the conversation starts, while a single-agent thread's playbook
+   * locks once a playbook has been selected and sent.
    */
   const initialUserMessage = useMemo(
-    () => messages.find((m) => m.role === 'user'),
+    () => messages.find((m) => m.role === 'user' && Boolean(m.playbook?.trim())),
     [messages],
   );
 
   const initialUserPlaybook = useMemo(
-    () => thread.initialPlaybook ?? initialUserMessage?.playbook,
+    () => thread.initialPlaybook?.trim() || initialUserMessage?.playbook?.trim() || undefined,
     [thread.initialPlaybook, initialUserMessage],
   );
 
@@ -344,14 +344,14 @@ export function ChatView(props: {
     isThreadStarted(thread) ||
     messages.some((m) => m.role === 'user');
 
-  const isPlaybookLocked = isConversationStarted;
+  const isPlaybookLocked = !orchestratorActive && Boolean(initialUserPlaybook);
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
     if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (initialUserPlaybook) {
       const messageVersion =
-        initialUserMessage?.playbook === initialUserPlaybook
+        initialUserMessage?.playbook?.trim() === initialUserPlaybook
           ? initialUserMessage.playbookVersion
           : undefined;
       const found = prompts.find((p) => p.name === initialUserPlaybook);
@@ -611,6 +611,10 @@ export function ChatView(props: {
       if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
     const effectivePromptName = isPlaybookLocked ? (activePrompt?.name ?? initialUserPlaybook) : promptName;
+    if (!isPlaybookLocked && !orchestratorActive && !effectivePromptName && prompts.length > 0) {
+      setPlaybookRequired(true);
+      return;
+    }
     if (toSend && toSend.length > 0) {
       onSend(text, effectivePromptName, toSend);
     } else {
@@ -844,11 +848,11 @@ export function ChatView(props: {
                     Switch to {preflight.suggestedName}
                   </button>
                 )}
-                {/* Sends exactly what the composer shows — normally the playbook the card is
-                    about, but the user is free to have changed it while the card stood. */}
+                {/* Sends what the composer shows, falling back to the playbook the card was
+                    opened for if the user removed the chip while the card stood. */}
                 <button
                   disabled={draft.trim().length === 0 && attachments.length === 0}
-                  onClick={() => send(draft.trim(), activePrompt?.name)}
+                  onClick={() => send(draft.trim(), activePrompt?.name ?? preflight.forPlaybook)}
                 >
                   Send anyway
                 </button>

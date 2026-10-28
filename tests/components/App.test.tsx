@@ -719,5 +719,102 @@ describe('App conversation switching with in-progress turn', () => {
     );
     expect(pickerTitles).toEqual(['oim-alpha', 'oim-beta']);
   });
+
+  it('continues polling listPrompts every 10s when serverReachable is true but prompts is empty, stops once prompts loads, keeps IPC listeners registered once, and cleans up interval on unmount', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const listPromptsMock = vi
+        .fn()
+        .mockResolvedValueOnce([]) // initial mount: empty catalogue (e.g. /mcp startup timeout)
+        .mockResolvedValueOnce([]) // 1st 10s retry: still empty
+        .mockResolvedValue(PROMPTS); // 2nd 10s retry: catalogue recovered!
+      (window as unknown as { api: any }).api.listPrompts = listPromptsMock;
+
+      const onAgentEventSpy = (window as unknown as { api: any }).api.onAgentEvent;
+      const onSyncEventSpy = (window as unknown as { api: any }).api.onSyncEvent;
+
+      const { unmount } = render(<App />);
+
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      expect(listPromptsMock).toHaveBeenCalledTimes(1);
+      expect(onAgentEventSpy).toHaveBeenCalledTimes(1);
+      expect(onSyncEventSpy).toHaveBeenCalledTimes(1);
+
+      // Advance 10s -> triggers 1st retry (still returns [])
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      await waitFor(() => expect(listPromptsMock).toHaveBeenCalledTimes(2));
+
+      // Advance another 10s -> triggers 2nd retry (returns PROMPTS)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      await waitFor(() => expect(listPromptsMock).toHaveBeenCalledTimes(3));
+
+      // Open First Conversation -> playbook picker now shows the recovered playbooks!
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+      expect(screen.getByText('oim-getting-started')).toBeTruthy();
+
+      // Crucial: updating `prompts` state must NOT have changed `refreshThreads` identity or re-registered IPC listeners
+      expect(onAgentEventSpy).toHaveBeenCalledTimes(1);
+      expect(onSyncEventSpy).toHaveBeenCalledTimes(1);
+      expect(agentListeners).toHaveLength(1);
+      expect(syncListeners).toHaveLength(1);
+
+      // Advance another 20s -> polling has stopped now that prompts.length > 0
+      const callsAfterRecovery = listPromptsMock.mock.calls.length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(listPromptsMock).toHaveBeenCalledTimes(callsAfterRecovery);
+
+      // Unmount while polling is active (test unmount cleanup)
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans up the 10s empty-catalogue polling interval on unmount and re-fetches prompts when refreshThreads runs while prompts is empty', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const listPromptsMock = vi
+        .fn()
+        .mockResolvedValueOnce([]) // initial mount: empty
+        .mockResolvedValue(PROMPTS); // subsequent call via refreshThreads (e.g. sync-state synced) recovers prompts
+      (window as unknown as { api: any }).api.listPrompts = listPromptsMock;
+
+      const { unmount } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      expect(listPromptsMock).toHaveBeenCalledTimes(1);
+
+      // Trigger refreshThreads via a sync-state: 'synced' event before the 10s timer fires
+      act(() => {
+        for (const l of syncListeners) {
+          l({ kind: 'sync-state', threadId: 'thread-1', state: 'synced', pendingCount: 0 });
+        }
+      });
+
+      await waitFor(() => expect(listPromptsMock).toHaveBeenCalledTimes(2));
+
+      // Also verify unmount cleans up active interval when prompts is still empty
+      listPromptsMock.mockReset();
+      listPromptsMock.mockResolvedValue([]);
+      unmount();
+
+      const { unmount: unmount2 } = render(<App />);
+      await waitFor(() => expect(listPromptsMock).toHaveBeenCalledTimes(1));
+      unmount2();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(listPromptsMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 

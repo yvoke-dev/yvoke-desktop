@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import type { McpPromptInfo, ThreadMeta } from '../src/shared/types';
+import { SyncApiError } from '../src/main/sync/SyncClient';
+import type { McpPromptInfo, OrchestratorRunPayload, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
 import * as logger from '../src/main/log';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
@@ -1015,10 +1016,137 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
     expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
   });
 
-  it('Plain Chat Immutability Negative Test: started plain-chat thread ignores promptName and never mutates initialPlaybook', async () => {
+  it('Late Playbook Assignment on Started Playbook-Less Thread: assigns initialPlaybook, closes warm session, clears sessionId, and locks initialPlaybook for subsequent turns', async () => {
     const thread: ThreadMeta = {
       id: 't-plain-chat',
-      title: 'Plain Chat Thread',
+      title: 'Started Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'warm-plain-session',
+      sessionProfile: undefined,
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 25, outputTokens: 30 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    };
+    appCore.threads.upsert(thread);
+    await appCore.threads.appendMessages(thread.id, [
+      {
+        localId: 'u-1',
+        role: 'user',
+        content: 'Turn 1 sent while catalogue was empty',
+        playbook: undefined,
+        createdAt: '2026-08-01T10:00:01.000Z',
+      },
+      {
+        localId: 'a-1',
+        role: 'assistant',
+        content: 'Answer 1',
+        createdAt: '2026-08-01T10:00:02.000Z',
+      },
+    ]);
+
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    // Follow-up turn while catalogue is still empty (no promptName) stays playbook-less without closing session
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 2 still without playbook',
+    });
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: thread.id, sessionId: 'warm-plain-session' }),
+      'Turn 2 still without playbook',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+
+    // Once catalogue loads and user selects a playbook on follow-up turn, it assigns initialPlaybook, closes warm session, and clears sessionId
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 3 assigning playbook',
+      promptName: 'oim-schema',
+    });
+
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: thread.id,
+        initialPlaybook: 'oim-schema',
+      }),
+      'Turn 3 assigning playbook',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    const passedThread = sendSpy.mock.calls.at(-1)![0];
+    expect(passedThread.sessionId).toBeUndefined();
+    expect(passedThread.sessionProfile).toBeUndefined();
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+    expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+
+    // Subsequent turn attempting a different playbook is locked to 'oim-schema'
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 4 attempting divergent playbook',
+      promptName: 'divergent-playbook',
+    });
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: thread.id, initialPlaybook: 'oim-schema' }),
+      'Turn 4 attempting divergent playbook',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Multi-Turn Stored Playbook Backfill: getMessages and sendMessage find playbook from Turn 2 when Turn 1 had playbook: undefined', async () => {
+    const threadId = 't-multiturn-backfill';
+    appCore.threads.upsert({
+      id: threadId,
+      title: 'Multi-Turn Backfill Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadId, [
+      { localId: 'u-1', role: 'user', content: 'Turn 1 no playbook', playbook: undefined, createdAt: '2026-08-01T10:00:01.000Z' },
+      { localId: 'a-1', role: 'assistant', content: 'Answer 1', createdAt: '2026-08-01T10:00:02.000Z' },
+      { localId: 'u-2', role: 'user', content: 'Turn 2 with playbook', playbook: 'oim-schema', playbookVersion: 2, createdAt: '2026-08-01T10:01:01.000Z' },
+      { localId: 'a-2', role: 'assistant', content: 'Answer 2', playbook: 'oim-schema', playbookVersion: 2, createdAt: '2026-08-01T10:01:02.000Z' },
+    ]);
+
+    // Test sendMessage reading storedPlaybook before getMessages is called
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+    await appCore.sendMessage({
+      threadId,
+      text: 'Turn 3 with divergent prompt',
+      promptName: 'other-playbook',
+    });
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: threadId, initialPlaybook: 'oim-schema' }),
+      'Turn 3 with divergent prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(threadId)?.initialPlaybook).toBe('oim-schema');
+
+    // Also test getMessages backfilling initialPlaybook when initialPlaybook is cleared
+    appCore.threads.patch(threadId, { initialPlaybook: undefined, hasStarted: false });
+    const msgs = await appCore.getMessages(threadId);
+    expect(msgs).toHaveLength(4);
+    expect(appCore.threads.get(threadId)?.initialPlaybook).toBe('oim-schema');
+    expect(appCore.threads.get(threadId)?.hasStarted).toBe(true);
+  });
+
+  it('Busy Guard Pre-emption: sendMessage throws immediately when agent.isBusy(threadId) is true before reading messages', async () => {
+    const thread: ThreadMeta = {
+      id: 't-busy-guard',
+      title: 'Busy Thread',
       model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: '2026-08-01T10:00:00.000Z',
@@ -1030,20 +1158,17 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
     };
     appCore.threads.upsert(thread);
 
-    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+    vi.spyOn(appCore.agent, 'isBusy').mockReturnValue(true);
+    const readSpy = vi.spyOn(appCore.threads, 'readMessages');
 
-    await appCore.sendMessage({
-      threadId: thread.id,
-      text: 'Follow-up send attempting to attach playbook',
-      promptName: 'divergent-playbook',
-    });
-
-    expect(sendSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      'Follow-up send attempting to attach playbook',
-      expect.objectContaining({ playbook: undefined }),
-    );
-    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+    await expect(
+      appCore.sendMessage({
+        threadId: thread.id,
+        text: 'Concurrent send while busy',
+        promptName: 'oim-schema',
+      }),
+    ).rejects.toThrow('A turn is already running for this conversation.');
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
   it('Orchestrator Rogue Playbook Immunity Negative Test: orchestrator stamps hasStarted but ignores rogue playbook', async () => {
@@ -1342,7 +1467,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     vi.restoreAllMocks();
   });
 
-  it('writeTurn enqueues playbook and playbookVersion on the synced user message', async () => {
+  it('writeTurn enqueues playbook and playbookVersion on both user and assistant messages for single-agent turns and leaves them undefined on orchestrator assistant messages', async () => {
     const threadId = 'thread-sync-ver';
     appCore.threads.upsert({
       id: threadId,
@@ -1373,6 +1498,8 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
         localId: 'a-ver-1',
         role: 'assistant',
         content: 'Here is how attestation works.',
+        playbook: 'oim-full',
+        playbookVersion: 2,
         createdAt: '2026-10-15T10:01:05.000Z',
       },
     );
@@ -1385,6 +1512,50 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       playbook: 'oim-full',
       playbookVersion: 2,
     });
+    expect(turn.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'Here is how attestation works.',
+      playbook: 'oim-full',
+      playbookVersion: 2,
+    });
+
+    // Orchestrator turn leaves playbook and playbookVersion undefined on both messages
+    const orchThreadId = 'thread-sync-orch';
+    appCore.threads.upsert({
+      id: orchThreadId,
+      title: 'Orch Sync Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    });
+    vi.spyOn(appCore as any, 'stashOrchestratorRun').mockResolvedValue(undefined);
+
+    (appCore as any).writeTurn(
+      orchThreadId,
+      {
+        localId: 'u-orch-sync',
+        role: 'user',
+        content: 'Orch question',
+        createdAt: '2026-10-15T10:01:00.000Z',
+      },
+      {
+        localId: 'a-orch-sync',
+        role: 'assistant',
+        content: 'Orch answer',
+        createdAt: '2026-10-15T10:01:05.000Z',
+      },
+    );
+
+    const orchTurn = enqueueSpy.mock.calls[1][0];
+    expect(orchTurn.messages[0].playbook).toBeUndefined();
+    expect(orchTurn.messages[0].playbookVersion).toBeUndefined();
+    expect(orchTurn.messages[1].playbook).toBeUndefined();
+    expect(orchTurn.messages[1].playbookVersion).toBeUndefined();
   });
 
   it('fromDto restores playbook and playbookVersion from remote MessageDto and maps null to undefined', async () => {
@@ -1619,5 +1790,345 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     (appCore as any).handleServerIds(threadId, { 'a-orch-3': 'srv-msg-3' });
     expect(recordRunSpy).toHaveBeenCalledTimes(2);
     expect(recordRunSpy.mock.calls[1][0].steps[0].playbookVersion).toBeUndefined();
+  });
+
+  it('patchThread sends full buildThreadSettings payload and listThreads repairs missing server orchestrator-profile with negative controls', async () => {
+    const thread: ThreadMeta = {
+      id: 't-full-settings',
+      title: 'Full Settings Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // Patching only thinkingLevel sends the complete settings object preserving orchestrator-profile and model
+    appCore.patchThread(thread.id, { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenCalledWith(thread.id, undefined, {
+      model: 'sonnet',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    updateSpy.mockClear();
+
+    // listThreads repairs server conversation whose settings lost 'orchestrator-profile',
+    // while NOT calling updateConversation when already matching or when single-agent
+    const singleThread: ThreadMeta = {
+      id: 't-single-no-repair',
+      title: 'Single Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    const matchingOrchThread: ThreadMeta = {
+      id: 't-matching-orch',
+      title: 'Matching Orch',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(singleThread);
+    appCore.threads.upsert(matchingOrchThread);
+
+    // Also verify listThreads survives a rejected repair call
+    updateSpy.mockRejectedValueOnce(new Error('Repair failed'));
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-full-settings',
+        title: 'Full Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet', 'thinking-level': 'high' }, // missing orchestrator-profile!
+      },
+      {
+        id: 't-single-no-repair',
+        title: 'Single Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet' },
+      },
+      {
+        id: 't-matching-orch',
+        title: 'Matching Orch',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+    ]);
+
+    const res = await appCore.listThreads();
+    expect(res.serverReachable).toBe(true);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('t-full-settings', undefined, {
+      model: 'sonnet',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+  });
+
+  it('stashOrchestratorRun registers tracePromise synchronously before awaiting and bounds resolution to 5_000ms with zero dangling timers', async () => {
+    vi.useFakeTimers();
+    try {
+      const threadId = 'thread-orch-timeout';
+      const thread: ThreadMeta = {
+        id: threadId,
+        title: 'Orch Timeout Thread',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:00:00.000Z',
+        totals: ThreadStore.emptyTotals(),
+        syncState: 'synced',
+        orchestratorProfile: 'OIM',
+        hasStarted: true,
+      };
+      appCore.threads.upsert(thread);
+      // Seed stale profilesCache so fallback has the profile if getOrchestratorProfiles hangs
+      (appCore as any).profilesCache = {
+        at: 0,
+        profiles: [
+          {
+            name: 'OIM',
+            orchestratorPlaybook: 'oim-orchestrator',
+            reviewerPlaybook: 'oim-orchestrator-reviewer',
+            specialistPlaybooks: ['oim-access-governance'],
+          },
+        ],
+      };
+
+      // Both network calls hang forever
+      vi.spyOn(appCore, 'resolveOrchestratorProfile').mockImplementation(() => new Promise(() => {}));
+      vi.spyOn(appCore.mcpPrompts, 'list').mockImplementation(() => new Promise(() => {}));
+      const recordRunSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-timeout-1' });
+
+      const stashPromise = (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: 'u-to-1', role: 'user', content: 'Question', createdAt: 'now' },
+        {
+          localId: 'a-to-1',
+          role: 'assistant',
+          content: 'Final answer',
+          toolCalls: [
+            { id: 'tc-1', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          ],
+          createdAt: 'now',
+        },
+      );
+
+      // Synchronously registered in pendingRuns BEFORE any await settles
+      expect((appCore as any).pendingRuns.has('a-to-1')).toBe(true);
+
+      // Server acks the message BEFORE stashOrchestratorRun finishes!
+      (appCore as any).handleServerIds(threadId, { 'a-to-1': 'srv-to-msg-1' });
+      expect(recordRunSpy).not.toHaveBeenCalled();
+
+      // Advance 5,000ms to fire the timeout fallbacks
+      await vi.advanceTimersByTimeAsync(5_000);
+      await stashPromise;
+
+      expect(recordRunSpy).toHaveBeenCalledTimes(1);
+      expect(recordRunSpy.mock.calls[0][0]).toMatchObject({
+        conversationId: threadId,
+        messageId: 'srv-to-msg-1',
+        profileName: 'OIM',
+      });
+      expect(recordRunSpy.mock.calls[0][0].steps[0]).toMatchObject({
+        role: 'orchestrator',
+        playbookName: 'oim-orchestrator',
+        playbookVersion: undefined,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Also verify that when both resolve fast (< 5s), the 5s timers are cleaned up in .finally()
+      vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+        name: 'OIM',
+        orchestratorPlaybook: 'oim-orchestrator',
+        reviewerPlaybook: 'oim-orchestrator-reviewer',
+        specialistPlaybooks: ['oim-access-governance'],
+      });
+      vi.spyOn(appCore.mcpPrompts, 'list').mockResolvedValue([
+        { name: 'oim-orchestrator', title: 'Orch', description: '', arguments: [], version: 2 },
+      ]);
+
+      await (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: 'u-to-2', role: 'user', content: 'Fast question', createdAt: 'now' },
+        {
+          localId: 'a-to-2',
+          role: 'assistant',
+          content: 'Fast answer',
+          toolCalls: [
+            { id: 'tc-2', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          ],
+          createdAt: 'now',
+        },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stashOrchestratorRun deletes pendingRuns entry when buildRunTrace returns null and prevents evicted in-flight promises from resurrecting', async () => {
+    const threadId = 'thread-orch-null-evict';
+    const thread: ThreadMeta = {
+      id: threadId,
+      title: 'Orch Null & Eviction Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    vi.spyOn(appCore.mcpPrompts, 'list').mockResolvedValue([]);
+
+    // 1. Assistant message with empty content and no tool calls -> buildRunTrace returns null -> entry deleted
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-null', role: 'user', content: 'Empty turn', createdAt: 'now' },
+      { localId: 'a-null', role: 'assistant', content: '   ', toolCalls: [], createdAt: 'now' },
+    );
+    expect((appCore as any).pendingRuns.has('a-null')).toBe(false);
+
+    // 2. Eviction race: first turn is slow; 50 subsequent turns evict 'a-evict-0' before it settles
+    let resolveSlowProfile!: (p: any) => void;
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveSlowProfile = res;
+        }),
+    );
+
+    const delegationCall = [
+      { id: 'tc-evict', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'q' }, result: 'a' },
+    ];
+
+    const slowStash = (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-evict-0', role: 'user', content: 'Slow 0', createdAt: 'now' },
+      { localId: 'a-evict-0', role: 'assistant', content: 'Ans 0', toolCalls: delegationCall, createdAt: 'now' },
+    );
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(true);
+
+    for (let i = 1; i <= 50; i++) {
+      await (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: `u-evict-${i}`, role: 'user', content: `Q ${i}`, createdAt: 'now' },
+        { localId: `a-evict-${i}`, role: 'assistant', content: `Ans ${i}`, toolCalls: delegationCall, createdAt: 'now' },
+      );
+    }
+
+    expect((appCore as any).pendingRuns.size).toBe(50);
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(false);
+
+    // Now the slow promise resolves — it must NOT re-insert 'a-evict-0' into pendingRuns
+    resolveSlowProfile({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    await slowStash;
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(false);
+    expect((appCore as any).pendingRuns.size).toBe(50);
+  });
+
+  it('postOrchestratorRun buffers retriable failures (network, 401, 429, 502), drops non-retriable 4xx (400, 403, 404), caps failedRuns at 50, and drains atomically without double-POSTing', async () => {
+    const threadId = 'thread-orch-retry';
+    const makeRun = (msgId: string): OrchestratorRunPayload => ({
+      conversationId: threadId,
+      messageId: msgId,
+      profileName: 'OIM',
+      status: 'completed',
+      reviewRounds: 0,
+      steps: [{ seq: 1, role: 'orchestrator', round: 0, playbookName: 'oim-orchestrator' }],
+    });
+
+    const recordSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun');
+
+    // Non-retriable 400, 403, 404 are dropped and NOT added to failedRuns
+    for (const status of [400, 403, 404]) {
+      recordSpy.mockRejectedValueOnce(new SyncApiError(status, `Yvoke Backend: HTTP ${status}`));
+      (appCore as any).postOrchestratorRun(makeRun(`msg-${status}`));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect((appCore as any).failedRuns).toHaveLength(0);
+
+    // Retriable errors: network TypeError, 401, 429, 502 ARE buffered in failedRuns
+    const retriableErrors = [
+      new TypeError('fetch failed'),
+      new SyncApiError(401, 'Yvoke Backend: HTTP 401'),
+      new SyncApiError(429, 'Yvoke Backend: HTTP 429'),
+      new SyncApiError(502, 'Yvoke Backend: HTTP 502'),
+    ];
+    for (let i = 0; i < retriableErrors.length; i++) {
+      recordSpy.mockRejectedValueOnce(retriableErrors[i]);
+      (appCore as any).postOrchestratorRun(makeRun(`msg-ret-${i}`));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect((appCore as any).failedRuns).toHaveLength(4);
+
+    // Atomic splice proof: concurrent handleServerIds + listThreads while drain is in-flight
+    // must post each buffered run exactly ONCE
+    recordSpy.mockClear();
+    let resolveInFlightPost!: (v: { id: string }) => void;
+    recordSpy.mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveInFlightPost = res;
+        }),
+    );
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValue([]);
+
+    // Trigger first drain via handleServerIds
+    (appCore as any).handleServerIds(threadId, {});
+    // Immediately trigger second drain via listThreads while first drain's POSTs are still in flight
+    await appCore.listThreads();
+
+    // Even with two concurrent drain triggers, recordOrchestratorRun was only called 4 times (not 8)
+    expect(recordSpy).toHaveBeenCalledTimes(4);
+    expect((appCore as any).failedRuns).toHaveLength(0);
+    resolveInFlightPost({ id: 'ok' });
+
+    // Verify failedRuns is capped at MAX_PENDING_RUNS = 50
+    recordSpy.mockRejectedValue(new SyncApiError(503, 'Service Unavailable'));
+    for (let i = 0; i < 60; i++) {
+      (appCore as any).postOrchestratorRun(makeRun(`msg-cap-${i}`));
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    expect((appCore as any).failedRuns).toHaveLength(50);
+    expect((appCore as any).failedRuns[0].messageId).toBe('msg-cap-10');
+    expect((appCore as any).failedRuns[49].messageId).toBe('msg-cap-59');
   });
 });
