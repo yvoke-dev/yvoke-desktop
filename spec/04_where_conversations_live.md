@@ -42,6 +42,10 @@ or lose the network mid-conversation.
 - **Search is incremental.** At startup only the logs whose size or timestamp changed are re-read, a
   turn written while the app runs is folded in immediately, and a search typed during startup answers
   from the previous session's index rather than coming back empty.
+- **An empty playbook catalogue keeps retrying in the background.** While the server is unreachable or
+  the playbook catalogue is still empty (for example, if the knowledge-base connection timed out at
+  startup while the conversation list succeeded), the app continues retrying every 10 seconds in the
+  background and reloads the playbook and multi-agent profile catalogues as soon as the server responds.
 
 ## Limits
 

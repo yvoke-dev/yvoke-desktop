@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import type { McpPromptInfo, ThreadMeta } from '../src/shared/types';
+import { SyncApiError } from '../src/main/sync/SyncClient';
+import type { McpPromptInfo, OrchestratorRunPayload, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
 import * as logger from '../src/main/log';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
@@ -1015,10 +1016,137 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
     expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
   });
 
-  it('Plain Chat Immutability Negative Test: started plain-chat thread ignores promptName and never mutates initialPlaybook', async () => {
+  it('Late Playbook Assignment on Started Playbook-Less Thread: assigns initialPlaybook, closes warm session, clears sessionId, and locks initialPlaybook for subsequent turns', async () => {
     const thread: ThreadMeta = {
       id: 't-plain-chat',
-      title: 'Plain Chat Thread',
+      title: 'Started Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      sessionId: 'warm-plain-session',
+      sessionProfile: undefined,
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 25, outputTokens: 30 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    };
+    appCore.threads.upsert(thread);
+    await appCore.threads.appendMessages(thread.id, [
+      {
+        localId: 'u-1',
+        role: 'user',
+        content: 'Turn 1 sent while catalogue was empty',
+        playbook: undefined,
+        createdAt: '2026-08-01T10:00:01.000Z',
+      },
+      {
+        localId: 'a-1',
+        role: 'assistant',
+        content: 'Answer 1',
+        createdAt: '2026-08-01T10:00:02.000Z',
+      },
+    ]);
+
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    // Follow-up turn while catalogue is still empty (no promptName) stays playbook-less without closing session
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 2 still without playbook',
+    });
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: thread.id, sessionId: 'warm-plain-session' }),
+      'Turn 2 still without playbook',
+      expect.objectContaining({ playbook: undefined }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+
+    // Once catalogue loads and user selects a playbook on follow-up turn, it assigns initialPlaybook, closes warm session, and clears sessionId
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 3 assigning playbook',
+      promptName: 'oim-schema',
+    });
+
+    expect(closeSpy).toHaveBeenCalledWith(thread.id);
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: thread.id,
+        initialPlaybook: 'oim-schema',
+      }),
+      'Turn 3 assigning playbook',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    const passedThread = sendSpy.mock.calls.at(-1)![0];
+    expect(passedThread.sessionId).toBeUndefined();
+    expect(passedThread.sessionProfile).toBeUndefined();
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+    expect(appCore.threads.get(thread.id)?.sessionId).toBeUndefined();
+
+    // Subsequent turn attempting a different playbook is locked to 'oim-schema'
+    await appCore.sendMessage({
+      threadId: thread.id,
+      text: 'Turn 4 attempting divergent playbook',
+      promptName: 'divergent-playbook',
+    });
+    expect(sendSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: thread.id, initialPlaybook: 'oim-schema' }),
+      'Turn 4 attempting divergent playbook',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBe('oim-schema');
+  });
+
+  it('Multi-Turn Stored Playbook Backfill: getMessages and sendMessage find playbook from Turn 2 when Turn 1 had playbook: undefined', async () => {
+    const threadId = 't-multiturn-backfill';
+    appCore.threads.upsert({
+      id: threadId,
+      title: 'Multi-Turn Backfill Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadId, [
+      { localId: 'u-1', role: 'user', content: 'Turn 1 no playbook', playbook: undefined, createdAt: '2026-08-01T10:00:01.000Z' },
+      { localId: 'a-1', role: 'assistant', content: 'Answer 1', createdAt: '2026-08-01T10:00:02.000Z' },
+      { localId: 'u-2', role: 'user', content: 'Turn 2 with playbook', playbook: 'oim-schema', playbookVersion: 2, createdAt: '2026-08-01T10:01:01.000Z' },
+      { localId: 'a-2', role: 'assistant', content: 'Answer 2', playbook: 'oim-schema', playbookVersion: 2, createdAt: '2026-08-01T10:01:02.000Z' },
+    ]);
+
+    // Test sendMessage reading storedPlaybook before getMessages is called
+    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+    await appCore.sendMessage({
+      threadId,
+      text: 'Turn 3 with divergent prompt',
+      promptName: 'other-playbook',
+    });
+    expect(sendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: threadId, initialPlaybook: 'oim-schema' }),
+      'Turn 3 with divergent prompt',
+      expect.objectContaining({ playbook: 'oim-schema' }),
+    );
+    expect(appCore.threads.get(threadId)?.initialPlaybook).toBe('oim-schema');
+
+    // Also test getMessages backfilling initialPlaybook when initialPlaybook is cleared
+    appCore.threads.patch(threadId, { initialPlaybook: undefined, hasStarted: false });
+    const msgs = await appCore.getMessages(threadId);
+    expect(msgs).toHaveLength(4);
+    expect(appCore.threads.get(threadId)?.initialPlaybook).toBe('oim-schema');
+    expect(appCore.threads.get(threadId)?.hasStarted).toBe(true);
+  });
+
+  it('Busy Guard Pre-emption: sendMessage throws immediately when agent.isBusy(threadId) is true before reading messages', async () => {
+    const thread: ThreadMeta = {
+      id: 't-busy-guard',
+      title: 'Busy Thread',
       model: 'sonnet',
       thinkingLevel: 'medium',
       createdAt: '2026-08-01T10:00:00.000Z',
@@ -1030,20 +1158,17 @@ describe('AppCore - Agent Mode & Playbook Locking (Wave 1)', () => {
     };
     appCore.threads.upsert(thread);
 
-    const sendSpy = vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+    vi.spyOn(appCore.agent, 'isBusy').mockReturnValue(true);
+    const readSpy = vi.spyOn(appCore.threads, 'readMessages');
 
-    await appCore.sendMessage({
-      threadId: thread.id,
-      text: 'Follow-up send attempting to attach playbook',
-      promptName: 'divergent-playbook',
-    });
-
-    expect(sendSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      'Follow-up send attempting to attach playbook',
-      expect.objectContaining({ playbook: undefined }),
-    );
-    expect(appCore.threads.get(thread.id)?.initialPlaybook).toBeUndefined();
+    await expect(
+      appCore.sendMessage({
+        threadId: thread.id,
+        text: 'Concurrent send while busy',
+        promptName: 'oim-schema',
+      }),
+    ).rejects.toThrow('A turn is already running for this conversation.');
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
   it('Orchestrator Rogue Playbook Immunity Negative Test: orchestrator stamps hasStarted but ignores rogue playbook', async () => {
@@ -1342,7 +1467,7 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     vi.restoreAllMocks();
   });
 
-  it('writeTurn enqueues playbook and playbookVersion on the synced user message', async () => {
+  it('writeTurn enqueues playbook and playbookVersion on both user and assistant messages for single-agent turns and leaves them undefined on orchestrator assistant messages', async () => {
     const threadId = 'thread-sync-ver';
     appCore.threads.upsert({
       id: threadId,
@@ -1373,6 +1498,8 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
         localId: 'a-ver-1',
         role: 'assistant',
         content: 'Here is how attestation works.',
+        playbook: 'oim-full',
+        playbookVersion: 2,
         createdAt: '2026-10-15T10:01:05.000Z',
       },
     );
@@ -1385,6 +1512,50 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
       playbook: 'oim-full',
       playbookVersion: 2,
     });
+    expect(turn.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'Here is how attestation works.',
+      playbook: 'oim-full',
+      playbookVersion: 2,
+    });
+
+    // Orchestrator turn leaves playbook and playbookVersion undefined on both messages
+    const orchThreadId = 'thread-sync-orch';
+    appCore.threads.upsert({
+      id: orchThreadId,
+      title: 'Orch Sync Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    });
+    vi.spyOn(appCore as any, 'stashOrchestratorRun').mockResolvedValue(undefined);
+
+    (appCore as any).writeTurn(
+      orchThreadId,
+      {
+        localId: 'u-orch-sync',
+        role: 'user',
+        content: 'Orch question',
+        createdAt: '2026-10-15T10:01:00.000Z',
+      },
+      {
+        localId: 'a-orch-sync',
+        role: 'assistant',
+        content: 'Orch answer',
+        createdAt: '2026-10-15T10:01:05.000Z',
+      },
+    );
+
+    const orchTurn = enqueueSpy.mock.calls[1][0];
+    expect(orchTurn.messages[0].playbook).toBeUndefined();
+    expect(orchTurn.messages[0].playbookVersion).toBeUndefined();
+    expect(orchTurn.messages[1].playbook).toBeUndefined();
+    expect(orchTurn.messages[1].playbookVersion).toBeUndefined();
   });
 
   it('fromDto restores playbook and playbookVersion from remote MessageDto and maps null to undefined', async () => {
@@ -1619,5 +1790,843 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
     (appCore as any).handleServerIds(threadId, { 'a-orch-3': 'srv-msg-3' });
     expect(recordRunSpy).toHaveBeenCalledTimes(2);
     expect(recordRunSpy.mock.calls[1][0].steps[0].playbookVersion).toBeUndefined();
+  });
+
+  it('patchThread sends full buildThreadSettings payload and listThreads repairs missing server orchestrator-profile with negative controls', async () => {
+    const thread: ThreadMeta = {
+      id: 't-full-settings',
+      title: 'Full Settings Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // Patching only thinkingLevel sends the complete settings object preserving orchestrator-profile and model
+    appCore.patchThread(thread.id, { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenCalledWith(thread.id, undefined, {
+      model: 'sonnet',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    updateSpy.mockClear();
+
+    // listThreads repairs server conversation whose settings lost 'orchestrator-profile',
+    // while NOT calling updateConversation when already matching or when single-agent
+    const singleThread: ThreadMeta = {
+      id: 't-single-no-repair',
+      title: 'Single Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+    };
+    const matchingOrchThread: ThreadMeta = {
+      id: 't-matching-orch',
+      title: 'Matching Orch',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+    };
+    appCore.threads.upsert(singleThread);
+    appCore.threads.upsert(matchingOrchThread);
+
+    // Also verify listThreads survives a rejected repair call
+    updateSpy.mockRejectedValueOnce(new Error('Repair failed'));
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-full-settings',
+        title: 'Full Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet', 'thinking-level': 'high' }, // missing orchestrator-profile!
+      },
+      {
+        id: 't-single-no-repair',
+        title: 'Single Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet' },
+      },
+      {
+        id: 't-matching-orch',
+        title: 'Matching Orch',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+    ]);
+
+    const res = await appCore.listThreads();
+    expect(res.serverReachable).toBe(true);
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('t-full-settings', undefined, {
+      model: 'sonnet',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+  });
+
+  it('stashOrchestratorRun registers tracePromise synchronously before awaiting and bounds resolution to 5_000ms with zero dangling timers', async () => {
+    vi.useFakeTimers();
+    try {
+      const threadId = 'thread-orch-timeout';
+      const thread: ThreadMeta = {
+        id: threadId,
+        title: 'Orch Timeout Thread',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:00:00.000Z',
+        totals: ThreadStore.emptyTotals(),
+        syncState: 'synced',
+        orchestratorProfile: 'OIM',
+        hasStarted: true,
+      };
+      appCore.threads.upsert(thread);
+      // Seed stale profilesCache so fallback has the profile if getOrchestratorProfiles hangs
+      (appCore as any).profilesCache = {
+        at: 0,
+        profiles: [
+          {
+            name: 'OIM',
+            orchestratorPlaybook: 'oim-orchestrator',
+            reviewerPlaybook: 'oim-orchestrator-reviewer',
+            specialistPlaybooks: ['oim-access-governance'],
+          },
+        ],
+      };
+
+      // Both network calls hang forever
+      vi.spyOn(appCore, 'resolveOrchestratorProfile').mockImplementation(() => new Promise(() => {}));
+      vi.spyOn(appCore.mcpPrompts, 'list').mockImplementation(() => new Promise(() => {}));
+      const recordRunSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-timeout-1' });
+
+      const stashPromise = (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: 'u-to-1', role: 'user', content: 'Question', createdAt: 'now' },
+        {
+          localId: 'a-to-1',
+          role: 'assistant',
+          content: 'Final answer',
+          toolCalls: [
+            { id: 'tc-1', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          ],
+          createdAt: 'now',
+        },
+      );
+
+      // Synchronously registered in pendingRuns BEFORE any await settles
+      expect((appCore as any).pendingRuns.has('a-to-1')).toBe(true);
+
+      // Server acks the message BEFORE stashOrchestratorRun finishes!
+      (appCore as any).handleServerIds(threadId, { 'a-to-1': 'srv-to-msg-1' });
+      expect(recordRunSpy).not.toHaveBeenCalled();
+
+      // Advance 5,000ms to fire the timeout fallbacks
+      await vi.advanceTimersByTimeAsync(5_000);
+      await stashPromise;
+
+      expect(recordRunSpy).toHaveBeenCalledTimes(1);
+      expect(recordRunSpy.mock.calls[0][0]).toMatchObject({
+        conversationId: threadId,
+        messageId: 'srv-to-msg-1',
+        profileName: 'OIM',
+      });
+      expect(recordRunSpy.mock.calls[0][0].steps[0]).toMatchObject({
+        role: 'orchestrator',
+        playbookName: 'oim-orchestrator',
+        playbookVersion: undefined,
+      });
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Also verify that when both resolve fast (< 5s), the 5s timers are cleaned up in .finally()
+      vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+        name: 'OIM',
+        orchestratorPlaybook: 'oim-orchestrator',
+        reviewerPlaybook: 'oim-orchestrator-reviewer',
+        specialistPlaybooks: ['oim-access-governance'],
+      });
+      vi.spyOn(appCore.mcpPrompts, 'list').mockResolvedValue([
+        { name: 'oim-orchestrator', title: 'Orch', description: '', arguments: [], version: 2 },
+      ]);
+
+      await (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: 'u-to-2', role: 'user', content: 'Fast question', createdAt: 'now' },
+        {
+          localId: 'a-to-2',
+          role: 'assistant',
+          content: 'Fast answer',
+          toolCalls: [
+            { id: 'tc-2', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'sub-q' }, result: 'sub-a' },
+          ],
+          createdAt: 'now',
+        },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stashOrchestratorRun deletes pendingRuns entry when buildRunTrace returns null and prevents evicted in-flight promises from resurrecting', async () => {
+    const threadId = 'thread-orch-null-evict';
+    const thread: ThreadMeta = {
+      id: threadId,
+      title: 'Orch Null & Eviction Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    };
+    appCore.threads.upsert(thread);
+
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockResolvedValue({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    vi.spyOn(appCore.mcpPrompts, 'list').mockResolvedValue([]);
+
+    // 1. Assistant message with empty content and no tool calls -> buildRunTrace returns null -> entry deleted
+    await (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-null', role: 'user', content: 'Empty turn', createdAt: 'now' },
+      { localId: 'a-null', role: 'assistant', content: '   ', toolCalls: [], createdAt: 'now' },
+    );
+    expect((appCore as any).pendingRuns.has('a-null')).toBe(false);
+
+    // 2. Eviction race: first turn is slow; 50 subsequent turns evict 'a-evict-0' before it settles
+    let resolveSlowProfile!: (p: any) => void;
+    vi.spyOn(appCore, 'resolveOrchestratorProfile').mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveSlowProfile = res;
+        }),
+    );
+
+    const delegationCall = [
+      { id: 'tc-evict', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'q' }, result: 'a' },
+    ];
+
+    const slowStash = (appCore as any).stashOrchestratorRun(
+      thread,
+      { localId: 'u-evict-0', role: 'user', content: 'Slow 0', createdAt: 'now' },
+      { localId: 'a-evict-0', role: 'assistant', content: 'Ans 0', toolCalls: delegationCall, createdAt: 'now' },
+    );
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(true);
+
+    for (let i = 1; i <= 50; i++) {
+      await (appCore as any).stashOrchestratorRun(
+        thread,
+        { localId: `u-evict-${i}`, role: 'user', content: `Q ${i}`, createdAt: 'now' },
+        { localId: `a-evict-${i}`, role: 'assistant', content: `Ans ${i}`, toolCalls: delegationCall, createdAt: 'now' },
+      );
+    }
+
+    expect((appCore as any).pendingRuns.size).toBe(50);
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(false);
+
+    // Now the slow promise resolves — it must NOT re-insert 'a-evict-0' into pendingRuns
+    resolveSlowProfile({
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-orchestrator-reviewer',
+      specialistPlaybooks: ['oim-access-governance'],
+    });
+    await slowStash;
+    expect((appCore as any).pendingRuns.has('a-evict-0')).toBe(false);
+    expect((appCore as any).pendingRuns.size).toBe(50);
+  });
+
+  it('postOrchestratorRun only retries unambiguous pre-execution HTTP errors (401, 429, 502, 503), drops ambiguous (network, 500, 504, malformed 200 JSON) and 4xx (400, 403, 404) errors, enforces exponential backoff (5s->10s->20s->40s->60s) up to MAX_RUN_RETRY_ATTEMPTS = 5, caps failedRuns at 50, and drains atomically', async () => {
+    const threadId = 'thread-orch-retry';
+    const makeRun = (msgId: string): OrchestratorRunPayload => ({
+      conversationId: threadId,
+      messageId: msgId,
+      profileName: 'OIM',
+      status: 'completed',
+      reviewRounds: 0,
+      steps: [{ seq: 1, role: 'orchestrator', round: 0, playbookName: 'oim-orchestrator' }],
+    });
+
+    const recordSpy = vi.spyOn(appCore.syncClient, 'recordOrchestratorRun');
+
+    // 1. Ambiguous errors (network TypeError, 500, 504, malformed 200 JSON) and 4xx client errors (400, 403, 404) are NOT pushed to failedRuns
+    const nonRetriableErrors = [
+      new TypeError('fetch failed'),
+      new SyncApiError(500, 'Yvoke Backend: HTTP 500 Internal Server Error'),
+      new SyncApiError(504, 'Yvoke Backend: HTTP 504 Gateway Timeout'),
+      new Error('Yvoke Backend: Unexpected token < in JSON at position 0'),
+      new SyncApiError(400, 'Yvoke Backend: HTTP 400'),
+      new SyncApiError(403, 'Yvoke Backend: HTTP 403'),
+      new SyncApiError(404, 'Yvoke Backend: HTTP 404'),
+    ];
+    for (let i = 0; i < nonRetriableErrors.length; i++) {
+      recordSpy.mockRejectedValueOnce(nonRetriableErrors[i]);
+      (appCore as any).postOrchestratorRun(makeRun(`msg-nonret-${i}`));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect((appCore as any).failedRuns).toHaveLength(0);
+
+    // 2. Unambiguous pre-execution HTTP errors (401, 429, 502, 503) ARE pushed to failedRuns as { run, attempts: 1, nextRetryAt }
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const retriableStatuses = [401, 429, 502, 503];
+    for (let i = 0; i < retriableStatuses.length; i++) {
+      const status = retriableStatuses[i];
+      recordSpy.mockRejectedValueOnce(new SyncApiError(status, `Yvoke Backend: HTTP ${status}`));
+      (appCore as any).postOrchestratorRun(makeRun(`msg-ret-${status}`));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect((appCore as any).failedRuns).toHaveLength(4);
+    for (let i = 0; i < retriableStatuses.length; i++) {
+      expect((appCore as any).failedRuns[i]).toEqual({
+        run: expect.objectContaining({ messageId: `msg-ret-${retriableStatuses[i]}` }),
+        attempts: 1,
+        nextRetryAt: now + 5_000,
+      });
+    }
+
+    // 3. drainFailedRuns() does NOT retry an entry while Date.now() < entry.nextRetryAt
+    recordSpy.mockClear();
+    now += 4_999; // 1_004_999 < 1_005_000
+    (appCore as any).drainFailedRuns();
+    expect(recordSpy).not.toHaveBeenCalled();
+    expect((appCore as any).failedRuns).toHaveLength(4);
+
+    // 4. Atomic splice proof once Date.now() >= entry.nextRetryAt: concurrent handleServerIds + listThreads
+    // while drain is in-flight must post each ready run exactly ONCE
+    now += 1; // 1_005_000 >= 1_005_000
+    let resolveInFlightPost!: (v: { id: string }) => void;
+    recordSpy.mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveInFlightPost = res;
+        }),
+    );
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValue([]);
+
+    (appCore as any).handleServerIds(threadId, {});
+    await appCore.listThreads();
+
+    expect(recordSpy).toHaveBeenCalledTimes(4);
+    expect((appCore as any).failedRuns).toHaveLength(0);
+    resolveInFlightPost({ id: 'ok' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 5. Exponential backoff (5_000 -> 10_000 -> 20_000 -> 40_000 -> 60_000) and drop after MAX_RUN_RETRY_ATTEMPTS = 5
+    recordSpy.mockClear();
+    recordSpy.mockRejectedValue(new SyncApiError(503, 'Service Unavailable'));
+    const backoffRun = makeRun('msg-backoff');
+    (appCore as any).postOrchestratorRun(backoffRun);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const expectedDelays = [5_000, 10_000, 20_000, 40_000, 60_000];
+    for (let attempt = 1; attempt <= expectedDelays.length; attempt++) {
+      const delay = expectedDelays[attempt - 1];
+      expect((appCore as any).failedRuns).toHaveLength(1);
+      expect((appCore as any).failedRuns[0]).toEqual({
+        run: backoffRun,
+        attempts: attempt,
+        nextRetryAt: now + delay,
+      });
+
+      // Before nextRetryAt: does not drain
+      now += delay - 1;
+      recordSpy.mockClear();
+      (appCore as any).drainFailedRuns();
+      expect(recordSpy).not.toHaveBeenCalled();
+      expect((appCore as any).failedRuns).toHaveLength(1);
+
+      // At nextRetryAt: drains and retries
+      now += 1;
+      (appCore as any).drainFailedRuns();
+      expect(recordSpy).toHaveBeenCalledTimes(1);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    // After the 5th retry fails (6 total attempts: 1 initial + 5 retries), entry is dropped!
+    expect((appCore as any).failedRuns).toHaveLength(0);
+
+    // 6. Verify failedRuns is capped at MAX_PENDING_RUNS = 50
+    for (let i = 0; i < 60; i++) {
+      (appCore as any).postOrchestratorRun(makeRun(`msg-cap-${i}`));
+    }
+    await new Promise((r) => setTimeout(r, 0));
+    expect((appCore as any).failedRuns).toHaveLength(50);
+    expect((appCore as any).failedRuns[0].run.messageId).toBe('msg-cap-10');
+    expect((appCore as any).failedRuns[49].run.messageId).toBe('msg-cap-59');
+  });
+
+  it('Finding 1: preserves web-owned remoteSettings across listThreads, createThread, patchThread (with single disk write), and blank-profile repair', async () => {
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // 1. listThreads() captures web-owned keys from c.settings into remoteSettings
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:01:00.000Z',
+        settings: {
+          model: 'sonnet',
+          'thinking-level': 'medium',
+          'chat-prompt': 'custom',
+          streaming: true,
+          'show-thinking': true,
+          'show-prototypes': false,
+        },
+      },
+    ]);
+
+    await appCore.listThreads();
+    const loaded = appCore.threads.get('t-web-settings')!;
+    expect(loaded.remoteSettings).toMatchObject({
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+    });
+
+    // 2. Subsequent patchThread (changing model, thinkingLevel, or orchestratorProfile) sends all sibling keys intact
+    // and calls threads.patch only ONCE per patchThread call
+    const patchStoreSpy = vi.spyOn(appCore.threads, 'patch');
+
+    appCore.patchThread('t-web-settings', { orchestratorProfile: 'OIM' });
+    expect(patchStoreSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenLastCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      'thinking-level': 'medium',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    patchStoreSpy.mockClear();
+    appCore.patchThread('t-web-settings', { model: 'opus', thinkingLevel: 'high' });
+    expect(patchStoreSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenLastCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom',
+      streaming: true,
+      'show-thinking': true,
+      'show-prototypes': false,
+      model: 'opus',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 3. listThreads() blank-profile repair also sends all sibling keys from c.settings intact in updateConversation
+    updateSpy.mockClear();
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:02:00.000Z',
+        settings: {
+          model: 'opus',
+          'thinking-level': 'high',
+          'orchestrator-profile': '',
+          'chat-prompt': 'custom-v2',
+          streaming: false,
+          'show-thinking': true,
+          'show-prototypes': true,
+        },
+      },
+    ]);
+
+    await appCore.listThreads();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('t-web-settings', undefined, {
+      'chat-prompt': 'custom-v2',
+      streaming: false,
+      'show-thinking': true,
+      'show-prototypes': true,
+      model: 'opus',
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 4. Server-authoritative remoteSettings key deletion: keys removed on the server are not resurrected
+    updateSpy.mockClear();
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-web-settings',
+        title: 'Web Settings Thread',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:03:00.000Z',
+        settings: {
+          model: 'opus',
+          'thinking-level': 'high',
+          'orchestrator-profile': 'OIM',
+          streaming: false,
+        },
+      },
+    ]);
+    await appCore.listThreads();
+    expect(appCore.threads.get('t-web-settings')?.remoteSettings).toEqual({
+      model: 'opus',
+      'thinking-level': 'high',
+      'orchestrator-profile': 'OIM',
+      streaming: false,
+    });
+    expect(appCore.threads.get('t-web-settings')?.remoteSettings).not.toHaveProperty('chat-prompt');
+
+    updateSpy.mockClear();
+    appCore.patchThread('t-web-settings', { thinkingLevel: 'low' });
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const afterDeleteSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect(afterDeleteSettings).not.toHaveProperty('chat-prompt');
+    expect(afterDeleteSettings).not.toHaveProperty('show-thinking');
+
+    // 5. createThread() captures conversation.settings into remoteSettings
+    vi.spyOn(appCore.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-created-web',
+      title: 'Created Thread',
+      createdAt: '2026-10-15T10:05:00.000Z',
+      updatedAt: '2026-10-15T10:05:00.000Z',
+      settings: {
+        model: 'sonnet',
+        'thinking-level': 'medium',
+        'chat-prompt': 'server-seeded',
+      },
+    });
+    const created = await appCore.createThread();
+    expect(created.remoteSettings).toEqual({
+      model: 'sonnet',
+      'thinking-level': 'medium',
+      'chat-prompt': 'server-seeded',
+    });
+  });
+
+  it('Finding 3: listThreads adopts remote orchestrator-profile only when unstarted and idle, locks started/busy threads, and repairs diverged server profiles', async () => {
+    const updateSpy = vi.spyOn(appCore.syncClient, 'updateConversation').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(appCore.agent, 'closeThread');
+    vi.spyOn(appCore.agent, 'isBusy').mockImplementation((id: string) => id === 't-busy-diverged');
+
+    // Case 1 (unstarted): existing.orchestratorProfile is 'OIM' (truly unstarted: no sessionId/tokens/hasStarted) and server returns 'Security'
+    appCore.threads.upsert({
+      id: 't-adopt-diff-profile',
+      title: 'Adopt Diff Profile',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: undefined,
+      sessionProfile: undefined,
+    });
+
+    // Case 2 (unstarted): existing.orchestratorProfile is undefined (truly unstarted single-agent) and server returns 'OIM'
+    appCore.threads.upsert({
+      id: 't-adopt-from-single',
+      title: 'Adopt From Single',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: undefined,
+      sessionId: undefined,
+      sessionProfile: undefined,
+    });
+
+    // Case 3: existing.orchestratorProfile is 'OIM' and server returns '' (blank) -> keeps 'OIM' and repairs server
+    appCore.threads.upsert({
+      id: 't-repair-blank',
+      title: 'Repair Blank Profile',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: 'warm-keep',
+      sessionProfile: 'OIM',
+    });
+
+    // Case 4 (started single-agent): hasStarted: true, initialPlaybook: 'oim-schema', warm session, server reports 'OIM'
+    appCore.threads.upsert({
+      id: 't-started-single-locked',
+      title: 'Started Single Locked',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: 'oim-schema',
+      orchestratorProfile: undefined,
+      sessionId: 'warm-single-sess',
+      sessionProfile: undefined,
+    });
+
+    // Case 5 (started multi-agent): hasStarted: true, orchestratorProfile: 'OIM', warm session, server reports 'Security'
+    appCore.threads.upsert({
+      id: 't-started-multi-locked',
+      title: 'Started Multi Locked',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      orchestratorProfile: 'OIM',
+      sessionId: 'warm-oim-sess',
+      sessionProfile: 'OIM',
+    });
+
+    // Case 6 (started idle thread with mismatched sessionProfile): keeps 'OIM', closes stale session, clears sessionId/sessionProfile
+    appCore.threads.upsert({
+      id: 't-started-mismatch-session',
+      title: 'Started Mismatch Session',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      hasStarted: true,
+      orchestratorProfile: 'OIM',
+      sessionId: 'stale-sess',
+      sessionProfile: undefined,
+    });
+
+    // Case 7 (busy thread during listThreads when server reports differing profile): refuses adoption, does NOT close active session, repairs server
+    appCore.threads.upsert({
+      id: 't-busy-diverged',
+      title: 'Busy Thread Diverged',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      sessionId: 'busy-sess',
+      sessionProfile: undefined,
+    });
+
+    vi.spyOn(appCore.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-adopt-diff-profile',
+        title: 'Adopt Diff Profile',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
+      {
+        id: 't-adopt-from-single',
+        title: 'Adopt From Single',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-repair-blank',
+        title: 'Repair Blank Profile',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': '' },
+      },
+      {
+        id: 't-started-single-locked',
+        title: 'Started Single Locked',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-started-multi-locked',
+        title: 'Started Multi Locked',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
+      {
+        id: 't-started-mismatch-session',
+        title: 'Started Mismatch Session',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'OIM' },
+      },
+      {
+        id: 't-busy-diverged',
+        title: 'Busy Thread Diverged',
+        createdAt: '2026-10-15T10:00:00.000Z',
+        updatedAt: '2026-10-15T10:05:00.000Z',
+        settings: { model: 'sonnet', 'orchestrator-profile': 'Security' },
+      },
+    ]);
+
+    await appCore.listThreads();
+
+    // Case 1 assertions: unstarted thread adopted 'Security', called closeThread, did NOT call updateConversation
+    const adoptedDiff = appCore.threads.get('t-adopt-diff-profile')!;
+    expect(adoptedDiff.orchestratorProfile).toBe('Security');
+    expect(adoptedDiff.sessionId).toBeUndefined();
+    expect(adoptedDiff.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-adopt-diff-profile');
+
+    // Case 2 assertions: unstarted thread adopted 'OIM', called closeThread, did NOT call updateConversation
+    const adoptedSingle = appCore.threads.get('t-adopt-from-single')!;
+    expect(adoptedSingle.orchestratorProfile).toBe('OIM');
+    expect(adoptedSingle.sessionId).toBeUndefined();
+    expect(adoptedSingle.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-adopt-from-single');
+
+    // Case 3 assertions: kept 'OIM', preserved warm session, and repaired server
+    const repaired = appCore.threads.get('t-repair-blank')!;
+    expect(repaired.orchestratorProfile).toBe('OIM');
+    expect(repaired.sessionId).toBe('warm-keep');
+    expect(repaired.sessionProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-repair-blank');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-repair-blank',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+
+    // Case 4 assertions: started single-agent refused 'OIM', kept initialPlaybook + warm session, did NOT closeThread, repaired server to ''
+    const startedSingle = appCore.threads.get('t-started-single-locked')!;
+    expect(startedSingle.orchestratorProfile).toBeUndefined();
+    expect(startedSingle.initialPlaybook).toBe('oim-schema');
+    expect(startedSingle.sessionId).toBe('warm-single-sess');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-started-single-locked');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-started-single-locked',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': '' }),
+    );
+
+    // Case 5 assertions: started multi-agent refused 'Security', kept 'OIM' + warm session, did NOT closeThread, repaired server to 'OIM'
+    const startedMulti = appCore.threads.get('t-started-multi-locked')!;
+    expect(startedMulti.orchestratorProfile).toBe('OIM');
+    expect(startedMulti.sessionId).toBe('warm-oim-sess');
+    expect(startedMulti.sessionProfile).toBe('OIM');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-started-multi-locked');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-started-multi-locked',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+
+    // Case 6 assertions: started idle thread with mismatched sessionProfile kept 'OIM', closed stale session, cleared sessionId/sessionProfile
+    const mismatchSession = appCore.threads.get('t-started-mismatch-session')!;
+    expect(mismatchSession.orchestratorProfile).toBe('OIM');
+    expect(mismatchSession.sessionId).toBeUndefined();
+    expect(mismatchSession.sessionProfile).toBeUndefined();
+    expect(closeSpy).toHaveBeenCalledWith('t-started-mismatch-session');
+
+    // Case 7 assertions: busy thread refused 'Security', did NOT close active session, preserved sessionId, repaired server to 'OIM'
+    const busyDiverged = appCore.threads.get('t-busy-diverged')!;
+    expect(busyDiverged.orchestratorProfile).toBe('OIM');
+    expect(busyDiverged.sessionId).toBe('busy-sess');
+    expect(closeSpy).not.toHaveBeenCalledWith('t-busy-diverged');
+    expect(updateSpy).toHaveBeenCalledWith(
+      't-busy-diverged',
+      undefined,
+      expect.objectContaining({ 'orchestrator-profile': 'OIM' }),
+    );
+
+    // Total repairs: t-repair-blank, t-started-single-locked, t-started-multi-locked, t-busy-diverged
+    expect(updateSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('Finding 8: playbookBackfillChecked memoizes transcript backfill across getMessages and sendMessage on started playbook-less threads', async () => {
+    vi.spyOn(appCore.agent, 'sendMessage').mockResolvedValue(undefined as any);
+
+    // Subcase A: getMessages(threadId) called at load time -> subsequent sendMessage makes 0 additional readMessages calls
+    const threadLoaded = 't-memo-loaded';
+    appCore.threads.upsert({
+      id: threadLoaded,
+      title: 'Loaded Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 10 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadLoaded, [
+      { localId: 'u-1', role: 'user', content: 'Turn 1 plain', createdAt: 'now' },
+      { localId: 'a-1', role: 'assistant', content: 'Ans 1', createdAt: 'now' },
+    ]);
+
+    await appCore.getMessages(threadLoaded);
+
+    const readSpy = vi.spyOn(appCore.threads, 'readMessages');
+    await appCore.sendMessage({ threadId: threadLoaded, text: 'Turn 2 plain' });
+    await appCore.sendMessage({ threadId: threadLoaded, text: 'Turn 3 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(0);
+
+    // Subcase B: sendMessage called without prior getMessages -> first sendMessage calls readMessages once, second makes 0 additional calls
+    const threadUnloaded = 't-memo-unloaded';
+    appCore.threads.upsert({
+      id: threadUnloaded,
+      title: 'Unloaded Playbook-Less Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-15T10:00:00.000Z',
+      updatedAt: '2026-10-15T10:00:00.000Z',
+      totals: { ...ThreadStore.emptyTotals(), inputTokens: 10 },
+      syncState: 'synced',
+      hasStarted: true,
+      initialPlaybook: undefined,
+    });
+    await appCore.threads.appendMessages(threadUnloaded, [
+      { localId: 'u-2', role: 'user', content: 'Turn 1 plain', createdAt: 'now' },
+      { localId: 'a-2', role: 'assistant', content: 'Ans 1', createdAt: 'now' },
+    ]);
+
+    readSpy.mockClear();
+    await appCore.sendMessage({ threadId: threadUnloaded, text: 'Turn 2 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(1);
+
+    await appCore.sendMessage({ threadId: threadUnloaded, text: 'Turn 3 plain' });
+    expect(readSpy).toHaveBeenCalledTimes(1); // 0 additional calls
   });
 });

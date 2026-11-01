@@ -47,8 +47,30 @@ import { SettingsStore } from './settings/Settings';
 import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore } from './store/ThreadStore';
 import { parseStoredContent, serializeAssistantContent } from './store/messageCodec';
-import { SyncClient, type MessageDto } from './sync/SyncClient';
+import { SyncApiError, SyncClient, type MessageDto } from './sync/SyncClient';
 import { SyncQueue } from './sync/SyncQueue';
+
+const MAX_PENDING_RUNS = 50;
+const RUN_TRACE_METADATA_TIMEOUT_MS = 5_000;
+const RUN_RETRY_BASE_DELAY_MS = 5_000;
+const RUN_RETRY_MAX_DELAY_MS = 60_000;
+const MAX_RUN_RETRY_ATTEMPTS = 5;
+
+interface FailedOrchestratorRun {
+  run: OrchestratorRunPayload;
+  attempts: number;
+  nextRetryAt: number;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
 
 export interface AppCoreDeps {
   userDataDir: string;
@@ -138,7 +160,14 @@ export class AppCore {
 
   private profilesCache: { at: number; profiles: OrchestratorProfile[] } | null = null;
   /** Completed orchestrator runs awaiting their assistant message's server id (to link on POST). */
-  private readonly pendingRuns = new Map<string, OrchestratorRunPayload>();
+  private readonly pendingRuns = new Map<
+    string,
+    OrchestratorRunPayload | Promise<OrchestratorRunPayload | null>
+  >();
+  /** Resolved orchestrator runs whose POST failed transiently and will retry on next sync activity. */
+  private readonly failedRuns: FailedOrchestratorRun[] = [];
+  /** Started threads whose message log has already been inspected once for initialPlaybook backfill. */
+  private readonly playbookBackfillChecked = new Set<string>();
   /**
    * Image descriptions in flight, keyed by the attachment array they describe.
    *
@@ -379,6 +408,10 @@ export class AppCore {
     // Keep search current within the session — no need to wait for the next startup sweep.
     this.searchIndex.addMessages(threadId, [userMessage, assistantMessage]);
 
+    if (isOrchestrator && thread) {
+      void this.stashOrchestratorRun(thread, userMessage, assistantMessage);
+    }
+
     this.syncQueue.enqueue({
       threadId,
       localIds: [userMessage.localId, assistantMessage.localId],
@@ -392,6 +425,8 @@ export class AppCore {
         {
           role: 'assistant',
           content: serializeAssistantContent(assistantMessage, isOrchestrator),
+          playbook: assistantMessage.playbook,
+          playbookVersion: assistantMessage.playbookVersion,
           promptTokens: usage?.inputTokens ?? null,
           completionTokens: usage?.outputTokens ?? null,
           totalTokens: usage ? usage.inputTokens + usage.outputTokens : null,
@@ -400,54 +435,75 @@ export class AppCore {
         },
       ],
     });
-
-    if (isOrchestrator && thread) {
-      void this.stashOrchestratorRun(thread, userMessage, assistantMessage);
-    }
   }
 
   /** Assemble the run trace and hold it until the assistant message's server id is known. */
   private async stashOrchestratorRun(thread: ThreadMeta, userMessage: ChatMessage, assistantMessage: ChatMessage): Promise<void> {
     const orchestrator = this.settings.get().orchestrator;
-    if (!orchestrator || !thread.orchestratorProfile) return;
-    try {
-      const profile = await this.resolveOrchestratorProfile(thread.orchestratorProfile);
-      let playbookVersions: Map<string, number> | undefined;
+    const profileName = thread.orchestratorProfile;
+    if (!orchestrator || !profileName) return;
+
+    const tracePromise: Promise<OrchestratorRunPayload | null> = (async () => {
       try {
-        const prompts = await this.mcpPrompts.list();
-        playbookVersions = new Map<string, number>();
-        for (const p of prompts) {
-          if (typeof p.version === 'number') {
-            playbookVersions.set(p.name, p.version);
-          }
-        }
+        const [profile, playbookVersions] = await Promise.all([
+          withTimeout(
+            this.resolveOrchestratorProfile(profileName),
+            RUN_TRACE_METADATA_TIMEOUT_MS,
+            'resolveOrchestratorProfile',
+          ).catch(() => this.profilesCache?.profiles.find((p) => p.name === profileName)),
+          withTimeout(
+            this.mcpPrompts.list(),
+            RUN_TRACE_METADATA_TIMEOUT_MS,
+            'mcpPrompts.list',
+          )
+            .then((prompts) => {
+              const versions = new Map<string, number>();
+              for (const p of prompts) {
+                if (typeof p.version === 'number') {
+                  versions.set(p.name, p.version);
+                }
+              }
+              return versions;
+            })
+            .catch((err) => {
+              log(
+                'sync',
+                `Failed to resolve playbook versions for orchestrator run trace: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return undefined;
+            }),
+        ]);
+
+        return buildRunTrace({
+          conversationId: thread.id,
+          userText: userMessage.content,
+          assistant: assistantMessage,
+          profileName,
+          profile,
+          orchestrator,
+          playbookVersions,
+        });
       } catch (err) {
-        log('sync', `Failed to resolve playbook versions for orchestrator run trace: ${err instanceof Error ? err.message : String(err)}`);
-        playbookVersions = undefined;
+        logError('sync', `Failed to assemble orchestrator run trace: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
       }
-      const payload = buildRunTrace({
-        conversationId: thread.id,
-        userText: userMessage.content,
-        assistant: assistantMessage,
-        profileName: thread.orchestratorProfile,
-        profile,
-        orchestrator,
-        playbookVersions,
-      });
+    })();
+
+    // Register synchronously BEFORE awaiting so a fast appendMessages ack never misses the entry.
+    this.pendingRuns.set(assistantMessage.localId, tracePromise);
+    while (this.pendingRuns.size > MAX_PENDING_RUNS) {
+      const oldest = this.pendingRuns.keys().next().value;
+      if (oldest === undefined) break;
+      this.pendingRuns.delete(oldest);
+    }
+
+    const payload = await tracePromise;
+    if (this.pendingRuns.get(assistantMessage.localId) === tracePromise) {
       if (payload) {
         this.pendingRuns.set(assistantMessage.localId, payload);
-        // Entries only clear on a successful server-id mapping; a turn dropped as
-        // non-retriable (4xx) would otherwise leak forever. Bound the map by
-        // evicting the oldest entries (Map preserves insertion order).
-        const MAX_PENDING_RUNS = 50;
-        while (this.pendingRuns.size > MAX_PENDING_RUNS) {
-          const oldest = this.pendingRuns.keys().next().value;
-          if (oldest === undefined) break;
-          this.pendingRuns.delete(oldest);
-        }
+      } else {
+        this.pendingRuns.delete(assistantMessage.localId);
       }
-    } catch (err) {
-      logError('sync', `Failed to assemble orchestrator run trace: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -456,16 +512,81 @@ export class AppCore {
     void this.threads
       .applyServerIds(threadId, mapping)
       .catch((err) => logError('store', `applyServerIds failed: ${err instanceof Error ? err.message : String(err)}`));
+    this.drainFailedRuns();
     for (const [localId, serverId] of Object.entries(mapping)) {
-      const run = this.pendingRuns.get(localId);
-      if (!run) continue;
+      const entry = this.pendingRuns.get(localId);
+      if (!entry) continue;
       this.pendingRuns.delete(localId);
-      run.messageId = serverId;
-      void this.syncClient
-        .recordOrchestratorRun(run)
-        .then((res) => log('sync', `Recorded orchestrator run ${res.id} (${run.steps.length} steps) → message ${serverId}`))
-        .catch((err) => logError('sync', `Failed to record orchestrator run: ${err instanceof Error ? err.message : String(err)}`));
+      if (entry instanceof Promise) {
+        void entry.then((run) => {
+          if (!run) return;
+          run.messageId = serverId;
+          this.postOrchestratorRun(run);
+        });
+      } else {
+        entry.messageId = serverId;
+        this.postOrchestratorRun(entry);
+      }
     }
+  }
+
+  private drainFailedRuns(): void {
+    if (this.failedRuns.length === 0) return;
+    const now = Date.now();
+    const ready: FailedOrchestratorRun[] = [];
+    for (let i = 0; i < this.failedRuns.length; ) {
+      if (this.failedRuns[i].nextRetryAt <= now) {
+        ready.push(...this.failedRuns.splice(i, 1));
+      } else {
+        i++;
+      }
+    }
+    for (const entry of ready) {
+      this.postOrchestratorRun(entry.run, entry.attempts);
+    }
+  }
+
+  private postOrchestratorRun(run: OrchestratorRunPayload, attempts = 0): void {
+    void this.syncClient
+      .recordOrchestratorRun(run)
+      .then((res) =>
+        log(
+          'sync',
+          `Recorded orchestrator run ${res.id} (${run.steps.length} steps) → message ${run.messageId ?? 'unknown'}`,
+        ),
+      )
+      .catch((err) => {
+        logError('sync', `Failed to record orchestrator run: ${err instanceof Error ? err.message : String(err)}`);
+        const isRetriable =
+          err instanceof SyncApiError &&
+          (err.status === 401 || err.status === 429 || err.status === 502 || err.status === 503);
+        if (isRetriable && attempts < MAX_RUN_RETRY_ATTEMPTS) {
+          const nextAttempts = attempts + 1;
+          const delay = Math.min(
+            RUN_RETRY_MAX_DELAY_MS,
+            RUN_RETRY_BASE_DELAY_MS * 2 ** (nextAttempts - 1),
+          );
+          this.failedRuns.push({
+            run,
+            attempts: nextAttempts,
+            nextRetryAt: Date.now() + delay,
+          });
+          while (this.failedRuns.length > MAX_PENDING_RUNS) {
+            this.failedRuns.shift();
+          }
+        }
+      });
+  }
+
+  private buildThreadSettings(thread: ThreadMeta): Record<string, unknown> {
+    return {
+      ...(thread.remoteSettings ?? {}),
+      model: thread.model,
+      thinkingLevel: thread.thinkingLevel,
+      'thinking-level': thread.thinkingLevel,
+      'orchestrator-profile': thread.orchestratorProfile ?? '',
+      client: 'desktop',
+    };
   }
 
   // --- threads ---------------------------------------------------------------
@@ -473,19 +594,37 @@ export class AppCore {
   async listThreads(): Promise<{ threads: ThreadMeta[]; serverReachable: boolean }> {
     try {
       const conversations = await this.syncClient.listConversations();
+      this.drainFailedRuns();
       for (const c of conversations) {
         const existing = this.threads.get(c.id);
         const settings = this.settings.get();
-        const orchestratorProfile =
-          existing?.orchestratorProfile ??
-          (c.settings?.['orchestrator-profile'] ? String(c.settings['orchestrator-profile']) : undefined);
+        const rawRemoteProfile = c.settings?.['orchestrator-profile'];
+        const remoteProfile =
+          typeof rawRemoteProfile === 'string' && rawRemoteProfile.trim().length > 0
+            ? rawRemoteProfile.trim()
+            : undefined;
+        const isStarted = existing ? isThreadStarted(existing) : false;
+        const isBusy = existing ? this.agent.isBusy(c.id) : false;
+        const canAdoptRemoteProfile = !isStarted && !isBusy;
+        const orchestratorProfile = canAdoptRemoteProfile
+          ? (remoteProfile ?? existing?.orchestratorProfile)
+          : existing?.orchestratorProfile;
         const modeMatches =
           existing?.sessionProfile === orchestratorProfile ||
           (!existing?.sessionProfile && !orchestratorProfile);
-        this.threads.upsert({
+        const shouldResetSession = Boolean(
+          existing && !isBusy && (existing.orchestratorProfile !== orchestratorProfile || !modeMatches),
+        );
+        if (shouldResetSession) {
+          this.agent.closeThread(c.id);
+        }
+        const remoteSettings = c.settings
+          ? { ...c.settings }
+          : existing?.remoteSettings;
+        const upserted: ThreadMeta = {
           id: c.id,
-          sessionId: modeMatches ? existing?.sessionId : undefined,
-          sessionProfile: modeMatches ? existing?.sessionProfile : undefined,
+          sessionId: shouldResetSession ? undefined : existing?.sessionId,
+          sessionProfile: shouldResetSession ? undefined : existing?.sessionProfile,
           title: c.title,
           model: existing?.model ?? String(c.settings?.model ?? settings.defaultModel),
           thinkingLevel: existing?.thinkingLevel ?? (String(c.settings?.['thinking-level'] ?? c.settings?.thinkingLevel ?? settings.defaultThinkingLevel) as ThinkingLevel),
@@ -494,15 +633,23 @@ export class AppCore {
           totals: existing?.totals ?? ThreadStore.emptyTotals(),
           syncState: existing?.syncState ?? 'synced',
           orchestratorProfile,
-          initialPlaybook: existing?.initialPlaybook,
+          initialPlaybook: orchestratorProfile ? undefined : existing?.initialPlaybook,
           hasStarted: existing?.hasStarted,
-        });
+          remoteSettings,
+        };
+        this.threads.upsert(upserted);
+        if (existing && (orchestratorProfile ?? '') !== (remoteProfile ?? '')) {
+          void this.syncClient
+            .updateConversation(c.id, undefined, this.buildThreadSettings(upserted))
+            .catch(() => undefined);
+        }
       }
       // Drop local cache entries the server no longer knows (deleted elsewhere).
       const serverIds = new Set(conversations.map((c) => c.id));
       for (const local of this.threads.list()) {
         if (!serverIds.has(local.id) && this.syncQueue.pendingCount(local.id) === 0) {
           this.threads.delete(local.id);
+          this.playbookBackfillChecked.delete(local.id);
         }
       }
       return { threads: this.threads.list(), serverReachable: true };
@@ -529,6 +676,7 @@ export class AppCore {
       updatedAt: conversation.updatedAt ?? conversation.createdAt,
       totals: ThreadStore.emptyTotals(),
       syncState: 'synced',
+      remoteSettings: conversation.settings ? { ...conversation.settings } : undefined,
     };
     this.threads.upsert(meta);
     return meta;
@@ -538,6 +686,7 @@ export class AppCore {
     this.agent.closeThread(threadId);
     await this.syncClient.deleteConversation(threadId);
     this.threads.delete(threadId);
+    this.playbookBackfillChecked.delete(threadId);
     this.searchIndex.remove(threadId);
   }
 
@@ -577,30 +726,37 @@ export class AppCore {
       patchPayload.sessionId = undefined;
       patchPayload.sessionProfile = undefined;
     }
+    const fullSettings = this.buildThreadSettings({ ...existing, ...patchPayload });
+    patchPayload.remoteSettings = fullSettings;
 
     const patched = this.threads.patch(threadId, patchPayload);
     if (patched) {
       // Undefined means "this patch is not about the title" — see updateConversation.
       const title = update.title;
-      const settingsPayload: Record<string, unknown> = {};
-      if (update.model) settingsPayload.model = update.model;
-      if (update.thinkingLevel) {
-        settingsPayload.thinkingLevel = update.thinkingLevel;
-        settingsPayload['thinking-level'] = update.thinkingLevel;
-      }
-      // Mirror the web ConversationSetting key so both surfaces share the selection.
-      if ('orchestratorProfile' in update) {
-        settingsPayload['orchestrator-profile'] = sanitized.orchestratorProfile ?? '';
-      }
-      void this.syncClient.updateConversation(threadId, title, settingsPayload).catch(() => undefined);
+      void this.syncClient
+        .updateConversation(threadId, title, fullSettings)
+        .catch(() => undefined);
     }
     return patched;
+  }
+
+  private backfillInitialPlaybook(threadId: string, messages: readonly ChatMessage[]): void {
+    this.playbookBackfillChecked.add(threadId);
+    const thread = this.threads.get(threadId);
+    if (!thread || thread.orchestratorProfile || thread.initialPlaybook) return;
+    const firstPlaybook = messages
+      .find((m) => m.role === 'user' && Boolean(m.playbook?.trim()))
+      ?.playbook?.trim();
+    if (firstPlaybook) {
+      this.threads.patch(threadId, { initialPlaybook: firstPlaybook, hasStarted: true });
+    }
   }
 
   /** Local log first; falls back to server rehydration (reinstall / second device). */
   async getMessages(threadId: string): Promise<ChatMessage[]> {
     const local = await this.threads.readMessages(threadId);
     if (local.length > 0) {
+      this.backfillInitialPlaybook(threadId, local);
       return local;
     }
     try {
@@ -623,6 +779,7 @@ export class AppCore {
           return acc;
         }, ThreadStore.emptyTotals());
         this.threads.patch(threadId, { totals });
+        this.backfillInitialPlaybook(threadId, rehydrated);
       }
       return rehydrated;
     } catch {
@@ -683,24 +840,47 @@ export class AppCore {
     if (!thread) {
       throw new Error(`Unknown thread: ${request.threadId}`);
     }
+    if (this.agent.isBusy(thread.id)) {
+      throw new Error('A turn is already running for this conversation.');
+    }
     const sanitizedImages = validateAndSanitizeImages(request.images);
     this.startImageDescriptions(sanitizedImages);
 
     const isOrchestrator = Boolean(thread.orchestratorProfile);
-    const isFirstSend = !isThreadStarted(thread);
-    const canSetPlaybook = !isOrchestrator && !thread.hasStarted;
+    const wasStarted = isThreadStarted(thread);
+    let storedPlaybook: string | undefined;
+    if (
+      !isOrchestrator &&
+      !thread.initialPlaybook &&
+      wasStarted &&
+      !this.playbookBackfillChecked.has(thread.id)
+    ) {
+      this.playbookBackfillChecked.add(thread.id);
+      const msgs = await this.threads.readMessages(thread.id);
+      storedPlaybook = msgs
+        .find((m) => m.role === 'user' && Boolean(m.playbook?.trim()))
+        ?.playbook?.trim();
+    }
+
+    const lockedPlaybook = thread.initialPlaybook ?? storedPlaybook;
+    const canSetPlaybook = !isOrchestrator && !lockedPlaybook;
     const sanitizedPrompt = request.promptName?.trim() || undefined;
     const effectivePlaybook = isOrchestrator
       ? undefined
-      : (thread.initialPlaybook ?? (canSetPlaybook ? sanitizedPrompt : undefined));
+      : (lockedPlaybook ?? (canSetPlaybook ? sanitizedPrompt : undefined));
 
     let effectiveThread = thread;
     const startPatch: Partial<ThreadMeta> = {};
-    if (isFirstSend || !thread.hasStarted) {
+    if (!thread.hasStarted) {
       startPatch.hasStarted = true;
     }
-    if (canSetPlaybook && !thread.initialPlaybook && effectivePlaybook) {
+    if (!thread.initialPlaybook && effectivePlaybook) {
       startPatch.initialPlaybook = effectivePlaybook;
+    }
+    if (!lockedPlaybook && effectivePlaybook && wasStarted) {
+      this.agent.closeThread(thread.id);
+      startPatch.sessionId = undefined;
+      startPatch.sessionProfile = undefined;
     }
     if (Object.keys(startPatch).length > 0) {
       const patched = this.threads.patch(thread.id, startPatch);

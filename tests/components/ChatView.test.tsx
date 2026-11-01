@@ -476,21 +476,95 @@ describe('playbook preflight', () => {
     expect(screen.queryByText('Switch to oim-schema')).toBeNull();
   });
 
-  it('gracefully handles external thread history with user messages having missing playbook attributes', async () => {
+  it('requires and allows selecting a playbook on a started single-agent thread whose Turn 1 had playbook: undefined when prompts.length > 0, while failing open when prompts is []', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question without playbook', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
     ];
-    const { container } = renderChat({ messages: existingMessages });
+    const { container, unmount } = renderChat({ messages: existingMessages });
 
     expect(container.querySelector('.active-playbook')).toBeNull();
 
+    // When prompts.length > 0, attempting to send without picking a playbook raises Playbook required
     const textarea = container.querySelector('textarea')!;
     fireEvent.change(textarea, { target: { value: 'Follow-up question' } });
     fireEvent.click(container.querySelector('.composer-send')!);
 
-    expect(container.querySelector('.playbook-required')).toBeNull();
-    expect(onSend).toHaveBeenCalledWith('Follow-up question', undefined);
+    expect(container.querySelector('.playbook-required')).not.toBeNull();
+    expect(onSend).not.toHaveBeenCalled();
+
+    // Selecting a playbook via slash autocomplete unlocks and sends with that playbook
+    fireEvent.change(textarea, { target: { value: '/schema' } });
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.prompt-option')!);
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+
+    fireEvent.change(textarea, { target: { value: 'Follow-up question with schema' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith('Follow-up question with schema', 'oim-schema'),
+    );
+
+    unmount();
+    onSend.mockClear();
+
+    // When prompts is [], it still fails open on a started playbook-less thread
+    const { container: emptyCatContainer } = renderChat({ messages: existingMessages, prompts: [] });
+    const emptyTextarea = emptyCatContainer.querySelector('textarea')!;
+    fireEvent.change(emptyTextarea, { target: { value: 'Follow-up while offline' } });
+    fireEvent.click(emptyCatContainer.querySelector('.composer-send')!);
+
+    expect(emptyCatContainer.querySelector('.playbook-required')).toBeNull();
+    expect(onSend).toHaveBeenCalledWith('Follow-up while offline', undefined);
+  });
+
+  it('locks playbook to Turn 2 when Turn 1 had playbook: undefined and Turn 2 had playbook: oim-schema v2', () => {
+    const existingMessages: ChatMessage[] = [
+      { localId: 'u1', role: 'user', content: 'Turn 1 no playbook', playbook: undefined, createdAt: '' },
+      { localId: 'a1', role: 'assistant', content: 'Answer 1', createdAt: '' },
+      {
+        localId: 'u2',
+        role: 'user',
+        content: 'Turn 2 with playbook',
+        playbook: 'oim-schema',
+        playbookVersion: 2,
+        createdAt: '',
+      },
+      { localId: 'a2', role: 'assistant', content: 'Answer 2', playbook: 'oim-schema', playbookVersion: 2, createdAt: '' },
+    ];
+    const { container } = renderChat({ messages: existingMessages, prompts: [] });
+
+    const chip = container.querySelector('.active-playbook');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toContain('oim-schema');
+    expect(chip?.textContent).toContain('v2');
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
+
+    const textarea = container.querySelector('textarea')!;
+    fireEvent.change(textarea, { target: { value: 'Turn 3 follow-up' } });
+    fireEvent.click(container.querySelector('.composer-send')!);
+
+    expect(onSend).toHaveBeenCalledWith('Turn 3 follow-up', 'oim-schema');
+  });
+
+  it('prevents bypassing playbook selection if the user removes the active playbook chip while the preflight recommendation card is open and clicks Send anyway', async () => {
+    validatePlaybook.mockResolvedValue({
+      plausible: false,
+      reason: 'Schema fits better.',
+      suggestedPlaybookName: 'oim-schema',
+    });
+    const { container } = renderChat();
+    ask(container, 'How are tables indexed?', 'oim-getting-started');
+    await waitFor(() => expect(screen.getByText('Send anyway')).toBeTruthy());
+
+    // User removes the active playbook chip while preflight card is open
+    const removeBtn = container.querySelector<HTMLButtonElement>('.active-playbook-remove');
+    expect(removeBtn).not.toBeNull();
+    fireEvent.click(removeBtn!);
+    expect(container.querySelector('.active-playbook')).toBeNull();
+
+    // Clicking "Send anyway" falls back to preflight.forPlaybook ('oim-getting-started') rather than sending undefined
+    fireEvent.click(screen.getByText('Send anyway'));
+    expect(onSend).toHaveBeenCalledWith('How are tables indexed?', 'oim-getting-started');
   });
 
   it('gracefully retains locked playbook when prompts catalogue is temporarily empty or loading', async () => {
@@ -617,24 +691,27 @@ describe('playbook preflight', () => {
     expect(onSend).toHaveBeenCalledWith('/schema', undefined);
   });
 
-  it('locks to initial user message playbook when initial message had no playbook even if a subsequent message had one', async () => {
+  it('locks to the first playbook-carrying user message when Turn 1 had no playbook and Turn 2 had one (ignoring any divergent Turn 3 playbook)', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'First question without playbook', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'First answer', createdAt: '' },
-      { localId: 'u2', role: 'user', content: 'Legacy switched question', playbook: 'oim-schema', createdAt: '' },
-      { localId: 'a2', role: 'assistant', content: 'Legacy answer', createdAt: '' },
+      { localId: 'u2', role: 'user', content: 'Second question assigning playbook', playbook: 'oim-schema', createdAt: '' },
+      { localId: 'a2', role: 'assistant', content: 'Second answer', createdAt: '' },
+      { localId: 'u3', role: 'user', content: 'Legacy third question', playbook: 'oim-getting-started', createdAt: '' },
+      { localId: 'a3', role: 'assistant', content: 'Legacy third answer', createdAt: '' },
     ];
     const { container } = renderChat({ messages: existingMessages });
 
-    // Thread is locked to initial user message (undefined / no playbook)
-    expect(container.querySelector('.active-playbook')).toBeNull();
+    // Thread is locked to the first playbook-carrying user message ('oim-schema')
+    expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+    expect(container.querySelector('.active-playbook-remove')).toBeNull();
 
     const textarea = container.querySelector('textarea')!;
-    fireEvent.change(textarea, { target: { value: 'Third question' } });
+    fireEvent.change(textarea, { target: { value: 'Fourth question' } });
     fireEvent.click(container.querySelector('.composer-send')!);
 
     expect(container.querySelector('.playbook-required')).toBeNull();
-    expect(onSend).toHaveBeenCalledWith('Third question', undefined);
+    expect(onSend).toHaveBeenCalledWith('Fourth question', 'oim-schema');
   });
 
   describe('excluded playbook preflight bypass', () => {

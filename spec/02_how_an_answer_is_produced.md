@@ -13,7 +13,7 @@ server.
 | **Every answer is grounded in a live search** | The assistant answers from what the server's knowledge-base tools return, under the server's own grounding and citation instructions. It has no other source. |
 | **A toolbox, not a search box** | The assistant can search the corpus, list an area's documents, read a table of contents, read a whole section, look a thing up in the knowledge graph and follow its connections, query structured records, read their declared shape, and check its own citations. Nine of these are granted by default. |
 | **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name and positive integer version (when published by the server) are stored on the user message. |
-| **Playbook preflight** | Before the first message in a conversation runs, a tool-free model call is asked whether that playbook suits the question, and offers a better match if not. |
+| **Playbook preflight** | Before a playbook is locked in a conversation, a tool-free model call is asked whether the selected playbook suits the question, and offers a better match if not. |
 | **Sandboxed computation without a shell** | An in-app JavaScript execution tool lets the assistant run arithmetic, statistics, date math and data transformations inside an isolated in-memory sandbox with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
 | **It can ask instead of guessing** | The assistant can pause and ask the user a question, with or without ready-made options (including descriptive explanations), and continue from the answer. |
@@ -94,10 +94,12 @@ server.
 - **A clarifying question reaches the model as a refused tool call** whose message reads *User
   answered: …*. Stopping a turn resolves any question still waiting with an empty answer rather than
   leaving the run hanging.
-- **Agent mode and playbooks are immutable once a conversation starts.**
+- **Agent mode is immutable once a conversation starts, and a playbook is immutable once selected and sent.**
   Once a conversation has started (stamped upon sending the first prompt, persisting across restarts and failed or stopped turns),
-  both the agent mode (single-agent vs. multi-agent profile) and the initial single-agent playbook are permanently locked.
-  Attempting to change agent mode or switch playbooks on a started conversation is rejected with an error. Before a conversation
+  the agent mode (single-agent vs. multi-agent profile) is permanently locked, and once a single-agent message carrying a playbook
+  has been sent, that playbook is permanently locked. If a single-agent conversation's first turn was sent while no playbooks were
+  available from the server, a playbook can be selected on a later turn once the catalogue loads, closing any warm playbook-less
+  session and locking the playbook from that point onward. Before a conversation
   starts, switching agent mode cleanly closes any prepared session so the new tool allow-list and instructions take effect.
   When continuing under the same mode and playbook, the session remains warm. Knowledge-base connection credentials are
   automatically synchronized before each turn so that long-lived sessions transparently retain access without requiring an app
@@ -134,7 +136,7 @@ server.
   and turn run under the selected model.
 - **The check is skipped when there is nothing to compare against** — fewer than two playbooks offered,
   an unreachable server, a playbook the picker does not list, a multi-agent conversation, follow-up messages
-  once a conversation has started, or when the selected playbook is configured in the deployment's validation exclusion list.
+  once a playbook has been locked in the conversation, or when the selected playbook is configured in the deployment's validation exclusion list.
 - **A playbook whose constraints cannot be resolved runs with the full default tool set and no
   code-execution restriction.** Nothing is logged when the playbook is simply absent from the server's
   list, and nothing is shown either way — a playbook that meant to narrow the assistant silently
@@ -175,6 +177,6 @@ server.
 - Any cost figure. The runtime reports what a turn cost and the app forwards it to the interface,
   where nothing displays it.
 - Changing the agent mode while a turn is in progress.
-- Changing or removing a playbook once a conversation has started.
+- Changing or removing a playbook once a playbook has been selected and sent in the conversation.
 - Changing agent mode (single-agent vs. multi-agent orchestrator profile) once a conversation has started.
 

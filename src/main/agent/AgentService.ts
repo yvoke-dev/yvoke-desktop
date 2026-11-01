@@ -511,6 +511,14 @@ export class AgentService {
           `Session config changed (profile "${existing.orchestratorProfile}"→"${thread.orchestratorProfile}"), restarting agent session`,
         );
         this.closeThread(thread.id);
+      } else if (existing.playbookName === undefined && playbookName !== undefined) {
+        log(
+          'agent',
+          `Session playbook assigned ("none"→"${playbookName}"), restarting agent session`,
+        );
+        this.closeThread(thread.id);
+        this.deps.onSessionId(thread.id, '', undefined);
+        thread = { ...thread, sessionId: undefined, sessionProfile: undefined };
       } else if (existing.playbookName !== playbookName) {
         throw new Error(
           `Cannot switch playbook on an existing conversation session (locked to "${existing.playbookName ?? 'none'}", requested "${playbookName ?? 'none'}")`,
@@ -1475,6 +1483,9 @@ export class AgentService {
       toolCalls: session.turn.toolCalls,
       blocks: session.turn.blocks,
       review,
+      playbook: session.orchestratorProfile ? undefined : session.playbookName,
+      playbookVersion:
+        !session.orchestratorProfile && session.playbookName ? session.playbookVersion : undefined,
       usage,
       createdAt: new Date().toISOString(),
     };

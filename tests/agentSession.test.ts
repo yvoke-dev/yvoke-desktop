@@ -352,16 +352,22 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('rejects switching from no playbook to a playbook on an existing thread session', async () => {
+  it('restarts the warm session when assigning a playbook to a previously playbook-less thread session, then locks to that playbook', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
     await ask(svc, meta, 'First question', undefined);
-    await expect(ask(svc, meta, 'Second question with playbook', 'oim-schema')).rejects.toThrow(
-      /Cannot switch playbook on an existing conversation session \(locked to "none", requested "oim-schema"\)/,
-    );
-
     expect(h.sessions).toHaveLength(1);
+
+    await ask(svc, meta, 'Second question with playbook', 'oim-schema');
+    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions[0].closed).toBe(true);
+    expect(h.sessions[1].options.resume).toBeUndefined();
+
+    await expect(ask(svc, meta, 'Third question switching playbook', 'oim-getting-started')).rejects.toThrow(
+      /Cannot switch playbook on an existing conversation session \(locked to "oim-schema", requested "oim-getting-started"\)/,
+    );
+    expect(h.sessions).toHaveLength(2);
     svc.closeAll();
   });
 

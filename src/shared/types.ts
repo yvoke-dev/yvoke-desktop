@@ -263,6 +263,8 @@ export interface ThreadMeta {
   initialPlaybook?: string;
   /** Whether the conversation has started (first prompt sent). */
   hasStarted?: boolean;
+  /** Server-side conversation settings map, preserved so web-owned keys survive desktop PATCHes. */
+  remoteSettings?: Record<string, unknown>;
 }
 
 /**
@@ -425,9 +427,9 @@ export interface ChatMessage {
   blocks?: MessageBlock[];
   /** Orchestrator mode only: whether this answer passed the reviewer. Absent = not orchestrated. */
   review?: ReviewStatus;
-  /** Canonical name of the MCP prompt/playbook injected with this (user) message, if any. */
+  /** Canonical name of the MCP prompt/playbook active for this single-agent message, if any. */
   playbook?: string;
-  /** Positive integer version of the MCP prompt/playbook injected with this (user) message, if any. */
+  /** Positive integer version of the MCP prompt/playbook active for this single-agent message, if any. */
   playbookVersion?: number;
   usage?: UsageTotals;
   createdAt: string;

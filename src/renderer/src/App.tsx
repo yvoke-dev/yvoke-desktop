@@ -62,6 +62,9 @@ export default function App(): React.JSX.Element {
   activeThreadIdRef.current = activeThreadId;
   const liveTurnsByThreadRef = useRef<Record<string, LiveTurn>>({});
   liveTurnsByThreadRef.current = liveTurnsByThread;
+  const promptsCountRef = useRef(0);
+  promptsCountRef.current = prompts.length;
+  const initialPromptsLoadedRef = useRef(false);
 
   const messages = useMemo(
     () => (activeThreadId ? messagesByThread[activeThreadId] ?? [] : []),
@@ -80,6 +83,13 @@ export default function App(): React.JSX.Element {
     const result = await window.api.listThreads();
     setThreads(result.threads);
     setServerReachable(result.serverReachable);
+    if (result.serverReachable && initialPromptsLoadedRef.current && promptsCountRef.current === 0) {
+      void window.api.listPrompts().then((list) => {
+        promptsCountRef.current = list.length;
+        setPrompts(list);
+      });
+      void window.api.listOrchestratorProfiles().then(setProfiles);
+    }
     return result.serverReachable;
   }, []);
 
@@ -92,29 +102,43 @@ export default function App(): React.JSX.Element {
    */
   const refreshServer = useCallback(async () => {
     void window.api.authStatus().then(setAuth);
+    const shouldFetchCatalogues = !initialPromptsLoadedRef.current || promptsCountRef.current > 0;
     if (!(await refreshThreads())) return;
-    void window.api.listPrompts().then(setPrompts);
-    void window.api.listOrchestratorProfiles().then(setProfiles);
+    if (shouldFetchCatalogues) {
+      void window.api.listPrompts().then((list) => {
+        promptsCountRef.current = list.length;
+        setPrompts(list);
+      });
+      void window.api.listOrchestratorProfiles().then(setProfiles);
+    }
   }, [refreshThreads]);
 
   useEffect(() => {
     void window.api.getAppVersion().then(setAppVersion);
     void window.api.getSettings().then(setSettings);
     void window.api.authStatus().then(setAuth);
-    void window.api.listPrompts().then(setPrompts);
+    void window.api
+      .listPrompts()
+      .then((list) => {
+        promptsCountRef.current = list.length;
+        setPrompts(list);
+      })
+      .finally(() => {
+        initialPromptsLoadedRef.current = true;
+      });
     void window.api.listOrchestratorProfiles().then(setProfiles);
     void refreshThreads();
   }, [refreshThreads]);
 
-  // When the server is unreachable, periodically poll so the banner clears and playbooks load
-  // automatically once the backend service starts.
+  // When the server is unreachable or the playbook catalogue is still empty, periodically poll
+  // so the banner clears and playbooks load automatically once the backend service answers.
   useEffect(() => {
-    if (serverReachable) return;
+    if (serverReachable && prompts.length > 0) return;
     const interval = setInterval(() => {
       void refreshServer();
     }, 10_000);
     return () => clearInterval(interval);
-  }, [serverReachable, refreshServer]);
+  }, [serverReachable, prompts.length, refreshServer]);
 
   // Orchestrator and reviewer playbooks are the runtime's own machinery, so they never appear in
   // the picker (see isUserSelectablePlaybook). Specialist playbooks stay pickable — they're useful
