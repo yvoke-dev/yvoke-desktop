@@ -349,8 +349,8 @@ describe('SyncClient.verifyConnection review regressions', () => {
 });
 
 
-describe('SyncClient full 8-endpoint contract & error handling', () => {
-  it('calls all 8 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
+describe('SyncClient full 9-endpoint contract & error handling', () => {
+  it('calls all 9 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
     const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example///',

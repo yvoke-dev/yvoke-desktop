@@ -1107,7 +1107,7 @@ export function ChatView(props: {
                         ? `Add your question for “${activePrompt.name}” — ${sendShortcut} to send`
                         : prompts.length > 0
                           ? 'Pick a playbook first — / to choose one'
-                          : `Ask a question or paste/drop images — ${sendShortcut} to send`
+                          : 'No playbooks available — check the server connection'
               }
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}

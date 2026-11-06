@@ -626,6 +626,7 @@ export class AgentService {
     let playbookVersion: number | undefined;
     let singleAgentPrompt = '';
     if (!thread.orchestratorProfile) {
+      let text: string;
       try {
         const prompts = await this.deps.mcpPrompts.list();
         const p = prompts.find((pr: McpPromptInfo) => pr.name === playbookName);
@@ -635,11 +636,7 @@ export class AgentService {
           playbookVersion = p.version;
           log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false}`);
         }
-        const text = await this.deps.mcpPrompts.getText(playbookName!);
-        if (!text || !text.trim()) {
-          throw new Error(`Playbook "${playbookName}" instructions are empty.`);
-        }
-        singleAgentPrompt = text;
+        text = await this.deps.mcpPrompts.getText(playbookName!);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (hasErrorSourcePrefix(msg, 'Entra')) {
@@ -652,6 +649,10 @@ export class AgentService {
           ),
         );
       }
+      if (!text || !text.trim()) {
+        throw new Error(`Playbook "${playbookName}" instructions are empty.`);
+      }
+      singleAgentPrompt = text;
     }
 
     const queue = new MessageQueue();

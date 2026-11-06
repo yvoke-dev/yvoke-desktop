@@ -462,9 +462,17 @@ describe('playbook injection across a session', () => {
       svc.sendMessage(meta, 'Question with empty playbook body', {
         playbook: 'oim-schema',
       }),
-    ).rejects.toThrow(/Playbook "oim-schema" instructions are empty/);
+    ).rejects.toThrow(/^Playbook "oim-schema" instructions are empty\.$/);
 
     expect(h.sessions).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: meta.id,
+        message: 'Yvoke Backend: Playbook "oim-schema" instructions are empty.',
+        authRequired: false,
+      },
+    ]);
     svc.closeAll();
   });
 
@@ -548,7 +556,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('fetches each role playbook once when building an orchestrator session', async () => {
+  it('uses the playbook body as the single-agent system prompt', async () => {
     const meta = thread();
     const customPlaybooks: McpPromptInfo[] = [
       {
@@ -577,6 +585,43 @@ describe('playbook injection across a session', () => {
 
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.systemPrompt).toBe('PLAYBOOK BODY STANDALONE');
+    svc.closeAll();
+  });
+
+  it('fetches each role playbook once when building an orchestrator session', async () => {
+    const distinctProfile: OrchestratorProfile = {
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-reviewer',
+      specialistPlaybooks: ['oim-specialist'],
+    };
+    const getTextSpy = vi.fn(async (name: string) => `PLAYBOOK(${name})`);
+    const meta = thread({ orchestratorProfile: 'OIM' });
+    const svc = makeService(meta, {
+      getOrchestratorProfile: async () => distinctProfile,
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: getTextSpy,
+      } as never,
+    });
+
+    const before = events.filter((e) => e.kind === 'turn-complete').length;
+    await svc.sendMessage(meta, 'Orchestrator question', {});
+    for (let i = 0; i < 200; i++) {
+      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(getTextSpy).toHaveBeenCalledTimes(3);
+    expect(getTextSpy.mock.calls.map(([name]) => name)).toEqual([
+      'oim-orchestrator',
+      'oim-reviewer',
+      'oim-specialist',
+    ]);
+    expect(h.sessions).toHaveLength(1);
+    const agents = h.sessions[0].options.agents as Record<string, { prompt: string }>;
+    expect(agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
+    expect(agents['oim-specialist'].prompt).toBe('PLAYBOOK(oim-specialist)');
     svc.closeAll();
   });
 

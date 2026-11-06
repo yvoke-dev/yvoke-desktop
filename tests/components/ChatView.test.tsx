@@ -2016,11 +2016,11 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays ⌘↵ shortcut in placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
-        'Ask a question or paste/drop images — ⌘↵ to send',
+        'No playbooks available — check the server connection',
       );
     });
 
@@ -2061,11 +2061,11 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays Ctrl+↵ shortcut in placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
-        'Ask a question or paste/drop images — Ctrl+↵ to send',
+        'No playbooks available — check the server connection',
       );
     });
 

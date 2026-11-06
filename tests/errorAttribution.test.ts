@@ -238,7 +238,7 @@ describe('errorAttribution', () => {
     });
 
     it('detects 404 in error message strings', () => {
-      expect(isNotFoundError(new Error('GET /prompts/system/foo failed (404): Not found'))).toBe(true);
+      expect(isNotFoundError(new Error('GET /api/chat/v1/conversations/foo failed (404): Not found'))).toBe(true);
       expect(isNotFoundError('404 Not Found')).toBe(true);
       expect(isNotFoundError(new Error('Not found: 404'))).toBe(true);
       expect(isNotFoundError(new Error('fetch failed: ECONNREFUSED'))).toBe(false);
