@@ -3,7 +3,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { AppSettings, CitationRef, McpPromptInfo } from '../../shared/types';
-import { hasErrorSourcePrefix, sanitizeLogContent, tagAttributedError } from '../../shared/error';
+import { hasErrorSourcePrefix, tagAttributedError } from '../../shared/error';
 import { log, logError } from '../log';
 import type { McpAuthProvider } from './McpConnection';
 

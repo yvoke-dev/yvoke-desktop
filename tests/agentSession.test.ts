@@ -263,7 +263,6 @@ function makeService(
     },
     onTurnPersist: () => undefined,
     sandboxDir,
-    syncClient: {} as never,
     mcpPrompts: {
       list: async () => PLAYBOOKS,
       getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -306,7 +305,7 @@ afterEach(() => {
 });
 
 describe('playbook injection across a session', () => {
-  it('combines system prompt and playbook instructions in systemPrompt, and passes raw user input', async () => {
+  it('uses playbook instructions as systemPrompt, and passes raw user input', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
@@ -402,7 +401,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('combines system prompt and playbook instructions when the conversation is resumed cold', async () => {
+  it('uses playbook instructions as systemPrompt when the conversation is resumed cold', async () => {
     const meta = thread();
     const first = makeService(meta);
     await ask(first, meta, 'First question', 'oim-schema');
@@ -549,7 +548,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('deduplicates remote system prompt requests across roles in an orchestrator profile via memoizedLoadPrompt', async () => {
+  it('fetches each role playbook once when building an orchestrator session', async () => {
     const meta = thread();
     const customPlaybooks: McpPromptInfo[] = [
       {
@@ -561,7 +560,6 @@ describe('playbook injection across a session', () => {
       },
     ];
     const svc = makeService(meta, {
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => customPlaybooks,
         getText: async () => 'PLAYBOOK BODY STANDALONE',
@@ -617,6 +615,45 @@ describe('playbook injection across a session', () => {
       }),
     ).rejects.toThrow(/Playbook metadata for "custom-playbook" could not be loaded/);
     svc.closeAll();
+  });
+
+  it('fails closed before calling sdk.query() in orchestrator mode when any role playbook is empty or whitespace-only', async () => {
+    const distinctProfile: OrchestratorProfile = {
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-reviewer',
+      specialistPlaybooks: ['oim-specialist'],
+    };
+    for (const [rolePlaybook, emptyText] of [
+      ['oim-orchestrator', ''],
+      ['oim-reviewer', '   \n\t  '],
+      ['oim-specialist', ''],
+    ] as const) {
+      events = [];
+      const meta = thread({ orchestratorProfile: 'OIM' });
+      const svc = makeService(meta, {
+        getOrchestratorProfile: async () => distinctProfile,
+        mcpPrompts: {
+          list: async () => PLAYBOOKS,
+          getText: async (name: string) =>
+            name === rolePlaybook ? emptyText : `PLAYBOOK(${name})`,
+        } as never,
+      });
+
+      await expect(svc.sendMessage(meta, 'Multi-agent question', {})).rejects.toThrow(
+        `Playbook "${rolePlaybook}" instructions are empty.`,
+      );
+      expect(h.sessions).toHaveLength(0);
+      expect(events).toEqual([
+        {
+          kind: 'error',
+          threadId: meta.id,
+          message: `Yvoke Backend: Playbook "${rolePlaybook}" instructions are empty.`,
+          authRequired: false,
+        },
+      ]);
+      svc.closeAll();
+    }
   });
 
   it('Negative 1.3.1: session eviction & cold session re-locking enforces lock against divergent playbook and resumes under initialPlaybook', async () => {
@@ -748,7 +785,6 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async () => { throw new Error('Connection refused to backend prompt service'); },
@@ -776,7 +812,6 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async () => { throw new Error('Entra: Authentication token expired'); },
@@ -809,7 +844,6 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: { list: async () => PLAYBOOKS, getText: async () => 'PLAYBOOK INSTRUCTIONS' } as never,
       getOrchestratorProfile: async () => undefined,
     });
@@ -977,7 +1011,6 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -1386,7 +1419,6 @@ describe('completeTurn error handling with isResultFailure', () => {
       },
       onTurnPersist,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -1427,7 +1459,6 @@ describe('completeTurn error handling with isResultFailure', () => {
       },
       onTurnPersist,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -2717,7 +2748,6 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {} as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',

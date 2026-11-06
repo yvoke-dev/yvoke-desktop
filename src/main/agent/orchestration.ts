@@ -427,21 +427,17 @@ export interface ResolvedOrchestrator {
 }
 
 /**
- * Build the SDK `agents` map + `allowedTools` for orchestrator mode from a server profile. Fetches
- * each playbook's text (system prompt) and tool metadata; binds Claude models per role from settings.
+ * Build the SDK `agents` map, `allowedTools`, and `reviewer` config for orchestrator mode from a
+ * server profile. Fetches each role playbook's self-contained text (system prompt) and tool metadata;
+ * binds Claude models per role from settings; fails closed if any role playbook's instructions are empty.
  *
- * `baseSystemPrompt` is the server's `default-chat` system prompt. It carries the shared grounding &
- * citation contract — a bare `[<uuid>]` id inline after each claim, explicitly NO numbering and no
- * `## References` section.
- * SPECIALISTS and the ORCHESTRATOR both run under it with their playbook layered on top: the
- * orchestrator writes the user-facing answer, so it needs that contract as much as they do.
+ * The ORCHESTRATOR and SPECIALISTS each run under their own self-contained playbook, which carries
+ * the grounding & citation contract — a bare `[<uuid>]` id inline after each claim, explicitly NO
+ * numbering and no `## References` section — with the desktop runtime delegation adapter appended to
+ * the orchestrator's prompt.
  *
- * It previously did NOT — the orchestrator got its control playbook alone, making it the one agent
- * that never saw the format it was supposed to produce. That mirrored the web, where the same gap
- * produced answers full of raw `[chunk_id=<uuid>]` tokens; the web side has since been fixed too.
- *
- * The REVIEWER still runs on its playbook alone, deliberately: it emits a plain-text verdict rather
- * than prose, so answer-formatting rules are noise in its context.
+ * The REVIEWER runs on its playbook alone in its own code-driven `query()` session, emitting a
+ * structured verdict rather than user-facing prose.
  */
 /**
  * Delegation must be SYNCHRONOUS. The orchestrator needs a specialist's answer in hand to compose,
@@ -481,6 +477,11 @@ export async function buildOrchestrator(
   const textEntries = await Promise.all(
     names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
   );
+  for (const [name, text] of textEntries) {
+    if (!text || !text.trim()) {
+      throw new Error(`Playbook "${name}" instructions are empty.`);
+    }
+  }
   const textByName = new Map(textEntries);
 
   const specialistNames = profile.specialistPlaybooks;
@@ -494,7 +495,7 @@ export async function buildOrchestrator(
 
   const agents: Record<string, AgentDefinition> = {};
 
-  const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
+  const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook)!;
 
   const orchestratorTools = [
     DELEGATE_ALLOW_TOKEN,
@@ -519,7 +520,7 @@ export async function buildOrchestrator(
   for (const name of specialistNames) {
     const info = byName.get(name);
     const tools = mapSpecialistTools(info, settings);
-    const specialistPrompt = textByName.get(name) ?? '';
+    const specialistPrompt = textByName.get(name)!;
     specialistToolSets.push(tools);
     agents[name] = {
       description: info?.description || info?.title || name,
@@ -533,7 +534,7 @@ export async function buildOrchestrator(
   }
 
   const reviewer: ReviewerConfig = {
-    prompt: textByName.get(profile.reviewerPlaybook) ?? '',
+    prompt: textByName.get(profile.reviewerPlaybook)!,
     model: resolveCanonicalModel(cfg.reviewer.model),
     thinkingLevel: cfg.reviewer.thinkingLevel,
     effort: effortFor(cfg.reviewer.thinkingLevel),

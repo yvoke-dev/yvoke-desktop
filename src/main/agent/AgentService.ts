@@ -43,7 +43,6 @@ import {
   usageFromSdk,
   type TurnContext,
 } from './translate';
-import { SyncClient } from '../sync/SyncClient';
 import { McpPrompts } from './McpPrompts';
 import { harvestSpecialistEvidence, SentLedger } from './evidenceDigest';
 import {
@@ -83,7 +82,7 @@ const PROBE_TOKEN = 'pong';
  * scripts/fetch-claude-binary.ts and the `extraResources` entry in electron-builder.yml.
  *
  * Resolved by probing resourcesPath rather than `app.isPackaged` so this module stays importable
- * outside Electron (tests/systemPrompt.test.ts loads it directly). In a dev run resourcesPath
+ * outside Electron (unit tests load it directly). In a dev run resourcesPath
  * points into node_modules/electron, where no such file exists, and the SDK's own resolution
  * takes over.
  */
@@ -102,7 +101,6 @@ const claudeBinary = stagedClaudeBinary();
 export function claudeBinaryPath(): string | null {
   return claudeBinary;
 }
-
 
 /**
  * Decides how a thrown turn failure reaches the user.
@@ -234,7 +232,6 @@ export interface AgentServiceDeps {
   /** Called when a turn finishes so the store/sync layers can persist it. */
   onTurnPersist: (threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage) => void;
   sandboxDir: string;
-  syncClient: SyncClient;
   mcpPrompts: McpPrompts;
   /** Resolve a multi-agent profile by name (orchestrator mode); undefined if unknown/unavailable. */
   getOrchestratorProfile: (name: string) => Promise<OrchestratorProfile | undefined>;

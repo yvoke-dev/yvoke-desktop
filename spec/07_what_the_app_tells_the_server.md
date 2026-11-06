@@ -11,7 +11,7 @@ desktop usage.
 | Capability | What happens |
 | --- | --- |
 | **Read the knowledge base** | Every search, listing, table of contents, section read, graph lookup, record query and citation check goes to the server's knowledge-base connection, authenticated as the signed-in user. |
-| **Read the configuration** | The base instructions, the whole playbook library and every multi-agent profile are fetched live over the same connection. |
+| **Read the configuration** | The whole playbook library and every multi-agent profile are fetched live over the same connection. |
 | **Write conversations** | Conversations are created, retitled, re-settinged and deleted through the conversation API, and each finished turn is appended to it (including the active playbook name and version number on both user and assistant messages in single-agent turns). |
 | **Write ratings** | A thumb and its comment are stored against the server's id for that answer, so they appear in the web app's feedback screens and counts. |
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
@@ -22,7 +22,7 @@ desktop usage.
 
 - **The app only ever reads the corpus.** Nothing reachable from here can import, edit or delete
   knowledge-base content.
-- **Configuration changes reach the app without a release.** A playbook, base-instruction or profile
+- **Configuration changes reach the app without a release.** A playbook or profile
   edited on the server is picked up within about a minute — the same library the web app and connected
   AI clients read.
 - **An answer is stored as one text field with markers in it.** Reasoning and the name and arguments of

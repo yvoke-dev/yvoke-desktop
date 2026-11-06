@@ -6,7 +6,6 @@
 import { qualifyTool, type AppSettings, type OrchestratorProfile } from '../src/shared/types';
 import { McpPrompts } from '../src/main/agent/McpPrompts';
 import { buildOrchestrator } from '../src/main/agent/orchestration';
-import { SyncClient } from '../src/main/sync/SyncClient';
 
 const SERVER = process.env.YVOKE_SERVER ?? 'http://localhost:8080';
 
@@ -38,8 +37,7 @@ async function main(): Promise<void> {
     auth: { headers: async () => ({ Authorization: 'Bearer dev-local-token' }) },
   });
 
-  const sync = new SyncClient({ getBaseUrl: () => SERVER, getToken: async () => 'dev-local-token' });
-  const { agents, allowedTools, specialistNames } = await buildOrchestrator(
+  const { agents, allowedTools, specialistNames, reviewer } = await buildOrchestrator(
     profile,
     settings,
     mcpPrompts,
@@ -56,7 +54,7 @@ async function main(): Promise<void> {
 
   // Assertions
   const orch = agents.orchestrator;
-  const rev = agents.reviewer;
+  const rev = reviewer;
   const assert = (cond: boolean, label: string): void => {
     console.log(`${cond ? 'PASS' : 'FAIL'} — ${label}`);
     if (!cond) process.exitCode = 1;
@@ -71,10 +69,7 @@ async function main(): Promise<void> {
   );
   assert(allowedTools.includes('Task') && allowedTools.includes(qualifyTool('search_corpus')), 'allow-list unions Task + specialist tools');
   assert(agents['oim-access-governance'].prompt.length > 200, 'specialist prompt text loaded from server');
-  assert(
-    agents['oim-access-governance'].prompt.includes('PLAYBOOK TEXT FOR oim-access-governance') || agents['oim-access-governance'].prompt.length > 0,
-    'specialist prompt is populated',
-  );
+  assert(rev.prompt.length > 100, 'reviewer prompt text loaded from server');
 
   mcpPrompts.reset();
 }

@@ -485,7 +485,7 @@ export interface McpPromptInfo {
   prototype?: boolean;
   /** Which agent role the playbook is written for; undefined when the server does not say. */
   targetAgent?: PlaybookRole | string;
-  /** Optional base instruction / system prompt designated for this playbook. */
+  /** Optional positive integer version of the playbook published by the server. */
   version?: number;
 }
 

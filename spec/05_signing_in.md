@@ -21,7 +21,7 @@ other, and the app is useless without both.
 | Sign-in | What it pays for or grants | How it works |
 | --- | --- | --- |
 | **Claude** (Pro/Max subscription) | The model — every answer, every specialist, every review. Drawn from the subscription's agent allowance, separate from other Claude apps. | Picked up from the machine's existing Claude credentials. The app never sees, stores or transmits them. |
-| **Server** (corporate account) | The knowledge base, the playbooks, the base instructions, the profiles, and conversation storage. | Corporate sign-in in the system browser; the resulting token authenticates both the knowledge-base connection and the conversation API. |
+| **Server** (corporate account) | The knowledge base, the playbooks, the profiles, and conversation storage. | Corporate sign-in in the system browser; the resulting token authenticates both the knowledge-base connection and the conversation API. |
 
 - **A pay-per-token API key in the environment is removed** before the model runs, so an inherited one
   cannot silently move billing off the subscription.

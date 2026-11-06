@@ -188,7 +188,6 @@ describe('AgentService playbookVersion stamping', () => {
         persistedTurns.push({ threadId, userMessage, assistantMessage });
       },
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => `INSTRUCTIONS FOR ${name}`,

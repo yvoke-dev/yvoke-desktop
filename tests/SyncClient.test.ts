@@ -300,6 +300,36 @@ describe('SyncClient.verifyConnection review regressions', () => {
     expect(await client.verifyConnection('token')).toEqual({ status: 'ok' });
   });
 
+  it('rejects a 204 No Content response as a server error rather than ok or expired', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+
+    expect(await client.verifyConnection('token')).toEqual({
+      status: 'error',
+      message: 'Server error (204)',
+    });
+  });
+
+  it('rejects a 200 JSON array containing non-object elements as expired', async () => {
+    for (const invalidBody of ['[null]', '["str"]', '[[]]']) {
+      const client = new SyncClient({
+        getBaseUrl: () => 'https://server.example',
+        getToken: async () => 'token',
+        fetchFn: (async () =>
+          new Response(invalidBody, {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })) as unknown as typeof fetch,
+      });
+
+      const result = await client.verifyConnection('token');
+      expect(result.status).toBe('expired');
+    }
+  });
+
   // The message is rendered verbatim in the About pane; an error page must not arrive whole,
   // and a proxy that echoes the request must not carry the bearer back into the renderer.
   it('caps and redacts the server body it quotes back', async () => {
@@ -319,8 +349,8 @@ describe('SyncClient.verifyConnection review regressions', () => {
 });
 
 
-describe('SyncClient full 9-endpoint contract & error handling', () => {
-  it('calls all 9 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
+describe('SyncClient full 8-endpoint contract & error handling', () => {
+  it('calls all 8 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
     const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example///',

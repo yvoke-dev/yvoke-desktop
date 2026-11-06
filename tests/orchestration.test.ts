@@ -263,11 +263,7 @@ describe('orchestrator-mode translation', () => {
   });
 });
 
-const noopLoadPrompt = async () => '';
-
 describe('buildOrchestrator prompt composition', () => {
-  const BASE = 'BASE-PROMPT: cite the bare id inline, e.g. [8f7c1a2b-3d4e-4f50-8a1b-2c3d4e5f6071].';
-
   const profile = {
     name: 'OIM',
     orchestratorPlaybook: 'oim-orchestrator',
@@ -305,11 +301,50 @@ describe('buildOrchestrator prompt composition', () => {
 
   it('leaves the reviewer on its playbook alone and out of built.agents', async () => {
     // Deliberate: the reviewer runs in its own query() session via built.reviewer, not as an
-    // orchestrator-invoked Task subagent, and uses its playbook without baseSystemPrompt.
+    // orchestrator-invoked Task subagent, and uses its self-contained playbook alone.
     const built = await buildOrchestrator(profile, settings, fakePrompts);
     expect(built.agents[REVIEWER_SUBAGENT]).toBeUndefined();
-    
+
     expect(built.reviewer.prompt).toContain('PLAYBOOK(oim-orchestrator-reviewer)');
+  });
+
+  it('throws when orchestratorPlaybook instructions are empty or whitespace-only', async () => {
+    for (const emptyText of ['', '   \n\t  ']) {
+      const prompts = {
+        list: async () => [] as McpPromptInfo[],
+        getText: async (name: string) =>
+          name === 'oim-orchestrator' ? emptyText : `PLAYBOOK(${name})`,
+      } as unknown as McpPrompts;
+      await expect(buildOrchestrator(profile, settings, prompts)).rejects.toThrow(
+        'Playbook "oim-orchestrator" instructions are empty.',
+      );
+    }
+  });
+
+  it('throws when reviewerPlaybook instructions are empty or whitespace-only', async () => {
+    for (const emptyText of ['', '   \n\t  ']) {
+      const prompts = {
+        list: async () => [] as McpPromptInfo[],
+        getText: async (name: string) =>
+          name === 'oim-orchestrator-reviewer' ? emptyText : `PLAYBOOK(${name})`,
+      } as unknown as McpPrompts;
+      await expect(buildOrchestrator(profile, settings, prompts)).rejects.toThrow(
+        'Playbook "oim-orchestrator-reviewer" instructions are empty.',
+      );
+    }
+  });
+
+  it('throws when any specialistPlaybook instructions are empty or whitespace-only', async () => {
+    for (const emptyText of ['', '   \n\t  ']) {
+      const prompts = {
+        list: async () => [] as McpPromptInfo[],
+        getText: async (name: string) =>
+          name === 'oim-access-governance' ? emptyText : `PLAYBOOK(${name})`,
+      } as unknown as McpPrompts;
+      await expect(buildOrchestrator(profile, settings, prompts)).rejects.toThrow(
+        'Playbook "oim-access-governance" instructions are empty.',
+      );
+    }
   });
 
   it('includes SUBMIT_ANSWER_CONTRACT in the orchestrator prompt and does not instruct calling subagent_type: "reviewer"', async () => {

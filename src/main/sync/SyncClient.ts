@@ -192,7 +192,6 @@ export class SyncClient {
     return this.request('PUT', `/messages/${messageId}/feedback`, { rating, comment: comment ?? null });
   }
 
-
   /** Multi-agent profiles available for orchestrator mode; empty if none configured. */
   getOrchestratorProfiles(): Promise<OrchestratorProfile[]> {
     return this.request('GET', '/orchestrator/profiles');
@@ -248,7 +247,7 @@ export class SyncClient {
     if (response.status === 429) {
       return { status: 'rate_limited', message: 'Rate limit exceeded' };
     }
-    if (response.status !== 200 && response.status !== 204) {
+    if (response.status !== 200) {
       const text = await response.text().catch(() => '');
       return {
         status: 'error',
@@ -263,7 +262,12 @@ export class SyncClient {
     const body = await response.text().catch(() => '');
     try {
       const parsed = JSON.parse(body);
-      if (!Array.isArray(parsed)) throw new Error('unexpected shape');
+      if (
+        !Array.isArray(parsed) ||
+        !parsed.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))
+      ) {
+        throw new Error('unexpected shape');
+      }
     } catch {
       return {
         status: 'expired',

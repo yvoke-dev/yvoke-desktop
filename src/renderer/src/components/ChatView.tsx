@@ -611,7 +611,7 @@ export function ChatView(props: {
       if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
     const effectivePromptName = isPlaybookLocked ? (activePrompt?.name ?? initialUserPlaybook) : promptName;
-    if (!isPlaybookLocked && !orchestratorActive && !effectivePromptName && prompts.length > 0) {
+    if (!isPlaybookLocked && !orchestratorActive && !effectivePromptName) {
       setPlaybookRequired(true);
       return;
     }
@@ -658,9 +658,8 @@ export function ChatView(props: {
     const prompt = activePrompt;
     // A single-agent answer runs under a playbook, so a question sent without one is refused
     // rather than quietly answered with the bare default tool set. Multi-agent conversations take
-    // their playbooks from the profile, and an empty catalogue — an unreachable server — leaves
-    // nothing to pick, so neither is gated: an error the user cannot act on is just a dead end.
-    if (!isPlaybookLocked && !orchestratorActive && !prompt && prompts.length > 0) {
+    // their playbooks from the profile and are not gated here.
+    if (!isPlaybookLocked && !orchestratorActive && !prompt) {
       setPlaybookRequired(true);
       return;
     }
@@ -866,7 +865,9 @@ export function ChatView(props: {
                 Playbook required
               </div>
               <div className="preflight-card-reason">
-                Pick a playbook before asking a question — press “/” in the composer to choose one.
+                {prompts.length > 0
+                  ? 'Pick a playbook before asking a question — press “/” in the composer to choose one.'
+                  : 'No playbooks available — check the server connection.'}
               </div>
             </div>
           )}

@@ -23,7 +23,6 @@ import { buildMcpServers } from '../src/main/agent/McpConnection';
 import { buildOrchestrator, ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
 import { buildAutoApproveTools, buildCanUseTool } from '../src/main/agent/policy';
 import { claudeBinaryPath, debugEnv } from '../src/main/agent/AgentService';
-import { SyncClient } from '../src/main/sync/SyncClient';
 
 const SERVER = process.env.YVOKE_SERVER ?? 'http://localhost:8080';
 const TOKEN = 'dev-local-token';
@@ -53,7 +52,6 @@ function assert(cond: boolean, label: string): void {
 async function main(): Promise<void> {
   const headers = { Authorization: `Bearer ${TOKEN}` };
   const mcpPrompts = new McpPrompts({ getSettings: () => settings, auth: { headers: async () => headers } });
-  const sync = new SyncClient({ getBaseUrl: () => SERVER, getToken: async () => TOKEN });
   const built = await buildOrchestrator(profile, settings, mcpPrompts);
 
   async function* prompt(): AsyncGenerator<SDKUserMessage> {

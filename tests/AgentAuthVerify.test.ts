@@ -62,7 +62,6 @@ describe('AgentService.verifyClaudeCredentials', () => {
       onSessionId: vi.fn(),
       onTurnPersist: vi.fn(),
       sandboxDir: '/tmp/test-sandbox',
-      syncClient: {} as any,
       mcpPrompts: {} as any,
       getOrchestratorProfile: vi.fn(),
     };
@@ -420,7 +419,6 @@ describe('AgentService.verifyClaudeCredentials error classification', () => {
       onSessionId: vi.fn(),
       onTurnPersist: vi.fn(),
       sandboxDir: '/tmp/test-sandbox',
-      syncClient: {} as any,
       mcpPrompts: {} as any,
       getOrchestratorProfile: vi.fn(),
     };
@@ -501,7 +499,6 @@ describe('AgentService.verifyClaudeCredentials isolation', () => {
       onSessionId: vi.fn(),
       onTurnPersist: vi.fn(),
       sandboxDir: '/tmp/test-sandbox',
-      syncClient: {} as any,
       mcpPrompts: {} as any,
       getOrchestratorProfile: vi.fn(),
     });

@@ -90,7 +90,7 @@ triage are the web app's job.
   credentials. So the server never sees the answer being written — only the finished text. Closing the
   app loses a running answer, the model's cost appears in no company report, and the app cannot answer
   at all without a working Claude sign-in.
-- **Everything the assistant is *told* lives on the server.** The base instructions, every playbook,
+- **Everything the assistant is *told* lives on the server.** Every playbook
   and every multi-agent profile are fetched live over the knowledge-base connection. There is
   deliberately no local copy and no fallback: an unreachable server means the question fails outright,
   rather than being answered by an assistant running on stale or invented instructions.
@@ -105,8 +105,7 @@ triage are the web app's job.
 | Word | What it means | Also called |
 | --- | --- | --- |
 | **Conversation** | One thread of questions and answers. Created on the server, listed in the sidebar. | "thread" in the code |
-| **Playbook** | A named, reusable way of answering a class of question, written by administrators on the server. The user attaches one to a message. | "prompt" / "skill" historically |
-| **Base instructions** | The server-managed instructions every answer runs under, on top of which a playbook is layered. | the `default-chat` system prompt |
+| **Playbook** | A named, self-contained instruction set and tool allow-list for answering a class of question, written by administrators on the server. The user attaches one to a single-agent conversation. | "prompt" / "skill" historically |
 | **Profile** | A named multi-agent setup on the server: which playbook leads, which reviews, and which specialists are available. | "orchestrator profile" |
 | **Lead** | The agent that plans a multi-agent turn, delegates, and writes the final answer. | "orchestrator" |
 | **Specialist** | A sub-agent the lead delegates one self-contained sub-question to. | |
@@ -145,5 +144,5 @@ plain defect rather than a position.
 | 10 | **There is no auto-update**, no update notice, and no way to know which versions are in the field — and the app tells the server nothing about itself either. | Every fix reaches users only when somebody sends them a file and they install it. A serious bug has no recall mechanism and no way to measure the exposure. |
 | 11 | **The release workflow does not run the tests.** The local release command does, and every push does — but the workflow the tag triggers depends on neither. | The one gate that matters is the one that is optional. A tag pushed by hand ships whatever compiles. |
 | 12 | **Choosing the older knowledge-base transport is accepted, used, then silently reverted** at the next launch. | A setting that appears to work and quietly undoes itself is worse than one that is not offered. Either remove the choice or make it stick. |
-| 13 | **The app has no offline mode at all — not even a degraded one.** Base instructions, playbooks and profiles are all fetched live with no fallback and no cache, so an unreachable server means no answer rather than a worse one. | Deliberate, and right: a local copy would drift from the server's and contradict it silently. Recorded here as a decision so that nobody "fixes" it by adding a fallback. |
+| 13 | **The app has no offline mode at all — not even a degraded one.** Playbooks and profiles are all fetched live with no fallback and no cache, so an unreachable server means no answer rather than a worse one. | Deliberate, and right: a local copy would drift from the server's and contradict it silently. Recorded here as a decision so that nobody "fixes" it by adding a fallback. |
 | 14 | **Nothing about the app's shell is tested** — not its lifecycle, not the boundary between its two halves, not the settings store, not the packaging or release scripts. | Every finding in chapter 8 is unenforced by definition. The parts most likely to break a release are the parts nothing watches. |

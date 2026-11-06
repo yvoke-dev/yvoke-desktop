@@ -301,16 +301,9 @@ describe('Image Attachments & Vision Support', () => {
 
   describe('AppCore Validation & Sanitization', () => {
     let appCore: AppCore;
-    let syncClientMock: any;
     let agentServiceSendMock: any;
 
     beforeEach(() => {
-      syncClientMock = {
-        listConversations: vi.fn().mockResolvedValue([]),
-        createConversation: vi.fn().mockResolvedValue({ id: 't1', title: 'New', createdAt: new Date().toISOString() }),
-        getOrchestratorProfiles: vi.fn().mockResolvedValue([]),
-      };
-
       appCore = new AppCore({
         userDataDir: tmpDir,
         emitAgentEvent: vi.fn(),
@@ -1144,9 +1137,6 @@ describe('Image Attachments & Vision Support', () => {
         onSessionId: vi.fn(),
         onTurnPersist: vi.fn(),
         sandboxDir: path.join(tmpDir, 'sandbox'),
-        syncClient: {
-          getSystemPrompt: vi.fn().mockResolvedValue('Base system prompt'),
-        } as any,
         mcpPrompts: {
           list: vi.fn().mockResolvedValue([]),
         } as any,
@@ -1247,9 +1237,6 @@ describe('Image Attachments & Vision Support', () => {
         onSessionId: vi.fn(),
         onTurnPersist: vi.fn(),
         sandboxDir: path.join(tmpDir, 'sandbox'),
-        syncClient: {
-          getSystemPrompt: vi.fn().mockResolvedValue('Base system prompt'),
-        } as any,
         mcpPrompts: {
           list: vi.fn().mockResolvedValue([]),
         } as any,

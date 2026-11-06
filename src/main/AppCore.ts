@@ -221,7 +221,6 @@ export class AppCore {
       onTurnPersist: (threadId, userMessage, assistantMessage) =>
         this.persistTurn(threadId, userMessage, assistantMessage),
       sandboxDir: sandboxDirFor(deps.userDataDir),
-      syncClient: this.syncClient,
       mcpPrompts: this.mcpPrompts,
       getOrchestratorProfile: (name) => this.resolveOrchestratorProfile(name),
     });

@@ -243,13 +243,17 @@ describe('playbook preflight', () => {
     expect(screen.queryByText('Playbook required')).toBeNull();
   });
 
-  // Fails open where the gate would otherwise be a dead end: an empty catalogue (an unreachable
-  // server) offers nothing to pick, so refusing would leave the composer unable to send anything.
-  it('sends without a playbook when there are none to pick', () => {
+  // Fails closed even when the playbook catalogue is empty: a single-agent question always
+  // requires a playbook, and an empty catalogue tells the user to check the server connection.
+  it('refuses to send without a playbook when there are none to pick and shows server connection guidance', () => {
     const { container } = renderChat({ prompts: [] });
     ask(container, 'Just asking.');
-    expect(screen.queryByText('Playbook required')).toBeNull();
-    expect(onSend).toHaveBeenCalledWith('Just asking.', undefined);
+    expect(screen.getByText('Playbook required')).toBeTruthy();
+    expect(
+      screen.getByText('No playbooks available — check the server connection.'),
+    ).toBeTruthy();
+    expect(onSend).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('Just asking.');
   });
 
   it('skips the check when it is switched off', () => {
@@ -476,7 +480,7 @@ describe('playbook preflight', () => {
     expect(screen.queryByText('Switch to oim-schema')).toBeNull();
   });
 
-  it('requires and allows selecting a playbook on a started single-agent thread whose Turn 1 had playbook: undefined when prompts.length > 0, while failing open when prompts is []', async () => {
+  it('requires and allows selecting a playbook on a started single-agent thread whose Turn 1 had playbook: undefined when prompts.length > 0, and also refuses when prompts is []', async () => {
     const existingMessages: ChatMessage[] = [
       { localId: 'u1', role: 'user', content: 'Old question without playbook', createdAt: '' },
       { localId: 'a1', role: 'assistant', content: 'Old answer', createdAt: '' },
@@ -507,14 +511,17 @@ describe('playbook preflight', () => {
     unmount();
     onSend.mockClear();
 
-    // When prompts is [], it still fails open on a started playbook-less thread
+    // When prompts is [], it still refuses to send on a started playbook-less thread and shows server connection guidance
     const { container: emptyCatContainer } = renderChat({ messages: existingMessages, prompts: [] });
     const emptyTextarea = emptyCatContainer.querySelector('textarea')!;
     fireEvent.change(emptyTextarea, { target: { value: 'Follow-up while offline' } });
     fireEvent.click(emptyCatContainer.querySelector('.composer-send')!);
 
-    expect(emptyCatContainer.querySelector('.playbook-required')).toBeNull();
-    expect(onSend).toHaveBeenCalledWith('Follow-up while offline', undefined);
+    expect(emptyCatContainer.querySelector('.playbook-required')).not.toBeNull();
+    expect(emptyCatContainer.querySelector('.playbook-required')?.textContent).toContain(
+      'No playbooks available — check the server connection.',
+    );
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('locks playbook to Turn 2 when Turn 1 had playbook: undefined and Turn 2 had playbook: oim-schema v2', () => {
@@ -1159,21 +1166,27 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
     });
 
     it('pressing Cmd+Enter (macOS) in textarea with a valid draft calls onSend', () => {
-      const { container } = renderChat({ prompts: [] });
+      const { container } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+        prompts: [],
+      });
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: 'Valid question' } });
       fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
       expect(onSend).toHaveBeenCalledTimes(1);
-      expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+      expect(onSend).toHaveBeenCalledWith('Valid question', 'oim-getting-started');
     });
 
     it('pressing Ctrl+Enter (Windows) in textarea with a valid draft calls onSend', () => {
-      const { container } = renderChat({ prompts: [] });
+      const { container } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+        prompts: [],
+      });
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: 'Valid question' } });
       fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true });
       expect(onSend).toHaveBeenCalledTimes(1);
-      expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+      expect(onSend).toHaveBeenCalledWith('Valid question', 'oim-getting-started');
     });
 
     it('pressing Cmd+Enter or Ctrl+Enter in textarea with whitespace-only draft does not call onSend', () => {
@@ -1241,7 +1254,10 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
     });
 
     it('renders Send button when liveTurn.running is false; clicking it with valid draft calls onSend and never onInterrupt', () => {
-      const { container } = renderChat({ prompts: [] });
+      const { container } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+        prompts: [],
+      });
       const textarea = container.querySelector('textarea')!;
       fireEvent.change(textarea, { target: { value: 'Valid question' } });
       const sendBtn = container.querySelector<HTMLButtonElement>('.composer-send')!;
@@ -1890,7 +1906,10 @@ describe('keyboard shortcut submission and Alt/AltGr suppression', () => {
   });
 
   it('Ctrl + Enter (ctrlKey: true) with valid text calls onSend and has defaultPrevented === true', () => {
-    const { container } = renderChat({ prompts: [] });
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      prompts: [],
+    });
     const textarea = container.querySelector('textarea')!;
     fireEvent.change(textarea, { target: { value: 'Valid question' } });
 
@@ -1898,12 +1917,15 @@ describe('keyboard shortcut submission and Alt/AltGr suppression', () => {
     fireEvent(textarea, event);
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    expect(onSend).toHaveBeenCalledWith('Valid question', 'oim-getting-started');
     expect(event.defaultPrevented).toBe(true);
   });
 
   it('Meta + Enter (metaKey: true) with valid text calls onSend and has defaultPrevented === true', () => {
-    const { container } = renderChat({ prompts: [] });
+    const { container } = renderChat({
+      thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+      prompts: [],
+    });
     const textarea = container.querySelector('textarea')!;
     fireEvent.change(textarea, { target: { value: 'Valid question' } });
 
@@ -1911,7 +1933,7 @@ describe('keyboard shortcut submission and Alt/AltGr suppression', () => {
     fireEvent(textarea, event);
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith('Valid question', undefined);
+    expect(onSend).toHaveBeenCalledWith('Valid question', 'oim-getting-started');
     expect(event.defaultPrevented).toBe(true);
   });
 
@@ -2414,6 +2436,7 @@ describe('deterministic platform shortcut labels', () => {
       };
 
       const { container, rerender } = renderChat({
+        thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
         prompts: [],
         liveTurn: initialTurn,
       });
@@ -2442,7 +2465,13 @@ describe('deterministic platform shortcut labels', () => {
         clarifyingQuestion: undefined,
       };
 
-      rerender(chat({ prompts: [], liveTurn: resolvedTurn }));
+      rerender(
+        chat({
+          thread: { ...THREAD, initialPlaybook: 'oim-getting-started' },
+          prompts: [],
+          liveTurn: resolvedTurn,
+        }),
+      );
 
       await waitFor(() => {
         expect(textarea.placeholder).not.toBe('Awaiting clarification…');
@@ -2450,7 +2479,7 @@ describe('deterministic platform shortcut labels', () => {
       expect(textarea.disabled).toBe(false);
       fireEvent.change(textarea, { target: { value: 'Followup prompt' } });
       fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
-      expect(onSend).toHaveBeenCalledWith('Followup prompt', undefined);
+      expect(onSend).toHaveBeenCalledWith('Followup prompt', 'oim-getting-started');
     });
 
     it('renders rehydrated clarification calls with placeholder result as answered with 0 failed steps', () => {
