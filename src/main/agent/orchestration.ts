@@ -8,21 +8,17 @@ import type {
   ThinkingLevel,
 } from '../../shared/types';
 import {
-  BASE_SYSTEM_PROMPT_NAME,
   DEFAULT_KB_TOOLS,
   isCitationOnlyVerdict,
-  isValidSystemPromptName,
   MCP_TOOL_PREFIX,
   qualifyTool,
   resolveCanonicalModel,
-  type ValidSystemPromptName,
 } from '../../shared/types';
 import { COMPUTE_TOOLS, isComputeTool } from './computeTools';
 import { citeScoped, deduped, type SentLedger } from './evidenceDigest';
 import { isWebTool, webToolDeclared } from './policy';
 import { ORCHESTRATOR_SUBMIT_ANSWER_TOOL, REVIEW_SUBMIT_TOOL } from './reviewTools';
 import type { McpPrompts } from './McpPrompts';
-import { loadDesignatedSystemPrompt } from './systemPrompt';
 
 
 /**
@@ -471,8 +467,6 @@ export async function buildOrchestrator(
   profile: OrchestratorProfile,
   settings: AppSettings,
   mcpPrompts: McpPrompts,
-  baseSystemPrompt: string,
-  loadSystemPrompt: (name: ValidSystemPromptName) => Promise<string>,
 ): Promise<ResolvedOrchestrator> {
   const cfg = settings.orchestrator;
   if (!cfg) {
@@ -484,49 +478,10 @@ export async function buildOrchestrator(
 
   const names = [profile.orchestratorPlaybook, profile.reviewerPlaybook, ...profile.specialistPlaybooks];
 
-  // Collect all unique, valid designated system prompt names across all roles in this profile.
-  const uniqueDesignatedNames = [
-    ...new Set(
-      names
-        .map((name) => {
-          const raw = byName.get(name)?.systemPrompt;
-          return typeof raw === 'string' ? raw.trim() : undefined;
-        })
-        .filter((p): p is ValidSystemPromptName => Boolean(p && isValidSystemPromptName(p))),
-    ),
-  ];
-
-  // Pre-seed cache with baseSystemPrompt under BASE_SYSTEM_PROMPT_NAME ('default-chat') so designating
-  // it explicitly never triggers a redundant remote fetch.
-  const promptCache = new Map<string, string>();
-  if (baseSystemPrompt && baseSystemPrompt.trim().length > 0) {
-    promptCache.set(BASE_SYSTEM_PROMPT_NAME, baseSystemPrompt);
-  }
-
-  // Load all unique designated custom prompts and all playbook texts concurrently in a single parallel stage.
-  const [, textEntries] = await Promise.all([
-    Promise.all(
-      uniqueDesignatedNames.map(async (promptName) => {
-        if (promptCache.has(promptName)) return;
-        const loaded = await loadDesignatedSystemPrompt(loadSystemPrompt, promptName);
-        if (loaded !== null) {
-          promptCache.set(promptName, loaded);
-        }
-      }),
-    ),
-    Promise.all(
-      names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
-    ),
-  ]);
+  const textEntries = await Promise.all(
+    names.map(async (name) => [name, await mcpPrompts.getText(name)] as const),
+  );
   const textByName = new Map(textEntries);
-
-  const resolveDesignatedPrompt = (playbookName: string): string | null => {
-    const raw = byName.get(playbookName)?.systemPrompt;
-    if (!raw || typeof raw !== 'string') return null;
-    const trimmed = raw.trim();
-    if (!isValidSystemPromptName(trimmed)) return null;
-    return promptCache.get(trimmed) ?? null;
-  };
 
   const specialistNames = profile.specialistPlaybooks;
   const roster = specialistNames
@@ -539,17 +494,7 @@ export async function buildOrchestrator(
 
   const agents: Record<string, AgentDefinition> = {};
 
-  // The orchestrator writes the user-facing answer, so it needs the base prompt's output contract
-  // (bare-id citations, mermaid/KaTeX delimiters) exactly as the specialists do.
-  // It previously got the control playbook alone — the one agent that never saw the contract it was
-  // expected to honour. Playbook last, so its role-specific rules win on any conflict.
-  // Falls back to baseSystemPrompt if no custom prompt is designated, if not found (404), or if empty.
-  const customOrchPrompt = resolveDesignatedPrompt(profile.orchestratorPlaybook);
-  const orchestratorBase = customOrchPrompt ?? baseSystemPrompt;
   const orchestratorPlaybookText = textByName.get(profile.orchestratorPlaybook) ?? '';
-  const orchestratorPrompt = orchestratorBase
-    ? `${orchestratorBase}\n\n---\n\n${orchestratorPlaybookText}`
-    : orchestratorPlaybookText;
 
   const orchestratorTools = [
     DELEGATE_ALLOW_TOKEN,
@@ -561,13 +506,8 @@ export async function buildOrchestrator(
   agents[ORCHESTRATOR_AGENT] = {
     description: 'Coordinates specialists and composes one grounded, cited answer.',
     prompt:
-      orchestratorPrompt +
+      orchestratorPlaybookText +
       orchestratorAdapter(roster, cfg.maxReviewRounds, cfg.maxSpecialistCalls),
-    // `verify_citations` is not optional: the server's orchestrator playbook names it as one of the
-    // three tools it has, and requires it be run on every id before the answer is sent. The web
-    // grants exactly `["ask_clarifying_question", "verify_citations"]`. Without it the orchestrator
-    // — the one agent that writes the user-facing answer — was told to pre-flight its citations
-    // with a tool it had not been given, leaving a fabricated id to cost a whole review round.
     tools: orchestratorTools,
     background: BACKGROUND_DELEGATION,
     model: resolveCanonicalModel(cfg.orchestrator.model),
@@ -579,12 +519,7 @@ export async function buildOrchestrator(
   for (const name of specialistNames) {
     const info = byName.get(name);
     const tools = mapSpecialistTools(info, settings);
-    const customSpecPrompt = resolveDesignatedPrompt(name);
-    const specialistBase = customSpecPrompt ?? baseSystemPrompt;
-    const playbookText = textByName.get(name) ?? '';
-    const specialistPrompt = specialistBase
-      ? `${specialistBase}\n\n---\n\n${playbookText}`
-      : playbookText;
+    const specialistPrompt = textByName.get(name) ?? '';
     specialistToolSets.push(tools);
     agents[name] = {
       description: info?.description || info?.title || name,
@@ -597,15 +532,8 @@ export async function buildOrchestrator(
     };
   }
 
-  // The reviewer runs on its playbook alone (deliberately: no baseSystemPrompt), in its own
-  // runtime-driven query() session rather than as an orchestrator-callable Task sub-agent.
-  // If a custom designated system prompt is specified and loads successfully, it is layered on top.
-  // If absent, not found (404), or empty, it falls back to empty string (playbook alone, NO baseSystemPrompt).
-  const customRevPrompt = resolveDesignatedPrompt(profile.reviewerPlaybook);
-  const reviewerBase = customRevPrompt ? `${customRevPrompt}\n\n---\n\n` : '';
-
   const reviewer: ReviewerConfig = {
-    prompt: reviewerBase + (textByName.get(profile.reviewerPlaybook) ?? ''),
+    prompt: textByName.get(profile.reviewerPlaybook) ?? '',
     model: resolveCanonicalModel(cfg.reviewer.model),
     thinkingLevel: cfg.reviewer.thinkingLevel,
     effort: effortFor(cfg.reviewer.thinkingLevel),

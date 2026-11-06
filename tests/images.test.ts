@@ -308,7 +308,6 @@ describe('Image Attachments & Vision Support', () => {
       syncClientMock = {
         listConversations: vi.fn().mockResolvedValue([]),
         createConversation: vi.fn().mockResolvedValue({ id: 't1', title: 'New', createdAt: new Date().toISOString() }),
-        getSystemPrompt: vi.fn().mockResolvedValue('System prompt content'),
         getOrchestratorProfiles: vi.fn().mockResolvedValue([]),
       };
 
@@ -1179,6 +1178,7 @@ describe('Image Attachments & Vision Support', () => {
         interrupted: false,
         turn: { threadId: thread.id, isOrchestrator: false, agentCalls: new Map(), toolCalls: [], blocks: [] },
         lastActiveAt: Date.now(),
+        playbookName: 'oim-schema',
       };
 
       (agent as any).sessions.set(thread.id, fakeSession);
@@ -1192,7 +1192,7 @@ describe('Image Attachments & Vision Support', () => {
         },
       ];
 
-      await agent.sendMessage(thread, 'What is in this image?', { images });
+      await agent.sendMessage(thread, 'What is in this image?', { images, playbook: 'oim-schema' });
 
       expect(fakeSession.pendingUser).toBeDefined();
       expect(fakeSession.pendingUser.images).toEqual(images);
@@ -1280,6 +1280,7 @@ describe('Image Attachments & Vision Support', () => {
         interrupted: false,
         turn: { threadId: thread.id, isOrchestrator: false, agentCalls: new Map(), toolCalls: [], blocks: [] },
         lastActiveAt: Date.now(),
+        playbookName: 'oim-schema',
       };
 
       (agent as any).sessions.set(thread.id, fakeSession);
@@ -1293,7 +1294,7 @@ describe('Image Attachments & Vision Support', () => {
         },
       ];
 
-      await agent.sendMessage(thread, '   ', { images });
+      await agent.sendMessage(thread, '   ', { images, playbook: 'oim-schema' });
 
       expect(pushedMessages).toHaveLength(1);
       const pushed = pushedMessages[0];

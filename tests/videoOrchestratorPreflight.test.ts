@@ -35,7 +35,7 @@ describe('videoOrchestratorPreflight', () => {
 
       await expect(probeBackend('http://localhost:8080', mockFetch)).resolves.toBeUndefined();
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/api/chat/v1/prompts/system/default-chat',
+        'http://localhost:8080/api/chat/v1/areas',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({
@@ -56,7 +56,7 @@ describe('videoOrchestratorPreflight', () => {
 
       await probeBackend('http://127.0.0.1:8080/', mockFetch);
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:8080/api/chat/v1/prompts/system/default-chat',
+        'http://127.0.0.1:8080/api/chat/v1/areas',
         expect.any(Object),
       );
     });

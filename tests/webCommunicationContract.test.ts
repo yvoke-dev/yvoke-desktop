@@ -9,7 +9,6 @@ import type {
   McpPromptInfo,
   OrchestratorProfile,
   OrchestratorRunPayload,
-  ValidSystemPromptName,
 } from '../src/shared/types';
 
 interface InMemoryWebServer {
@@ -56,12 +55,6 @@ function createInMemoryYvokeWebServer(): InMemoryWebServer {
       const method = init?.method ?? 'GET';
       const p = url.pathname.replace(/^\/api\/chat\/v1/, '');
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-
-      // GET /prompts/system/:name
-      if (method === 'GET' && p.startsWith('/prompts/system/')) {
-        const name = decodeURIComponent(p.slice('/prompts/system/'.length));
-        return new Response(JSON.stringify({ systemPrompt: `SYSTEM_PROMPT(${name})` }), { status: 200 });
-      }
 
       // GET /orchestrator/profiles
       if (method === 'GET' && p === '/orchestrator/profiles') {
@@ -293,9 +286,6 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
   it('Scenario A: Single-Agent Round-Trip, Assistant Playbook Attribution, Feedback, & Second-Device Rehydration', async () => {
     const prompts = await appCore1.listPrompts();
     expect(prompts.find((p) => p.name === 'oim-schema')?.version).toBe(2);
-
-    const sysPrompt = await appCore1.syncClient.getSystemPrompt('default-chat' as ValidSystemPromptName);
-    expect(sysPrompt).toBe('SYSTEM_PROMPT(default-chat)');
 
     const thread = await appCore1.createThread();
     appCore1.threads.patch(thread.id, { initialPlaybook: 'oim-schema', hasStarted: true });
