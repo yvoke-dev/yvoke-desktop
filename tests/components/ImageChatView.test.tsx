@@ -150,7 +150,7 @@ describe('ChatView Image UI & Interactions', () => {
   it('handles image paste into textarea and allows sending with images', async () => {
     const { container } = render(
       <ChatView
-        thread={THREAD}
+        thread={{ ...THREAD, initialPlaybook: 'oim-getting-started' }}
         settings={testSettings()}
         messages={[]}
         prompts={[]}
@@ -209,7 +209,7 @@ describe('ChatView Image UI & Interactions', () => {
 
     await waitFor(() => {
       expect(onSend).toHaveBeenCalledTimes(1);
-      expect(onSend).toHaveBeenCalledWith('', undefined, expect.arrayContaining([
+      expect(onSend).toHaveBeenCalledWith('', 'oim-getting-started', expect.arrayContaining([
         expect.objectContaining({
           name: 'pasted.png',
           mediaType: 'image/png',

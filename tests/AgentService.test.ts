@@ -188,7 +188,6 @@ describe('AgentService playbookVersion stamping', () => {
         persistedTurns.push({ threadId, userMessage, assistantMessage });
       },
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => `INSTRUCTIONS FOR ${name}`,
@@ -263,50 +262,14 @@ describe('AgentService playbookVersion stamping', () => {
     svc.closeAll();
   });
 
-  it('restarts a warm playbook-less session when a playbook is assigned on a follow-up turn (undefined -> oim-full) without resuming the playbook-less sessionId', async () => {
+  it('rejects sending turn without playbook in single-agent mode', async () => {
     const meta = makeThread({ id: 'thread-late-pb' });
-    const sessionIdEvents: { threadId: string; sessionId: string; profile?: string }[] = [];
-    const svc = new AgentService({
-      getSettings: settings,
-      mcpAuthProvider: { headers: async () => ({}) } as never,
-      emit: (e) => events.push(e),
-      onSessionId: (threadId, sessionId, profile) => {
-        sessionIdEvents.push({ threadId, sessionId, profile });
-        meta.sessionId = sessionId || undefined;
-        meta.sessionProfile = profile;
-      },
-      onTurnPersist: (threadId, userMessage, assistantMessage) => {
-        persistedTurns.push({ threadId, userMessage, assistantMessage });
-      },
-      sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
-      mcpPrompts: {
-        list: async () => PLAYBOOKS,
-        getText: async (name: string) => `INSTRUCTIONS FOR ${name}`,
-      } as never,
-      getOrchestratorProfile: async (name: string) => (name === 'OIM' ? OIM_PROFILE : undefined),
-    });
+    const svc = createService(meta);
 
-    // Turn 1: sent while catalogue was empty (no playbook)
-    await runTurn(svc, meta, 'Turn 1 without playbook', undefined);
-    expect(h.sessions).toHaveLength(1);
-    expect(meta.sessionId).toBe('sdk-session-1');
-    expect(persistedTurns[0].userMessage.playbook).toBeUndefined();
-    expect(persistedTurns[0].assistantMessage.playbook).toBeUndefined();
-
-    // Turn 2: playbook assigned on follow-up turn while warm session is still alive and passed thread snapshot carries sessionId
-    await runTurn(svc, { ...meta, initialPlaybook: 'oim-full' }, 'Turn 2 with playbook', 'oim-full');
-
-    expect(h.sessions).toHaveLength(2);
-    expect(h.sessions[0].closed).toBe(true);
-    expect(sessionIdEvents).toContainEqual({ threadId: 'thread-late-pb', sessionId: '', profile: undefined });
-    expect(h.sessions[1].options.resume).toBeUndefined();
-    expect(String(h.sessions[1].options.systemPrompt)).toContain('INSTRUCTIONS FOR oim-full');
-    expect(persistedTurns[1].userMessage.playbook).toBe('oim-full');
-    expect(persistedTurns[1].userMessage.playbookVersion).toBe(2);
-    expect(persistedTurns[1].assistantMessage.playbook).toBe('oim-full');
-    expect(persistedTurns[1].assistantMessage.playbookVersion).toBe(2);
-
+    await expect(runTurn(svc, meta, 'Turn 1 without playbook', undefined)).rejects.toThrow(
+      /A playbook must be selected for single-agent chat/,
+    );
+    expect(h.sessions).toHaveLength(0);
     svc.closeAll();
   });
 

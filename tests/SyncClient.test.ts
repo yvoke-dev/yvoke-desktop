@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SyncApiError, SyncClient } from '../src/main/sync/SyncClient';
-import type { OrchestratorRunPayload, ValidSystemPromptName } from '../src/shared/types';
+import type { OrchestratorRunPayload } from '../src/shared/types';
 
 /**
  * The PATCH body is the one place a settings change can destroy something the user cares about:
@@ -84,15 +84,12 @@ describe('SyncClient.updateConversation', () => {
     expect(getTokenRetry).toHaveBeenNthCalledWith(4, true);
   });
 
-  it('rejects with Yvoke Backend attributed error when JSON-expecting endpoints (getSystemPrompt, listConversations) receive 200 OK with an empty body', async () => {
+  it('rejects with Yvoke Backend attributed error when JSON-expecting endpoints (listConversations) receive 200 OK with an empty body', async () => {
     const empty200Client = new SyncClient({
       getBaseUrl: () => 'https://server.example',
       getToken: async () => 'token',
       fetchFn: (async () => new Response('', { status: 200 })) as unknown as typeof fetch,
     });
-    await expect(empty200Client.getSystemPrompt('default-chat' as ValidSystemPromptName)).rejects.toThrow(
-      /^Yvoke Backend:/,
-    );
     await expect(empty200Client.listConversations()).rejects.toThrow(/^Yvoke Backend:/);
   });
 });
@@ -181,7 +178,7 @@ describe('SyncClient.verifyConnection', () => {
     const getTokenMock = vi.fn().mockResolvedValue('unused-token');
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(new Response(JSON.stringify({ systemPrompt: 'hi' }), { status: 200 }));
+      .mockResolvedValue(new Response(JSON.stringify([{ name: 'area-1' }]), { status: 200 }));
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example',
       getToken: getTokenMock,
@@ -192,7 +189,7 @@ describe('SyncClient.verifyConnection', () => {
     expect(result).toEqual({ status: 'ok' });
     expect(getTokenMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/prompts/system/default-chat',
+      'https://server.example/api/chat/v1/areas',
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer passed-token-xyz',
@@ -232,7 +229,7 @@ describe('SyncClient.verifyConnection', () => {
   });
 
   it('returns ok on 200 probe', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ systemPrompt: 'hi' }), { status: 200 }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify([{ name: 'area-1' }]), { status: 200 }));
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example',
       getToken: async () => 'test-token',
@@ -242,7 +239,7 @@ describe('SyncClient.verifyConnection', () => {
     const result = await client.verifyConnection('test-token');
     expect(result).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/prompts/system/default-chat',
+      'https://server.example/api/chat/v1/areas',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({
@@ -294,13 +291,43 @@ describe('SyncClient.verifyConnection review regressions', () => {
       getBaseUrl: () => 'https://server.example',
       getToken: async () => 'token',
       fetchFn: (async () =>
-        new Response(JSON.stringify({ systemPrompt: 'You are Yvoke.' }), {
+        new Response(JSON.stringify([{ name: 'area-1' }]), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })) as unknown as typeof fetch,
     });
 
     expect(await client.verifyConnection('token')).toEqual({ status: 'ok' });
+  });
+
+  it('rejects a 204 No Content response as a server error rather than ok or expired', async () => {
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'token',
+      fetchFn: (async () => new Response(null, { status: 204 })) as unknown as typeof fetch,
+    });
+
+    expect(await client.verifyConnection('token')).toEqual({
+      status: 'error',
+      message: 'Server error (204)',
+    });
+  });
+
+  it('rejects a 200 JSON array containing non-object elements as expired', async () => {
+    for (const invalidBody of ['[null]', '["str"]', '[[]]']) {
+      const client = new SyncClient({
+        getBaseUrl: () => 'https://server.example',
+        getToken: async () => 'token',
+        fetchFn: (async () =>
+          new Response(invalidBody, {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })) as unknown as typeof fetch,
+      });
+
+      const result = await client.verifyConnection('token');
+      expect(result.status).toBe('expired');
+    }
   });
 
   // The message is rendered verbatim in the About pane; an error page must not arrive whole,
@@ -321,32 +348,9 @@ describe('SyncClient.verifyConnection review regressions', () => {
   });
 });
 
-describe('SyncClient.getSystemPrompt', () => {
-  it('URL-encodes prompt name to prevent path traversal and truncation', async () => {
-    let requestedUrl = '';
-    const client = new SyncClient({
-      getBaseUrl: () => 'https://server.example',
-      getToken: async () => 'token',
-      fetchFn: (async (url: string) => {
-        requestedUrl = url;
-        return new Response(JSON.stringify({ systemPrompt: 'PROMPT BODY' }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }) as unknown as typeof fetch,
-    });
 
-    // @ts-expect-error Raw unvalidated strings must not compile as ValidSystemPromptName argument
-    const _typeOnly = () => client.getSystemPrompt('../../evil?test=1#frag');
-
-    const res = await client.getSystemPrompt('../../evil?test=1#frag' as unknown as ValidSystemPromptName);
-    expect(res).toBe('PROMPT BODY');
-    expect(requestedUrl).toBe('https://server.example/api/chat/v1/prompts/system/..%2F..%2Fevil%3Ftest%3D1%23frag');
-  });
-});
-
-describe('SyncClient full 10-endpoint contract & error handling', () => {
-  it('calls all 10 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
+describe('SyncClient full 9-endpoint contract & error handling', () => {
+  it('calls all 9 endpoints with expected HTTP method, path, headers, and JSON body', async () => {
     const calls: { url: string; method: string; headers: Record<string, string>; body: unknown }[] = [];
     const client = new SyncClient({
       getBaseUrl: () => 'https://server.example///',
@@ -403,9 +407,6 @@ describe('SyncClient full 10-endpoint contract & error handling', () => {
         if (url.endsWith('/messages/srv-a-1/feedback') && method === 'PUT') {
           return new Response(JSON.stringify({ messageId: 'srv-a-1', rating: 1, comment: 'Great' }), { status: 200 });
         }
-        if (url.endsWith('/prompts/system/default-chat')) {
-          return new Response(JSON.stringify({ systemPrompt: 'Default system prompt' }), { status: 200 });
-        }
         if (url.endsWith('/orchestrator/profiles')) {
           return new Response(
             JSON.stringify([
@@ -448,9 +449,6 @@ describe('SyncClient full 10-endpoint contract & error handling', () => {
     const fb = await client.submitFeedback('srv-a-1', 1, 'Great');
     expect(fb).toEqual({ messageId: 'srv-a-1', rating: 1, comment: 'Great' });
 
-    const sysPrompt = await client.getSystemPrompt('default-chat' as ValidSystemPromptName);
-    expect(sysPrompt).toBe('Default system prompt');
-
     const profiles = await client.getOrchestratorProfiles();
     expect(profiles[0].name).toBe('OIM');
 
@@ -473,7 +471,6 @@ describe('SyncClient full 10-endpoint contract & error handling', () => {
       'GET https://server.example/api/chat/v1/conversations/c-1/messages?limit=500&offset=0',
       'POST https://server.example/api/chat/v1/conversations/c-1/messages',
       'PUT https://server.example/api/chat/v1/messages/srv-a-1/feedback',
-      'GET https://server.example/api/chat/v1/prompts/system/default-chat',
       'GET https://server.example/api/chat/v1/orchestrator/profiles',
       'POST https://server.example/api/chat/v1/orchestrator/runs',
     ]);

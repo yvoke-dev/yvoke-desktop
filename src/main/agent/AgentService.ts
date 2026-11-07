@@ -43,7 +43,6 @@ import {
   usageFromSdk,
   type TurnContext,
 } from './translate';
-import { SyncClient } from '../sync/SyncClient';
 import { McpPrompts } from './McpPrompts';
 import { harvestSpecialistEvidence, SentLedger } from './evidenceDigest';
 import {
@@ -66,14 +65,6 @@ import {
   unreviewedNote,
   type ResolvedOrchestrator,
 } from './orchestration';
-import {
-  BASE_SYSTEM_PROMPT_NAME,
-  loadDesignatedSystemPrompt,
-  loadRequiredSystemPrompt,
-} from './systemPrompt';
-
-/** The server-managed system prompt every turn runs under and helper loaders. */
-export { BASE_SYSTEM_PROMPT_NAME, loadDesignatedSystemPrompt, loadRequiredSystemPrompt };
 
 /** Timeout ceiling for dynamic MCP server configuration updates on warm sessions. */
 export const MCP_UPDATE_TIMEOUT_MS = 10_000;
@@ -91,7 +82,7 @@ const PROBE_TOKEN = 'pong';
  * scripts/fetch-claude-binary.ts and the `extraResources` entry in electron-builder.yml.
  *
  * Resolved by probing resourcesPath rather than `app.isPackaged` so this module stays importable
- * outside Electron (tests/systemPrompt.test.ts loads it directly). In a dev run resourcesPath
+ * outside Electron (unit tests load it directly). In a dev run resourcesPath
  * points into node_modules/electron, where no such file exists, and the SDK's own resolution
  * takes over.
  */
@@ -110,7 +101,6 @@ const claudeBinary = stagedClaudeBinary();
 export function claudeBinaryPath(): string | null {
   return claudeBinary;
 }
-
 
 /**
  * Decides how a thrown turn failure reaches the user.
@@ -242,7 +232,6 @@ export interface AgentServiceDeps {
   /** Called when a turn finishes so the store/sync layers can persist it. */
   onTurnPersist: (threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage) => void;
   sandboxDir: string;
-  syncClient: SyncClient;
   mcpPrompts: McpPrompts;
   /** Resolve a multi-agent profile by name (orchestrator mode); undefined if unknown/unavailable. */
   getOrchestratorProfile: (name: string) => Promise<OrchestratorProfile | undefined>;
@@ -608,6 +597,10 @@ export class AgentService {
       );
     }
 
+    if (!thread.orchestratorProfile && (!playbookName || !playbookName.trim())) {
+      throw new Error('A playbook must be selected for single-agent chat.');
+    }
+
     const MAX_WARM_SESSIONS = 3;
     if (this.sessions.size >= MAX_WARM_SESSIONS) {
       let oldestId: string | null = null;
@@ -630,21 +623,20 @@ export class AgentService {
     let playbookTools: string[] | undefined;
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
-    let playbookSystemPrompt: string | undefined;
     let playbookVersion: number | undefined;
-    let playbookText: string | undefined;
-    if (playbookName && !thread.orchestratorProfile) {
+    let singleAgentPrompt = '';
+    if (!thread.orchestratorProfile) {
+      let text: string;
       try {
         const prompts = await this.deps.mcpPrompts.list();
         const p = prompts.find((pr: McpPromptInfo) => pr.name === playbookName);
         if (p) {
           playbookTools = p.tools;
           playbookCodeExecution = p.codeExecution;
-          playbookSystemPrompt = p.systemPrompt;
           playbookVersion = p.version;
-          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false} systemPrompt=${playbookSystemPrompt ?? 'default'}`);
+          log('agent', `Resolved playbook "${playbookName}" constraints — tools=${playbookTools ? playbookTools.join(',') : 'all'} codeExecution=${playbookCodeExecution !== false}`);
         }
-        playbookText = await this.deps.mcpPrompts.getText(playbookName);
+        text = await this.deps.mcpPrompts.getText(playbookName!);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (hasErrorSourcePrefix(msg, 'Entra')) {
@@ -657,16 +649,11 @@ export class AgentService {
           ),
         );
       }
+      if (!text || !text.trim()) {
+        throw new Error(`Playbook "${playbookName}" instructions are empty.`);
+      }
+      singleAgentPrompt = text;
     }
-
-    // In orchestrator mode, each role resolves its designated prompt from the profile's playbooks,
-    // and the base fallback prompt is always default-chat. In single-agent mode, use the thread's playbook.
-    const designatedPrompt = thread.orchestratorProfile ? undefined : playbookSystemPrompt;
-    const systemPrompt = await loadRequiredSystemPrompt(this.deps.syncClient, designatedPrompt);
-    const singleAgentPrompt =
-      playbookName && playbookText !== undefined
-        ? `${systemPrompt}\n\n---\n\n${playbookText}`
-        : systemPrompt;
 
     const queue = new MessageQueue();
     const onClarifyingQuestion = (toolUseId: string, question: string, options: ClarificationOption[]) => {
@@ -702,8 +689,6 @@ export class AgentService {
         profile,
         settings,
         this.deps.mcpPrompts,
-        systemPrompt,
-        (name) => this.deps.syncClient.getSystemPrompt(name),
       );
       const oc = settings.orchestrator;
       log(

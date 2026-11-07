@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  BASE_SYSTEM_PROMPT_NAME,
   MCP_SERVER_NAME,
   type AgentEvent,
   type AppSettings,
@@ -264,7 +263,6 @@ function makeService(
     },
     onTurnPersist: () => undefined,
     sandboxDir,
-    syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
     mcpPrompts: {
       list: async () => PLAYBOOKS,
       getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -307,7 +305,7 @@ afterEach(() => {
 });
 
 describe('playbook injection across a session', () => {
-  it('combines system prompt and playbook instructions in systemPrompt, and passes raw user input', async () => {
+  it('uses playbook instructions as systemPrompt, and passes raw user input', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
@@ -316,7 +314,7 @@ describe('playbook injection across a session', () => {
 
     expect(h.sessions).toHaveLength(1); // stayed warm — no restart for an unchanged playbook
     expect(h.sessions[0].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
     expect(h.sessions[0].pushed).toEqual([
       'First question',
@@ -352,22 +350,14 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('restarts the warm session when assigning a playbook to a previously playbook-less thread session, then locks to that playbook', async () => {
+  it('rejects sending message without playbook in single-agent mode', async () => {
     const meta = thread();
     const svc = makeService(meta);
 
-    await ask(svc, meta, 'First question', undefined);
-    expect(h.sessions).toHaveLength(1);
-
-    await ask(svc, meta, 'Second question with playbook', 'oim-schema');
-    expect(h.sessions).toHaveLength(2);
-    expect(h.sessions[0].closed).toBe(true);
-    expect(h.sessions[1].options.resume).toBeUndefined();
-
-    await expect(ask(svc, meta, 'Third question switching playbook', 'oim-getting-started')).rejects.toThrow(
-      /Cannot switch playbook on an existing conversation session \(locked to "oim-schema", requested "oim-getting-started"\)/,
+    await expect(ask(svc, meta, 'First question without playbook', undefined)).rejects.toThrow(
+      /A playbook must be selected for single-agent chat/,
     );
-    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions).toHaveLength(0);
     svc.closeAll();
   });
 
@@ -394,7 +384,7 @@ describe('playbook injection across a session', () => {
 
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
     expect(h.sessions[0].rawPushed).toEqual([
       [
@@ -411,7 +401,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('combines system prompt and playbook instructions when the conversation is resumed cold', async () => {
+  it('uses playbook instructions as systemPrompt when the conversation is resumed cold', async () => {
     const meta = thread();
     const first = makeService(meta);
     await ask(first, meta, 'First question', 'oim-schema');
@@ -425,7 +415,7 @@ describe('playbook injection across a session', () => {
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.resume).toBe('sdk-session-1');
     expect(h.sessions[0].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
     expect(h.sessions[0].pushed).toEqual([
       'Follow-up question',
@@ -443,7 +433,7 @@ describe('playbook injection across a session', () => {
 
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
     expect(h.sessions[0].pushed).toEqual([
       'First turn',
@@ -459,7 +449,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('combines system prompt with empty playbook text when getText returns empty string', async () => {
+  it('rejects playbook with empty instructions', async () => {
     const meta = thread();
     const svc = makeService(meta, {
       mcpPrompts: {
@@ -468,18 +458,21 @@ describe('playbook injection across a session', () => {
       } as never,
     });
 
-    const before = events.filter((e) => e.kind === 'turn-complete').length;
-    await svc.sendMessage(meta, 'Question with empty playbook body', {
-      playbook: 'oim-schema',
-    });
-    for (let i = 0; i < 200; i++) {
-      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    await expect(
+      svc.sendMessage(meta, 'Question with empty playbook body', {
+        playbook: 'oim-schema',
+      }),
+    ).rejects.toThrow(/^Playbook "oim-schema" instructions are empty\.$/);
 
-    expect(h.sessions).toHaveLength(1);
-    expect(h.sessions[0].options.systemPrompt).toBe('BASE SYSTEM PROMPT\n\n---\n\n');
-    expect(h.sessions[0].pushed).toEqual(['Question with empty playbook body']);
+    expect(h.sessions).toHaveLength(0);
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: meta.id,
+        message: 'Yvoke Backend: Playbook "oim-schema" instructions are empty.',
+        authRequired: false,
+      },
+    ]);
     svc.closeAll();
   });
 
@@ -504,15 +497,12 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('prepends nothing when the question carries no playbook', async () => {
+  it('rejects question without playbook in single-agent mode', async () => {
     const meta = thread();
     const svc = makeService(meta);
-    await svc.sendMessage(meta, 'Bare question', {});
-    for (let i = 0; i < 200 && events.every((e) => e.kind !== 'turn-complete'); i++) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    expect(h.sessions[0].options.systemPrompt).toBe('BASE SYSTEM PROMPT');
-    expect(h.sessions[0].pushed).toEqual(['Bare question']);
+    await expect(svc.sendMessage(meta, 'Bare question', {})).rejects.toThrow(
+      /A playbook must be selected for single-agent chat/,
+    );
     svc.closeAll();
   });
 
@@ -566,48 +556,7 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
-  it('deduplicates remote system prompt requests across roles in an orchestrator profile via memoizedLoadPrompt', async () => {
-    const meta = thread();
-    meta.orchestratorProfile = 'OIM';
-    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `PROMPT(${name})`);
-    const customPlaybooks: McpPromptInfo[] = [
-      {
-        name: 'oim-schema',
-        title: 'Schema',
-        description: 'Tables.',
-        arguments: [],
-        tools: ['get_section'],
-        systemPrompt: 'shared-schema-prompt',
-      },
-      {
-        name: 'oim-customers',
-        title: 'Customers',
-        description: 'Accounts.',
-        arguments: [],
-        tools: ['search_corpus'],
-      },
-    ];
-    const svc = makeService(meta, {
-      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
-      mcpPrompts: {
-        list: async () => customPlaybooks,
-        getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
-      } as never,
-    });
-
-    const before = events.filter((e) => e.kind === 'turn-complete').length;
-    await svc.sendMessage(meta, 'Multi-agent question', {});
-    for (let i = 0; i < 200; i++) {
-      if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
-      await new Promise((r) => setTimeout(r, 0));
-    }
-
-    const callsForShared = getSystemPromptSpy.mock.calls.filter(([name]) => name === 'shared-schema-prompt');
-    expect(callsForShared).toHaveLength(1);
-    svc.closeAll();
-  });
-
-  it('passes the playbook designated system prompt to single-agent session options', async () => {
+  it('uses the playbook body as the single-agent system prompt', async () => {
     const meta = thread();
     const customPlaybooks: McpPromptInfo[] = [
       {
@@ -616,15 +565,12 @@ describe('playbook injection across a session', () => {
         description: 'Custom playbook.',
         arguments: [],
         tools: ['search_corpus'],
-        systemPrompt: 'custom-designated-prompt',
       },
     ];
-    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `BODY OF ${name}`);
     const svc = makeService(meta, {
-      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
       mcpPrompts: {
         list: async () => customPlaybooks,
-        getText: async () => 'PLAYBOOK BODY',
+        getText: async () => 'PLAYBOOK BODY STANDALONE',
       } as never,
     });
 
@@ -637,58 +583,45 @@ describe('playbook injection across a session', () => {
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    expect(getSystemPromptSpy).toHaveBeenCalledWith('custom-designated-prompt');
     expect(h.sessions).toHaveLength(1);
-    expect(h.sessions[0].options.systemPrompt).toBe('BODY OF custom-designated-prompt\n\n---\n\nPLAYBOOK BODY');
+    expect(h.sessions[0].options.systemPrompt).toBe('PLAYBOOK BODY STANDALONE');
     svc.closeAll();
   });
 
-  it('ignores thread playbook designated prompt in orchestrator mode, using default-chat as base', async () => {
-    const meta = thread();
-    meta.orchestratorProfile = 'OIM';
-    const customPlaybooks: McpPromptInfo[] = [
-      {
-        name: 'custom-playbook',
-        title: 'Custom',
-        description: 'Custom playbook.',
-        arguments: [],
-        tools: ['search_corpus'],
-        systemPrompt: 'custom-designated-prompt',
-      },
-      {
-        name: 'oim-orchestrator',
-        title: 'Orchestrator',
-        description: 'Orchestrator playbook',
-        arguments: [],
-        tools: [],
-      },
-    ];
-    const getSystemPromptSpy = vi.fn().mockImplementation(async (name: string) => `BODY OF ${name}`);
+  it('fetches each role playbook once when building an orchestrator session', async () => {
+    const distinctProfile: OrchestratorProfile = {
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-reviewer',
+      specialistPlaybooks: ['oim-specialist'],
+    };
+    const getTextSpy = vi.fn(async (name: string) => `PLAYBOOK(${name})`);
+    const meta = thread({ orchestratorProfile: 'OIM' });
     const svc = makeService(meta, {
-      syncClient: { getSystemPrompt: getSystemPromptSpy } as never,
+      getOrchestratorProfile: async () => distinctProfile,
       mcpPrompts: {
-        list: async () => customPlaybooks,
-        getText: async () => 'PLAYBOOK BODY',
+        list: async () => PLAYBOOKS,
+        getText: getTextSpy,
       } as never,
     });
 
     const before = events.filter((e) => e.kind === 'turn-complete').length;
-    await svc.sendMessage(meta, 'Hello orchestrator', {
-      playbook: 'custom-playbook',
-    });
+    await svc.sendMessage(meta, 'Orchestrator question', {});
     for (let i = 0; i < 200; i++) {
       if (events.filter((e) => e.kind === 'turn-complete').length > before) break;
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    // In orchestrator mode, the base prompt must be default-chat, NOT custom-designated-prompt
-    expect(getSystemPromptSpy).toHaveBeenCalledWith(BASE_SYSTEM_PROMPT_NAME);
-    expect(getSystemPromptSpy).not.toHaveBeenCalledWith('custom-designated-prompt');
+    expect(getTextSpy).toHaveBeenCalledTimes(3);
+    expect(getTextSpy.mock.calls.map(([name]) => name)).toEqual([
+      'oim-orchestrator',
+      'oim-reviewer',
+      'oim-specialist',
+    ]);
     expect(h.sessions).toHaveLength(1);
-    const agents = h.sessions[0].options.agents as Record<string, { prompt: string }> | undefined;
-    const orchPrompt = agents?.[ORCHESTRATOR_AGENT]?.prompt;
-    expect(orchPrompt).toContain(`BODY OF ${BASE_SYSTEM_PROMPT_NAME}`);
-    expect(orchPrompt).not.toContain('BODY OF custom-designated-prompt');
+    const agents = h.sessions[0].options.agents as Record<string, { prompt: string }>;
+    expect(agents[ORCHESTRATOR_AGENT].prompt).toContain('PLAYBOOK(oim-orchestrator)');
+    expect(agents['oim-specialist'].prompt).toBe('PLAYBOOK(oim-specialist)');
     svc.closeAll();
   });
 
@@ -729,6 +662,45 @@ describe('playbook injection across a session', () => {
     svc.closeAll();
   });
 
+  it('fails closed before calling sdk.query() in orchestrator mode when any role playbook is empty or whitespace-only', async () => {
+    const distinctProfile: OrchestratorProfile = {
+      name: 'OIM',
+      orchestratorPlaybook: 'oim-orchestrator',
+      reviewerPlaybook: 'oim-reviewer',
+      specialistPlaybooks: ['oim-specialist'],
+    };
+    for (const [rolePlaybook, emptyText] of [
+      ['oim-orchestrator', ''],
+      ['oim-reviewer', '   \n\t  '],
+      ['oim-specialist', ''],
+    ] as const) {
+      events = [];
+      const meta = thread({ orchestratorProfile: 'OIM' });
+      const svc = makeService(meta, {
+        getOrchestratorProfile: async () => distinctProfile,
+        mcpPrompts: {
+          list: async () => PLAYBOOKS,
+          getText: async (name: string) =>
+            name === rolePlaybook ? emptyText : `PLAYBOOK(${name})`,
+        } as never,
+      });
+
+      await expect(svc.sendMessage(meta, 'Multi-agent question', {})).rejects.toThrow(
+        `Playbook "${rolePlaybook}" instructions are empty.`,
+      );
+      expect(h.sessions).toHaveLength(0);
+      expect(events).toEqual([
+        {
+          kind: 'error',
+          threadId: meta.id,
+          message: `Yvoke Backend: Playbook "${rolePlaybook}" instructions are empty.`,
+          authRequired: false,
+        },
+      ]);
+      svc.closeAll();
+    }
+  });
+
   it('Negative 1.3.1: session eviction & cold session re-locking enforces lock against divergent playbook and resumes under initialPlaybook', async () => {
     const meta = thread();
     meta.initialPlaybook = 'oim-schema';
@@ -738,7 +710,7 @@ describe('playbook injection across a session', () => {
     await ask(svc, meta, 'First question', 'oim-schema');
     expect(h.sessions).toHaveLength(1);
     expect(h.sessions[0].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
 
     // Evict session from memory (e.g. by closing or simulating warm session eviction)
@@ -754,7 +726,7 @@ describe('playbook injection across a session', () => {
     await ask(svc, meta, 'Valid follow-up', 'oim-schema');
     expect(h.sessions).toHaveLength(2);
     expect(h.sessions[1].options.systemPrompt).toBe(
-      'BASE SYSTEM PROMPT\n\n---\n\nSCHEMA PLAYBOOK INSTRUCTIONS',
+      'SCHEMA PLAYBOOK INSTRUCTIONS',
     );
     svc.closeAll();
   });
@@ -813,7 +785,7 @@ describe('error attribution across session events', () => {
     const svc = makeService(meta);
     h.nextQueryError = new Error('Please run /login to authenticate with Claude Code');
 
-    await svc.sendMessage(meta, 'Question');
+    await svc.sendMessage(meta, 'Question', { playbook: 'oim-schema' });
     for (let i = 0; i < 50 && events.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -835,7 +807,7 @@ describe('error attribution across session events', () => {
       usage: {},
     };
 
-    await svc.sendMessage(meta, 'Question');
+    await svc.sendMessage(meta, 'Question', { playbook: 'oim-schema' });
     for (let i = 0; i < 50 && events.every((e) => e.kind !== 'turn-complete'); i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
@@ -858,16 +830,14 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {
-        getSystemPrompt: async () => {
-          throw new Error('Connection refused to backend prompt service');
-        },
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => { throw new Error('Connection refused to backend prompt service'); },
       } as never,
-      mcpPrompts: { list: async () => PLAYBOOKS } as never,
       getOrchestratorProfile: async () => undefined,
     });
 
-    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow();
+    await expect(svc.sendMessage(meta, 'Question', { playbook: 'oim-schema' })).rejects.toThrow();
 
     const errEvent = events.find((e) => e.kind === 'error');
     expect(errEvent).toBeDefined();
@@ -887,16 +857,14 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {
-        getSystemPrompt: async () => {
-          throw new Error('Entra: Authentication token expired');
-        },
+      mcpPrompts: {
+        list: async () => PLAYBOOKS,
+        getText: async () => { throw new Error('Entra: Authentication token expired'); },
       } as never,
-      mcpPrompts: { list: async () => PLAYBOOKS } as never,
       getOrchestratorProfile: async () => undefined,
     });
 
-    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow('Entra: Authentication token expired');
+    await expect(svc.sendMessage(meta, 'Question', { playbook: 'oim-schema' })).rejects.toThrow('Entra: Authentication token expired');
 
     const errEvent = events.find((e) => e.kind === 'error');
     expect(errEvent).toBeDefined();
@@ -921,14 +889,11 @@ describe('error attribution across session events', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: {
-        getSystemPrompt: async () => 'BASE SYSTEM PROMPT',
-      } as never,
-      mcpPrompts: { list: async () => PLAYBOOKS } as never,
+      mcpPrompts: { list: async () => PLAYBOOKS, getText: async () => 'PLAYBOOK INSTRUCTIONS' } as never,
       getOrchestratorProfile: async () => undefined,
     });
 
-    await expect(svc.sendMessage(meta, 'Question')).rejects.toThrow('Entra: User is not authenticated');
+    await expect(svc.sendMessage(meta, 'Question', { playbook: 'oim-schema' })).rejects.toThrow('Entra: User is not authenticated');
 
     const errEvent = events.find((e) => e.kind === 'error');
     expect(errEvent).toBeDefined();
@@ -1091,7 +1056,6 @@ describe('McpConnection pre-resolved headers & AgentService dynamic header synch
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -1500,7 +1464,6 @@ describe('completeTurn error handling with isResultFailure', () => {
       },
       onTurnPersist,
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -1541,7 +1504,6 @@ describe('completeTurn error handling with isResultFailure', () => {
       },
       onTurnPersist,
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',
@@ -2831,7 +2793,6 @@ describe('code-driven multi-agent reviewer loop (yvoke-web parity)', () => {
       },
       onTurnPersist: () => undefined,
       sandboxDir,
-      syncClient: { getSystemPrompt: async () => 'BASE SYSTEM PROMPT' } as never,
       mcpPrompts: {
         list: async () => PLAYBOOKS,
         getText: async (name: string) => TEXT[name] ?? 'INSTRUCTIONS',

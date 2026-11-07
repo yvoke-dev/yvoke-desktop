@@ -34,10 +34,10 @@ profiles and the playbooks; there is no way to build one from the app.
   profile.
 - **The lead never touches the knowledge base.** It can delegate and it can ask the user a clarifying
   question; everything else is somebody else's job.
-- **The lead and the specialists run under the base instructions; the reviewer does not.** The lead
-  writes the user-facing answer, so it needs the citation and formatting contract exactly as the
-  specialists do. The reviewer emits a plain verdict rather than prose, so those rules would be noise
-  in its context. The playbook is layered last, so a role's own rules win any conflict.
+- **Each role runs under its own self-contained playbook.** The lead and the specialists carry the
+  citation and formatting contract in their playbooks (with the runtime delegation adapter appended to
+  the lead's instructions), while the reviewer runs on its review playbook alone to emit a structured
+  verdict rather than user-facing prose.
 - **The reviewer sees the raw evidence the specialists retrieved, scoped to what the answer cites.**
   When the lead submits its candidate answer, the app harvests the tool results the specialists
   actually received from the knowledge base, strips any chunk the draft does not cite, deduplicates
@@ -134,8 +134,8 @@ profiles and the playbooks; there is no way to build one from the app.
   interface reports *Awaiting clarification…* and shows nothing to answer, because a sub-agent's
   question is never rendered.
 - **Every multi-agent session costs a burst of server round-trips before the first model call** — the
-  base instructions plus the full text of the lead's, the reviewer's and every specialist's playbook,
-  none of which is cached. Any one of them failing fails the turn.
+  full text of the lead's, the reviewer's and every specialist's playbook,
+  none of which is cached. Any one of them failing or returning empty text fails the turn.
 - **Profiles are cached for a minute, and an unreachable server yields the last list or none at all** —
   in which case the selector disappears entirely. A conversation set to a profile the server no longer
   offers fails its next turn, saying the profile is unavailable.

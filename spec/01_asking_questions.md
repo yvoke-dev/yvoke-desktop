@@ -38,22 +38,22 @@ behind it, and the work that produced it can be opened and read.
   that is still multi-agent.
 - **A playbook is required for a single-agent question**, as it is on the web: a playbook is what
   scopes the answer, so a message carrying none is refused with a *Playbook required* card and the
-  draft is kept. The refusal stands until a playbook is picked. Two cases are not gated, because in
-  both the error would be one the user could not act on: a multi-agent conversation, which takes its
-  playbooks from the profile, and a server that offers no playbooks at all, where the question is
-  sent as it was and the assistant gets the default knowledge-base tool set.
-- **A conversation locks its agent mode after the first message is sent, and locks its playbook once a playbook has been selected and sent.** Playbook
-  instructions are combined with the resolved system prompt rather than
+  draft is kept. The refusal stands until a playbook is picked. Only a multi-agent conversation (which
+  takes its playbooks from the profile) is exempt; if the server offers no playbooks at all (or none
+  are visible), the refusal card tells the user that no playbooks are available and to check the server
+  connection rather than sending without one.
+- **A conversation locks its agent mode after the first message is sent, and locks its playbook once a playbook has been selected and sent.** The
+  selected playbook's instructions serve as the system prompt rather than being
   prepended to user messages. Once a conversation has started (persisting across restarts and failed
   or stopped initial turns), the conversation's agent mode (Single agent vs. Multi-agent orchestrator
   profile) cannot be changed: the agent mode selector is disabled with an explanatory tooltip, and
   attempting to change agent mode on a started conversation is rejected. Once a single-agent message
   carrying a playbook has been sent, that playbook is locked and cannot be changed or removed: the remove
   button (`×`) on the active playbook indicator is omitted, typing `/` does not open the autocomplete
-  picker, and backspacing on an empty draft does not clear it. If a single-agent conversation's first
-  turn was sent while no playbooks were available from the server, a playbook can and must be selected
-  once the playbook catalogue loads, and is then locked from that point onward (restarting the underlying
-  assistant session under the newly assigned playbook). In single-agent mode, the model and thinking
+  picker, and backspacing on an empty draft does not clear it. On a restored legacy single-agent
+  conversation whose earlier turns had no playbook recorded, a playbook must be selected before sending
+  a follow-up turn, and is then locked from that point onward (restarting the underlying assistant
+  session under the newly assigned playbook). In single-agent mode, the model and thinking
   effort selectors remain editable between turns when idle. Preflight validation runs only on the
   first message in a conversation that carries a playbook (before the conversation's playbook is locked), and preflight recommendations never offer switching playbooks
   once a playbook has been locked.

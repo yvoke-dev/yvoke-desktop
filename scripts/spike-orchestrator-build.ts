@@ -3,10 +3,9 @@
  * against the live MCP server — proving the agents map + allow-list assemble from actual playbooks.
  *   npm run spike:build
  */
-import { BASE_SYSTEM_PROMPT_NAME, qualifyTool, type AppSettings, type OrchestratorProfile } from '../src/shared/types';
+import { qualifyTool, type AppSettings, type OrchestratorProfile } from '../src/shared/types';
 import { McpPrompts } from '../src/main/agent/McpPrompts';
 import { buildOrchestrator } from '../src/main/agent/orchestration';
-import { SyncClient } from '../src/main/sync/SyncClient';
 
 const SERVER = process.env.YVOKE_SERVER ?? 'http://localhost:8080';
 
@@ -38,16 +37,10 @@ async function main(): Promise<void> {
     auth: { headers: async () => ({ Authorization: 'Bearer dev-local-token' }) },
   });
 
-  const sync = new SyncClient({ getBaseUrl: () => SERVER, getToken: async () => 'dev-local-token' });
-  const baseSystemPrompt = await sync.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
-  console.log('base system prompt chars:', baseSystemPrompt.length);
-
-  const { agents, allowedTools, specialistNames } = await buildOrchestrator(
+  const { agents, allowedTools, specialistNames, reviewer } = await buildOrchestrator(
     profile,
     settings,
     mcpPrompts,
-    baseSystemPrompt,
-    (name) => sync.getSystemPrompt(name),
   );
 
   console.log('agent keys:', Object.keys(agents).join(', '));
@@ -61,7 +54,7 @@ async function main(): Promise<void> {
 
   // Assertions
   const orch = agents.orchestrator;
-  const rev = agents.reviewer;
+  const rev = reviewer;
   const assert = (cond: boolean, label: string): void => {
     console.log(`${cond ? 'PASS' : 'FAIL'} — ${label}`);
     if (!cond) process.exitCode = 1;
@@ -76,22 +69,7 @@ async function main(): Promise<void> {
   );
   assert(allowedTools.includes('Task') && allowedTools.includes(qualifyTool('search_corpus')), 'allow-list unions Task + specialist tools');
   assert(agents['oim-access-governance'].prompt.length > 200, 'specialist prompt text loaded from server');
-  assert(
-    baseSystemPrompt.length > 0 && agents['oim-access-governance'].prompt.includes(baseSystemPrompt),
-    'specialist runs under the server base system prompt (grounding + citation contract)',
-  );
-  // Reversed deliberately. This previously asserted the orchestrator does NOT get the base prompt,
-  // pinning the very defect it should have caught: the agent that writes the user-facing answer was
-  // the only one never shown the citation contract, so answers came back full of raw
-  // [chunk_id=<uuid>] tokens. The orchestrator now runs under it, like the specialists.
-  assert(
-    orch.prompt.includes(baseSystemPrompt),
-    'orchestrator runs under the server base system prompt (it writes the final answer)',
-  );
-  assert(
-    !rev.prompt.includes(baseSystemPrompt),
-    'reviewer still uses its control playbook alone (emits a verdict, not prose)',
-  );
+  assert(rev.prompt.length > 100, 'reviewer prompt text loaded from server');
 
   mcpPrompts.reset();
 }

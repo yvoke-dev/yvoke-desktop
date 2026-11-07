@@ -91,8 +91,8 @@ configuration: whatever ships as the build's defaults, the user can change.
 
 - A managed or enterprise configuration channel.
 - Per-conversation overrides for anything other than model, thinking level and agent mode.
-- Any setting that changes what the assistant *knows*. Knowledge areas, versions, playbooks and base
-  instructions are all server-side.
+- Any setting that changes what the assistant *knows*. Knowledge areas, versions, playbooks and
+  profiles are all server-side.
 - Turning off local caching, or choosing where it lives.
 - An unsaved-changes prompt.
 

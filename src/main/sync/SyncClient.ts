@@ -1,11 +1,9 @@
 /** Typed client for the Desktop Sync API (/api/desktop/v1) on the Spring server. */
 
 import {
-  BASE_SYSTEM_PROMPT_NAME,
   type LoginVerificationResult,
   type OrchestratorProfile,
   type OrchestratorRunPayload,
-  type ValidSystemPromptName,
 } from '../../shared/types';
 import {
   hasErrorSourcePrefix,
@@ -14,8 +12,6 @@ import {
   tagAttributedError,
 } from '../../shared/error';
 
-/** The system prompt every conversation starts from; also the connection probe's target. */
-export { BASE_SYSTEM_PROMPT_NAME };
 
 /** How long the connection probe waits before calling the server unreachable. */
 export const VERIFY_TIMEOUT_MS = 10_000;
@@ -196,11 +192,6 @@ export class SyncClient {
     return this.request('PUT', `/messages/${messageId}/feedback`, { rating, comment: comment ?? null });
   }
 
-  getSystemPrompt(name: ValidSystemPromptName): Promise<string> {
-    return this.request<{ systemPrompt: string }>('GET', `/prompts/system/${encodeURIComponent(name)}`)
-      .then((res) => res.systemPrompt);
-  }
-
   /** Multi-agent profiles available for orchestrator mode; empty if none configured. */
   getOrchestratorProfiles(): Promise<OrchestratorProfile[]> {
     return this.request('GET', '/orchestrator/profiles');
@@ -234,7 +225,7 @@ export class SyncClient {
 
     let response: Response;
     try {
-      response = await this.fetchFn(this.url(`/prompts/system/${BASE_SYSTEM_PROMPT_NAME}`), {
+      response = await this.fetchFn(this.url('/areas'), {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
         signal: abort.signal,
@@ -256,7 +247,7 @@ export class SyncClient {
     if (response.status === 429) {
       return { status: 'rate_limited', message: 'Rate limit exceeded' };
     }
-    if (response.status !== 200 && response.status !== 204) {
+    if (response.status !== 200) {
       const text = await response.text().catch(() => '');
       return {
         status: 'error',
@@ -270,8 +261,13 @@ export class SyncClient {
     // the status code alone proves nothing. Insist on the payload this endpoint actually serves.
     const body = await response.text().catch(() => '');
     try {
-      const parsed = JSON.parse(body) as { systemPrompt?: unknown };
-      if (typeof parsed?.systemPrompt !== 'string') throw new Error('unexpected shape');
+      const parsed = JSON.parse(body);
+      if (
+        !Array.isArray(parsed) ||
+        !parsed.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))
+      ) {
+        throw new Error('unexpected shape');
+      }
     } catch {
       return {
         status: 'expired',

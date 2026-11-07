@@ -12,7 +12,7 @@ server.
 | --- | --- |
 | **Every answer is grounded in a live search** | The assistant answers from what the server's knowledge-base tools return, under the server's own grounding and citation instructions. It has no other source. |
 | **A toolbox, not a search box** | The assistant can search the corpus, list an area's documents, read a table of contents, read a whole section, look a thing up in the knowledge graph and follow its connections, query structured records, read their declared shape, and check its own citations. Nine of these are granted by default. |
-| **Playbooks scope the run** | A playbook adds its instructions on top of the base instructions and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name and positive integer version (when published by the server) are stored on the user message. |
+| **Playbooks scope the run** | A playbook provides the complete instructions for the run and narrows the assistant to the tools it declares. Its text never appears in the conversation — only its name and positive integer version (when published by the server) are stored on the user message. |
 | **Playbook preflight** | Before a playbook is locked in a conversation, a tool-free model call is asked whether the selected playbook suits the question, and offers a better match if not. |
 | **Sandboxed computation without a shell** | An in-app JavaScript execution tool lets the assistant run arithmetic, statistics, date math and data transformations inside an isolated in-memory sandbox with no shell, no file access and no network. |
 | **Domain-restricted web search and fetch** | When an operator enables it and lists domains, the assistant may search the web and fetch full pages — but only within those domains. |
@@ -26,10 +26,10 @@ server.
   those credentials: it picks up whatever the Claude tooling on the machine has already signed in, and
   removes any pay-per-token API key from the environment the model runs in, so an inherited one cannot
   silently move the billing off the subscription.
-- **The base instructions come from the server, on every new session, with no fallback and no cache.**
-  They carry the grounding rules, the citation contract and the formatting the answer renderer
-  expects. If they cannot be fetched — or come back empty — the question fails and says so. A
-  hard-coded copy would drift from the server's and quietly contradict the playbooks; running with
+- **Playbook instructions come from the server, on every new session, with no fallback and no cache.**
+  Each playbook is self-contained and carries the grounding rules, the citation contract and the
+  formatting the answer renderer expects. If a required playbook cannot be fetched — or comes back
+  empty — the question fails and says so. A hard-coded copy would drift from the server's; running with
   none at all is worse still.
 - **Deny by default.** The assistant is granted the knowledge-base tools, a tool-discovery helper, the
   in-app computation tool and (when enabled) web search and page fetch. Every other tool the runtime knows about is
@@ -55,17 +55,15 @@ server.
   that version when the single-agent session starts and records it alongside the playbook's name on
   every user message in the conversation, across both the first turn and warm follow-up turns. Zero,
   negative, fractional or non-numeric version metadata is ignored.
-- **A playbook can define which base instruction set (system prompt) to use.** If designated in its metadata,
-  the app loads that prompt from the server on session creation to replace the default chat base instructions.
-  In orchestrator mode, each agent's playbook template text is appended to its resolved system prompt; in
-  single-agent chat, the playbook instruction text is combined with the designated or base system prompt
-  in the SDK system prompt (`<systemPrompt>\n\n---\n\n<playbookText>`), and the user message passes raw user
-  input without prepending playbook instructions. If the designated prompt is not found on the server (404), has an invalid name,
-  or is empty: single-agent chat, orchestrator, and specialist agents fall back to the default chat base instructions,
-  whereas the reviewer agent falls back to running on its playbook alone without a base prompt. Every other failure
-  fails closed and halts session initialization, failing the turn: authentication errors (Entra), client and server
-  errors (including 401, 403, 429, 5xx), network unreachability, timeouts, and selecting a playbook while the playbook
-  metadata lookup (`prompts/list`) is unavailable all fail closed rather than silently falling back.
+- **Each role runs under its self-contained playbook, and missing or empty playbooks fail closed.**
+  In single-agent chat, the selected playbook's template text is the entire SDK system prompt, and the user
+  message passes raw user input without prepending playbook instructions. In orchestrator mode, the
+  orchestrator's playbook text (plus the runtime delegation adapter), each specialist's playbook text, and
+  the reviewer's playbook text are loaded live from the server on session creation. If any required playbook
+  cannot be fetched or its instructions are empty, session initialization fails closed and halts the turn:
+  authentication errors (Entra), client and server errors (including 401, 403, 429, 5xx), network
+  unreachability, timeouts, empty playbook bodies, and selecting a playbook while the playbook metadata
+  lookup (`prompts/list`) is unavailable all fail closed rather than silently falling back.
 - **Tool names in playbooks are re-namespaced, not matched.** A playbook written when the connection
   had a different name still works; its tool names are rewritten to the current one rather than tested
   against it.
@@ -97,16 +95,16 @@ server.
 - **Agent mode is immutable once a conversation starts, and a playbook is immutable once selected and sent.**
   Once a conversation has started (stamped upon sending the first prompt, persisting across restarts and failed or stopped turns),
   the agent mode (single-agent vs. multi-agent profile) is permanently locked, and once a single-agent message carrying a playbook
-  has been sent, that playbook is permanently locked. If a single-agent conversation's first turn was sent while no playbooks were
-  available from the server, a playbook can be selected on a later turn once the catalogue loads, closing any warm playbook-less
-  session and locking the playbook from that point onward. Before a conversation
+  has been sent, that playbook is permanently locked. On a restored legacy single-agent conversation whose earlier turns had no
+  playbook recorded, selecting a playbook on a follow-up turn closes any warm playbook-less session and locks the playbook from
+  that point onward. Before a conversation
   starts, switching agent mode cleanly closes any prepared session so the new tool allow-list and instructions take effect.
   When continuing under the same mode and playbook, the session remains warm. Knowledge-base connection credentials are
   automatically synchronized before each turn so that long-lived sessions transparently retain access without requiring an app
   restart. Attempting to change agent mode while a turn is already running is rejected.
 - **Nothing from the user's own Claude tooling configures this app.** Personal settings, project
-  settings and instruction files are all excluded; the assistant's behaviour comes from the server's
-  instructions plus the selected playbook. The environment the model runs in *is* inherited, so
+  settings and instruction files are all excluded; the assistant's behaviour comes from the selected
+  playbook or multi-agent profile on the server. The environment the model runs in *is* inherited, so
   variables a developer exported still reach it.
 - **Citation markers are rewritten after the answer is parsed, not before.** A real link like
   `[2](https://example.com)`, and a bracketed index inside a code block, are therefore left alone —
@@ -167,11 +165,11 @@ server.
 ## Not supported
 
 - Opening a shell, running machine commands or arbitrary processes, or reading files on the machine. Beyond the isolated in-memory computation sandbox, there is no path to the host system.
-- Answering without the server. The knowledge base, the playbooks and the base instructions are all
+- Answering without the server. The knowledge base, the playbooks and the profiles are all
   remote, so an offline app can read old conversations but cannot answer a new question.
 - Answering without a Claude sign-in. The app cannot sign in for you; it can only tell you to.
 - Choosing a model per message, or any model other than those listed in Settings.
-- Editing playbooks or base instructions from the app. Both are server-managed and read-only here.
+- Editing playbooks from the app. Playbooks are server-managed and read-only here.
 - Cancelling a playbook check once it has started.
 - Automatically retrying a failed turn, or falling back to another model or service when one is busy.
 - Any cost figure. The runtime reports what a turn cost and the app forwards it to the interface,

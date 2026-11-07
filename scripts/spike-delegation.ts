@@ -14,7 +14,6 @@
 import fs from 'node:fs';
 import { query, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
-  BASE_SYSTEM_PROMPT_NAME,
   resolveCanonicalModel,
   type AppSettings,
   type OrchestratorProfile,
@@ -24,7 +23,6 @@ import { buildMcpServers } from '../src/main/agent/McpConnection';
 import { buildOrchestrator, ORCHESTRATOR_AGENT } from '../src/main/agent/orchestration';
 import { buildAutoApproveTools, buildCanUseTool } from '../src/main/agent/policy';
 import { claudeBinaryPath, debugEnv } from '../src/main/agent/AgentService';
-import { SyncClient } from '../src/main/sync/SyncClient';
 
 const SERVER = process.env.YVOKE_SERVER ?? 'http://localhost:8080';
 const TOKEN = 'dev-local-token';
@@ -54,9 +52,7 @@ function assert(cond: boolean, label: string): void {
 async function main(): Promise<void> {
   const headers = { Authorization: `Bearer ${TOKEN}` };
   const mcpPrompts = new McpPrompts({ getSettings: () => settings, auth: { headers: async () => headers } });
-  const sync = new SyncClient({ getBaseUrl: () => SERVER, getToken: async () => TOKEN });
-  const base = await sync.getSystemPrompt(BASE_SYSTEM_PROMPT_NAME);
-  const built = await buildOrchestrator(profile, settings, mcpPrompts, base, (name) => sync.getSystemPrompt(name));
+  const built = await buildOrchestrator(profile, settings, mcpPrompts);
 
   async function* prompt(): AsyncGenerator<SDKUserMessage> {
     yield { type: 'user', message: { role: 'user', content: QUESTION }, parent_tool_use_id: null };
