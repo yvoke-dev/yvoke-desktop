@@ -282,5 +282,30 @@ describe('spec/ modular structure', () => {
     // spec/06: review toggle removed from Agents row
     expect(settings).not.toContain('whether review is enforced in code');
   });
+
+  it('documents creation-time desktop version recording and preservation in 07_what_the_app_tells_the_server.md, 08_installing_updating_and_diagnosing.md, and README.md', () => {
+    const serverContract = readFileSync(resolve(SPEC_DIR, '07_what_the_app_tells_the_server.md'), 'utf8');
+    const installing = readFileSync(resolve(SPEC_DIR, '08_installing_updating_and_diagnosing.md'), 'utf8');
+    const readme = specReadme();
+
+    // spec/07: records the desktop version on new conversations and preserves the creation version across later settings updates
+    expect(serverContract).toContain('and the desktop version that created them');
+    expect(serverContract).toContain(
+      'Creating a conversation records the desktop version that created it, and later settings updates preserve that creation version',
+    );
+    expect(serverContract).toContain(
+      'Beyond the desktop version recorded when a conversation is created, the app tells the server nothing about the client machine.',
+    );
+    expect(serverContract).not.toContain('No version, no platform, no build.');
+    expect(serverContract).not.toContain('The app tells the server nothing about itself.');
+
+    // spec/08: no contradiction on version reporting while keeping background update limit intact
+    expect(installing).not.toContain('or tells the team which versions are in the field');
+    expect(installing).toContain('only new conversations record the desktop version that created them');
+
+    // spec/README.md: row 10 updated
+    expect(readme).not.toContain('and the app tells the server nothing about itself either');
+    expect(readme).toContain('only new conversations record the desktop version that created them');
+  });
 });
 
