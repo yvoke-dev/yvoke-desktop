@@ -248,13 +248,14 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
   let appCore1: AppCore;
   let appCore2: AppCore | null = null;
 
-  function wireAppCore(userDataDir: string): AppCore {
+  function wireAppCore(userDataDir: string, appVersion?: string): AppCore {
     const core = new AppCore({
       userDataDir,
       emitAgentEvent: vi.fn(),
       emitSyncEvent: vi.fn(),
       openBrowser: vi.fn().mockResolvedValue(undefined),
       tokenCache: null,
+      ...(appVersion !== undefined ? { appVersion } : {}),
     });
     // Route SyncClient through the in-memory yvoke-web server harness
     (core.syncClient as any).fetchFn = server.fetchFn;
@@ -596,4 +597,48 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     expect(server.runs).toHaveLength(2);
     expect((appCore1 as any).failedRuns).toHaveLength(0);
   });
+
+  it('Scenario D: Two-Version Desktop Lifecycle Preserves Original Creation desktopVersion Across App Upgrades', async () => {
+    await appCore1.drain();
+    appCore1.dispose();
+    appCore1 = wireAppCore(tmpDir1, '1.2.0');
+
+    // appCore1 (v1.2.0) creates a conversation on the server
+    const created = await appCore1.createThread();
+    expect(server.conversations.get(created.id)?.settings).toMatchObject({
+      client: 'desktop',
+      desktopVersion: '1.2.0',
+    });
+
+    // appCore2 (upgraded v1.3.1) syncs threads from the server and patches thinkingLevel
+    appCore2 = wireAppCore(tmpDir2, '1.3.1');
+    const updateSpy = vi.spyOn(appCore2.syncClient, 'updateConversation');
+
+    const listRes = await appCore2.listThreads();
+    expect(listRes.serverReachable).toBe(true);
+    expect(appCore2.threads.get(created.id)?.remoteSettings).toMatchObject({
+      desktopVersion: '1.2.0',
+    });
+
+    appCore2.patchThread(created.id, { thinkingLevel: 'high' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(
+      created.id,
+      undefined,
+      expect.objectContaining({
+        desktopVersion: '1.2.0',
+        thinkingLevel: 'high',
+        'thinking-level': 'high',
+        client: 'desktop',
+      }),
+    );
+    expect(server.conversations.get(created.id)?.settings).toMatchObject({
+      desktopVersion: '1.2.0',
+      'thinking-level': 'high',
+      client: 'desktop',
+    });
+  });
 });
+
