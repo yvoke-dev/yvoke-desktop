@@ -82,9 +82,13 @@ export interface AppCoreDeps {
   appVersion?: string;
 }
 
+const MAX_APP_VERSION_LENGTH = 256;
+
 function normalizeAppVersion(raw: string | undefined): string | undefined {
   if (typeof raw !== 'string') return undefined;
-  return raw.trim().replace(/^[vV]+/, '').trim() || undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > MAX_APP_VERSION_LENGTH) return undefined;
+  return trimmed;
 }
 
 let cachedPackageAppVersion: string | undefined | null = null;

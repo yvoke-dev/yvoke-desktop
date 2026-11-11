@@ -2662,7 +2662,7 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
     vi.restoreAllMocks();
   });
 
-  it('stamps desktopVersion from package.json fallback when appVersion is omitted and normalizes v/V-prefixed appVersion', async () => {
+  it('stamps desktopVersion from package.json fallback when appVersion is omitted and preserves trimmed appVersion verbatim (including v/V prefixes and 256-char boundary)', async () => {
     // 1. Default fallback to package.json version when appVersion is omitted
     const defaultCore = makeCore();
     const defaultSettings = defaultCore.settings.get();
@@ -2691,13 +2691,22 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
       desktopVersion: pkg.version,
     });
 
-    // 2. Normalizes leading 'v' and 'V' and surrounding whitespace
-    const rawInputs = ['v1.3.1', ' V1.3.1 ', 'vv1.3.1'];
-    for (let idx = 0; idx < rawInputs.length; idx++) {
-      const core = makeCore(rawInputs[idx]);
+    // 2. Preserves trimmed appVersion verbatim (no leading 'v'/'V' stripping) up to 256 trimmed chars
+    const verbatimCases: Array<{ raw: string; expected: string }> = [
+      { raw: '1.3.1', expected: '1.3.1' },
+      { raw: ' 1.3.1 ', expected: '1.3.1' },
+      { raw: 'v1.3.1', expected: 'v1.3.1' },
+      { raw: ' V1.3.1 ', expected: 'V1.3.1' },
+      { raw: 'Version 1.3.1', expected: 'Version 1.3.1' },
+      { raw: 'v', expected: 'v' },
+      { raw: '  ' + '1'.repeat(256) + '\t', expected: '1'.repeat(256) },
+    ];
+    for (let idx = 0; idx < verbatimCases.length; idx++) {
+      const { raw, expected } = verbatimCases[idx];
+      const core = makeCore(raw);
       const spy = vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
-        id: `t-norm-${idx}`,
-        title: 'Normalized',
+        id: `t-verbatim-${idx}`,
+        title: 'Verbatim',
         createdAt: '2026-11-01T10:00:00.000Z',
         updatedAt: '2026-11-01T10:00:00.000Z',
       } as unknown as ConversationDto);
@@ -2705,29 +2714,42 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
       expect(spy).toHaveBeenCalledWith(
         null,
         expect.objectContaining({
-          desktopVersion: '1.3.1',
+          desktopVersion: expected,
         }),
       );
-      expect(created.remoteSettings).toEqual({ desktopVersion: '1.3.1' });
+      expect(created.remoteSettings).toEqual({ desktopVersion: expected });
     }
   });
 
-  it('omits desktopVersion and sets remoteSettings to undefined when appVersion is blank, whitespace-only, or bare v/V', async () => {
-    const blanks = ['', '   ', 'v', 'V', '  v  ', '  vvV  '];
-    for (let idx = 0; idx < blanks.length; idx++) {
-      const core = makeCore(blanks[idx]);
+  it('omits desktopVersion on createThread and patchThread and sets remoteSettings to undefined when appVersion is blank, non-string, or > 256 trimmed chars', async () => {
+    const omittedInputs: string[] = [
+      '',
+      '   ',
+      '\t\n',
+      123 as unknown as string,
+      '1'.repeat(257),
+      ' ' + '1'.repeat(257) + ' ',
+    ];
+    for (let idx = 0; idx < omittedInputs.length; idx++) {
+      const core = makeCore(omittedInputs[idx]);
       const createSpy = vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
-        id: `t-blank-${idx}`,
-        title: 'Blank Ver',
+        id: `t-omitted-${idx}`,
+        title: 'Omitted Ver',
         createdAt: '2026-11-01T10:00:00.000Z',
         updatedAt: '2026-11-01T10:00:00.000Z',
       } as unknown as ConversationDto);
+      const updateSpy = vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
 
       const created = await core.createThread();
       expect(createSpy).toHaveBeenCalledTimes(1);
       const sentSettings = createSpy.mock.calls[0][1] as Record<string, unknown>;
       expect('desktopVersion' in sentSettings).toBe(false);
       expect(created.remoteSettings).toBeUndefined();
+
+      core.patchThread(created.id, { title: 'Renamed' });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const patchedSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+      expect('desktopVersion' in patchedSettings).toBe(false);
     }
   });
 
