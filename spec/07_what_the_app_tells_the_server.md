@@ -15,7 +15,7 @@ desktop usage.
 | **Write conversations** | Conversations are created, retitled, re-settinged and deleted through the conversation API, and each finished turn is appended to it (including the active playbook name and version number on both user and assistant messages in single-agent turns). |
 | **Write ratings** | A thumb and its comment are stored against the server's id for that answer, so they appear in the web app's feedback screens and counts. |
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
-| **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop and the desktop version that created them, which is what lets the web sidebar, the conversation header, and the admin conversation register tell them apart. |
+| **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop and the desktop version that created them, which is what lets the web sidebar mark them as desktop conversations and lets the conversation header and the admin conversation register show which desktop version started each one. |
 | **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together alongside any existing server-side conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
 
 ## How it behaves
@@ -36,7 +36,8 @@ desktop usage.
   the conversation's playbook from the restored transcript. Multi-agent messages carry neither on the
   messages themselves and instead report the playbook name and version number on each uploaded trace step.
 - **Creating a conversation records the desktop version that created it, and later settings updates preserve that creation version.**
-  When a new conversation is created, the app records its own version alongside the initial conversation
+  When a new conversation is created, the app records its own version verbatim (trimming only surrounding
+  whitespace, and omitting non-text, blank, or over-256-character values) alongside the initial conversation
   settings. Updating a conversation's settings later — including from a newer desktop release — preserves
   the version recorded when the conversation was created rather than overwriting it, and older
   conversations that were created before version recording was introduced remain unversioned.

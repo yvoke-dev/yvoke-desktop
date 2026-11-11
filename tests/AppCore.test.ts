@@ -2922,6 +2922,28 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
       customFlag: true,
       'orchestrator-profile': 'OIM',
     });
+
+    // 4. Local legacy conversation with remoteSettings: undefined stays unversioned on patchThread
+    core.threads.upsert({
+      id: 't-legacy-no-remote-settings',
+      title: 'Legacy Without Remote Settings',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      remoteSettings: undefined,
+    });
+
+    updateSpy.mockClear();
+    const patchedNoRemote = core.patchThread('t-legacy-no-remote-settings', { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const patchedNoRemoteSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect('desktopVersion' in patchedNoRemoteSettings).toBe(false);
+    expect('desktopVersion' in (patchedNoRemote?.remoteSettings ?? {})).toBe(false);
+    expect('desktopVersion' in (core.threads.get('t-legacy-no-remote-settings')?.remoteSettings ?? {})).toBe(false);
   });
 });
-

@@ -633,6 +633,17 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
       desktopVersion: 'v1.2.0',
     });
 
+    // Seed a pre-existing unversioned desktop conversation directly on the server
+    const legacyId = 'conv-legacy-unversioned';
+    server.conversations.set(legacyId, {
+      id: legacyId,
+      title: 'Legacy Desktop Conversation',
+      settings: { model: 'sonnet', 'thinking-level': 'medium' },
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+    });
+    server.messagesByConv.set(legacyId, []);
+
     // appCore2 (upgraded '1.3.1') syncs threads from the server and patches thinkingLevel
     appCore2 = wireAppCore(tmpDir2, '1.3.1');
     const updateSpy = vi.spyOn(appCore2.syncClient, 'updateConversation');
@@ -642,6 +653,7 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     expect(appCore2.threads.get(created.id)?.remoteSettings).toMatchObject({
       desktopVersion: 'v1.2.0',
     });
+    expect('desktopVersion' in (appCore2.threads.get(legacyId)?.remoteSettings ?? {})).toBe(false);
 
     appCore2.patchThread(created.id, { thinkingLevel: 'high' });
     await new Promise((r) => setTimeout(r, 10));
@@ -659,6 +671,19 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     );
     expect(server.conversations.get(created.id)?.settings).toMatchObject({
       desktopVersion: 'v1.2.0',
+      'thinking-level': 'high',
+      client: 'desktop',
+    });
+
+    // Patching the pre-existing unversioned conversation on upgraded appCore2 keeps it unversioned
+    updateSpy.mockClear();
+    appCore2.patchThread(legacyId, { thinkingLevel: 'high' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect('desktopVersion' in server.conversations.get(legacyId)!.settings).toBe(false);
+    expect('desktopVersion' in (appCore2.threads.get(legacyId)?.remoteSettings ?? {})).toBe(false);
+    expect(server.conversations.get(legacyId)?.settings).toMatchObject({
       'thinking-level': 'high',
       client: 'desktop',
     });
@@ -688,4 +713,3 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     expect('desktopVersion' in server.conversations.get(created.id)!.settings).toBe(false);
   });
 });
-
