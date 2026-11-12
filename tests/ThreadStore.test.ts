@@ -1,9 +1,10 @@
 import fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ThreadStore } from '../src/main/store/ThreadStore';
-import { isThreadStarted, type ChatMessage, type ThreadMeta } from '../src/shared/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ThreadStore, type StoredChatMessage } from '../src/main/store/ThreadStore';
+import { isThreadStarted, type ChatMessage, type ImageAttachment, type ThreadMeta } from '../src/shared/types';
 
 function meta(id: string): ThreadMeta {
   return {
@@ -476,6 +477,252 @@ describe('ThreadStore', () => {
 
       const raw = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
       expect('hasStarted' in raw.t1).toBe(false);
+    });
+  });
+
+  describe('Wave 1: startup scan, migration, validation & corrupt-index hardening', () => {
+    const sampleImage = (id = 'img-1'): ImageAttachment => ({
+      id,
+      mediaType: 'image/png',
+      data: Buffer.from('fake-png-bytes').toString('base64'),
+      name: 'diagram.png',
+      size: 14,
+      description: 'Architecture diagram',
+    });
+
+    it('listLogThreadIds enumerates valid <id>.jsonl files and returns [] when directory is missing', async () => {
+      const missingStore = new ThreadStore(path.join(dir, 'does-not-exist-yet'));
+      expect(await missingStore.listLogThreadIds()).toEqual([]);
+
+      store.upsert(meta('t-alpha'));
+      store.upsert(meta('t-beta'));
+      await store.appendMessages('t-alpha', [message('u1', 'user')]);
+      await store.appendMessages('t-beta', [message('u2', 'user')]);
+      // Noise files/dirs that must be ignored
+      fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore');
+      fs.writeFileSync(path.join(dir, 'bad name.jsonl'), '{}');
+      fs.mkdirSync(path.join(dir, 'images', 't-alpha'), { recursive: true });
+
+      const ids = await store.listLogThreadIds();
+      expect(ids.sort()).toEqual(['t-alpha', 't-beta']);
+    });
+
+    it('readRawMessages skips image blob disk reads (zero-blob proof) and skips corrupt JSONL lines', async () => {
+      store.upsert(meta('t1'));
+      await store.appendMessages('t1', [
+        { ...message('u1', 'user'), images: [sampleImage('img-1')] },
+        message('a1', 'assistant'),
+      ]);
+      // Append corrupt, non-object, and incomplete-shape JSON lines
+      fs.appendFileSync(
+        path.join(dir, 't1.jsonl'),
+        '{corrupt-line\nnull\n123\n{"bad":true}\n{"localId":"x","role":"system","content":"nope"}\n{"localId":"y","role":"user"}\n',
+      );
+
+      // Delete the underlying .png blob on disk to prove non-tautologically that readRawMessages
+      // never touches threads/images/<id>/* whereas readMessages drops the missing image.
+      const imgDir = path.join(dir, 'images', 't1');
+      const files = fs.readdirSync(imgDir);
+      expect(files).toHaveLength(1);
+      fs.rmSync(path.join(imgDir, files[0]));
+
+      const readFileSpy = vi.spyOn(fsp, 'readFile');
+      try {
+        const rawMsgs: StoredChatMessage[] = await store.readRawMessages('t1');
+        expect(rawMsgs).toHaveLength(2);
+        expect(rawMsgs[0].images).toHaveLength(1);
+        expect(rawMsgs[0].images?.[0].file).toBe(files[0]);
+        expect(rawMsgs[0].images?.[0].data).toBeUndefined();
+        expect(rawMsgs[0].images?.[0].description).toBe('Architecture diagram');
+
+        const imageReads = readFileSpy.mock.calls.filter(([p]) => String(p).includes(`${path.sep}images${path.sep}`));
+        expect(imageReads).toHaveLength(0);
+      } finally {
+        readFileSpy.mockRestore();
+      }
+
+      // Contrast: readMessages attempts blob hydration and drops the missing blob
+      const hydrated = await store.readMessages('t1');
+      expect(hydrated).toHaveLength(2);
+      expect(hydrated[0].images).toBeUndefined();
+    });
+
+    it('applyServerIds returns { hasUnsynced: true } when unsynced messages remain and { hasUnsynced: false } when all have serverId', async () => {
+      store.upsert(meta('t1'));
+      expect(await store.applyServerIds('t1', {})).toEqual({ hasUnsynced: false });
+
+      await store.appendMessages('t1', [
+        message('u1', 'user'),
+        message('a1', 'assistant'),
+        message('u2', 'user'),
+      ]);
+
+      const partial = await store.applyServerIds('t1', { u1: 'srv-u1', a1: 'srv-a1' });
+      expect(partial).toEqual({ hasUnsynced: true });
+
+      const complete = await store.applyServerIds('t1', { u2: 'srv-u2' });
+      expect(complete).toEqual({ hasUnsynced: false });
+    });
+
+    it('migrateThread moves .jsonl and images/<oldId> -> <newId>, strips stale serverIds, preserves feedback + extraMessages, and updates index.json', async () => {
+      store.upsert({ ...meta('old-id'), sessionId: 'sess-1', hasStarted: true });
+      await store.appendMessages('old-id', [
+        { ...message('u1', 'user'), images: [sampleImage('img-1')] },
+        message('a1', 'assistant', { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      ]);
+      await store.applyServerIds('old-id', { u1: 'stale-srv-u1', a1: 'stale-srv-a1' });
+      await store.setFeedback('old-id', 'a1', 1, 'helpful');
+
+      const newThreadMeta: ThreadMeta = {
+        ...meta('new-id'),
+        sessionId: 'sess-1',
+        hasStarted: true,
+        syncState: 'pending',
+      };
+      const extra: StoredChatMessage[] = [
+        { localId: 'a1', role: 'assistant', content: 'duplicate-ignored', createdAt: '2026-06-10T10:01:00Z' },
+        { localId: 'u2', role: 'user', content: 'queue-only-question', createdAt: '2026-06-10T10:02:00Z', serverId: 'stale-u2' },
+      ];
+
+      await store.migrateThread('old-id', newThreadMeta, extra);
+
+      expect(store.get('old-id')).toBeUndefined();
+      expect(store.get('new-id')?.sessionId).toBe('sess-1');
+      expect(fs.existsSync(path.join(dir, 'old-id.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'images', 'old-id'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'new-id.jsonl'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'images', 'new-id'))).toBe(true);
+
+      const rawMigrated = await store.readRawMessages('new-id');
+      expect(rawMigrated.map((m) => m.localId)).toEqual(['u1', 'a1', 'u2']);
+      expect(rawMigrated.every((m) => m.serverId === undefined)).toBe(true);
+      expect(rawMigrated[0].images?.[0].file).toBeTruthy();
+      expect(rawMigrated[1].feedback).toEqual({ rating: 1, comment: 'helpful' });
+
+      const hydratedMigrated = await store.readMessages('new-id');
+      expect(hydratedMigrated[0].images?.[0].data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
+
+      const reopened = new ThreadStore(dir);
+      expect(reopened.get('old-id')).toBeUndefined();
+      expect(reopened.get('new-id')?.id).toBe('new-id');
+    });
+
+    it('migrateThread succeeds when threads/images/<oldId> does not exist', async () => {
+      store.upsert(meta('no-img-old'));
+      await store.appendMessages('no-img-old', [message('u1', 'user')]);
+      await store.migrateThread('no-img-old', meta('no-img-new'));
+
+      expect(store.get('no-img-old')).toBeUndefined();
+      expect((await store.readMessages('no-img-new')).map((m) => m.localId)).toEqual(['u1']);
+    });
+
+    it('migrateThread falls back to recursive copy + rm when rename throws EXDEV', async () => {
+      store.upsert(meta('exdev-old'));
+      await store.appendMessages('exdev-old', [{ ...message('u1', 'user'), images: [sampleImage('img-exdev')] }]);
+
+      const origRename = fsp.rename.bind(fsp);
+      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementation(async (oldPath, newPath) => {
+        if (String(oldPath).includes(`${path.sep}images${path.sep}`)) {
+          throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+        }
+        return origRename(oldPath, newPath);
+      });
+
+      try {
+        await store.migrateThread('exdev-old', meta('exdev-new'));
+      } finally {
+        renameSpy.mockRestore();
+      }
+
+      expect(fs.existsSync(path.join(dir, 'images', 'exdev-old'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'images', 'exdev-new'))).toBe(true);
+      const msgs = await store.readMessages('exdev-new');
+      expect(msgs[0].images?.[0].data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
+    });
+
+    it('migrateThread preserves <oldId>.jsonl, images/<oldId>, and index.json if <newId>.jsonl write fails', async () => {
+      store.upsert(meta('atomic-old'));
+      await store.appendMessages('atomic-old', [{ ...message('u1', 'user'), images: [sampleImage('img-atomic')] }]);
+
+      const origWriteFile = fsp.writeFile.bind(fsp);
+      const writeSpy = vi.spyOn(fsp, 'writeFile').mockImplementation(async (target, data, opts) => {
+        if (String(target).includes('atomic-new.jsonl')) {
+          throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+        }
+        return origWriteFile(target, data, opts as BufferEncoding);
+      });
+
+      try {
+        await expect(store.migrateThread('atomic-old', meta('atomic-new'))).rejects.toThrow(/ENOSPC/);
+      } finally {
+        writeSpy.mockRestore();
+      }
+
+      expect(fs.existsSync(path.join(dir, 'atomic-old.jsonl'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'images', 'atomic-old'))).toBe(true);
+      expect(store.get('atomic-old')?.id).toBe('atomic-old');
+      expect(store.get('atomic-new')).toBeUndefined();
+      expect((await store.readMessages('atomic-old')).map((m) => m.localId)).toEqual(['u1']);
+    });
+
+    it('rejects self-migration (oldId === newMeta.id) without deleting <sameId>.jsonl or images', async () => {
+      store.upsert(meta('same-id'));
+      await store.appendMessages('same-id', [{ ...message('u1', 'user'), images: [sampleImage('img-same')] }]);
+
+      await expect(store.migrateThread('same-id', meta('same-id'))).rejects.toThrow(/same/i);
+      expect(fs.existsSync(path.join(dir, 'same-id.jsonl'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'images', 'same-id'))).toBe(true);
+      expect(store.get('same-id')?.id).toBe('same-id');
+    });
+
+    it('rejects tainted non-string / empty / traversal threadIds (including null & undefined without coercion)', async () => {
+      // Seed literal "null" and "undefined" threads to prove null/undefined never coerce to strings!
+      store.upsert(meta('null'));
+      store.upsert(meta('undefined'));
+      const taintedIds: unknown[] = [null, undefined, 123, {}, '', '   ', '../escape', 'a/b'];
+      for (const bad of taintedIds) {
+        expect(() => store.get(bad as string)).toThrow(/Invalid threadId/);
+        expect(() => store.delete(bad as string)).toThrow(/Invalid threadId/);
+        await expect(store.readRawMessages(bad as string)).rejects.toThrow(/Invalid threadId/);
+        await expect(store.applyServerIds(bad as string, {})).rejects.toThrow(/Invalid threadId/);
+        await expect(store.migrateThread(bad as string, meta('valid-target'))).rejects.toThrow(/Invalid threadId/);
+        await expect(store.migrateThread('null', { ...meta('valid-target'), id: bad as string })).rejects.toThrow(
+          /Invalid threadId/,
+        );
+      }
+      // Neither 'null' nor 'undefined' thread was deleted or touched by passing null/undefined
+      expect(store.get('null')?.id).toBe('null');
+      expect(store.get('undefined')?.id).toBe('undefined');
+    });
+
+    it('loadIndex accepts {} cleanly without .corrupt, round-trips valid entries, and quarantines non-object / malformed JSON', () => {
+      const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-idx-'));
+      try {
+        const indexFile = path.join(indexDir, 'index.json');
+
+        // 1. Valid empty object {} must NOT create .corrupt
+        fs.writeFileSync(indexFile, '{}');
+        const emptyStore = new ThreadStore(indexDir);
+        expect(emptyStore.list()).toEqual([]);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(false);
+
+        // 2. Valid { [id]: ThreadMeta } round-trips cleanly without .corrupt
+        emptyStore.upsert(meta('valid-1'));
+        const reloadedValid = new ThreadStore(indexDir);
+        expect(reloadedValid.list().map((t) => t.id)).toEqual(['valid-1']);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(false);
+
+        // 3. Non-objects and malformed payloads are quarantined/filtered safely without throwing
+        for (const payload of ['null', '"str"', '123', '[]', '{"bad": null}', '{corrupt']) {
+          fs.rmSync(indexFile + '.corrupt', { force: true });
+          fs.writeFileSync(indexFile, payload);
+          const recovered = new ThreadStore(indexDir);
+          expect(recovered.list()).toEqual([]);
+          expect(fs.existsSync(indexFile + '.corrupt')).toBe(true);
+        }
+      } finally {
+        fs.rmSync(indexDir, { recursive: true, force: true });
+      }
     });
   });
 });

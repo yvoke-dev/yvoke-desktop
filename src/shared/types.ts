@@ -267,6 +267,12 @@ export interface ThreadMeta {
   remoteSettings?: Record<string, unknown>;
 }
 
+export interface ThreadsListResult {
+  threads: ThreadMeta[];
+  serverReachable: boolean;
+  pendingSyncCount?: number;
+}
+
 /**
  * Pure helper determining whether a thread has started (first prompt sent or state established).
  * Zero disk I/O, synchronous, safe across main and renderer processes.
@@ -625,8 +631,10 @@ export type AgentEvent =
   | { kind: 'review-enforced'; threadId: string; reason: 'skipped' | 'rejected' | 'unclear'; round?: number };
 
 export type SyncEvent =
-  | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string }
-  | { kind: 'server-ids'; threadId: string; mapping: Record<string, string> };
+  | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string; dropped?: boolean }
+  | { kind: 'server-ids'; threadId: string; mapping: Record<string, string> }
+  | { kind: 'thread-migrated'; oldThreadId: string; thread: ThreadMeta }
+  | { kind: 'thread-deleted'; threadId: string };
 
 export interface SendMessageRequest {
   threadId: string;

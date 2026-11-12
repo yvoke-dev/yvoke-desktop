@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
-import { isAttributedError, tagAttributedError } from '../../shared/error';
+import { isAttributedError, sanitizeLogContent, tagAttributedError } from '../../shared/error';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -13,12 +13,23 @@ export interface QueuedTurn {
   attempts: number;
 }
 
+export type HeldThreadResolution = 'ready' | 'deferred';
+export type MissingConversationResolution = 'migrated' | 'deferred' | 'retry' | 'drop';
+
 export interface SyncQueueDeps {
   client: SyncClient;
   file: string;
   emit: (event: SyncEvent) => void;
   /** Persist localId → serverId mapping after a turn is acked. */
   onServerIds: (threadId: string, mapping: Record<string, string>) => void;
+  /** Total waiting turns across all conversations (including unqueued startup turns). */
+  totalPendingCount?: () => number;
+  /** Lazily reconcile a startup-held thread before flushing its turns. */
+  reconcileHeldThread?: (threadId: string) => Promise<HeldThreadResolution>;
+  /** Handle a 404 Not Found on appendMessages (e.g. recreate conversation & migrate turns). */
+  onMissingConversation?: (threadId: string) => Promise<MissingConversationResolution>;
+  /** Notified when a turn is dropped for the current session (non-401/non-404 4xx or 500-turn cap). */
+  onTurnDropped?: (turn: QueuedTurn, detail: string) => void;
   /** Backoff schedule in ms; index = attempts (capped at last entry). */
   backoffMs?: number[];
   setTimeoutFn?: typeof setTimeout;
@@ -32,20 +43,74 @@ const DEFAULT_BACKOFF = [2_000, 5_000, 15_000, 30_000, 60_000];
  * very long outage with continued chatting must not grow the queue without limit — past this
  * cap the oldest turn is dropped with a visible error rather than accumulating forever.
  */
-const MAX_QUEUE_LENGTH = 500;
+export const MAX_QUEUE_LENGTH = 500;
+
+const MAX_DETAIL_LENGTH = 300;
+
+function sanitizeDetail(raw: string): string {
+  const safe = sanitizeLogContent(raw).trim();
+  return safe.length > MAX_DETAIL_LENGTH ? `${safe.slice(0, MAX_DETAIL_LENGTH)}…` : safe;
+}
+
+function isValidQueuedTurn(item: unknown): item is QueuedTurn {
+  if (typeof item !== 'object' || item === null || Array.isArray(item)) return false;
+  const rec = item as Record<string, unknown>;
+  if (typeof rec.threadId !== 'string' || rec.threadId.length === 0) return false;
+  if (!Array.isArray(rec.localIds) || !rec.localIds.every((id) => typeof id === 'string')) return false;
+  if (
+    !Array.isArray(rec.messages) ||
+    !rec.messages.every(
+      (m) =>
+        typeof m === 'object' &&
+        m !== null &&
+        !Array.isArray(m) &&
+        ((m as { role?: unknown }).role === 'user' || (m as { role?: unknown }).role === 'assistant') &&
+        typeof (m as { content?: unknown }).content === 'string',
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function preserveCorruptQueue(file: string): void {
+  const backup = file + '.corrupt';
+  try {
+    if (!fs.existsSync(backup)) {
+      fs.renameSync(file, backup);
+    }
+  } catch {
+    // Best-effort preservation; never block startup on backup failure.
+  }
+}
+
+function preserveCorruptQueueCopy(file: string): void {
+  const backup = file + '.corrupt';
+  try {
+    if (!fs.existsSync(backup)) {
+      fs.copyFileSync(file, backup);
+    }
+  } catch {
+    // Best-effort preservation; never block startup on backup failure.
+  }
+}
 
 /**
  * Durable write-through queue (Correctness Property 5): every completed turn is
  * appended to an on-disk queue file and flushed in order with retry/backoff —
- * a turn is either acked by the server or still sitting in the queue. 4xx
- * validation responses are not retriable and are dropped with an error event.
+ * a turn is either acked by the server or still sitting in the queue. Non-401/non-404
+ * 4xx validation responses are dropped for the session with `dropped: true`.
  */
 export class SyncQueue {
   private queue: QueuedTurn[] = [];
   private flushPromise: Promise<void> | null = null;
+  private flushRequested = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   /** The turn currently mid-flush (network call in flight); never dropped by the length cap. */
   private flushing: QueuedTurn | null = null;
+  /** Thread IDs held at startup until their server presence / transcript is reconciled. */
+  private readonly heldThreads = new Set<string>();
+  private disposed = false;
 
   /** Remove a specific turn by identity (not by position — the front can shift during an await). */
   private removeTurn(turn: QueuedTurn): void {
@@ -65,22 +130,35 @@ export class SyncQueue {
       // Missing file (first run) — start empty without touching disk.
       return [];
     }
+    let parsed: unknown;
     try {
-      return JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
-      // The file exists but is corrupt: preserve it as a stable '.corrupt' backup
-      // rather than silently returning [] (which persist() would then overwrite),
-      // so undelivered turns are not destroyed. Leave any existing backup intact.
-      const backup = this.deps.file + '.corrupt';
-      try {
-        if (!fs.existsSync(backup)) {
-          fs.renameSync(this.deps.file, backup);
-        }
-      } catch {
-        // Best-effort preservation; never block startup on backup failure.
-      }
+      preserveCorruptQueue(this.deps.file);
       return [];
     }
+    if (!Array.isArray(parsed)) {
+      preserveCorruptQueue(this.deps.file);
+      return [];
+    }
+    const valid = parsed.filter(isValidQueuedTurn);
+    if (valid.length !== parsed.length) {
+      if (valid.length === 0) {
+        preserveCorruptQueue(this.deps.file);
+        return [];
+      }
+      preserveCorruptQueueCopy(this.deps.file);
+    }
+    return valid.map((item) => ({
+      threadId: item.threadId,
+      localIds: [...item.localIds],
+      messages: [...item.messages],
+      enqueuedAt: typeof item.enqueuedAt === 'string' ? item.enqueuedAt : new Date().toISOString(),
+      attempts:
+        typeof item.attempts === 'number' && Number.isFinite(item.attempts) && item.attempts >= 0
+          ? item.attempts
+          : 0,
+    }));
   }
 
   private persist(): void {
@@ -93,104 +171,318 @@ export class SyncQueue {
     fs.renameSync(tmp, this.deps.file);
   }
 
-  pendingCount(threadId?: string): number {
-    return threadId ? this.queue.filter((t) => t.threadId === threadId).length : this.queue.length;
+  private reportedPendingCount(): number {
+    return this.deps.totalPendingCount ? this.deps.totalPendingCount() : this.pendingCount();
   }
 
-  enqueue(turn: Omit<QueuedTurn, 'enqueuedAt' | 'attempts'>): void {
-    this.queue.push({ ...turn, enqueuedAt: new Date().toISOString(), attempts: 0 });
+  private formatErrorDetail(error: unknown): string {
+    const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+    const attributed = isAttributedError(msg) ? msg : tagAttributedError('Yvoke Backend', error);
+    return sanitizeDetail(attributed);
+  }
+
+  private enforceQueueCap(): void {
     while (this.queue.length > MAX_QUEUE_LENGTH) {
       // Drop the oldest turn that is NOT the one currently mid-flush — dropping the in-flight
       // turn would desync the doFlush loop and emit a spurious error for a delivered turn.
       const idx = this.queue.findIndex((t) => t !== this.flushing);
       if (idx === -1) break; // only the in-flight turn remains over the cap
       const [dropped] = this.queue.splice(idx, 1);
+      const detail = sanitizeDetail(
+        `Sync backlog exceeded ${MAX_QUEUE_LENGTH} turns; oldest unsent turn was dropped.`,
+      );
+      this.deps.onTurnDropped?.(dropped, detail);
       this.deps.emit({
         kind: 'sync-state',
         threadId: dropped.threadId,
         state: 'error',
-        pendingCount: this.pendingCount(dropped.threadId),
-        detail: `Sync backlog exceeded ${MAX_QUEUE_LENGTH} turns; oldest unsent turn was dropped.`,
+        pendingCount: this.reportedPendingCount(),
+        detail,
+        dropped: true,
       });
     }
+  }
+
+  pendingCount(threadId?: string): number {
+    return threadId ? this.queue.filter((t) => t.threadId === threadId).length : this.queue.length;
+  }
+
+  holdThreads(threadIds: Iterable<string>): void {
+    for (const id of threadIds) {
+      if (typeof id === 'string' && id.length > 0) {
+        this.heldThreads.add(id);
+      }
+    }
+  }
+
+  unholdThread(threadId: string): boolean {
+    const removed = this.heldThreads.delete(threadId);
+    if (removed && this.flushPromise && this.pendingCount(threadId) > 0) {
+      this.flushRequested = true;
+    }
+    return removed;
+  }
+
+  isHeld(threadId: string): boolean {
+    return this.heldThreads.has(threadId);
+  }
+
+  queuedThreadIds(): string[] {
+    return Array.from(new Set(this.queue.map((t) => t.threadId)));
+  }
+
+  getQueuedTurns(threadId: string): QueuedTurn[] {
+    return this.queue
+      .filter((t) => t.threadId === threadId)
+      .map((t) => ({
+        ...t,
+        localIds: [...t.localIds],
+        messages: [...t.messages],
+      }));
+  }
+
+  replaceThreadTurns(threadId: string, turns: readonly QueuedTurn[]): void {
+    let insertAt = this.queue.findIndex((t) => t.threadId === threadId && t !== this.flushing);
+    this.queue = this.queue.filter((t) => t.threadId !== threadId || t === this.flushing);
+    if (turns.length > 0) {
+      const normalized = turns.map((t) => ({
+        threadId,
+        localIds: [...t.localIds],
+        messages: [...t.messages],
+        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
+        attempts: t.attempts ?? 0,
+      }));
+      if (insertAt < 0 || insertAt > this.queue.length) {
+        insertAt = this.queue.length;
+      }
+      this.queue.splice(insertAt, 0, ...normalized);
+      this.enforceQueueCap();
+    }
+    this.persist();
+  }
+
+  migrateThread(oldId: string, newId: string, replacementTurns?: readonly QueuedTurn[]): void {
+    this.heldThreads.delete(oldId);
+    if (oldId === newId && !replacementTurns) return;
+
+    if (replacementTurns !== undefined) {
+      let insertAt = this.queue.findIndex((t) => t.threadId === oldId && t !== this.flushing);
+      this.queue = this.queue.filter((t) => t.threadId !== oldId || t === this.flushing);
+      const normalized = replacementTurns.map((t) => ({
+        threadId: newId,
+        localIds: [...t.localIds],
+        messages: [...t.messages],
+        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
+        attempts: 0,
+      }));
+      if (insertAt < 0 || insertAt > this.queue.length) {
+        insertAt = this.queue.length;
+      }
+      if (normalized.length > 0) {
+        this.queue.splice(insertAt, 0, ...normalized);
+        this.enforceQueueCap();
+      }
+      this.persist();
+      return;
+    }
+
+    let changed = false;
+    for (const item of this.queue) {
+      if (item.threadId === oldId) {
+        item.threadId = newId;
+        item.attempts = 0;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.persist();
+    }
+  }
+
+  removeThread(threadId: string): number {
+    this.heldThreads.delete(threadId);
+    const before = this.queue.length;
+    this.queue = this.queue.filter((t) => t.threadId !== threadId || t === this.flushing);
+    const removed = before - this.queue.length;
+    if (removed > 0) {
+      this.persist();
+    }
+    return removed;
+  }
+
+  enqueue(turn: Omit<QueuedTurn, 'enqueuedAt' | 'attempts'>): void {
+    this.queue.push({ ...turn, enqueuedAt: new Date().toISOString(), attempts: 0 });
+    this.enforceQueueCap();
     this.persist();
     this.deps.emit({
       kind: 'sync-state',
       threadId: turn.threadId,
       state: 'pending',
-      pendingCount: this.pendingCount(turn.threadId),
+      pendingCount: this.reportedPendingCount(),
     });
     void this.flush();
   }
 
-  /** Flushes queued turns in order; stops on the first transient failure and reschedules. */
+  /** Flushes queued turns in order; tail-loops if new work arrives mid-settlement. */
   flush(): Promise<void> {
+    this.flushRequested = true;
     if (!this.flushPromise) {
-      this.flushPromise = this.doFlush().finally(() => {
-        this.flushPromise = null;
-      });
+      this.flushPromise = (async () => {
+        try {
+          let status: 'completed' | 'backoff' = 'completed';
+          do {
+            this.flushRequested = false;
+            status = await this.doFlush();
+          } while (this.flushRequested && status === 'completed' && !this.disposed);
+        } finally {
+          this.flushPromise = null;
+        }
+      })();
     }
     return this.flushPromise;
   }
 
-  private async doFlush(): Promise<void> {
-    {
-      while (this.queue.length > 0) {
-        const turn = this.queue[0];
-        this.flushing = turn;
+  private async doFlush(): Promise<'completed' | 'backoff'> {
+    const deferredThreads = new Set<string>();
+
+    while (!this.disposed) {
+      const turn = this.queue.find((t) => !deferredThreads.has(t.threadId));
+      if (!turn) {
+        return 'completed';
+      }
+
+      if (this.heldThreads.has(turn.threadId)) {
+        if (!this.deps.reconcileHeldThread) {
+          deferredThreads.add(turn.threadId);
+          continue;
+        }
+        let resolution: HeldThreadResolution;
         try {
-          const { ids } = await this.deps.client.appendMessages(turn.threadId, turn.messages);
-          this.flushing = null;
-          const mapping: Record<string, string> = {};
-          turn.localIds.forEach((localId, i) => {
-            if (ids[i]) mapping[localId] = ids[i];
-          });
-          this.removeTurn(turn);
-          this.persist();
-          this.deps.onServerIds(turn.threadId, mapping);
+          resolution = await this.deps.reconcileHeldThread(turn.threadId);
+        } catch {
+          if (this.disposed) return 'completed';
+          deferredThreads.add(turn.threadId);
+          continue;
+        }
+        if (this.disposed) return 'completed';
+        if (resolution === 'deferred') {
+          deferredThreads.add(turn.threadId);
+          continue;
+        }
+        this.heldThreads.delete(turn.threadId);
+        // Re-evaluate from the queue front since reconcileHeldThread may have mutated turns.
+        continue;
+      }
+
+      this.flushing = turn;
+      try {
+        const { ids } = await this.deps.client.appendMessages(turn.threadId, turn.messages);
+        this.flushing = null;
+        const mapping: Record<string, string> = {};
+        turn.localIds.forEach((localId, i) => {
+          if (ids[i]) mapping[localId] = ids[i];
+        });
+        this.removeTurn(turn);
+        this.persist();
+        this.deps.onServerIds(turn.threadId, mapping);
+        if (!this.disposed) {
           this.deps.emit({ kind: 'server-ids', threadId: turn.threadId, mapping });
           this.deps.emit({
             kind: 'sync-state',
             threadId: turn.threadId,
             state: this.pendingCount(turn.threadId) > 0 ? 'pending' : 'synced',
-            pendingCount: this.pendingCount(turn.threadId),
+            pendingCount: this.reportedPendingCount(),
           });
-        } catch (error) {
-          this.flushing = null;
-          const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-          const isAttributed = isAttributedError(msg);
-          const detail = isAttributed ? msg : tagAttributedError('Yvoke Backend', error);
+        }
+      } catch (error) {
+        this.flushing = null;
+        if (this.disposed) {
+          return 'completed';
+        }
 
-          if (error instanceof SyncApiError && error.status >= 400 && error.status < 500 && error.status !== 401) {
-            // Non-retriable (validation/ownership): drop the turn, surface the error.
+        if (error instanceof SyncApiError && error.status === 404 && this.deps.onMissingConversation) {
+          let outcome: MissingConversationResolution;
+          try {
+            outcome = await this.deps.onMissingConversation(turn.threadId);
+          } catch (hookErr) {
+            if (this.disposed) {
+              return 'completed';
+            }
+            outcome = 'retry';
+            error = hookErr;
+          }
+          if (this.disposed) {
+            return 'completed';
+          }
+          if (outcome === 'migrated') {
+            continue;
+          }
+          if (outcome === 'deferred') {
+            deferredThreads.add(turn.threadId);
+            continue;
+          }
+          if (outcome === 'drop') {
+            const detail = this.formatErrorDetail(error);
             this.removeTurn(turn);
             this.persist();
+            this.deps.onTurnDropped?.(turn, detail);
             this.deps.emit({
               kind: 'sync-state',
               threadId: turn.threadId,
               state: 'error',
-              pendingCount: this.pendingCount(turn.threadId),
+              pendingCount: this.reportedPendingCount(),
               detail,
+              dropped: true,
             });
             continue;
           }
-          turn.attempts += 1;
+        }
+
+        const detail = this.formatErrorDetail(error);
+
+        if (
+          error instanceof SyncApiError &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 401 &&
+          error.status !== 404
+        ) {
+          // Non-retriable validation/ownership rejection: drop for this session and surface banner.
+          this.removeTurn(turn);
           this.persist();
+          this.deps.onTurnDropped?.(turn, detail);
           this.deps.emit({
             kind: 'sync-state',
             threadId: turn.threadId,
             state: 'error',
-            pendingCount: this.pendingCount(turn.threadId),
+            pendingCount: this.reportedPendingCount(),
             detail,
+            dropped: true,
           });
-          this.scheduleRetry(turn.attempts);
-          return;
+          continue;
         }
+
+        turn.attempts += 1;
+        this.persist();
+        this.deps.emit({
+          kind: 'sync-state',
+          threadId: turn.threadId,
+          state: 'error',
+          pendingCount: this.reportedPendingCount(),
+          detail,
+        });
+        this.scheduleRetry(turn.attempts);
+        return 'backoff';
       }
     }
+
+    return 'completed';
   }
 
   private scheduleRetry(attempts: number): void {
+    if (this.disposed) {
+      return;
+    }
     const backoff = this.deps.backoffMs ?? DEFAULT_BACKOFF;
     const delay = backoff[Math.min(attempts - 1, backoff.length - 1)];
     const setTimeoutFn = this.deps.setTimeoutFn ?? setTimeout;
@@ -204,6 +496,7 @@ export class SyncQueue {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;

@@ -222,6 +222,50 @@ export class SearchIndex {
     }
   }
 
+  private validateThreadId(threadId: unknown): asserts threadId is string {
+    if (typeof threadId !== 'string' || threadId.length === 0 || !/^[a-zA-Z0-9\-_]+$/.test(threadId)) {
+      throw new Error(`Invalid threadId: ${String(threadId)}`);
+    }
+  }
+
+  /**
+   * Re-keys an indexed thread from `oldId` to `newId` without re-sweeping unchanged prose.
+   * Treats `oldId === newId` or missing `oldId` as a safe no-op.
+   */
+  migrateThread(oldId: string, newId: string): void {
+    this.validateThreadId(oldId);
+    this.validateThreadId(newId);
+    if (oldId === newId) return;
+
+    const existingOld = this.entries.get(oldId);
+    if (!existingOld) return;
+
+    const existingNew = this.entries.get(newId);
+    let docs = existingOld.docs;
+    if (existingNew && existingNew.docs.length > 0) {
+      const seen = new Set(docs.map((d) => d.id));
+      docs = [...docs, ...existingNew.docs.filter((d) => !seen.has(d.id))];
+    }
+
+    let size = -1;
+    let mtimeMs = -1;
+    if (!existingNew && existingOld.size >= 0) {
+      try {
+        const stat = fs.statSync(path.join(this.threadsDir, `${newId}.jsonl`));
+        size = stat.size;
+        mtimeMs = stat.mtimeMs;
+      } catch {
+        size = -1;
+        mtimeMs = -1;
+      }
+    }
+
+    this.entries.delete(oldId);
+    this.lowered.delete(oldId);
+    this.setEntry(newId, { size, mtimeMs, docs });
+    this.markDirty();
+  }
+
   /**
    * Every thread with a message matching `query`, best first. All whitespace-separated terms
    * must appear in the same message, so "queue validation" finds the message that discusses

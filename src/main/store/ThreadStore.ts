@@ -26,13 +26,13 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
  * few kilobytes of text around it. Reading a log restores `data` and hides `file` again, so the
  * split is invisible to callers; `data` still parses on logs written before this existed.
  */
-interface StoredImage extends Omit<ImageAttachment, 'data'> {
+export interface StoredImage extends Omit<ImageAttachment, 'data'> {
   data?: string;
   /** Blob file name inside the thread's image directory. */
   file?: string;
 }
 
-interface StoredChatMessage extends Omit<ChatMessage, 'images'> {
+export interface StoredChatMessage extends Omit<ChatMessage, 'images'> {
   images?: StoredImage[];
 }
 
@@ -60,14 +60,45 @@ export class ThreadStore {
       // Missing file (first run) — start empty without touching disk.
       return {};
     }
+    let parsed: unknown;
     try {
-      return JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       // The file exists but is corrupt: preserve it as a backup rather than
       // silently returning {} (which persistIndex would then overwrite).
       preserveCorrupt(this.indexFile);
       return {};
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      preserveCorrupt(this.indexFile);
+      return {};
+    }
+
+    const valid: Record<string, ThreadMeta> = {};
+    let hadInvalid = false;
+    for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
+      if (
+        key.length > 0 &&
+        /^[a-zA-Z0-9\-_]+$/.test(key) &&
+        typeof val === 'object' &&
+        val !== null &&
+        !Array.isArray(val) &&
+        typeof (val as { id?: unknown }).id === 'string' &&
+        /^[a-zA-Z0-9\-_]+$/.test((val as { id: string }).id)
+      ) {
+        valid[key] = val as ThreadMeta;
+      } else {
+        hadInvalid = true;
+      }
+    }
+    if (hadInvalid) {
+      if (Object.keys(valid).length === 0) {
+        preserveCorrupt(this.indexFile);
+        return {};
+      }
+      preserveCorruptCopy(this.indexFile);
+    }
+    return valid;
   }
 
   private persistIndex(): void {
@@ -75,9 +106,9 @@ export class ThreadStore {
     atomicWriteFileSync(this.indexFile, JSON.stringify(this.index, null, 2));
   }
 
-  private validateThreadId(threadId: string): void {
-    if (!/^[a-zA-Z0-9\-_]+$/.test(threadId)) {
-      throw new Error(`Invalid threadId: ${threadId}`);
+  private validateThreadId(threadId: unknown): asserts threadId is string {
+    if (typeof threadId !== 'string' || threadId.length === 0 || !/^[a-zA-Z0-9\-_]+$/.test(threadId)) {
+      throw new Error(`Invalid threadId: ${String(threadId)}`);
     }
   }
 
@@ -87,7 +118,7 @@ export class ThreadStore {
   }
 
   list(): ThreadMeta[] {
-    return Object.values(this.index).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return Object.values(this.index).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
   }
 
   get(threadId: string): ThreadMeta | undefined {
@@ -95,8 +126,7 @@ export class ThreadStore {
     return this.index[threadId];
   }
 
-  upsert(meta: ThreadMeta): void {
-    this.validateThreadId(meta.id);
+  private cleanMeta(meta: ThreadMeta): ThreadMeta {
     const cleaned = { ...meta };
     if (cleaned.sessionId === undefined) delete cleaned.sessionId;
     if (cleaned.sessionProfile === undefined) delete cleaned.sessionProfile;
@@ -104,7 +134,12 @@ export class ThreadStore {
     if (!cleaned.initialPlaybook || cleaned.orchestratorProfile) delete cleaned.initialPlaybook;
     if (cleaned.hasStarted === undefined) delete cleaned.hasStarted;
     if (cleaned.remoteSettings === undefined) delete cleaned.remoteSettings;
-    this.index[meta.id] = cleaned;
+    return cleaned;
+  }
+
+  upsert(meta: ThreadMeta): void {
+    this.validateThreadId(meta.id);
+    this.index[meta.id] = this.cleanMeta(meta);
     this.persistIndex();
   }
 
@@ -218,7 +253,12 @@ export class ThreadStore {
     for (const line of raw.split('\n')) {
       if (line.trim().length === 0) continue;
       try {
-        messages.push(JSON.parse(line) as StoredChatMessage);
+        const parsed: unknown = JSON.parse(line);
+        if (isValidStoredMessage(parsed)) {
+          messages.push(parsed);
+        } else {
+          console.warn(`ThreadStore: skipping malformed message line in thread ${threadId}`);
+        }
       } catch {
         console.warn(`ThreadStore: skipping unparseable message line in thread ${threadId}`);
       }
@@ -317,6 +357,30 @@ export class ThreadStore {
     );
   }
 
+  async listLogThreadIds(): Promise<string[]> {
+    let files: string[];
+    try {
+      files = await fsp.readdir(this.dir);
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue;
+      const threadId = file.slice(0, -'.jsonl'.length);
+      if (threadId.length > 0 && /^[a-zA-Z0-9\-_]+$/.test(threadId)) {
+        ids.push(threadId);
+      }
+    }
+    return ids;
+  }
+
+  /** Reads stored JSONL messages under per-thread lock without hydrating base64 image blobs. */
+  async readRawMessages(threadId: string): Promise<StoredChatMessage[]> {
+    this.validateThreadId(threadId);
+    return this.runExclusive(threadId, () => this.readRaw(threadId));
+  }
+
   async readMessages(threadId: string): Promise<ChatMessage[]> {
     this.validateThreadId(threadId);
     return this.runExclusive(threadId, async () => this.hydrateImages(threadId, await this.readRaw(threadId)));
@@ -357,13 +421,13 @@ export class ThreadStore {
   }
 
   /** Writes server ids back onto locally-logged messages after a sync ack (atomic read-modify-write). */
-  async applyServerIds(threadId: string, mapping: Record<string, string>): Promise<void> {
+  async applyServerIds(threadId: string, mapping: Record<string, string>): Promise<{ hasUnsynced: boolean }> {
     this.validateThreadId(threadId);
     return this.runExclusive(threadId, async () => {
       const messages = await this.readRaw(threadId);
       let changed = false;
       for (const message of messages) {
-        const serverId = mapping[message.localId];
+        const serverId = Object.hasOwn(mapping, message.localId) ? mapping[message.localId] : undefined;
         if (serverId && message.serverId !== serverId) {
           message.serverId = serverId;
           changed = true;
@@ -372,7 +436,93 @@ export class ThreadStore {
       if (changed) {
         await this.writeRaw(threadId, messages);
       }
+      return { hasUnsynced: messages.some((m) => !m.serverId) };
     });
+  }
+
+  /**
+   * Migrates a cached conversation from `oldId` to `newMeta.id` atomically when recreating a
+   * missing server conversation. Writes `<newId>.jsonl` before swapping `index.json` or removing
+   * `<oldId>.jsonl` so a failure mid-migration never loses local transcript data.
+   */
+  async migrateThread(
+    oldId: string,
+    newMeta: ThreadMeta,
+    extraMessages?: StoredChatMessage[],
+  ): Promise<void> {
+    this.validateThreadId(oldId);
+    this.validateThreadId(newMeta?.id);
+    if (oldId === newMeta.id) {
+      throw new Error(`Cannot migrate thread to the same threadId: ${oldId}`);
+    }
+
+    const [firstId, secondId] = oldId < newMeta.id ? [oldId, newMeta.id] : [newMeta.id, oldId];
+    return this.runExclusive(firstId, () =>
+      this.runExclusive(secondId, async () => {
+        const rawOld = await this.readRaw(oldId);
+        const seenLocalIds = new Set(rawOld.map((m) => m.localId));
+        const merged: StoredChatMessage[] = [...rawOld];
+        for (const extra of extraMessages ?? []) {
+          if (isValidStoredMessage(extra) && !seenLocalIds.has(extra.localId)) {
+            seenLocalIds.add(extra.localId);
+            merged.push(extra);
+          }
+        }
+
+        const cleanedMessages: StoredChatMessage[] = merged.map((msg) => {
+          const copy: StoredChatMessage = {
+            ...msg,
+            ...(msg.images ? { images: msg.images.map((img) => ({ ...img })) } : {}),
+            ...(msg.feedback ? { feedback: { ...msg.feedback } } : {}),
+          };
+          delete copy.serverId;
+          return copy;
+        });
+
+        // 1. Write <newId>.jsonl atomically BEFORE moving images, swapping index, or deleting <oldId>.jsonl
+        if (cleanedMessages.length > 0) {
+          await this.writeRaw(newMeta.id, cleanedMessages);
+        }
+
+        // 2. Move threads/images/<oldId> -> threads/images/<newId> (with EXDEV cross-device fallback)
+        await this.moveImageDir(oldId, newMeta.id);
+
+        // 3. Swap index.json entry atomically
+        delete this.index[oldId];
+        this.index[newMeta.id] = this.cleanMeta(newMeta);
+        this.persistIndex();
+
+        // 4. Delete <oldId>.jsonl only after <newId>.jsonl and index.json are safely committed
+        await fsp.rm(this.messagesFile(oldId), { force: true });
+      }),
+    );
+  }
+
+  private async moveImageDir(oldId: string, newId: string): Promise<void> {
+    const oldImageDir = this.imageDir(oldId);
+    try {
+      const stat = await fsp.stat(oldImageDir);
+      if (!stat.isDirectory()) return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+      throw err;
+    }
+
+    const newImageDir = this.imageDir(newId);
+    await fsp.mkdir(path.dirname(newImageDir), { recursive: true });
+    await fsp.rm(newImageDir, { recursive: true, force: true });
+    try {
+      await fsp.rename(oldImageDir, newImageDir);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'EXDEV') {
+        await fsp.cp(oldImageDir, newImageDir, { recursive: true });
+        await fsp.rm(oldImageDir, { recursive: true, force: true });
+        return;
+      }
+      if (code === 'ENOENT') return;
+      throw err;
+    }
   }
 
   async setFeedback(threadId: string, messageLocalId: string, rating: 1 | -1, comment?: string): Promise<void> {
@@ -390,6 +540,17 @@ export class ThreadStore {
   static emptyTotals(): UsageTotals {
     return { ...EMPTY_USAGE };
   }
+}
+
+function isValidStoredMessage(val: unknown): val is StoredChatMessage {
+  if (typeof val !== 'object' || val === null || Array.isArray(val)) return false;
+  const rec = val as Record<string, unknown>;
+  return (
+    typeof rec.localId === 'string' &&
+    rec.localId.length > 0 &&
+    (rec.role === 'user' || rec.role === 'assistant') &&
+    typeof rec.content === 'string'
+  );
 }
 
 /** Crash-safe whole-file write (sync): write to a sibling temp file then rename over the target. */
@@ -415,6 +576,17 @@ function preserveCorrupt(file: string): void {
   try {
     if (!fs.existsSync(backup)) {
       fs.renameSync(file, backup);
+    }
+  } catch {
+    // Best-effort preservation; never block startup on backup failure.
+  }
+}
+
+function preserveCorruptCopy(file: string): void {
+  const backup = file + '.corrupt';
+  try {
+    if (!fs.existsSync(backup)) {
+      fs.copyFileSync(file, backup);
     }
   } catch {
     // Best-effort preservation; never block startup on backup failure.
