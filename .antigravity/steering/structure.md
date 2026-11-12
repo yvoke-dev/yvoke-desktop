@@ -66,9 +66,10 @@ yvoke-desktop/
 │   │   │   └── Settings.ts
 │   │   ├── store/          # Local JSON database for thread metadata and logs
 │   │   │   └── ThreadStore.ts
-│   │   ├── sync/           # Remote sync client and queue managers
+│   │   ├── sync/           # Remote sync client, startup reconciliation, and queue managers
 │   │   │   ├── SyncClient.ts
-│   │   │   └── SyncQueue.ts
+│   │   │   ├── SyncQueue.ts
+│   │   │   └── reconcile.ts
 │   │   ├── AppCore.ts      # Core orchestrator wiring main-process modules
 │   │   ├── bootstrap.ts    # Headless mode, userData path resolution, and settings recovery
 │   │   ├── index.ts        # Electron entry point (window setup, IPC registry)
@@ -104,6 +105,7 @@ yvoke-desktop/
 │   ├── chunkBlocks.test.ts
 │   ├── evidenceDigest.test.ts
 │   ├── orchestration.test.ts
+│   ├── reconcile.test.ts
 │   ├── review.test.ts
 │   ├── reviewTools.test.ts
 │   ├── runTrace.test.ts

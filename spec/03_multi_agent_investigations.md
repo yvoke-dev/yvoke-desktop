@@ -78,7 +78,11 @@ profiles and the playbooks; there is no way to build one from the app.
 - **A lead that answers without consulting anyone is not a multi-agent turn at all.** No review is
   run, no banner appears, and no trace is recorded.
 - **The trace is uploaded only once the answer has synced**, because it has to name the message it
-  belongs to. Until then it is held in memory, and the upload itself is best-effort. Each uploaded
+  belongs to. During a live session it is held in memory until the turn syncs, and if the app restarts
+  before an unsaved turn syncs — or recreates a missing conversation on the server — desktop-authored
+  multi-agent traces are rebuilt from the local message cache and uploaded once those turns receive
+  server identifiers (conversations restored solely from the server carry no local specialist or
+  reviewer detail to re-upload). Each uploaded
   lead, specialist and reviewer step includes the playbook version number resolved from the server's
   playbook catalogue (with the reviewer step's version looked up from — and recorded under — the
   profile's configured reviewer playbook, falling back to the generic reviewer role name when the
@@ -126,10 +130,13 @@ profiles and the playbooks; there is no way to build one from the app.
   backoff (up to five attempts) on subsequent sync activity during the session; network drops, internal
   server errors, gateway timeouts, and malformed responses are not retried to avoid duplicating a run the
   server may already have recorded, though a gateway error returned after the server committed can still
-  record a duplicate row because the server does not de-duplicate run uploads, and traces held in memory
-  do not survive quitting the app.
-- **A run whose answer the server rejects loses its trace silently**, and at most fifty pending traces
-  are held before the oldest are dropped.
+  record a duplicate row because the server does not de-duplicate run uploads. If the app quits after an
+  answer already synced to the server but before its trace upload finished, that in-memory trace retry
+  does not survive quitting — whereas traces for unsaved trailing turns or recreated missing
+  conversations are rebuilt from the local message cache on the next launch.
+- **A run whose answer the server rejects sets its trace aside with the turn** (retried once if the
+  rejected turn is retried on the next launch), and at most fifty in-memory pending traces are held
+  during a session before the oldest are dropped.
 - **A specialist that asks a clarifying question locks the composer with no question on screen.** The
   interface reports *Awaiting clarification…* and shows nothing to answer, because a sub-agent's
   question is never rendered.

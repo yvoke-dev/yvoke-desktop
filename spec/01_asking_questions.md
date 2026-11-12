@@ -140,11 +140,14 @@ behind it, and the work that produced it can be opened and read.
 
 ## Limits
 
-- **The sidebar lists the 200 most recently updated conversations, and the rest are deleted from this
-  machine.** The list is treated as the whole truth: a locally cached conversation the server did not
-  return is removed along with its message log — a rule meant for conversations deleted elsewhere,
-  which past 200 conversations quietly applies to the oldest ones on every refresh. Only a
-  conversation with turns still waiting to sync survives it.
+- **Refresh fetches the 200 most recently updated conversations from the server, while locally cached conversations past 200 stay in the sidebar.**
+  Uncached conversations past 200 on the server never appear in the sidebar, and unopened header-only
+  local entries outside that 200-conversation window are dropped on refresh (hiding any search hits for
+  conversations absent from the sidebar), whereas conversations past 200 with cached local messages
+  (that still exist on the server) or waiting turns keep their message logs, search index entries, and
+  model sessions on disk and remain listed, openable, and searchable in the sidebar under their last
+  known local title and settings. Untouched empty desktop-created conversations at least five minutes
+  old with a blank or default placeholder title are cleaned up automatically once per launch.
 - **Once a conversation has a local copy, its transcript is never fetched from the server again.**
   Anything added to it elsewhere is invisible here.
 - **Reopening a conversation the server has to supply brings back its first 500 messages**, not its
