@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import type {
   AgentEvent,
@@ -78,6 +79,30 @@ export interface AppCoreDeps {
   emitSyncEvent: (event: SyncEvent) => void;
   openBrowser: (url: string) => Promise<void>;
   tokenCache: TokenCachePersistence | null;
+  appVersion?: string;
+}
+
+const MAX_APP_VERSION_LENGTH = 256;
+
+function normalizeAppVersion(raw: string | undefined): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > MAX_APP_VERSION_LENGTH) return undefined;
+  return trimmed;
+}
+
+let cachedPackageAppVersion: string | undefined | null = null;
+function readPackageAppVersion(): string | undefined {
+  if (cachedPackageAppVersion !== null) return cachedPackageAppVersion;
+  try {
+    const raw = fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    cachedPackageAppVersion =
+      typeof parsed.version === 'string' ? normalizeAppVersion(parsed.version) : undefined;
+  } catch {
+    cachedPackageAppVersion = undefined;
+  }
+  return cachedPackageAppVersion;
 }
 
 const ALLOWED_IMAGE_TYPES = new Set<string>(ALLOWED_IMAGE_MEDIA_TYPES);
@@ -180,8 +205,11 @@ export class AppCore {
   /** Per-thread tail of the persist chain — see `chainPersist`. */
   private readonly persistTails = new Map<string, Promise<void>>();
   private activeVerification: Promise<AuthVerificationResponse> | null = null;
+  private readonly appVersion: string | undefined;
 
   constructor(private readonly deps: AppCoreDeps) {
+    this.appVersion =
+      deps.appVersion !== undefined ? normalizeAppVersion(deps.appVersion) : readPackageAppVersion();
     this.settings = new SettingsStore(deps.userDataDir);
     // The allow-list and the bot-challenged-host list are maintained apart and can drift into a
     // combination that grants WebFetch nothing. That never surfaces at runtime — the calls just
@@ -665,6 +693,7 @@ export class AppCore {
       thinkingLevel: settings.defaultThinkingLevel,
       'thinking-level': settings.defaultThinkingLevel,
       client: 'desktop',
+      ...(this.appVersion ? { desktopVersion: this.appVersion } : {}),
     });
     const meta: ThreadMeta = {
       id: conversation.id,
@@ -675,7 +704,11 @@ export class AppCore {
       updatedAt: conversation.updatedAt ?? conversation.createdAt,
       totals: ThreadStore.emptyTotals(),
       syncState: 'synced',
-      remoteSettings: conversation.settings ? { ...conversation.settings } : undefined,
+      remoteSettings: conversation.settings
+        ? { ...conversation.settings }
+        : this.appVersion
+          ? { desktopVersion: this.appVersion }
+          : undefined,
     };
     this.threads.upsert(meta);
     return meta;

@@ -47,7 +47,7 @@ something goes wrong.
 
 ## Limits
 
-- **There is no automatic background update or background notification.** Updating means downloading a new release and installing it. The About pane allows manual version checking on demand, but nothing silently checks in the background or tells the team which versions are in the field.
+- **There is no automatic background update or background notification.** Updating means downloading a new release and installing it. The About pane allows manual version checking on demand, but nothing silently checks in the background; only new conversations record the desktop version that created them.
 - **Version comparison requires a three-part numeric semantic version (MAJOR.MINOR.PATCH).** An optional leading v or V is ignored. Release tags with missing or extra version segments, non-numeric parts, or unparseable formats are treated as invalid updates rather than compared. Prerelease and build suffixes (such as -beta or +build) are stripped before comparison and do not participate in precedence ordering.
 - **The release build does not run the tests.** The type check and the tests run on every push, and the
   local release command runs them again — but the workflow the tag triggers depends on neither, so a

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import { SyncApiError } from '../src/main/sync/SyncClient';
+import { SyncApiError, type ConversationDto } from '../src/main/sync/SyncClient';
 import type { McpPromptInfo, OrchestratorRunPayload, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
 import * as logger from '../src/main/log';
@@ -2628,5 +2628,322 @@ describe('AppCore - Playbook Versioning (Sync, Rehydration, and Orchestrator Run
 
     await appCore.sendMessage({ threadId: threadUnloaded, text: 'Turn 3 plain' });
     expect(readSpy).toHaveBeenCalledTimes(1); // 0 additional calls
+  });
+});
+
+describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () => {
+  let tmpDir: string;
+  const activeCores: AppCore[] = [];
+
+  function makeCore(appVersion?: string): AppCore {
+    const core = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+      ...(appVersion !== undefined ? { appVersion } : {}),
+    });
+    activeCores.push(core);
+    return core;
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-desktop-version-test-'));
+  });
+
+  afterEach(async () => {
+    while (activeCores.length > 0) {
+      const core = activeCores.pop()!;
+      await core.drain();
+      core.dispose();
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('stamps desktopVersion from package.json fallback when appVersion is omitted and preserves trimmed appVersion verbatim (including v/V prefixes and 256-char boundary)', async () => {
+    // 1. Default fallback to package.json version when appVersion is omitted
+    const defaultCore = makeCore();
+    const defaultSettings = defaultCore.settings.get();
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'),
+    ) as { version: string };
+    const createSpyDefault = vi.spyOn(defaultCore.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-default-ver',
+      title: 'Default Ver',
+      createdAt: '2026-11-01T10:00:00.000Z',
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      settings: {
+        model: defaultSettings.defaultModel,
+        'thinking-level': defaultSettings.defaultThinkingLevel,
+        client: 'desktop',
+        desktopVersion: pkg.version,
+      },
+    });
+
+    await defaultCore.createThread();
+    expect(createSpyDefault).toHaveBeenCalledWith(null, {
+      model: defaultSettings.defaultModel,
+      thinkingLevel: defaultSettings.defaultThinkingLevel,
+      'thinking-level': defaultSettings.defaultThinkingLevel,
+      client: 'desktop',
+      desktopVersion: pkg.version,
+    });
+
+    // 2. Preserves trimmed appVersion verbatim (no leading 'v'/'V' stripping) up to 256 trimmed chars
+    const verbatimCases: Array<{ raw: string; expected: string }> = [
+      { raw: '1.3.1', expected: '1.3.1' },
+      { raw: ' 1.3.1 ', expected: '1.3.1' },
+      { raw: 'v1.3.1', expected: 'v1.3.1' },
+      { raw: ' V1.3.1 ', expected: 'V1.3.1' },
+      { raw: 'Version 1.3.1', expected: 'Version 1.3.1' },
+      { raw: 'v', expected: 'v' },
+      { raw: '  ' + '1'.repeat(256) + '\t', expected: '1'.repeat(256) },
+    ];
+    for (let idx = 0; idx < verbatimCases.length; idx++) {
+      const { raw, expected } = verbatimCases[idx];
+      const core = makeCore(raw);
+      const spy = vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: `t-verbatim-${idx}`,
+        title: 'Verbatim',
+        createdAt: '2026-11-01T10:00:00.000Z',
+        updatedAt: '2026-11-01T10:00:00.000Z',
+      } as unknown as ConversationDto);
+      const created = await core.createThread();
+      expect(spy).toHaveBeenCalledWith(
+        null,
+        expect.objectContaining({
+          desktopVersion: expected,
+        }),
+      );
+      expect(created.remoteSettings).toEqual({ desktopVersion: expected });
+    }
+  });
+
+  it('omits desktopVersion on createThread and patchThread and sets remoteSettings to undefined when appVersion is blank, non-string, or > 256 trimmed chars', async () => {
+    const omittedInputs: string[] = [
+      '',
+      '   ',
+      '\t\n',
+      123 as unknown as string,
+      '1'.repeat(257),
+      ' ' + '1'.repeat(257) + ' ',
+    ];
+    for (let idx = 0; idx < omittedInputs.length; idx++) {
+      const core = makeCore(omittedInputs[idx]);
+      const createSpy = vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: `t-omitted-${idx}`,
+        title: 'Omitted Ver',
+        createdAt: '2026-11-01T10:00:00.000Z',
+        updatedAt: '2026-11-01T10:00:00.000Z',
+      } as unknown as ConversationDto);
+      const updateSpy = vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+      const created = await core.createThread();
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      const sentSettings = createSpy.mock.calls[0][1] as Record<string, unknown>;
+      expect('desktopVersion' in sentSettings).toBe(false);
+      expect(created.remoteSettings).toBeUndefined();
+
+      core.patchThread(created.id, { title: 'Renamed' });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      const patchedSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+      expect('desktopVersion' in patchedSettings).toBe(false);
+    }
+  });
+
+  it('createThread -> patchThread round-trip retains desktopVersion whether server omits or echoes settings', async () => {
+    const core = makeCore('1.3.1');
+    const updateSpy = vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // Case A: Server response omits settings (e.g. minimal mock) -> seeds remoteSettings: { desktopVersion: '1.3.1' }
+    vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-no-echo',
+      title: 'New Conversation',
+      createdAt: '2026-11-01T10:00:00.000Z',
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      settings: undefined,
+    } as unknown as ConversationDto);
+
+    const createdNoEcho = await core.createThread();
+    expect(createdNoEcho.remoteSettings).toEqual({ desktopVersion: '1.3.1' });
+
+    core.patchThread(createdNoEcho.id, { title: 'Renamed' });
+    expect(updateSpy).toHaveBeenLastCalledWith(
+      't-no-echo',
+      'Renamed',
+      expect.objectContaining({
+        desktopVersion: '1.3.1',
+        client: 'desktop',
+      }),
+    );
+
+    // Case B: Server response echoes settings -> copies authoritative server settings
+    vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-echoed',
+      title: 'New Conversation',
+      createdAt: '2026-11-01T10:00:00.000Z',
+      updatedAt: '2026-11-01T10:00:00.000Z',
+      settings: {
+        model: 'sonnet',
+        'thinking-level': 'medium',
+        client: 'desktop',
+        desktopVersion: '1.3.1',
+        'chat-prompt': 'corp-default',
+      },
+    });
+
+    const createdEchoed = await core.createThread();
+    expect(createdEchoed.remoteSettings).toEqual({
+      model: 'sonnet',
+      'thinking-level': 'medium',
+      client: 'desktop',
+      desktopVersion: '1.3.1',
+      'chat-prompt': 'corp-default',
+    });
+
+    core.patchThread(createdEchoed.id, { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenLastCalledWith(
+      't-echoed',
+      undefined,
+      expect.objectContaining({
+        desktopVersion: '1.3.1',
+        'chat-prompt': 'corp-default',
+        'thinking-level': 'high',
+      }),
+    );
+  });
+
+  it('preserves original creation desktopVersion across app upgrades in patchThread and listThreads repair, and keeps legacy threads unversioned', async () => {
+    const core = makeCore('1.3.1');
+    const updateSpy = vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // 1. Existing thread created on 1.2.0: patchThread on 1.3.1 preserves 1.2.0 (never overwrites with 1.3.1)
+    core.threads.upsert({
+      id: 't-created-120',
+      title: 'Created on 1.2.0',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-01T10:00:00.000Z',
+      updatedAt: '2026-10-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      remoteSettings: { desktopVersion: '1.2.0', customFlag: true },
+    });
+
+    core.patchThread('t-created-120', { model: 'opus' });
+    expect(updateSpy).toHaveBeenLastCalledWith('t-created-120', undefined, {
+      desktopVersion: '1.2.0',
+      customFlag: true,
+      model: 'opus',
+      thinkingLevel: 'medium',
+      'thinking-level': 'medium',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 2. listThreads() profile repair on thread with remote settings { desktopVersion: '1.2.0' } preserves 1.2.0
+    updateSpy.mockClear();
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-created-120',
+        title: 'Created on 1.2.0',
+        createdAt: '2026-10-01T10:00:00.000Z',
+        updatedAt: '2026-10-01T10:05:00.000Z',
+        settings: {
+          desktopVersion: '1.2.0',
+          model: 'opus',
+          'thinking-level': 'medium',
+          // missing orchestrator-profile triggers repair
+        },
+      },
+    ]);
+
+    await core.listThreads();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith('t-created-120', undefined, {
+      desktopVersion: '1.2.0',
+      model: 'opus',
+      thinkingLevel: 'medium',
+      'thinking-level': 'medium',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+
+    // 3. Legacy conversation without desktopVersion stays unversioned on both patchThread and listThreads repair
+    core.threads.upsert({
+      id: 't-legacy-unversioned',
+      title: 'Legacy Thread',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-09-01T10:00:00.000Z',
+      updatedAt: '2026-09-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      remoteSettings: { customFlag: true },
+    });
+
+    updateSpy.mockClear();
+    core.patchThread('t-legacy-unversioned', { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const patchedLegacySettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect('desktopVersion' in patchedLegacySettings).toBe(false);
+    expect(patchedLegacySettings).toMatchObject({
+      customFlag: true,
+      thinkingLevel: 'high',
+      'thinking-level': 'high',
+    });
+
+    updateSpy.mockClear();
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      {
+        id: 't-legacy-unversioned',
+        title: 'Legacy Thread',
+        createdAt: '2026-09-01T10:00:00.000Z',
+        updatedAt: '2026-09-01T10:05:00.000Z',
+        settings: {
+          customFlag: true,
+          model: 'sonnet',
+          // missing orchestrator-profile triggers repair
+        },
+      },
+    ]);
+
+    await core.listThreads();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const repairedLegacySettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect('desktopVersion' in repairedLegacySettings).toBe(false);
+    expect(repairedLegacySettings).toMatchObject({
+      customFlag: true,
+      'orchestrator-profile': 'OIM',
+    });
+
+    // 4. Local legacy conversation with remoteSettings: undefined stays unversioned on patchThread
+    core.threads.upsert({
+      id: 't-legacy-no-remote-settings',
+      title: 'Legacy Without Remote Settings',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      remoteSettings: undefined,
+    });
+
+    updateSpy.mockClear();
+    const patchedNoRemote = core.patchThread('t-legacy-no-remote-settings', { thinkingLevel: 'high' });
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const patchedNoRemoteSettings = updateSpy.mock.calls[0][2] as Record<string, unknown>;
+    expect('desktopVersion' in patchedNoRemoteSettings).toBe(false);
+    expect('desktopVersion' in (patchedNoRemote?.remoteSettings ?? {})).toBe(false);
+    expect('desktopVersion' in (core.threads.get('t-legacy-no-remote-settings')?.remoteSettings ?? {})).toBe(false);
   });
 });

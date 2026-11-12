@@ -15,7 +15,7 @@ desktop usage.
 | **Write conversations** | Conversations are created, retitled, re-settinged and deleted through the conversation API, and each finished turn is appended to it (including the active playbook name and version number on both user and assistant messages in single-agent turns). |
 | **Write ratings** | A thumb and its comment are stored against the server's id for that answer, so they appear in the web app's feedback screens and counts. |
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
-| **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop, which is what lets the web sidebar and the admin conversation register tell them apart. |
+| **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop and the desktop version that created them, which is what lets the web sidebar mark them as desktop conversations and lets the conversation header and the admin conversation register show which desktop version started each one. |
 | **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together alongside any existing server-side conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
 
 ## How it behaves
@@ -35,6 +35,12 @@ desktop usage.
   (ignoring blank names, invalid version numbers, or version numbers without a playbook name) and locks
   the conversation's playbook from the restored transcript. Multi-agent messages carry neither on the
   messages themselves and instead report the playbook name and version number on each uploaded trace step.
+- **Creating a conversation records the desktop version that created it, and later settings updates preserve that creation version.**
+  When a new conversation is created, the app records its own version verbatim (trimming only surrounding
+  whitespace, and omitting non-text, blank, or over-256-character values) alongside the initial conversation
+  settings. Updating a conversation's settings later — including from a newer desktop release — preserves
+  the version recorded when the conversation was created rather than overwriting it, and older
+  conversations that were created before version recording was introduced remain unversioned.
 - **Conversation settings updates preserve existing server settings, adopt remote profile changes on unstarted conversations, and repair diverged server profiles on refresh.**
   Whenever a conversation's model, thinking level, or multi-agent profile changes, the app merges its
   settings with the conversation's latest server settings so that updating one setting on the desktop
@@ -55,9 +61,10 @@ desktop usage.
   web one.
 - **No tool result is ever stored.** The server holds which tools ran and what they were asked, never
   what they returned — so a desktop answer cannot be audited from the server the way a web answer can.
-- **The app tells the server nothing about itself.** No version, no platform, no build. A report about
-  a desktop answer cannot be tied from the server's side to the build that produced it; the version is
-  visible only in the app's own sidebar and About pane.
+- **Beyond the desktop version recorded when a conversation is created, the app tells the server nothing about the client machine.**
+  No operating system, no platform, no hardware details, and no per-message version are sent; a
+  conversation continued after an app upgrade still carries only the version that originally created it,
+  and older conversations created before version recording was introduced carry no version at all.
 - **Searches from this app are not rate-limited by anything.** The web app's per-user cap does not
   cover this route.
 - **A dropped turn drops its trace.** If the server rejects a turn as invalid, the multi-agent trace

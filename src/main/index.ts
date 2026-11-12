@@ -317,6 +317,7 @@ if (!gotLock) {
     );
     core = new AppCore({
       userDataDir,
+      appVersion: app.getVersion(),
       emitAgentEvent: (event) => send(IpcChannels.agentEvent, event),
       emitSyncEvent: (event) => send(IpcChannels.syncEvent, event),
       openBrowser: (url) => openExternalSafe(url),

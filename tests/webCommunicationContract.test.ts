@@ -22,6 +22,23 @@ interface InMemoryWebServer {
   fetchFn: typeof fetch;
 }
 
+function validateServerSettings(settings: Record<string, unknown> | undefined): Response | null {
+  if (
+    settings &&
+    'desktopVersion' in settings &&
+    settings.desktopVersion !== null &&
+    settings.desktopVersion !== undefined
+  ) {
+    if (typeof settings.desktopVersion !== 'string') {
+      return new Response('Invalid desktopVersion: expected string', { status: 400 });
+    }
+    if (settings.desktopVersion.trim().length > 256) {
+      return new Response('Invalid desktopVersion: exceeds 256 characters', { status: 400 });
+    }
+  }
+  return null;
+}
+
 function normalizeServerSettings(raw: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!raw) return {};
   const mapped: Record<string, unknown> = {};
@@ -79,6 +96,8 @@ function createInMemoryYvokeWebServer(): InMemoryWebServer {
 
       // POST /conversations
       if (method === 'POST' && p === '/conversations') {
+        const invalid = validateServerSettings(body?.settings);
+        if (invalid) return invalid;
         const id = `conv-${seq++}`;
         const now = new Date().toISOString();
         const conv: ConversationDto = {
@@ -98,6 +117,10 @@ function createInMemoryYvokeWebServer(): InMemoryWebServer {
       if (convMatch && method === 'PATCH') {
         const conv = conversations.get(convMatch[1]);
         if (!conv) return new Response('Conversation not found', { status: 404 });
+        if (body && body.settings !== undefined) {
+          const invalid = validateServerSettings(body.settings);
+          if (invalid) return invalid;
+        }
         if (body && 'title' in body && body.title !== undefined) {
           conv.title = body.title ?? '';
         }
@@ -248,13 +271,14 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
   let appCore1: AppCore;
   let appCore2: AppCore | null = null;
 
-  function wireAppCore(userDataDir: string): AppCore {
+  function wireAppCore(userDataDir: string, appVersion?: string): AppCore {
     const core = new AppCore({
       userDataDir,
       emitAgentEvent: vi.fn(),
       emitSyncEvent: vi.fn(),
       openBrowser: vi.fn().mockResolvedValue(undefined),
       tokenCache: null,
+      ...(appVersion !== undefined ? { appVersion } : {}),
     });
     // Route SyncClient through the in-memory yvoke-web server harness
     (core.syncClient as any).fetchFn = server.fetchFn;
@@ -595,5 +619,97 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     }
     expect(server.runs).toHaveLength(2);
     expect((appCore1 as any).failedRuns).toHaveLength(0);
+  });
+
+  it('Scenario D: Two-Version Desktop Lifecycle Preserves Verbatim Creation desktopVersion Across App Upgrades', async () => {
+    await appCore1.drain();
+    appCore1.dispose();
+    appCore1 = wireAppCore(tmpDir1, 'v1.2.0');
+
+    // appCore1 ('v1.2.0') creates a conversation on the server — 'v1.2.0' is preserved verbatim
+    const created = await appCore1.createThread();
+    expect(server.conversations.get(created.id)?.settings).toMatchObject({
+      client: 'desktop',
+      desktopVersion: 'v1.2.0',
+    });
+
+    // Seed a pre-existing unversioned desktop conversation directly on the server
+    const legacyId = 'conv-legacy-unversioned';
+    server.conversations.set(legacyId, {
+      id: legacyId,
+      title: 'Legacy Desktop Conversation',
+      settings: { model: 'sonnet', 'thinking-level': 'medium' },
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+    });
+    server.messagesByConv.set(legacyId, []);
+
+    // appCore2 (upgraded '1.3.1') syncs threads from the server and patches thinkingLevel
+    appCore2 = wireAppCore(tmpDir2, '1.3.1');
+    const updateSpy = vi.spyOn(appCore2.syncClient, 'updateConversation');
+
+    const listRes = await appCore2.listThreads();
+    expect(listRes.serverReachable).toBe(true);
+    expect(appCore2.threads.get(created.id)?.remoteSettings).toMatchObject({
+      desktopVersion: 'v1.2.0',
+    });
+    expect('desktopVersion' in (appCore2.threads.get(legacyId)?.remoteSettings ?? {})).toBe(false);
+
+    appCore2.patchThread(created.id, { thinkingLevel: 'high' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).toHaveBeenCalledWith(
+      created.id,
+      undefined,
+      expect.objectContaining({
+        desktopVersion: 'v1.2.0',
+        thinkingLevel: 'high',
+        'thinking-level': 'high',
+        client: 'desktop',
+      }),
+    );
+    expect(server.conversations.get(created.id)?.settings).toMatchObject({
+      desktopVersion: 'v1.2.0',
+      'thinking-level': 'high',
+      client: 'desktop',
+    });
+
+    // Patching the pre-existing unversioned conversation on upgraded appCore2 keeps it unversioned
+    updateSpy.mockClear();
+    appCore2.patchThread(legacyId, { thinkingLevel: 'high' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect('desktopVersion' in server.conversations.get(legacyId)!.settings).toBe(false);
+    expect('desktopVersion' in (appCore2.threads.get(legacyId)?.remoteSettings ?? {})).toBe(false);
+    expect(server.conversations.get(legacyId)?.settings).toMatchObject({
+      'thinking-level': 'high',
+      client: 'desktop',
+    });
+  });
+
+  it('Scenario E: Over-Limit (> 256 chars) appVersion Omits desktopVersion Against 400-Enforcing Server', async () => {
+    // Sanity-check the 400-enforcing mock server rejects raw > 256-char and non-string desktopVersion
+    await expect(
+      appCore1.syncClient.createConversation(null, { desktopVersion: '1'.repeat(257) }),
+    ).rejects.toThrow(/400/);
+    await expect(
+      appCore1.syncClient.createConversation(null, { desktopVersion: 123 as unknown as string }),
+    ).rejects.toThrow(/400/);
+
+    await appCore1.drain();
+    appCore1.dispose();
+    appCore1 = wireAppCore(tmpDir1, '1'.repeat(257));
+
+    const created = await appCore1.createThread();
+    const srvSettings = server.conversations.get(created.id)!.settings;
+    expect('desktopVersion' in srvSettings).toBe(false);
+    expect('desktopVersion' in (created.remoteSettings ?? {})).toBe(false);
+
+    appCore1.patchThread(created.id, { title: 'Renamed' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(server.conversations.get(created.id)!.title).toBe('Renamed');
+    expect('desktopVersion' in server.conversations.get(created.id)!.settings).toBe(false);
   });
 });
