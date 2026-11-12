@@ -4,8 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
-import { SyncApiError, type ConversationDto } from '../src/main/sync/SyncClient';
-import type { McpPromptInfo, OrchestratorRunPayload, ThreadMeta } from '../src/shared/types';
+import { SyncApiError, type ConversationDto, type MessageDto } from '../src/main/sync/SyncClient';
+import type { ChatMessage, McpPromptInfo, OrchestratorRunPayload, SyncEvent, ThreadMeta } from '../src/shared/types';
 import * as PlaybookValidator from '../src/main/agent/PlaybookValidator';
 import * as logger from '../src/main/log';
 import { DEFAULT_SETTINGS } from '../src/main/settings/Settings';
@@ -2717,11 +2717,11 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
           desktopVersion: expected,
         }),
       );
-      expect(created.remoteSettings).toEqual({ desktopVersion: expected });
+      expect(created.remoteSettings).toEqual({ client: 'desktop', desktopVersion: expected });
     }
   });
 
-  it('omits desktopVersion on createThread and patchThread and sets remoteSettings to undefined when appVersion is blank, non-string, or > 256 trimmed chars', async () => {
+  it('omits desktopVersion on createThread and patchThread and seeds fallback remoteSettings with client: desktop when appVersion is blank, non-string, or > 256 trimmed chars', async () => {
     const omittedInputs: string[] = [
       '',
       '   ',
@@ -2744,7 +2744,7 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
       expect(createSpy).toHaveBeenCalledTimes(1);
       const sentSettings = createSpy.mock.calls[0][1] as Record<string, unknown>;
       expect('desktopVersion' in sentSettings).toBe(false);
-      expect(created.remoteSettings).toBeUndefined();
+      expect(created.remoteSettings).toEqual({ client: 'desktop' });
 
       core.patchThread(created.id, { title: 'Renamed' });
       expect(updateSpy).toHaveBeenCalledTimes(1);
@@ -2757,7 +2757,7 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
     const core = makeCore('1.3.1');
     const updateSpy = vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
 
-    // Case A: Server response omits settings (e.g. minimal mock) -> seeds remoteSettings: { desktopVersion: '1.3.1' }
+    // Case A: Server response omits settings (e.g. minimal mock) -> seeds remoteSettings: { client: 'desktop', desktopVersion: '1.3.1' }
     vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
       id: 't-no-echo',
       title: 'New Conversation',
@@ -2767,7 +2767,7 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
     } as unknown as ConversationDto);
 
     const createdNoEcho = await core.createThread();
-    expect(createdNoEcho.remoteSettings).toEqual({ desktopVersion: '1.3.1' });
+    expect(createdNoEcho.remoteSettings).toEqual({ client: 'desktop', desktopVersion: '1.3.1' });
 
     core.patchThread(createdNoEcho.id, { title: 'Renamed' });
     expect(updateSpy).toHaveBeenLastCalledWith(
@@ -2945,5 +2945,1794 @@ describe('AppCore - Creation-Time desktopVersion Stamping & Preservation', () =>
     expect('desktopVersion' in patchedNoRemoteSettings).toBe(false);
     expect('desktopVersion' in (patchedNoRemote?.remoteSettings ?? {})).toBe(false);
     expect('desktopVersion' in (core.threads.get('t-legacy-no-remote-settings')?.remoteSettings ?? {})).toBe(false);
+  });
+});
+
+describe('Wave 2: Startup Conversation & Message Sync Recovery', () => {
+  let tmpDir: string;
+  const activeCores: AppCore[] = [];
+
+  function makeCore(opts?: {
+    dir?: string;
+    appVersion?: string;
+    onSyncEvent?: (event: SyncEvent) => void;
+  }): { core: AppCore; syncEvents: SyncEvent[] } {
+    const syncEvents: SyncEvent[] = [];
+    const core = new AppCore({
+      userDataDir: opts?.dir ?? tmpDir,
+      appVersion: opts?.appVersion ?? '1.3.1',
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: (ev) => {
+        syncEvents.push(ev);
+        opts?.onSyncEvent?.(ev);
+      },
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+    activeCores.push(core);
+    return { core, syncEvents };
+  }
+
+  function makeThreadMeta(overrides: Partial<ThreadMeta> & { id: string }): ThreadMeta {
+    return {
+      title: 'New Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-10-01T10:00:00.000Z',
+      updatedAt: '2026-10-01T10:00:00.000Z',
+      totals: ThreadStore.emptyTotals(),
+      syncState: 'synced',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-wave2-test-'));
+  });
+
+  afterEach(async () => {
+    while (activeCores.length > 0) {
+      const core = activeCores.pop()!;
+      await core.drain();
+      core.dispose();
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('performs zero network calls in new AppCore(), holds ONLY startup thread IDs, and hydrates offline pendingSyncCount without double-counting', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    // 1. Seed t-queued in both sync-queue.json AND t-queued.jsonl (must count as 1, not 2!)
+    fs.writeFileSync(
+      path.join(tmpDir, 'sync-queue.json'),
+      JSON.stringify([
+        {
+          threadId: 't-queued',
+          localIds: ['q-u1', 'q-a1'],
+          messages: [
+            { role: 'user', content: 'Queued question' },
+            { role: 'assistant', content: 'Queued answer' },
+          ],
+          enqueuedAt: '2026-10-10T10:00:05.000Z',
+          attempts: 0,
+        },
+      ]),
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 't-queued.jsonl'),
+      [
+        JSON.stringify({ localId: 'q-u1', role: 'user', content: 'Queued question', createdAt: '2026-10-10T10:00:00.000Z' }),
+        JSON.stringify({ localId: 'q-a1', role: 'assistant', content: 'Queued answer', createdAt: '2026-10-10T10:00:05.000Z' }),
+      ].join('\n') + '\n',
+    );
+
+    // 2. Seed orphan t-orphan-unsynced.jsonl (absent from index.json and sync-queue.json: 1 pair + 1 singleton = 2 unqueued turns)
+    fs.writeFileSync(
+      path.join(threadsDir, 't-orphan-unsynced.jsonl'),
+      [
+        JSON.stringify({
+          localId: 'o-u0',
+          serverId: 'srv-0u',
+          role: 'user',
+          content: 'Synced turn',
+          playbook: 'oim-schema',
+          createdAt: '2026-10-10T09:00:00.000Z',
+        }),
+        JSON.stringify({
+          localId: 'o-a0',
+          serverId: 'srv-0a',
+          role: 'assistant',
+          content: 'Synced reply',
+          createdAt: '2026-10-10T09:00:05.000Z',
+        }),
+        JSON.stringify({
+          localId: 'o-u1',
+          role: 'user',
+          content: 'Unsynced pair user',
+          createdAt: '2026-10-10T09:05:00.000Z',
+        }),
+        JSON.stringify({
+          localId: 'o-a1',
+          role: 'assistant',
+          content: 'Unsynced pair assistant',
+          createdAt: '2026-10-10T09:05:05.000Z',
+        }),
+        JSON.stringify({
+          localId: 'o-u2',
+          role: 'user',
+          content: 'Unsynced singleton user',
+          createdAt: '2026-10-10T09:06:00.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { core } = makeCore();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Scoped startup hold: t-queued and t-orphan-unsynced ARE held; arbitrary non-startup IDs are NOT held
+    expect(core.syncQueue.isHeld('t-queued')).toBe(true);
+    expect(core.syncQueue.isHeld('t-orphan-unsynced')).toBe(true);
+    expect(core.syncQueue.isHeld('brand-new-id')).toBe(false);
+
+    // Offline / signed-out Entra startup: listConversations rejects
+    vi.spyOn(core.syncClient, 'listConversations').mockRejectedValueOnce(new Error('Entra: Sign-in required'));
+    const offlineRes = await core.listThreads();
+    expect(offlineRes.serverReachable).toBe(false);
+    expect(offlineRes.pendingSyncCount).toBe(3); // 1 queued + 2 unqueued (zero double-counting!)
+    expect(offlineRes.threads.map((t) => t.id)).toEqual(
+      expect.arrayContaining(['t-queued', 't-orphan-unsynced']),
+    );
+    expect(core.threads.get('t-orphan-unsynced')?.initialPlaybook).toBe('oim-schema');
+
+    // Newly created thread via createThread() is never held
+    vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 't-fresh',
+      title: 'New Conversation',
+      createdAt: '2026-10-11T10:00:00.000Z',
+      updatedAt: '2026-10-11T10:00:00.000Z',
+      settings: { client: 'desktop' },
+    });
+    const created = await core.createThread();
+    expect(core.syncQueue.isHeld(created.id)).toBe(false);
+  });
+
+  it('steady-state startup with 200 clean synced conversations makes 0 GET /messages calls, skips image blob hydration, and unholds immediately', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    const indexMap: Record<string, ThreadMeta> = {};
+    const remoteList: ConversationDto[] = [];
+
+    for (let i = 1; i <= 200; i += 1) {
+      const id = `clean-${i}`;
+      const meta = makeThreadMeta({
+        id,
+        title: `Clean Topic ${i}`,
+        hasStarted: true,
+        remoteSettings: { client: 'desktop' },
+      });
+      indexMap[id] = meta;
+      remoteList.push({
+        id,
+        title: `Clean Topic ${i}`,
+        createdAt: meta.createdAt,
+        updatedAt: meta.updatedAt,
+        settings: { client: 'desktop' },
+      });
+      // Write synced .jsonl referencing a non-existent blob file to prove zero image blob reads!
+      fs.writeFileSync(
+        path.join(threadsDir, `${id}.jsonl`),
+        [
+          JSON.stringify({
+            localId: `${id}-u1`,
+            serverId: `srv-${id}-u1`,
+            role: 'user',
+            content: `Question ${i}`,
+            images: [{ id: 'img1', mediaType: 'image/png', name: 'missing.png', file: 'nonexistent.png' }],
+            createdAt: meta.createdAt,
+          }),
+          JSON.stringify({
+            localId: `${id}-a1`,
+            serverId: `srv-${id}-a1`,
+            role: 'assistant',
+            content: `Answer ${i}`,
+            createdAt: meta.updatedAt,
+          }),
+        ].join('\n') + '\n',
+      );
+    }
+    fs.writeFileSync(path.join(threadsDir, 'index.json'), JSON.stringify(indexMap));
+
+    const { core } = makeCore();
+    expect(core.syncQueue.isHeld('clean-1')).toBe(true);
+    expect(core.syncQueue.isHeld('clean-200')).toBe(true);
+
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce(remoteList);
+    const getMsgsSpy = vi.spyOn(core.syncClient, 'getMessages');
+    const getAllMsgsSpy = vi.spyOn(core.syncClient, 'getAllMessages');
+
+    const res = await core.listThreads();
+    await core.waitForStartupTasks();
+
+    expect(res.serverReachable).toBe(true);
+    expect(res.pendingSyncCount).toBe(0);
+    expect(res.threads).toHaveLength(200);
+    expect(getMsgsSpy).not.toHaveBeenCalled();
+    expect(getAllMsgsSpy).not.toHaveBeenCalled();
+    expect(core.syncQueue.isHeld('clean-1')).toBe(false);
+    expect(core.syncQueue.isHeld('clean-200')).toBe(false);
+  });
+
+  it('deduplicates pre-crash committed turns on 200 OK and backfills trailing unsynced .jsonl turns alongside ratings and multi-agent traces', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    const dedupMeta = makeThreadMeta({ id: 't-dedup', title: 'Dedup Topic', hasStarted: true });
+    const backfillMeta = makeThreadMeta({
+      id: 't-backfill',
+      title: 'Backfill Orch Topic',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+    });
+    fs.writeFileSync(
+      path.join(threadsDir, 'index.json'),
+      JSON.stringify({ 't-dedup': dedupMeta, 't-backfill': backfillMeta }),
+    );
+
+    // t-dedup: [d-u1, d-a1] in .jsonl without serverId AND in sync-queue.json, already committed on server
+    fs.writeFileSync(
+      path.join(threadsDir, 't-dedup.jsonl'),
+      [
+        JSON.stringify({ localId: 'd-u1', role: 'user', content: 'Pre-crash Q', createdAt: '2026-10-10T10:00:00.000Z' }),
+        JSON.stringify({ localId: 'd-a1', role: 'assistant', content: 'Pre-crash A', createdAt: '2026-10-10T10:00:05.000Z' }),
+      ].join('\n') + '\n',
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, 'sync-queue.json'),
+      JSON.stringify([
+        {
+          threadId: 't-dedup',
+          localIds: ['d-u1', 'd-a1'],
+          messages: [
+            { role: 'user', content: 'Pre-crash Q' },
+            { role: 'assistant', content: 'Pre-crash A' },
+          ],
+          enqueuedAt: '2026-10-10T10:00:05.000Z',
+          attempts: 0,
+        },
+      ]),
+    );
+
+    // t-backfill: synced [b-u0, b-a0] + trailing unsynced [b-u1, b-a1] with rating & Agent delegation
+    fs.writeFileSync(
+      path.join(threadsDir, 't-backfill.jsonl'),
+      [
+        JSON.stringify({ localId: 'b-u0', serverId: 'srv-b0u', role: 'user', content: 'Synced Q0', createdAt: '2026-10-10T09:00:00.000Z' }),
+        JSON.stringify({ localId: 'b-a0', serverId: 'srv-b0a', role: 'assistant', content: 'Synced A0', createdAt: '2026-10-10T09:00:05.000Z' }),
+        JSON.stringify({ localId: 'b-u1', role: 'user', content: 'Trailing Q1', createdAt: '2026-10-10T09:10:00.000Z' }),
+        JSON.stringify({
+          localId: 'b-a1',
+          role: 'assistant',
+          content: 'Trailing A1',
+          feedback: { rating: 1, comment: 'Spot on' },
+          toolCalls: [
+            {
+              id: 'tc-agent-1',
+              name: 'Agent',
+              subagentType: 'oim-access-governance',
+              input: { prompt: 'Investigate Q1' },
+              result: 'Specialist result',
+            },
+          ],
+          createdAt: '2026-10-10T09:10:10.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const { core } = makeCore();
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      { id: 't-dedup', title: 'Dedup Topic', createdAt: dedupMeta.createdAt, updatedAt: dedupMeta.updatedAt, settings: {} },
+      { id: 't-backfill', title: 'Backfill Orch Topic', createdAt: backfillMeta.createdAt, updatedAt: backfillMeta.updatedAt, settings: { 'orchestrator-profile': 'OIM' } },
+    ]);
+    vi.spyOn(core.syncClient, 'getOrchestratorProfiles').mockResolvedValue([
+      { name: 'OIM', orchestratorPlaybook: 'oim-orch', reviewerPlaybook: 'oim-rev', specialistPlaybooks: ['oim-access-governance'] },
+    ]);
+    vi.spyOn(core.mcpPrompts, 'list').mockResolvedValue([
+      { name: 'oim-orch', title: 'Orch', description: '', arguments: [], version: 2 },
+      { name: 'oim-access-governance', title: 'Spec', description: '', arguments: [], version: 5 },
+    ]);
+
+    vi.spyOn(core.syncClient, 'getAllMessages').mockImplementation(async (convId) => {
+      if (convId === 't-dedup') {
+        return {
+          truncated: false,
+          messages: [
+            {
+              id: 'srv-du1',
+              role: 'user',
+              content: 'Pre-crash Q',
+              playbook: null,
+              playbookVersion: null,
+              promptTokens: null,
+              completionTokens: null,
+              totalTokens: null,
+              cachedTokens: null,
+              thoughtTokens: null,
+              feedbackRating: null,
+              feedbackComment: null,
+              createdAt: '2026-10-10T10:00:00.000Z',
+            },
+            {
+              id: 'srv-da1',
+              role: 'assistant',
+              content: 'Pre-crash A',
+              playbook: null,
+              playbookVersion: null,
+              promptTokens: null,
+              completionTokens: null,
+              totalTokens: null,
+              cachedTokens: null,
+              thoughtTokens: null,
+              feedbackRating: null,
+              feedbackComment: null,
+              createdAt: '2026-10-10T10:00:05.000Z',
+            },
+          ],
+        };
+      }
+      return {
+        truncated: false,
+        messages: [
+          {
+            id: 'srv-b0u',
+            role: 'user',
+            content: 'Synced Q0',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T09:00:00.000Z',
+          },
+          {
+            id: 'srv-b0a',
+            role: 'assistant',
+            content: 'Synced A0',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T09:00:05.000Z',
+          },
+        ],
+      };
+    });
+
+    const appendSpy = vi.spyOn(core.syncClient, 'appendMessages').mockResolvedValue({
+      ids: ['srv-b1u', 'srv-b1a'],
+    });
+    const feedbackSpy = vi.spyOn(core.syncClient, 'submitFeedback').mockImplementation(async (messageId, rating, comment) => ({
+      messageId,
+      rating,
+      comment: comment ?? null,
+    }));
+    const runSpy = vi.spyOn(core.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'run-backfill-1' });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+    // Wait for async trace assembly / feedback promises triggered on handleServerIds
+    await vi.waitFor(() => {
+      expect(feedbackSpy).toHaveBeenCalledWith('srv-b1a', 1, 'Spot on');
+      expect(runSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // t-dedup did NOT append duplicate messages, and adopted serverIds locally
+    expect(appendSpy).toHaveBeenCalledTimes(1);
+    expect(appendSpy).toHaveBeenCalledWith(
+      't-backfill',
+      expect.arrayContaining([expect.objectContaining({ role: 'user', content: 'Trailing Q1' })]),
+    );
+    const dedupStored = await core.threads.readRawMessages('t-dedup');
+    expect(dedupStored.map((m) => m.serverId)).toEqual(['srv-du1', 'srv-da1']);
+    expect(core.syncQueue.pendingCount()).toBe(0);
+
+    const postedRun = runSpy.mock.calls[0][0];
+    expect(postedRun.conversationId).toBe('t-backfill');
+    expect(postedRun.messageId).toBe('srv-b1a');
+  });
+
+  it('preserves off-page #201+ conversation (200 OK) with transcript, SearchIndex hits, and sessionId while pruning unopened header-only entries', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    const offPageMeta = makeThreadMeta({
+      id: 't-201-cached',
+      title: 'Deep History Conversation',
+      sessionId: 'claude-sess-201',
+      hasStarted: true,
+    });
+    const headerOnlyMeta = makeThreadMeta({
+      id: 't-202-header-only',
+      title: 'Unopened Old Header',
+    });
+    fs.writeFileSync(
+      path.join(threadsDir, 'index.json'),
+      JSON.stringify({ 't-201-cached': offPageMeta, 't-202-header-only': headerOnlyMeta }),
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 't-201-cached.jsonl'),
+      [
+        JSON.stringify({
+          localId: 'm201-u',
+          serverId: 'srv-201-u',
+          role: 'user',
+          content: 'kerberos ticket delegation detail',
+          createdAt: '2026-06-01T10:00:00.000Z',
+        }),
+        JSON.stringify({
+          localId: 'm201-a',
+          serverId: 'srv-201-a',
+          role: 'assistant',
+          content: 'Configured via SPN constrained delegation.',
+          createdAt: '2026-06-01T10:00:05.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const { core } = makeCore();
+    await core.searchIndex.refresh();
+
+    // Server top-200 list omits both t-201-cached and t-202-header-only
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue([
+      { id: 't-top-1', title: 'Recent 1', createdAt: '2026-10-12T10:00:00.000Z', updatedAt: '2026-10-12T10:00:00.000Z', settings: {} },
+    ]);
+    const getAllMsgsSpy = vi.spyOn(core.syncClient, 'getAllMessages').mockResolvedValue({
+      truncated: false,
+      messages: [
+        {
+          id: 'srv-201-u',
+          role: 'user',
+          content: 'kerberos ticket delegation detail',
+          playbook: null,
+          playbookVersion: null,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          cachedTokens: null,
+          thoughtTokens: null,
+          feedbackRating: null,
+          feedbackComment: null,
+          createdAt: '2026-06-01T10:00:00.000Z',
+        },
+        {
+          id: 'srv-201-a',
+          role: 'assistant',
+          content: 'Configured via SPN constrained delegation.',
+          playbook: null,
+          playbookVersion: null,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          cachedTokens: null,
+          thoughtTokens: null,
+          feedbackRating: null,
+          feedbackComment: null,
+          createdAt: '2026-06-01T10:00:05.000Z',
+        },
+      ],
+    });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    // Unopened header-only thread pruned; #201+ cached thread preserved!
+    expect(core.threads.get('t-202-header-only')).toBeUndefined();
+    expect(core.threads.get('t-201-cached')?.sessionId).toBe('claude-sess-201');
+    expect(await core.threads.readMessages('t-201-cached')).toHaveLength(2);
+    expect((await core.searchThreads('kerberos')).map((h) => h.threadId)).toEqual(['t-201-cached']);
+    expect(getAllMsgsSpy).toHaveBeenCalledTimes(1);
+
+    // Second listThreads() does NOT re-probe verifiedOffPageThreads
+    await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(getAllMsgsSpy).toHaveBeenCalledTimes(1);
+    expect(core.threads.get('t-201-cached')?.sessionId).toBe('claude-sess-201');
+  });
+
+  it('always recreates missing 404 conversations (startup, mid-session, and runtime appendMessages 404), preserves/omits desktopVersion accurately, and resolves transitive oldId -> midId -> newId migrations', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    // Part A: Versioned orchestrator thread (v1.2.0) with placeholder title on upgraded 1.3.1 app
+    const oldOrch = makeThreadMeta({
+      id: 'old-orch',
+      title: 'New Conversation',
+      sessionId: 'warm-orch-sess',
+      sessionProfile: 'OIM',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      remoteSettings: { desktopVersion: 'v1.2.0', 'chat-prompt': 'corp-default', client: 'desktop' },
+    });
+    // Part B: Legacy unversioned thread (no desktopVersion) with custom title
+    const legacyOld = makeThreadMeta({
+      id: 'legacy-old',
+      title: 'OIM Sizing',
+      sessionId: 'warm-legacy-sess',
+      hasStarted: true,
+      remoteSettings: { customLegacyKey: 'yes' },
+    });
+    fs.writeFileSync(
+      path.join(threadsDir, 'index.json'),
+      JSON.stringify({ 'old-orch': oldOrch, 'legacy-old': legacyOld }),
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 'old-orch.jsonl'),
+      [
+        JSON.stringify({
+          localId: 'ou-1',
+          serverId: 'dead-srv-1',
+          role: 'user',
+          content: 'Analyze OIM roles',
+          createdAt: '2026-10-01T10:00:00.000Z',
+        }),
+        JSON.stringify({
+          localId: 'oa-1',
+          serverId: 'dead-srv-2',
+          role: 'assistant',
+          content: 'Role analysis complete.',
+          feedback: { rating: -1, comment: 'Needs more detail' },
+          toolCalls: [
+            { id: 'tc-1', name: 'Agent', subagentType: 'oim-access-governance', input: { prompt: 'roles' }, result: 'ok' },
+          ],
+          createdAt: '2026-10-01T10:00:10.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 'legacy-old.jsonl'),
+      [
+        JSON.stringify({
+          localId: 'lu-1',
+          serverId: 'dead-leg-1',
+          role: 'user',
+          content: 'Sizing question',
+          createdAt: '2026-09-01T10:00:00.000Z',
+        }),
+        JSON.stringify({
+          localId: 'la-1',
+          serverId: 'dead-leg-2',
+          role: 'assistant',
+          content: 'Sizing answer',
+          createdAt: '2026-09-01T10:00:05.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+
+    // Also seed a queue-only turn on old-orch (absent from old-orch.jsonl) to verify SearchIndex indexes extraMessages!
+    fs.writeFileSync(
+      path.join(tmpDir, 'sync-queue.json'),
+      JSON.stringify([
+        {
+          threadId: 'old-orch',
+          localIds: ['qo-u1', 'qo-a1'],
+          messages: [
+            { role: 'user', content: 'QueueOnlyUniqueTokenXyz question' },
+            { role: 'assistant', content: 'QueueOnlyUniqueTokenXyz answer' },
+          ],
+          enqueuedAt: '2026-10-01T10:01:00.000Z',
+          attempts: 0,
+        },
+      ]),
+    );
+
+    const { core, syncEvents } = makeCore({ appVersion: '1.3.1' });
+    await core.searchIndex.refresh();
+
+    const closeSpy = vi.spyOn(core.agent, 'closeThread');
+    vi.spyOn(core.syncClient, 'getOrchestratorProfiles').mockResolvedValue([
+      { name: 'OIM', orchestratorPlaybook: 'oim-orch', reviewerPlaybook: 'oim-rev', specialistPlaybooks: ['oim-access-governance'] },
+    ]);
+    vi.spyOn(core.mcpPrompts, 'list').mockResolvedValue([]);
+
+    // Startup: server knows neither old-orch nor legacy-old -> both return 404 on getAllMessages
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue([]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockRejectedValue(new SyncApiError(404, 'Yvoke Backend: 404 Not Found'));
+
+    let createSeq = 0;
+    const createIds = ['new-orch', 'mid-leg', 'final-leg'];
+    const createSpy = vi.spyOn(core.syncClient, 'createConversation').mockImplementation(async (title, settings) => {
+      const id = createIds[createSeq++] ?? `gen-${createSeq}`;
+      return {
+        id,
+        title: title ?? 'New Conversation',
+        createdAt: '2026-10-12T10:00:00.000Z',
+        updatedAt: '2026-10-12T10:00:00.000Z',
+        settings: { ...settings },
+      };
+    });
+
+    let appendSeq = 1;
+    vi.spyOn(core.syncClient, 'appendMessages').mockImplementation(async (convId, msgs) => {
+      // Simulate runtime 404 when sending a new turn onto mid-leg -> triggers chained mid-leg -> final-leg!
+      if (convId === 'mid-leg' && msgs.some((m) => m.content === 'Follow-up on migrated thread')) {
+        throw new SyncApiError(404, 'Yvoke Backend: 404 Not Found');
+      }
+      return { ids: msgs.map(() => `recreated-srv-${appendSeq++}`) };
+    });
+    const feedbackSpy = vi.spyOn(core.syncClient, 'submitFeedback').mockImplementation(async (messageId, rating, comment) => ({
+      messageId,
+      rating,
+      comment: comment ?? null,
+    }));
+    const runSpy = vi.spyOn(core.syncClient, 'recordOrchestratorRun').mockResolvedValue({ id: 'rec-run-1' });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    await vi.waitFor(() => {
+      expect(feedbackSpy).toHaveBeenCalledTimes(1);
+      expect(runSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Verify Part A (old-orch -> new-orch): placeholder title normalized to null, v1.2.0 preserved (NOT 1.3.1!)
+    const orchCreateCall = createSpy.mock.calls.find((c) => c[0] === null)!;
+    expect(orchCreateCall).toBeDefined();
+    expect(orchCreateCall[1]).toMatchObject({
+      desktopVersion: 'v1.2.0',
+      'chat-prompt': 'corp-default',
+      'orchestrator-profile': 'OIM',
+      client: 'desktop',
+    });
+    expect(closeSpy).toHaveBeenCalledWith('old-orch');
+    expect(core.threads.get('old-orch')).toBeUndefined();
+    expect(core.threads.get('new-orch')?.sessionId).toBe('warm-orch-sess');
+    expect((await core.searchThreads('Analyze')).map((h) => h.threadId)).toEqual(['new-orch']);
+    // Queue-only extraMessages are searchable BOTH immediately after 404 migration AND after a SearchIndex refresh sweep!
+    expect((await core.searchThreads('QueueOnlyUniqueTokenXyz')).map((h) => h.threadId)).toEqual(['new-orch']);
+    await core.searchIndex.refresh();
+    expect((await core.searchThreads('QueueOnlyUniqueTokenXyz')).map((h) => h.threadId)).toEqual(['new-orch']);
+    expect(syncEvents.some((e) => e.kind === 'thread-migrated' && e.oldThreadId === 'old-orch' && e.thread.id === 'new-orch')).toBe(true);
+
+    // Verify Part B (legacy-old -> mid-leg): custom title 'OIM Sizing' kept, desktopVersion OMITTED (never stamped with 1.3.1!)
+    const legCreateCall = createSpy.mock.calls.find((c) => c[0] === 'OIM Sizing')!;
+    expect(legCreateCall).toBeDefined();
+    expect('desktopVersion' in (legCreateCall[1] ?? {})).toBe(false);
+    expect(legCreateCall[1]).toMatchObject({ customLegacyKey: 'yes' });
+
+    // Trigger runtime 404 on mid-leg -> chains legacy-old -> mid-leg -> final-leg!
+    (core as any).persistTurn(
+      'legacy-old',
+      { localId: 'lu-2', role: 'user', content: 'Follow-up on migrated thread', createdAt: '2026-10-12T10:05:00.000Z' },
+      { localId: 'la-2', role: 'assistant', content: 'Follow-up reply', createdAt: '2026-10-12T10:05:05.000Z' },
+    );
+    await core.drain();
+    await core.syncQueue.flush();
+
+    expect(core.threads.get('mid-leg')).toBeUndefined();
+    expect(core.threads.get('final-leg')).toBeDefined();
+
+    // Verify transitive resolution legacy-old -> mid-leg -> final-leg across ALL methods!
+    const msgsViaOrigin = await core.getMessages('legacy-old');
+    expect(msgsViaOrigin.map((m) => m.localId)).toEqual(['lu-1', 'la-1', 'lu-2', 'la-2']);
+
+    vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
+    const patchedViaOrigin = core.patchThread('legacy-old', { title: 'OIM Sizing v2' });
+    expect(patchedViaOrigin?.id).toBe('final-leg');
+
+    const agentSendSpy = vi.spyOn(core.agent, 'sendMessage').mockResolvedValue(undefined);
+    await core.sendMessage({ threadId: 'legacy-old', text: 'Turn 3 via stale origin id' });
+    expect(agentSendSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'final-leg' }),
+      'Turn 3 via stale origin id',
+      expect.anything(),
+    );
+
+    const agentInterruptSpy = vi.spyOn(core.agent, 'interrupt').mockResolvedValue(undefined);
+    await core.interrupt('legacy-old');
+    expect(agentInterruptSpy).toHaveBeenCalledWith('final-leg');
+
+    await core.submitFeedback({ threadId: 'legacy-old', messageLocalId: 'la-2', rating: 1, comment: 'Great' });
+    expect(feedbackSpy).toHaveBeenCalledTimes(2);
+
+    vi.spyOn(core.syncClient, 'deleteConversation').mockResolvedValue(undefined);
+    await core.deleteThread('legacy-old');
+    expect(core.threads.get('final-leg')).toBeUndefined();
+  });
+
+  it('paces sequential mass 404 recovery by awaiting syncQueue.flush() per thread and halts early on transient backoff', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    const indexMap: Record<string, ThreadMeta> = {};
+    for (const id of ['m1', 'm2', 'm3']) {
+      indexMap[id] = makeThreadMeta({ id, title: `Mass ${id}`, hasStarted: true });
+      fs.writeFileSync(
+        path.join(threadsDir, `${id}.jsonl`),
+        [
+          JSON.stringify({ localId: `${id}-u`, role: 'user', content: `Q ${id}`, createdAt: '2026-10-01T10:00:00.000Z' }),
+          JSON.stringify({ localId: `${id}-a`, role: 'assistant', content: `A ${id}`, createdAt: '2026-10-01T10:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+    }
+    fs.writeFileSync(path.join(threadsDir, 'index.json'), JSON.stringify(indexMap));
+
+    const { core } = makeCore();
+    const callOrder: string[] = [];
+
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue([]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockImplementation(async (id) => {
+      callOrder.push(`probe:${id}`);
+      throw new SyncApiError(404, 'Not found');
+    });
+    let seq = 1;
+    vi.spyOn(core.syncClient, 'createConversation').mockImplementation(async (title, settings) => {
+      const newId = `recreated-${seq++}`;
+      callOrder.push(`create:${title}->${newId}`);
+      return {
+        id: newId,
+        title: title ?? 'New Conversation',
+        createdAt: '2026-10-12T10:00:00.000Z',
+        updatedAt: '2026-10-12T10:00:00.000Z',
+        settings: { ...settings },
+      };
+    });
+    vi.spyOn(core.syncClient, 'appendMessages').mockImplementation(async (convId) => {
+      callOrder.push(`append:${convId}`);
+      if (convId === 'recreated-2') {
+        throw new SyncApiError(503, 'Service unavailable');
+      }
+      return { ids: [`${convId}-u`, `${convId}-a`] };
+    });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    // m1 finished create + append BEFORE m2 was probed; m2 hit 503 backoff so m3 was NOT probed yet!
+    expect(callOrder).toEqual([
+      'probe:m1',
+      'create:Mass m1->recreated-1',
+      'append:recreated-1',
+      'probe:m2',
+      'create:Mass m2->recreated-2',
+      'append:recreated-2',
+    ]);
+    expect(core.threads.get('m3')).toBeDefined();
+  });
+
+  it('runs once-per-launch startup empty-conversation sweep (after offline start recovers), deleting >= 5m confirmed-empty desktop conversations on server + desktop', async () => {
+    const nowMs = Date.parse('2026-10-12T12:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    const staleIso = '2026-10-12T11:40:00.000Z'; // 20m old (>= 5m)
+
+    const srvEmptyLocal = makeThreadMeta({
+      id: 'empty-srv',
+      title: 'New Conversation',
+      createdAt: staleIso,
+      updatedAt: staleIso,
+      remoteSettings: { client: 'desktop' },
+    });
+    const localOnly404 = makeThreadMeta({
+      id: 'empty-local-404',
+      title: 'Untitled',
+      createdAt: staleIso,
+      updatedAt: staleIso,
+      remoteSettings: { client: 'desktop' },
+    });
+    fs.writeFileSync(
+      path.join(threadsDir, 'index.json'),
+      JSON.stringify({ 'empty-srv': srvEmptyLocal, 'empty-local-404': localOnly404 }),
+    );
+
+    const { core, syncEvents } = makeCore();
+    core.searchIndex.replaceMessages('empty-srv', [
+      { localId: 'ghost', role: 'user', content: 'stale ghost index doc', createdAt: staleIso },
+    ]);
+
+    const listSpy = vi
+      .spyOn(core.syncClient, 'listConversations')
+      .mockRejectedValueOnce(new Error('Offline at cold boot'))
+      .mockResolvedValue([
+        {
+          id: 'empty-srv',
+          title: 'New Conversation',
+          createdAt: staleIso,
+          updatedAt: staleIso,
+          settings: { client: 'desktop' },
+        },
+      ]);
+
+    const getMsgsSpy = vi.spyOn(core.syncClient, 'getMessages').mockImplementation(async (id, limit, offset) => {
+      expect(limit).toBe(1);
+      expect(offset).toBe(0);
+      if (id === 'empty-local-404') {
+        throw new SyncApiError(404, 'Not found');
+      }
+      return [];
+    });
+    const deleteSpy = vi.spyOn(core.syncClient, 'deleteConversation').mockResolvedValue(undefined);
+
+    // 1. Offline start: sweep does NOT latch
+    const r1 = await core.listThreads();
+    expect(r1.serverReachable).toBe(false);
+    expect(getMsgsSpy).not.toHaveBeenCalled();
+
+    // 2. Connectivity returns: sweep runs once and deletes both server-listed and local-only 404 empty desktop conversations!
+    const r2 = await core.listThreads();
+    expect(r2.serverReachable).toBe(true);
+    await core.waitForStartupTasks();
+
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith('empty-srv');
+    expect(core.threads.get('empty-srv')).toBeUndefined();
+    expect(core.threads.get('empty-local-404')).toBeUndefined();
+    expect(await core.searchThreads('ghost')).toEqual([]);
+    expect(syncEvents.filter((e) => e.kind === 'thread-deleted').map((e) => (e as { threadId: string }).threadId).sort()).toEqual([
+      'empty-local-404',
+      'empty-srv',
+    ]);
+
+    // 3. Subsequent listThreads() calls do NOT run the sweep a second time!
+    getMsgsSpy.mockClear();
+    deleteSpy.mockClear();
+    listSpy.mockResolvedValueOnce([
+      {
+        id: 'empty-later',
+        title: 'New Conversation',
+        createdAt: staleIso,
+        updatedAt: staleIso,
+        settings: { client: 'desktop' },
+      },
+    ]);
+    await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(getMsgsSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it('enforces all 7 empty-sweep preservation guards (web-created, <5m recent, sessionTouched race, custom title, non-empty server, NaN timestamp, and silent fail-open on 500)', async () => {
+    const nowMs = Date.parse('2026-10-12T12:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    const staleIso = '2026-10-12T11:30:00.000Z'; // 30m old
+    const recentIso = '2026-10-12T11:56:00.000Z'; // 4m old (< 5m)
+
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    const localSeed: Record<string, ThreadMeta> = {
+      'g1-web': makeThreadMeta({ id: 'g1-web', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'web' } }),
+      'g2-recent': makeThreadMeta({ id: 'g2-recent', title: 'New Conversation', createdAt: recentIso, updatedAt: recentIso, remoteSettings: { client: 'desktop' } }),
+      'g3-pre-touched': makeThreadMeta({ id: 'g3-pre-touched', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+      'g3-mid-race': makeThreadMeta({ id: 'g3-mid-race', title: 'New Chat', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+      'g4-titled': makeThreadMeta({ id: 'g4-titled', title: 'OIM Sizing', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+      'g5-has-msg': makeThreadMeta({ id: 'g5-has-msg', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+      'g6-nan-ts': makeThreadMeta({ id: 'g6-nan-ts', title: 'New Conversation', createdAt: 'not-a-date', updatedAt: '', remoteSettings: { client: 'desktop' } }),
+      'g7-del-500': makeThreadMeta({ id: 'g7-del-500', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+      's-local-client-only': makeThreadMeta({ id: 's-local-client-only', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+    };
+    fs.writeFileSync(path.join(threadsDir, 'index.json'), JSON.stringify(localSeed));
+
+    const { core, syncEvents } = makeCore();
+    vi.spyOn(core.syncClient, 'updateConversation').mockResolvedValue(undefined);
+
+    // Touch g3-pre-touched BEFORE listThreads via validatePlaybook
+    await core.validatePlaybook({ threadId: 'g3-pre-touched', text: '', promptName: '' });
+
+    const listSpy = vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue(
+      Object.values(localSeed).map((t) => ({
+        id: t.id,
+        title: t.title,
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+        // Simulate server omitting settings.client on s-local-client-only to test OR-fallback!
+        settings: t.id === 's-local-client-only' ? {} : (t.remoteSettings ?? {}),
+      })),
+    );
+
+    const probedIds: string[] = [];
+    vi.spyOn(core.syncClient, 'getMessages').mockImplementation(async (id) => {
+      probedIds.push(id);
+      if (id === 'g5-has-msg') {
+        return [
+          {
+            id: 'srv-m1',
+            role: 'user',
+            content: 'Web message on desktop conv',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: staleIso,
+          },
+        ];
+      }
+      return [];
+    });
+
+    const deletedServerIds: string[] = [];
+    vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (id) => {
+      if (id === 'g3-mid-race') {
+        // User touches g3-mid-race WHILE deleteConversation is in flight!
+        core.patchThread('g3-mid-race', { model: 'opus' });
+        return;
+      }
+      if (id === 'g7-del-500') {
+        throw new SyncApiError(500, 'Internal error');
+      }
+      deletedServerIds.push(id);
+    });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    // (1), (2), (3 pre-touched), (4), (6) were NEVER even probed via getMessages(id, 1, 0)!
+    expect(probedIds).not.toContain('g1-web');
+    expect(probedIds).not.toContain('g2-recent');
+    expect(probedIds).not.toContain('g3-pre-touched');
+    expect(probedIds).not.toContain('g4-titled');
+    expect(probedIds).not.toContain('g6-nan-ts');
+
+    // ONLY g3-mid-race, g5-has-msg, g7-del-500, and s-local-client-only were probed; ONLY s-local-client-only was swept!
+    for (const id of Object.keys(localSeed)) {
+      if (id === 's-local-client-only') {
+        expect(core.threads.get(id)).toBeUndefined();
+      } else {
+        expect(core.threads.get(id)).toBeDefined();
+      }
+    }
+    expect(deletedServerIds).toEqual(['s-local-client-only']);
+    expect(syncEvents.filter((e) => e.kind === 'thread-deleted')).toEqual([
+      { kind: 'thread-deleted', threadId: 's-local-client-only' },
+    ]);
+    // (7) Failed sweep did NOT emit any sync-state error banner!
+    expect(syncEvents.filter((e) => e.kind === 'sync-state' && e.state === 'error')).toEqual([]);
+
+    // Subsequent listThreads() when g3-mid-race is now absent on server MUST preserve sweep-spared g3-mid-race!
+    listSpy.mockResolvedValueOnce(
+      Object.values(localSeed)
+        .filter((t) => t.id !== 'g3-mid-race' && t.id !== 's-local-client-only')
+        .map((t) => ({
+          id: t.id,
+          title: t.title,
+          createdAt: t.createdAt,
+          updatedAt: t.updatedAt,
+          settings: t.remoteSettings ?? {},
+        })),
+    );
+    const secondList = await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(core.threads.get('g3-mid-race')).toBeDefined();
+    expect(secondList.threads.some((t) => t.id === 'g3-mid-race')).toBe(true);
+
+    // And sending a turn on sweep-spared g3-mid-race auto-recreates cleanly on 404!
+    vi.spyOn(core.syncClient, 'appendMessages')
+      .mockRejectedValueOnce(new SyncApiError(404, 'Deleted by sweep'))
+      .mockResolvedValueOnce({ ids: ['srv-spared-u', 'srv-spared-a'] });
+    vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 'recreated-spared',
+      title: 'New Chat',
+      createdAt: staleIso,
+      updatedAt: staleIso,
+      settings: { client: 'desktop' },
+    });
+    (core as any).persistTurn(
+      'g3-mid-race',
+      { localId: 'sp-u1', role: 'user', content: 'First prompt after race', createdAt: recentIso },
+      { localId: 'sp-a1', role: 'assistant', content: 'Reply after race', createdAt: recentIso },
+    );
+    await core.drain();
+    await vi.waitFor(() => {
+      expect(core.threads.get('recreated-spared')).toBeDefined();
+    });
+  });
+
+  it('enforces strict typed error classification neighbor matrix (403, 429, 502 with "404" prose, 401, ECONNRESET, SSO HTML) without false 404 recreation or pruning', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    const ids = ['e-403', 'e-429', 'e-502-404prose', 'e-401-halt', 'e-never-reached'];
+    const indexMap: Record<string, ThreadMeta> = {};
+    for (const id of ids) {
+      indexMap[id] = makeThreadMeta({ id, title: `Thread ${id}`, hasStarted: true });
+      fs.writeFileSync(
+        path.join(threadsDir, `${id}.jsonl`),
+        JSON.stringify({ localId: `${id}-u`, role: 'user', content: `Hello ${id}`, createdAt: '2026-10-01T10:00:00.000Z' }) + '\n',
+      );
+    }
+    fs.writeFileSync(path.join(threadsDir, 'index.json'), JSON.stringify(indexMap));
+
+    const { core, syncEvents } = makeCore();
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue([]); // All off-page / absent from top-200
+
+    const probed: string[] = [];
+    const getAllSpy = vi.spyOn(core.syncClient, 'getAllMessages').mockImplementation(async (id) => {
+      probed.push(id);
+      if (id === 'e-403') throw new SyncApiError(403, 'Forbidden');
+      if (id === 'e-429') throw new SyncApiError(429, 'Too many requests');
+      if (id === 'e-502-404prose') throw new SyncApiError(502, 'Yvoke Backend: upstream 404 not found');
+      if (id === 'e-401-halt') throw new SyncApiError(401, 'Unauthorized');
+      return { messages: [], truncated: false };
+    });
+    const createSpy = vi.spyOn(core.syncClient, 'createConversation');
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    expect(createSpy).not.toHaveBeenCalled();
+    // 401 halted sequential probes before e-never-reached
+    expect(probed).toContain('e-401-halt');
+    expect(probed).not.toContain('e-never-reached');
+    for (const id of ids) {
+      expect(core.threads.get(id)).toBeDefined();
+    }
+    expect(syncEvents.filter((e) => e.kind === 'sync-state' && e.dropped)).toEqual([]);
+
+    // Also verify ECONNRESET and SSO HTML 200 OK error halt sequential probes without recreation or pruning
+    probed.length = 0;
+    getAllSpy.mockClear();
+    getAllSpy.mockImplementationOnce(async (id) => {
+      probed.push(id);
+      throw new Error('read ECONNRESET');
+    });
+    await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(getAllSpy).toHaveBeenCalledTimes(1);
+    expect(probed).toHaveLength(1);
+    expect(createSpy).not.toHaveBeenCalled();
+
+    probed.length = 0;
+    getAllSpy.mockClear();
+    getAllSpy.mockImplementationOnce(async (id) => {
+      probed.push(id);
+      throw new Error('Yvoke Backend: unexpected non-array response (<!DOCTYPE html>Sign in)');
+    });
+    await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(getAllSpy).toHaveBeenCalledTimes(1);
+    expect(probed).toHaveLength(1);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it('enforces deleteThread 3-way resolution: 500/offline rollback, 404 completion, and in-flight recovery self-resurrection prevention', async () => {
+    const { core } = makeCore();
+
+    // Seed t-rollback, t-404-ok, and t-race with local messages + SearchIndex
+    for (const id of ['t-rollback', 't-404-ok', 't-race']) {
+      core.threads.upsert(makeThreadMeta({ id, title: `Delete ${id}`, hasStarted: true }));
+      await core.threads.appendMessages(id, [
+        { localId: `${id}-u`, serverId: `srv-${id}-u`, role: 'user', content: `searchable ${id} term`, createdAt: '2026-10-01T10:00:00.000Z' },
+        { localId: `${id}-a`, serverId: `srv-${id}-a`, role: 'assistant', content: `reply ${id}`, createdAt: '2026-10-01T10:00:05.000Z' },
+      ]);
+      core.searchIndex.addMessages(id, [
+        { localId: `${id}-u`, serverId: `srv-${id}-u`, role: 'user', content: `searchable ${id} term`, createdAt: '2026-10-01T10:00:00.000Z' },
+      ]);
+    }
+
+    // (a) 500 / offline failure rolls back deletingOrDeletedThreads and preserves all local data!
+    const deleteSpy = vi
+      .spyOn(core.syncClient, 'deleteConversation')
+      .mockRejectedValueOnce(new SyncApiError(500, 'Server down'))
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    await expect(core.deleteThread('t-rollback')).rejects.toThrow('Server down');
+    await expect(core.deleteThread('t-rollback')).rejects.toThrow('ECONNREFUSED');
+    expect(core.threads.get('t-rollback')).toBeDefined();
+    expect(await core.threads.readMessages('t-rollback')).toHaveLength(2);
+    expect((await core.searchThreads('t-rollback')).map((h) => h.threadId)).toEqual(['t-rollback']);
+
+    // Subsequent listThreads() still returns and updates t-rollback (deletingOrDeletedThreads was rolled back!)
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      { id: 't-rollback', title: 'Delete t-rollback (still live)', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+      { id: 't-404-ok', title: 'Delete t-404-ok', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+      { id: 't-race', title: 'Delete t-race', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+    ]);
+    const listAfterRollback = await core.listThreads();
+    await core.waitForStartupTasks();
+    expect(listAfterRollback.threads.find((t) => t.id === 't-rollback')?.title).toBe('Delete t-rollback (still live)');
+
+    // (b) SyncApiError(404) on deleteConversation completes local cleanup cleanly!
+    deleteSpy.mockRejectedValueOnce(new SyncApiError(404, 'Already gone'));
+    await expect(core.deleteThread('t-404-ok')).resolves.toBeUndefined();
+    expect(core.threads.get('t-404-ok')).toBeUndefined();
+    expect(await core.searchThreads('t-404-ok')).toEqual([]);
+
+    // (c) In-flight recovery / listConversations race: deleteThread('t-race') runs while getAllMessages('t-race') is in flight before returning 404!
+    let rejectProbe404!: (err: Error) => void;
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      { id: 't-rollback', title: 'Delete t-rollback', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+    ]); // t-race absent on server -> triggers probe for t-race
+    vi.spyOn(core.syncClient, 'getAllMessages').mockImplementationOnce(
+      () =>
+        new Promise<{ messages: MessageDto[]; truncated: boolean }>((_res, rej) => {
+          rejectProbe404 = rej;
+        }),
+    );
+    const createSpy = vi.spyOn(core.syncClient, 'createConversation');
+    deleteSpy.mockResolvedValueOnce(undefined);
+
+    await core.listThreads();
+    await vi.waitFor(() => {
+      expect(rejectProbe404).toBeTypeOf('function');
+    });
+    // Delete t-race from desktop while probe is in flight
+    await core.deleteThread('t-race');
+    // Probe now rejects with 404 — must NOT self-resurrect t-race!
+    rejectProbe404(new SyncApiError(404, 'Deleted'));
+    await core.waitForStartupTasks();
+
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(core.threads.get('t-race')).toBeUndefined();
+  });
+
+  it('recovers full transcript and pendingSyncCount when both threads/index.json and sync-queue.json are corrupt on disk', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+    fs.writeFileSync(path.join(threadsDir, 'index.json'), '{corrupt-index-json');
+    fs.writeFileSync(path.join(tmpDir, 'sync-queue.json'), '{corrupt-queue-json');
+    fs.writeFileSync(
+      path.join(threadsDir, 'surviving-conv.jsonl'),
+      [
+        JSON.stringify({ localId: 'su-1', role: 'user', content: 'Recovered question', createdAt: '2026-10-05T10:00:00.000Z' }),
+        JSON.stringify({ localId: 'sa-1', role: 'assistant', content: 'Recovered answer', createdAt: '2026-10-05T10:00:05.000Z' }),
+      ].join('\n') + '\n',
+    );
+
+    const { core } = makeCore();
+    expect(fs.existsSync(path.join(threadsDir, 'index.json.corrupt'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, 'sync-queue.json.corrupt'))).toBe(true);
+
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      { id: 'surviving-conv', title: 'Survived', createdAt: '2026-10-05T10:00:00.000Z', updatedAt: '2026-10-05T10:00:05.000Z', settings: {} },
+    ]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockResolvedValueOnce({ messages: [], truncated: false });
+    const appendSpy = vi.spyOn(core.syncClient, 'appendMessages').mockResolvedValueOnce({
+      ids: ['srv-su-1', 'srv-sa-1'],
+    });
+
+    const res = await core.listThreads();
+    expect(res.pendingSyncCount).toBe(1);
+    await core.waitForStartupTasks();
+
+    expect(appendSpy).toHaveBeenCalledTimes(1);
+    expect(core.syncQueue.pendingCount()).toBe(0);
+  });
+
+  it('cancels mid-recovery and mid-sweep on dispose(), emits zero fake orchestrator traces on rehydrated/single-agent 404s, and tolerates side-effect failures', async () => {
+    // Part A: dispose() while getAllMessages and empty-sweep getMessages are pending
+    const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-dispose-a-'));
+    try {
+      const staleIso = '2026-01-01T10:00:00.000Z';
+      const tDirA = path.join(dirA, 'threads');
+      fs.mkdirSync(tDirA, { recursive: true });
+      fs.writeFileSync(
+        path.join(tDirA, 'index.json'),
+        JSON.stringify({
+          'rec-1': makeThreadMeta({ id: 'rec-1', title: 'Rec 1', hasStarted: true }),
+          'emp-1': makeThreadMeta({ id: 'emp-1', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, remoteSettings: { client: 'desktop' } }),
+        }),
+      );
+      fs.writeFileSync(
+        path.join(tDirA, 'rec-1.jsonl'),
+        JSON.stringify({ localId: 'ru-1', role: 'user', content: 'hi', createdAt: staleIso }) + '\n',
+      );
+
+      const { core: coreA } = makeCore({ dir: dirA });
+      vi.spyOn(coreA.syncClient, 'listConversations').mockResolvedValueOnce([
+        { id: 'emp-1', title: 'New Conversation', createdAt: staleIso, updatedAt: staleIso, settings: { client: 'desktop' } },
+      ]);
+
+      let rejectRec!: (e: Error) => void;
+      let resolveEmp!: (m: MessageDto[]) => void;
+      vi.spyOn(coreA.syncClient, 'getAllMessages').mockImplementationOnce(
+        () => new Promise((_r, rej) => { rejectRec = rej; }),
+      );
+      vi.spyOn(coreA.syncClient, 'getMessages').mockImplementationOnce(
+        () => new Promise((res) => { resolveEmp = res; }),
+      );
+      const createSpyA = vi.spyOn(coreA.syncClient, 'createConversation');
+      const deleteSpyA = vi.spyOn(coreA.syncClient, 'deleteConversation');
+
+      await coreA.listThreads();
+      await vi.waitFor(() => {
+        expect(rejectRec).toBeTypeOf('function');
+        expect(resolveEmp).toBeTypeOf('function');
+      });
+
+      coreA.dispose();
+      rejectRec(new SyncApiError(404, 'Gone'));
+      resolveEmp([]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(createSpyA).not.toHaveBeenCalled();
+      expect(deleteSpyA).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(dirA, { recursive: true, force: true });
+    }
+
+    // Part B & C: Zero fake orchestrator traces on single-agent & MessageDto-rehydrated orchestrator 404s; side-effect errors don't abort message recovery
+    const { core } = makeCore();
+    core.threads.upsert(makeThreadMeta({ id: 'single-404', title: 'Single 404', hasStarted: true }));
+    await core.threads.appendMessages('single-404', [
+      { localId: 's4-u', role: 'user', content: 'Q', createdAt: '2026-10-01T10:00:00.000Z' },
+      { localId: 's4-a', role: 'assistant', content: 'A', feedback: { rating: 1, comment: 'Good' }, createdAt: '2026-10-01T10:00:05.000Z' },
+    ]);
+    // Rehydrated orchestrator thread has non-Agent toolCalls (0 local Agent delegations!)
+    core.threads.upsert(
+      makeThreadMeta({ id: 'rehyd-orch-404', title: 'Rehydrated Orch', orchestratorProfile: 'OIM', hasStarted: true }),
+    );
+    await core.threads.appendMessages('rehyd-orch-404', [
+      { localId: 'ro-u', serverId: 'old-s1', role: 'user', content: 'Orch Q', createdAt: '2026-10-01T10:00:00.000Z' },
+      {
+        localId: 'ro-a',
+        serverId: 'old-s2',
+        role: 'assistant',
+        content: 'Orch A',
+        toolCalls: [{ id: 'tc-non-agent', name: 'mcp__yvoke__search', input: {}, result: 'ok' }],
+        createdAt: '2026-10-01T10:00:05.000Z',
+      },
+    ]);
+
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockRejectedValue(new SyncApiError(404, 'Not found'));
+    let cSeq = 1;
+    vi.spyOn(core.syncClient, 'createConversation').mockImplementation(async (title, settings) => ({
+      id: `rebuilt-${cSeq++}`,
+      title: title ?? 'New Conversation',
+      createdAt: '2026-10-12T10:00:00.000Z',
+      updatedAt: '2026-10-12T10:00:00.000Z',
+      settings: { ...settings },
+    }));
+    vi.spyOn(core.syncClient, 'appendMessages').mockResolvedValue({ ids: ['ns-1', 'ns-2'] });
+    // Simulate transient 500 on submitFeedback — must NOT abort message recovery!
+    vi.spyOn(core.syncClient, 'submitFeedback').mockRejectedValue(new SyncApiError(500, 'Feedback service down'));
+    const runSpy = vi.spyOn(core.syncClient, 'recordOrchestratorRun');
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(core.threads.get('rebuilt-1')).toBeDefined();
+    expect(core.threads.get('rebuilt-2')).toBeDefined();
+  });
+
+  it('defers 404 migration while agent.isBusy(oldId) and wakes on turn completion, skips empty 404 recreation, and drops 422 once per session', async () => {
+    let emitAgent!: (ev: any) => void;
+    const syncEvents: SyncEvent[] = [];
+    const core = new AppCore({
+      userDataDir: tmpDir,
+      appVersion: '1.3.1',
+      emitAgentEvent: (ev) => emitAgent?.(ev),
+      emitSyncEvent: (ev) => syncEvents.push(ev),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+    activeCores.push(core);
+
+    // 1. Empty 404 (0 local messages, 0 queued turns) -> pruned cleanly without createConversation
+    core.threads.upsert(makeThreadMeta({ id: 'empty-404', title: 'Empty 404', hasStarted: true }));
+
+    // 2. Busy 404 thread -> defers while isBusy === true, then migrates when turn-complete fires!
+    core.threads.upsert(makeThreadMeta({ id: 'busy-404', title: 'Busy 404', hasStarted: true }));
+    await core.threads.appendMessages('busy-404', [
+      { localId: 'bu-1', role: 'user', content: 'Turn 1', createdAt: '2026-10-01T10:00:00.000Z' },
+      { localId: 'ba-1', role: 'assistant', content: 'Ans 1', createdAt: '2026-10-01T10:00:05.000Z' },
+    ]);
+
+    let busyFlag = true;
+    vi.spyOn(core.agent, 'isBusy').mockImplementation((id) => id === 'busy-404' && busyFlag);
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValue([]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockRejectedValue(new SyncApiError(404, 'Not found'));
+    const createSpy = vi.spyOn(core.syncClient, 'createConversation').mockResolvedValue({
+      id: 'migrated-after-busy',
+      title: 'Busy 404',
+      createdAt: '2026-10-12T10:00:00.000Z',
+      updatedAt: '2026-10-12T10:00:00.000Z',
+      settings: {},
+    });
+    const appendSpy = vi.spyOn(core.syncClient, 'appendMessages').mockResolvedValue({
+      ids: ['srv-bu-1', 'srv-ba-1'],
+    });
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    // empty-404 was NOT recreated; busy-404 was deferred while busyFlag === true!
+    expect(core.threads.get('empty-404')).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(core.threads.get('busy-404')).toBeDefined();
+
+    // Simulate AgentService emitting turn-complete BEFORE setting session.busy = false synchronously!
+    (core.agent as any).deps.emit({
+      kind: 'turn-complete',
+      threadId: 'busy-404',
+      message: { localId: 'ba-2', role: 'assistant', content: 'done', createdAt: 'now' },
+      usage: ThreadStore.emptyTotals(),
+      durationMs: 10,
+      isError: false,
+      aborted: false,
+    });
+    busyFlag = false;
+
+    await vi.waitFor(() => {
+      expect(core.threads.get('migrated-after-busy')).toBeDefined();
+      expect(appendSpy).toHaveBeenCalledWith('migrated-after-busy', expect.anything());
+    });
+
+    // 3. Session 4xx (422) drop guard: drops for current session, does NOT re-enqueue on listThreads(), retries once on next AppCore launch!
+    const dir422 = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-422-'));
+    try {
+      const { core: c1, syncEvents: ev1 } = makeCore({ dir: dir422 });
+      c1.threads.upsert(makeThreadMeta({ id: 't-422', title: '422 Thread', hasStarted: true }));
+      vi.spyOn(c1.syncClient, 'appendMessages').mockRejectedValue(new SyncApiError(422, 'Payload invalid'));
+      vi.spyOn(c1.syncClient, 'listConversations').mockResolvedValue([
+        { id: 't-422', title: '422 Thread', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+      ]);
+      vi.spyOn(c1.syncClient, 'getAllMessages').mockResolvedValue({ messages: [], truncated: false });
+
+      (c1 as any).persistTurn(
+        't-422',
+        { localId: 'u-422', role: 'user', content: 'Bad turn', createdAt: '2026-10-01T10:00:00.000Z' },
+        { localId: 'a-422', role: 'assistant', content: 'Bad reply', createdAt: '2026-10-01T10:00:05.000Z' },
+      );
+      await c1.drain();
+      await c1.syncQueue.flush();
+
+      expect(ev1.some((e) => e.kind === 'sync-state' && e.dropped === true)).toBe(true);
+      expect(c1.syncQueue.pendingCount()).toBe(0);
+
+      // Subsequent listThreads() in the SAME session does NOT re-enqueue u-422/a-422!
+      const appendSpySameSession = vi.spyOn(c1.syncClient, 'appendMessages');
+      appendSpySameSession.mockClear();
+      await c1.listThreads();
+      await c1.waitForStartupTasks();
+      expect(appendSpySameSession).not.toHaveBeenCalled();
+
+      // Fresh AppCore launch on dir422 DOES retry once from .jsonl!
+      await c1.drain();
+      c1.dispose();
+      const { core: c2 } = makeCore({ dir: dir422 });
+      vi.spyOn(c2.syncClient, 'listConversations').mockResolvedValue([
+        { id: 't-422', title: '422 Thread', createdAt: '2026-10-01T10:00:00.000Z', updatedAt: '2026-10-01T10:00:00.000Z', settings: {} },
+      ]);
+      vi.spyOn(c2.syncClient, 'getAllMessages').mockResolvedValue({ messages: [], truncated: false });
+      const appendSpyRelaunch = vi.spyOn(c2.syncClient, 'appendMessages').mockResolvedValue({
+        ids: ['srv-u-422', 'srv-a-422'],
+      });
+
+      await c2.listThreads();
+      await c2.waitForStartupTasks();
+      expect(appendSpyRelaunch).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.rmSync(dir422, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts secrets across SyncEvents and safely handles malformed / unknown threadIds across interrupt, deleteThread, getMessages, patchThread, and validatePlaybook', async () => {
+    const { core, syncEvents } = makeCore();
+    const rawJwt = 'eyJhbGciOiJIUzI1NiJ9.corpPayload.corpSig';
+    const rawAnt = 'sk-ant-api03-superSecretKey123';
+
+    core.threads.upsert(makeThreadMeta({ id: 't-sec', title: 'Sec', hasStarted: true }));
+    vi.spyOn(core.syncClient, 'appendMessages').mockRejectedValueOnce(
+      new SyncApiError(400, `Bad auth: Bearer ${rawJwt} and ${rawAnt}`),
+    );
+    (core as any).persistTurn(
+      't-sec',
+      { localId: 'sec-u', role: 'user', content: 'Hi', createdAt: '2026-10-01T10:00:00.000Z' },
+      { localId: 'sec-a', role: 'assistant', content: 'Hello', createdAt: '2026-10-01T10:00:05.000Z' },
+    );
+    await core.drain();
+    await core.syncQueue.flush();
+
+    const serializedEvents = JSON.stringify(syncEvents);
+    expect(serializedEvents).not.toContain(rawJwt);
+    expect(serializedEvents).not.toContain(rawAnt);
+
+    const badIds: unknown[] = ['', '   ', null, undefined, '../escape', 'a/b'];
+    for (const bad of badIds) {
+      // interrupt is a safe no-op on malformed/empty IDs
+      await expect(core.interrupt(bad as string)).resolves.toBeUndefined();
+      // validatePlaybook fails open with PASSES
+      await expect(
+        core.validatePlaybook({ threadId: bad as string, text: 'q', promptName: 'oim-schema' }),
+      ).resolves.toEqual({ plausible: true });
+      // Mutating / lookup methods reject with Invalid threadId without path traversal
+      await expect(core.deleteThread(bad as string)).rejects.toThrow(/Invalid threadId/);
+      await expect(core.getMessages(bad as string)).rejects.toThrow(/Invalid threadId/);
+      expect(() => core.patchThread(bad as string, { title: 'x' })).toThrow(/Invalid threadId/);
+      await expect(core.sendMessage({ threadId: bad as string, text: 'hi' })).rejects.toThrow(/Invalid threadId/);
+      await expect(
+        core.submitFeedback({ threadId: bad as string, messageLocalId: 'm1', rating: 1 }),
+      ).rejects.toThrow(/Invalid threadId/);
+    }
+
+    // Unknown valid threadId on interrupt is also a safe no-op
+    await expect(core.interrupt('unknown-valid-id')).resolves.toBeUndefined();
+  });
+
+  it('emits server-ids and sync-state (synced, pendingCount: 0) when 200 OK reconciliation resolves sole pending thread without queueing (deduplication, truncated, or skipped mid-thread gap)', async () => {
+    // Sub-case A: Sole pending thread resolved via adoptedServerIds deduplication (0 turnsToQueue)
+    const dirDedup = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-sole-dedup-'));
+    try {
+      const tDir = path.join(dirDedup, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      const meta = makeThreadMeta({ id: 't-dedup-sole', title: 'Sole Dedup', hasStarted: true, syncState: 'pending' });
+      fs.writeFileSync(path.join(tDir, 'index.json'), JSON.stringify({ 't-dedup-sole': meta }));
+      fs.writeFileSync(
+        path.join(tDir, 't-dedup-sole.jsonl'),
+        [
+          JSON.stringify({ localId: 'sd-u1', role: 'user', content: 'Sole Q', createdAt: '2026-10-10T10:00:00.000Z' }),
+          JSON.stringify({ localId: 'sd-a1', role: 'assistant', content: 'Sole A', createdAt: '2026-10-10T10:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+      fs.writeFileSync(
+        path.join(dirDedup, 'sync-queue.json'),
+        JSON.stringify([
+          {
+            threadId: 't-dedup-sole',
+            localIds: ['sd-u1', 'sd-a1'],
+            messages: [
+              { role: 'user', content: 'Sole Q' },
+              { role: 'assistant', content: 'Sole A' },
+            ],
+            enqueuedAt: '2026-10-10T10:00:05.000Z',
+            attempts: 0,
+          },
+        ]),
+      );
+
+      const { core, syncEvents } = makeCore({ dir: dirDedup });
+      vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+        { id: 't-dedup-sole', title: 'Sole Dedup', createdAt: meta.createdAt, updatedAt: meta.updatedAt, settings: {} },
+      ]);
+      vi.spyOn(core.syncClient, 'getAllMessages').mockResolvedValueOnce({
+        truncated: false,
+        messages: [
+          {
+            id: 'srv-sdu1',
+            role: 'user',
+            content: 'Sole Q',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T10:00:00.000Z',
+          },
+          {
+            id: 'srv-sda1',
+            role: 'assistant',
+            content: 'Sole A',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T10:00:05.000Z',
+          },
+        ],
+      });
+      const appendSpy = vi.spyOn(core.syncClient, 'appendMessages');
+
+      const res = await core.listThreads();
+      expect(res.pendingSyncCount).toBe(1);
+      await core.waitForStartupTasks();
+
+      expect(appendSpy).not.toHaveBeenCalled();
+      expect(syncEvents).toContainEqual({
+        kind: 'server-ids',
+        threadId: 't-dedup-sole',
+        mapping: { 'sd-u1': 'srv-sdu1', 'sd-a1': 'srv-sda1' },
+      });
+      expect(syncEvents).toContainEqual({
+        kind: 'sync-state',
+        threadId: 't-dedup-sole',
+        state: 'synced',
+        pendingCount: 0,
+      });
+    } finally {
+      fs.rmSync(dirDedup, { recursive: true, force: true });
+    }
+
+    // Sub-case B: Sole pending thread resolved with truncated: true (0 turnsToQueue)
+    const dirTrunc = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-sole-trunc-'));
+    try {
+      const tDir = path.join(dirTrunc, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      const meta = makeThreadMeta({ id: 't-trunc-sole', title: 'Sole Trunc', hasStarted: true });
+      fs.writeFileSync(path.join(tDir, 'index.json'), JSON.stringify({ 't-trunc-sole': meta }));
+      fs.writeFileSync(
+        path.join(tDir, 't-trunc-sole.jsonl'),
+        [
+          JSON.stringify({ localId: 'tu-1', role: 'user', content: 'Trunc Q', createdAt: '2026-10-10T10:00:00.000Z' }),
+          JSON.stringify({ localId: 'ta-1', role: 'assistant', content: 'Trunc A', createdAt: '2026-10-10T10:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+
+      const { core, syncEvents } = makeCore({ dir: dirTrunc });
+      vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+        { id: 't-trunc-sole', title: 'Sole Trunc', createdAt: meta.createdAt, updatedAt: meta.updatedAt, settings: {} },
+      ]);
+      vi.spyOn(core.syncClient, 'getAllMessages').mockResolvedValueOnce({
+        truncated: true,
+        messages: [],
+      });
+
+      const res = await core.listThreads();
+      expect(res.pendingSyncCount).toBe(1);
+      await core.waitForStartupTasks();
+
+      expect(syncEvents).toContainEqual({
+        kind: 'sync-state',
+        threadId: 't-trunc-sole',
+        state: 'synced',
+        pendingCount: 0,
+      });
+    } finally {
+      fs.rmSync(dirTrunc, { recursive: true, force: true });
+    }
+
+    // Sub-case C: Sole pending thread with only a skipped mid-thread gap (0 trailing turnsToQueue)
+    const dirGap = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-sole-gap-'));
+    try {
+      const tDir = path.join(dirGap, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      const meta = makeThreadMeta({ id: 't-gap-sole', title: 'Sole Gap', hasStarted: true, syncState: 'pending' });
+      fs.writeFileSync(path.join(tDir, 'index.json'), JSON.stringify({ 't-gap-sole': meta }));
+      fs.writeFileSync(
+        path.join(dirGap, 'sync-queue.json'),
+        JSON.stringify([
+          {
+            threadId: 't-gap-sole',
+            localIds: ['gu-0', 'ga-0'],
+            messages: [
+              { role: 'user', content: 'Mid Gap Q' },
+              { role: 'assistant', content: 'Mid Gap A' },
+            ],
+            enqueuedAt: '2026-10-10T09:50:05.000Z',
+            attempts: 0,
+          },
+        ]),
+      );
+      fs.writeFileSync(
+        path.join(tDir, 't-gap-sole.jsonl'),
+        [
+          JSON.stringify({ localId: 'gu-0', role: 'user', content: 'Mid Gap Q', createdAt: '2026-10-10T09:50:00.000Z' }),
+          JSON.stringify({ localId: 'ga-0', role: 'assistant', content: 'Mid Gap A', createdAt: '2026-10-10T09:50:05.000Z' }),
+          JSON.stringify({ localId: 'gu-1', serverId: 'srv-gu1', role: 'user', content: 'Later Synced Q', createdAt: '2026-10-10T10:00:00.000Z' }),
+          JSON.stringify({ localId: 'ga-1', serverId: 'srv-ga1', role: 'assistant', content: 'Later Synced A', createdAt: '2026-10-10T10:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+
+      const { core, syncEvents } = makeCore({ dir: dirGap });
+      vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+        { id: 't-gap-sole', title: 'Sole Gap', createdAt: meta.createdAt, updatedAt: meta.updatedAt, settings: {} },
+      ]);
+      vi.spyOn(core.syncClient, 'getAllMessages').mockResolvedValueOnce({
+        truncated: false,
+        messages: [
+          {
+            id: 'srv-gu1',
+            role: 'user',
+            content: 'Later Synced Q',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T10:00:00.000Z',
+          },
+          {
+            id: 'srv-ga1',
+            role: 'assistant',
+            content: 'Later Synced A',
+            playbook: null,
+            playbookVersion: null,
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            cachedTokens: null,
+            thoughtTokens: null,
+            feedbackRating: null,
+            feedbackComment: null,
+            createdAt: '2026-10-10T10:00:05.000Z',
+          },
+        ],
+      });
+
+      const res = await core.listThreads();
+      expect(res.pendingSyncCount).toBe(1);
+      await core.waitForStartupTasks();
+
+      expect(syncEvents).toContainEqual({
+        kind: 'sync-state',
+        threadId: 't-gap-sole',
+        state: 'synced',
+        pendingCount: 0,
+      });
+    } finally {
+      fs.rmSync(dirGap, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes pendingFeedback, deferredRecoveryTraces, pendingRuns (resolved and in-flight Promise), and failedRuns across deleteThread, onTurnDropped (422), 404 migration, and dispose()', async () => {
+    const threadsDir = path.join(tmpDir, 'threads');
+    fs.mkdirSync(threadsDir, { recursive: true });
+
+    const delOld = makeThreadMeta({
+      id: 'del-old',
+      title: 'To Migrate Then Delete',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      updatedAt: '2026-10-10T10:00:00.000Z',
+    });
+    const dropThread = makeThreadMeta({
+      id: 'drop-t',
+      title: 'Drop 422',
+      orchestratorProfile: 'OIM',
+      hasStarted: true,
+      updatedAt: '2026-10-11T10:00:00.000Z',
+    });
+    const liveThread = makeThreadMeta({ id: 'keep-live', title: 'Keep Live', orchestratorProfile: 'OIM', hasStarted: true });
+
+    fs.writeFileSync(
+      path.join(threadsDir, 'index.json'),
+      JSON.stringify({ 'del-old': delOld, 'drop-t': dropThread, 'keep-live': liveThread }),
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 'del-old.jsonl'),
+      [
+        JSON.stringify({ localId: 'do-u1', role: 'user', content: 'Q1', createdAt: '2026-10-10T10:00:00.000Z' }),
+        JSON.stringify({
+          localId: 'do-a1',
+          role: 'assistant',
+          content: 'A1',
+          feedback: { rating: 1, comment: 'Good' },
+          toolCalls: [{ id: 'tc1', name: 'Agent', subagentType: 'spec', input: { prompt: 'p' }, result: 'r' }],
+          createdAt: '2026-10-10T10:00:05.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+    fs.writeFileSync(
+      path.join(threadsDir, 'drop-t.jsonl'),
+      [
+        JSON.stringify({ localId: 'dr-u1', role: 'user', content: 'Drop Q', createdAt: '2026-10-10T10:00:00.000Z' }),
+        JSON.stringify({
+          localId: 'dr-a1',
+          role: 'assistant',
+          content: 'Drop A',
+          feedback: { rating: -1, comment: 'Bad' },
+          toolCalls: [{ id: 'tc2', name: 'Agent', subagentType: 'spec', input: { prompt: 'p' }, result: 'r' }],
+          createdAt: '2026-10-10T10:00:05.000Z',
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const { core } = makeCore();
+    vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([
+      { id: 'drop-t', title: 'Drop 422', createdAt: dropThread.createdAt, updatedAt: dropThread.updatedAt, settings: { 'orchestrator-profile': 'OIM' } },
+      { id: 'keep-live', title: 'Keep Live', createdAt: liveThread.createdAt, updatedAt: liveThread.updatedAt, settings: { 'orchestrator-profile': 'OIM' } },
+    ]);
+    vi.spyOn(core.syncClient, 'getAllMessages').mockImplementation(async (id) => {
+      if (id === 'del-old') throw new SyncApiError(404, 'Missing');
+      return { messages: [], truncated: false };
+    });
+    vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+      id: 'del-new',
+      title: 'To Migrate Then Delete',
+      createdAt: '2026-10-12T10:00:00.000Z',
+      updatedAt: '2026-10-12T10:00:00.000Z',
+      settings: { 'orchestrator-profile': 'OIM', client: 'desktop' },
+    });
+    // Hold appendMessages for del-new on 503 backoff so pendingFeedback & deferredRecoveryTraces stay populated; reject drop-t with 422!
+    let sawDropPopulatedBefore422 = false;
+    vi.spyOn(core.syncClient, 'appendMessages').mockImplementation(async (id) => {
+      if (id === 'drop-t') {
+        sawDropPopulatedBefore422 =
+          (core as any).pendingFeedback.has('dr-a1') &&
+          (core as any).deferredRecoveryTraces.has('dr-a1') &&
+          (core as any).pendingRuns.has('dr-u1');
+        throw new SyncApiError(422, 'Permanent 422');
+      }
+      throw new SyncApiError(503, 'Hold in queue');
+    });
+
+    // Seed pendingRuns (resolved + in-flight Promise) and failedRuns on del-old, drop-t, and keep-live
+    let resolveInFlightDel!: (val: any) => void;
+    let resolveInFlightLive!: (val: any) => void;
+    (core as any).pendingRuns.set('pr-resolved-del', { conversationId: 'del-old', profileName: 'OIM', steps: [] });
+    (core as any).pendingRuns.set(
+      'pr-inflight-del',
+      new Promise((res) => {
+        resolveInFlightDel = res;
+      }),
+    );
+    (core as any).pendingRuns.set('dr-u1', { conversationId: 'drop-t', profileName: 'OIM', steps: [] });
+    (core as any).pendingRuns.set(
+      'pr-inflight-live',
+      new Promise((res) => {
+        resolveInFlightLive = res;
+      }),
+    );
+    (core as any).failedRuns.push(
+      { run: { conversationId: 'del-old', profileName: 'OIM', steps: [] }, attempts: 1, nextRetryAt: Date.now() + 60_000 },
+      { run: { conversationId: 'keep-live', profileName: 'OIM', steps: [] }, attempts: 1, nextRetryAt: Date.now() + 60_000 },
+    );
+
+    await core.listThreads();
+    await core.waitForStartupTasks();
+
+    // 1. 422 onTurnDropped genuinely saw populated entries and pruned dr-a1 / dr-u1 from pendingFeedback, deferredRecoveryTraces, and pendingRuns!
+    expect(sawDropPopulatedBefore422).toBe(true);
+    expect((core as any).pendingFeedback.has('dr-a1')).toBe(false);
+    expect((core as any).deferredRecoveryTraces.has('dr-a1')).toBe(false);
+    expect((core as any).pendingRuns.has('dr-u1')).toBe(false);
+
+    // 2. 404 migration rewrote conversationId -> 'del-new' on pendingFeedback, deferredRecoveryTraces, pendingRuns, and failedRuns!
+    expect((core as any).pendingFeedback.get('do-a1')?.conversationId).toBe('del-new');
+    expect((core as any).deferredRecoveryTraces.get('do-a1')?.conversationId).toBe('del-new');
+
+    // 3. deleteThread('del-old') resolves -> 'del-new' and prunes all 4 collections for 'del-new' (including in-flight Promise on resolve)!
+    vi.spyOn(core.syncClient, 'deleteConversation').mockResolvedValueOnce(undefined);
+    await core.deleteThread('del-old');
+
+    expect((core as any).pendingFeedback.has('do-a1')).toBe(false);
+    expect((core as any).deferredRecoveryTraces.has('do-a1')).toBe(false);
+    expect((core as any).pendingRuns.has('pr-resolved-del')).toBe(false);
+    expect((core as any).failedRuns.map((f: any) => f.run.conversationId)).toEqual(['keep-live']);
+
+    // Resolve both in-flight pendingRuns promises after deleteThread
+    resolveInFlightDel({ conversationId: 'del-old', profileName: 'OIM', steps: [] });
+    resolveInFlightLive({ conversationId: 'keep-live', profileName: 'OIM', steps: [] });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((core as any).pendingRuns.has('pr-inflight-del')).toBe(false);
+    expect((core as any).pendingRuns.has('pr-inflight-live')).toBe(true);
+
+    // 4. dispose() clears all 4 collections completely!
+    (core as any).pendingFeedback.set('live-fb', { conversationId: 'keep-live', rating: 1 });
+    (core as any).deferredRecoveryTraces.set('live-tr', {
+      conversationId: 'keep-live',
+      profileName: 'OIM',
+      userText: 'u',
+      assistant: { localId: 'live-tr', role: 'assistant', content: 'a', createdAt: 'now' },
+    });
+    core.dispose();
+    expect((core as any).pendingFeedback.size).toBe(0);
+    expect((core as any).deferredRecoveryTraces.size).toBe(0);
+    expect((core as any).pendingRuns.size).toBe(0);
+    expect((core as any).failedRuns).toHaveLength(0);
   });
 });

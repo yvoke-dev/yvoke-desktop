@@ -144,7 +144,11 @@ function createInMemoryYvokeWebServer(): InMemoryWebServer {
       if (msgMatch && method === 'GET') {
         const list = messagesByConv.get(msgMatch[1]);
         if (!list) return new Response('Conversation not found', { status: 404 });
-        return new Response(JSON.stringify(list), { status: 200 });
+        const limitParam = url.searchParams.get('limit');
+        const offsetParam = url.searchParams.get('offset');
+        const offset = offsetParam !== null ? Number(offsetParam) : 0;
+        const limit = limitParam !== null ? Number(limitParam) : list.length;
+        return new Response(JSON.stringify(list.slice(offset, offset + limit)), { status: 200 });
       }
 
       // POST /conversations/:id/messages
@@ -711,5 +715,114 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
     await new Promise((r) => setTimeout(r, 10));
     expect(server.conversations.get(created.id)!.title).toBe('Renamed');
     expect('desktopVersion' in server.conversations.get(created.id)!.settings).toBe(false);
+  });
+
+  it('Scenario F: Shared toNewMessagePayload Wire Parity Across writeTurn, 200 OK Backfill, and 404 Recreation + Transitive interrupt Routing', async () => {
+    const liveThread = await appCore1.createThread();
+    appCore1.threads.patch(liveThread.id, { initialPlaybook: 'oim-schema', hasStarted: true });
+
+    const sampleUser = (localId: string): ChatMessage => ({
+      localId,
+      role: 'user',
+      content: 'Compare wire payload parity',
+      playbook: 'oim-schema',
+      playbookVersion: 2,
+      images: [
+        {
+          id: 'img-parity',
+          mediaType: 'image/png',
+          data: Buffer.from('png-bytes').toString('base64'),
+          name: 'arch.png',
+          description: 'Architecture diagram',
+        },
+      ],
+      createdAt: '2026-10-28T12:00:00.000Z',
+    });
+    const sampleAssistant = (localId: string): ChatMessage => ({
+      localId,
+      role: 'assistant',
+      content: 'Wire payload matches identically.',
+      thinking: 'Verifying wire parity...',
+      playbook: 'oim-schema',
+      playbookVersion: 2,
+      usage: { inputTokens: 80, outputTokens: 40, cacheReadTokens: 20, cacheWriteTokens: 0, thoughtTokens: 10 },
+      createdAt: '2026-10-28T12:00:05.000Z',
+    });
+
+    // 1. Live writeTurn path
+    (appCore1 as any).persistTurn(liveThread.id, sampleUser('live-u'), sampleAssistant('live-a'));
+    await appCore1.drain();
+    await appCore1.syncQueue.flush();
+    const liveServerPair = server.messagesByConv.get(liveThread.id)!;
+    expect(liveServerPair).toHaveLength(2);
+
+    // 2. Startup 200 OK backfill path (turn only in .jsonl on disk, conversation exists empty on server)
+    const backfillConv = await appCore1.syncClient.createConversation('Backfill Parity', { client: 'desktop' });
+    const dirBackfill = fs.mkdtempSync(path.join(os.tmpdir(), 'web-contract-backfill-'));
+    try {
+      const store = appCore1.threads;
+      void store;
+      const bfCoreSeed = wireAppCore(dirBackfill);
+      bfCoreSeed.threads.upsert({
+        id: backfillConv.id,
+        title: 'Backfill Parity',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: backfillConv.createdAt,
+        updatedAt: backfillConv.createdAt,
+        totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        syncState: 'pending',
+        initialPlaybook: 'oim-schema',
+        hasStarted: true,
+      });
+      await bfCoreSeed.threads.appendMessages(backfillConv.id, [
+        sampleUser('bf-u'),
+        sampleAssistant('bf-a'),
+      ]);
+      await bfCoreSeed.drain();
+      bfCoreSeed.dispose();
+
+      appCore2 = wireAppCore(dirBackfill);
+      await appCore2.listThreads();
+      await appCore2.waitForStartupTasks();
+
+      const backfillServerPair = server.messagesByConv.get(backfillConv.id)!;
+      expect(backfillServerPair).toHaveLength(2);
+
+      // 3. 404 Recreation path: delete backfillConv on web server, then refresh appCore2!
+      server.conversations.delete(backfillConv.id);
+      server.messagesByConv.delete(backfillConv.id);
+
+      await appCore2.listThreads();
+      await appCore2.waitForStartupTasks();
+
+      const recreatedConv = [...server.conversations.values()].find(
+        (c) => c.id !== liveThread.id && c.title === 'Backfill Parity',
+      )!;
+      expect(recreatedConv).toBeDefined();
+      const recreatedServerPair = server.messagesByConv.get(recreatedConv.id)!;
+      expect(recreatedServerPair).toHaveLength(2);
+
+      // Strip server-generated id and createdAt to assert exact wire parity across all 3 paths!
+      const stripMeta = (dtos: MessageDto[]) =>
+        dtos.map(({ id: _id, createdAt: _at, ...rest }) => rest);
+      expect(stripMeta(backfillServerPair)).toEqual(stripMeta(liveServerPair));
+      expect(stripMeta(recreatedServerPair)).toEqual(stripMeta(liveServerPair));
+
+      // Verify IPC main/index.ts chatInterrupt contract routes oldId -> recreatedConv.id through appCore.interrupt
+      const interruptSpy = vi.spyOn(appCore2.agent, 'interrupt').mockResolvedValue(undefined);
+      await appCore2.interrupt(backfillConv.id);
+      expect(interruptSpy).toHaveBeenCalledWith(recreatedConv.id);
+
+      const mainSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/main/index.ts'),
+        'utf8',
+      );
+      expect(mainSource).toContain('IpcChannels.chatInterrupt');
+      expect(mainSource).toContain('appCore.interrupt(');
+      expect(mainSource).not.toContain('appCore.agent.interrupt(');
+    } finally {
+      fs.rmSync(dirBackfill, { recursive: true, force: true });
+    }
   });
 });
