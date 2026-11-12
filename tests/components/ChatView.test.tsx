@@ -69,11 +69,13 @@ let originalClipboard: PropertyDescriptor | undefined;
 
 interface ChatOpts {
   thread?: ThreadMeta;
+  conversationKey?: string;
   settings?: AppSettings;
   messages?: ChatMessage[];
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
   liveTurn?: LiveTurn;
+  onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
 
@@ -81,12 +83,13 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
   return (
     <ChatView
       thread={opts.thread ?? THREAD}
+      conversationKey={opts.conversationKey}
       settings={opts.settings ?? settings()}
       messages={opts.messages ?? []}
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
-      onSend={onSend}
+      onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
       onFeedback={async () => undefined}
@@ -3105,6 +3108,230 @@ describe('playbook version display across chat UI surfaces', () => {
     expect(kickers[1]).toContain('oim-schema');
     expect(kickers[1]).not.toContain('vundefined');
     expect(kickers[1]).not.toMatch(/oim-schema\s+v\d/);
+  });
+});
+
+describe('conversationKey composer preservation & 3-way preflight resolution', () => {
+  it('preserves draft, pickerFilter, image attachments, and promptOverride when thread.id migrates under the same conversationKey', async () => {
+    const originalFileReader = window.FileReader;
+    try {
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsDataURL() {
+          this.result =
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          setTimeout(() => this.onload?.(), 0);
+        }
+      }
+      window.FileReader = MockFileReader as unknown as typeof FileReader;
+
+      const { container, rerender } = renderChat({
+        thread: { ...THREAD, id: 'old-id', title: 'Migrating Chat' },
+        conversationKey: 'conv-origin',
+      });
+
+      // 1. Filter picker and type a draft + attach an image before choosing playbook
+      const filterInput = screen.getByLabelText('Filter playbooks') as HTMLInputElement;
+      fireEvent.change(filterInput, { target: { value: 'schema' } });
+      expect(filterInput.value).toBe('schema');
+
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: 'Draft across migration' } });
+
+      const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+      const pngFile = new File(['pngdata'], 'diagram.png', { type: 'image/png' });
+      fireEvent.change(fileInput, { target: { files: [pngFile] } });
+      await waitFor(() => expect(container.querySelector('.attachment-pill')).not.toBeNull());
+
+      // Migrate old-id -> mid-id under same conversationKey while picker is still open
+      rerender(
+        chat({
+          thread: { ...THREAD, id: 'mid-id', title: 'Migrating Chat' },
+          conversationKey: 'conv-origin',
+        }),
+      );
+
+      expect((screen.getByLabelText('Filter playbooks') as HTMLInputElement).value).toBe('schema');
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Draft across migration');
+      expect(container.querySelector('.attachment-pill')).not.toBeNull();
+
+      // 2. Pick playbook ('oim-schema' -> sets promptOverride) and migrate again mid-id -> new-id
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('oim-schema'),
+      )!;
+      fireEvent.click(row);
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+
+      rerender(
+        chat({
+          thread: { ...THREAD, id: 'new-id', title: 'Migrating Chat' },
+          conversationKey: 'conv-origin',
+        }),
+      );
+
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Draft across migration');
+      expect(container.querySelector('.attachment-pill')).not.toBeNull();
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+    } finally {
+      window.FileReader = originalFileReader;
+    }
+  });
+
+  it('resets draft, pickerFilter, attachments, promptOverride, preflight, checking, and attachmentError on genuine conversationKey switch and cancels stale validatePlaybook', async () => {
+    const originalFileReader = window.FileReader;
+    try {
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsDataURL() {
+          this.result =
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          setTimeout(() => this.onload?.(), 0);
+        }
+      }
+      window.FileReader = MockFileReader as unknown as typeof FileReader;
+
+      const gate = deferred();
+      validatePlaybook.mockReturnValueOnce(gate.promise);
+
+      const { container, rerender } = renderChat({
+        thread: { ...THREAD, id: 't-1', title: 'First' },
+        conversationKey: 'conv-1',
+      });
+
+      // Populate pickerFilter, valid attachment, attachmentError, promptOverride, draft, and start preflight check
+      const filterInput = screen.getByLabelText('Filter playbooks') as HTMLInputElement;
+      fireEvent.change(filterInput, { target: { value: 'getting' } });
+
+      const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['png'], 'valid.png', { type: 'image/png' })] },
+      });
+      await waitFor(() => expect(container.querySelector('.attachment-pill')).not.toBeNull());
+
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['pdf'], 'bad.pdf', { type: 'application/pdf' })] },
+      });
+      await waitFor(() => expect(container.querySelector('.chat-notices .banner.error')).not.toBeNull());
+
+      ask(container, 'Question in conv-1', 'oim-getting-started');
+      await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(true);
+
+      // Switch to genuinely different conversationKey 'conv-2'
+      rerender(
+        chat({
+          thread: { ...THREAD, id: 't-2', title: 'Second' },
+          conversationKey: 'conv-2',
+        }),
+      );
+
+      // Every composer state item from conv-1 is reset and conv-2 is unlocked
+      const textarea2 = container.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea2.value).toBe('');
+      expect(textarea2.disabled).toBe(false);
+      expect((screen.getByLabelText('Filter playbooks') as HTMLInputElement).value).toBe('');
+      expect(container.querySelector('.attachment-pill')).toBeNull();
+      expect(container.querySelector('.chat-notices .banner.error')).toBeNull();
+      expect(container.querySelector('.active-playbook')).toBeNull();
+      expect(container.querySelector('.preflight-checking')).toBeNull();
+
+      // Typing on conv-2 enables Send button unaffected by conv-1's pending preflight
+      fireEvent.change(textarea2, { target: { value: 'Fresh question on conv-2' } });
+      const sendBtn2 = container.querySelector('.composer-send') as HTMLButtonElement;
+      expect(sendBtn2.disabled).toBe(false);
+
+      // Stale conv-1 preflight resolves with non-plausible card -> completely ignored on conv-2
+      await act(async () => {
+        gate.settle({ plausible: false, reason: 'Stale recommendation from conv-1' });
+        await gate.promise;
+      });
+      expect(screen.queryByText('Stale recommendation from conv-1')).toBeNull();
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      window.FileReader = originalFileReader;
+    }
+  });
+
+  it('re-enables composer controls (checking: false) and fails open targeting migrated thread when validatePlaybook rejects across oldId -> newId', async () => {
+    let rejectCheck!: (err: Error) => void;
+    validatePlaybook.mockReturnValueOnce(
+      new Promise<PlaybookValidation>((_resolve, reject) => {
+        rejectCheck = reject;
+      }),
+    );
+    const routedSends: Array<{ threadId: string; text: string; promptName?: string }> = [];
+
+    const { container, rerender } = renderChat({
+      thread: { ...THREAD, id: 't-err-old' },
+      conversationKey: 'conv-err',
+      onSend: (text, promptName) => routedSends.push({ threadId: 't-err-old', text, promptName }),
+    });
+
+    ask(container, 'Question when validator throws', 'oim-getting-started');
+    await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(true);
+
+    rerender(
+      chat({
+        thread: { ...THREAD, id: 't-err-new' },
+        conversationKey: 'conv-err',
+        onSend: (text, promptName) => routedSends.push({ threadId: 't-err-new', text, promptName }),
+      }),
+    );
+
+    await act(async () => {
+      rejectCheck(new Error('IPC channel failed'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.preflight-checking')).toBeNull();
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+    expect(routedSends).toEqual([
+      { threadId: 't-err-new', text: 'Question when validator throws', promptName: 'oim-getting-started' },
+    ]);
+  });
+
+  it('completes in-flight validatePlaybook across background oldId -> newId migration under the same conversationKey and dispatches latest onSend', async () => {
+    const gate = deferred();
+    validatePlaybook.mockReturnValueOnce(gate.promise);
+    const routedSends: Array<{ threadId: string; text: string; promptName?: string }> = [];
+
+    const { container, rerender } = renderChat({
+      thread: { ...THREAD, id: 'old-id' },
+      conversationKey: 'conv-same',
+      onSend: (text, promptName) => routedSends.push({ threadId: 'old-id', text, promptName }),
+    });
+
+    ask(container, 'Question mid-migration', 'oim-getting-started');
+    await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+
+    // Background 404 recreation migrates old-id -> new-id while validatePlaybook is still in flight
+    rerender(
+      chat({
+        thread: { ...THREAD, id: 'new-id' },
+        conversationKey: 'conv-same',
+        onSend: (text, promptName) => routedSends.push({ threadId: 'new-id', text, promptName }),
+      }),
+    );
+
+    // Still checking — migration under same conversationKey did NOT abort preflight
+    expect(container.querySelector('.preflight-checking')).not.toBeNull();
+
+    await act(async () => {
+      gate.settle({ plausible: true });
+      await gate.promise;
+    });
+
+    expect(container.querySelector('.preflight-checking')).toBeNull();
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    expect(routedSends).toEqual([
+      { threadId: 'new-id', text: 'Question mid-migration', promptName: 'oim-getting-started' },
+    ]);
   });
 });
 

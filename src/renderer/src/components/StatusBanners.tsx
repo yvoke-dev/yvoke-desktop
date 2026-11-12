@@ -7,11 +7,23 @@ export function StatusBanners(props: {
   serverReachable: boolean;
   pendingSync: number;
   syncError: string | null;
+  droppedSyncError?: string | null;
+  onDismissDroppedSyncError?: () => void;
   onServerSignIn: () => void;
   onRetryAuth: () => void;
   onRetryServer: () => void;
 }): React.JSX.Element | null {
-  const { auth, serverReachable, pendingSync, syncError, onServerSignIn, onRetryAuth, onRetryServer } = props;
+  const {
+    auth,
+    serverReachable,
+    pendingSync,
+    syncError,
+    droppedSyncError,
+    onDismissDroppedSyncError,
+    onServerSignIn,
+    onRetryAuth,
+    onRetryServer,
+  } = props;
   return (
     <div className="banners">
       {auth?.claude === 'missing' && (
@@ -53,6 +65,17 @@ export function StatusBanners(props: {
           </span>
           <button className="small banner-action" onClick={onRetryServer}>
             Retry connection
+          </button>
+        </div>
+      )}
+      {droppedSyncError && (
+        <div className="banner error">
+          <span className="banner-icon">
+            <AlertIcon size={14} />
+          </span>
+          <span>{droppedSyncError}</span>
+          <button type="button" className="small banner-action" onClick={onDismissDroppedSyncError}>
+            Dismiss
           </button>
         </div>
       )}

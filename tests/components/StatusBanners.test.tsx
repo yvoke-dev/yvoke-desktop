@@ -104,4 +104,60 @@ describe('StatusBanners', () => {
 
     expect(screen.getByText(/3 turns waiting to sync to the server — Connection timeout/i)).toBeTruthy();
   });
+
+  it('renders droppedSyncError in an error banner with Dismiss button and invokes onDismissDroppedSyncError on click', () => {
+    const onDismiss = vi.fn();
+    const { container } = render(
+      <StatusBanners
+        auth={mockAuth}
+        serverReachable={true}
+        pendingSync={0}
+        syncError={null}
+        droppedSyncError="A queued conversation turn was rejected by the server (HTTP 422)."
+        onDismissDroppedSyncError={onDismiss}
+        onServerSignIn={() => undefined}
+        onRetryAuth={() => undefined}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    const errorBanner = container.querySelector('.banner.error');
+    expect(errorBanner).not.toBeNull();
+    expect(errorBanner?.textContent).toContain(
+      'A queued conversation turn was rejected by the server (HTTP 422).',
+    );
+    expect(errorBanner?.querySelector('.banner-icon svg')).not.toBeNull();
+
+    const dismissBtn = screen.getByRole('button', { name: 'Dismiss' });
+    expect(dismissBtn.classList.contains('small')).toBe(true);
+    expect(dismissBtn.classList.contains('banner-action')).toBe(true);
+    expect(dismissBtn.getAttribute('style')).toBeNull();
+
+    fireEvent.click(dismissBtn);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('coexists cleanly alongside pendingSync > 0 info banner without conflating syncError and droppedSyncError', () => {
+    const onDismiss = vi.fn();
+    const { container } = render(
+      <StatusBanners
+        auth={mockAuth}
+        serverReachable={true}
+        pendingSync={2}
+        syncError="Temporary timeout"
+        droppedSyncError="Turn rejected by server (HTTP 400)."
+        onDismissDroppedSyncError={onDismiss}
+        onServerSignIn={() => undefined}
+        onRetryAuth={() => undefined}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    const errorBanner = container.querySelector('.banner.error');
+    const infoBanner = container.querySelector('.banner.info');
+    expect(errorBanner).not.toBeNull();
+    expect(infoBanner).not.toBeNull();
+    expect(errorBanner?.textContent).toContain('Turn rejected by server (HTTP 400).');
+    expect(infoBanner?.textContent).toContain('2 turns waiting to sync to the server — Temporary timeout');
+  });
 });

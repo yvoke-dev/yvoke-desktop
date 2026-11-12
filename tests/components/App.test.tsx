@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import App from '../../src/renderer/src/App';
+import type { ChatView as ChatViewType } from '../../src/renderer/src/components/ChatView';
 import type {
   AgentEvent,
   AppSettings,
@@ -32,6 +33,19 @@ function sampleSettings(): AppSettings {
   };
 }
 
+let latestChatViewProps: React.ComponentProps<typeof ChatViewType> | null = null;
+
+vi.mock('../../src/renderer/src/components/ChatView', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/renderer/src/components/ChatView')>();
+  return {
+    ...actual,
+    ChatView: (props: React.ComponentProps<typeof actual.ChatView>) => {
+      latestChatViewProps = props;
+      return actual.ChatView(props);
+    },
+  };
+});
+
 describe('App conversation switching with in-progress turn', () => {
   let agentListeners: Array<(event: AgentEvent) => void> = [];
   let syncListeners: Array<(event: SyncEvent) => void> = [];
@@ -48,6 +62,7 @@ describe('App conversation switching with in-progress turn', () => {
   };
 
   beforeEach(() => {
+    latestChatViewProps = null;
     agentListeners = [];
     syncListeners = [];
     storedMessages = {};
@@ -338,6 +353,7 @@ describe('App conversation switching with in-progress turn', () => {
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Show me tool call' } });
     fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    await waitFor(() => expect(sendMessageMock).toHaveBeenCalledTimes(1));
 
     emitAgent({ kind: 'turn-start', threadId: 'thread-1' });
 
@@ -387,6 +403,7 @@ describe('App conversation switching with in-progress turn', () => {
     const textarea = await screen.findByPlaceholderText(/Add your question/);
     fireEvent.change(textarea, { target: { value: 'Will fail' } });
     fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    await waitFor(() => expect(sendMessageMock).toHaveBeenCalledTimes(1));
 
     emitAgent({ kind: 'turn-start', threadId: 'thread-1' });
 
@@ -815,6 +832,691 @@ describe('App conversation switching with in-progress turn', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('hydrates pendingSync banner immediately on mount from listThreads().pendingSyncCount including when serverReachable is false', async () => {
+    (window as unknown as { api: Record<string, unknown> }).api.listThreads = vi.fn().mockResolvedValue({
+      threads: storedThreads.map((t) => ({ ...t })),
+      serverReachable: false,
+      pendingSyncCount: 4,
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Server unreachable:/i)).toBeTruthy();
+      expect(screen.getByText(/4 turns waiting to sync to the server/i)).toBeTruthy();
+    });
+  });
+
+  it('keeps sticky droppedSyncError banner visible across sibling sync-state synced events until Dismiss is clicked while clearing transient syncError', async () => {
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+    // 1. Transient error on thread-2 shows inside pendingSync info banner
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'error',
+          pendingCount: 2,
+          detail: 'Temporary network blip',
+        });
+      }
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/2 turns waiting to sync to the server — Temporary network blip/i)).toBeTruthy();
+    });
+
+    // 2. Permanent 4xx drop on thread-1 raises sticky droppedSyncError banner
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'error',
+          dropped: true,
+          pendingCount: 1,
+          detail: 'A queued turn in "First Conversation" was rejected (HTTP 422).',
+        });
+      }
+    });
+    await waitFor(() => {
+      expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 422');
+      expect(screen.getByText(/1 turn waiting to sync to the server/i)).toBeTruthy();
+    });
+
+    // 3. Sibling thread-2 finishes syncing -> clears pendingSync & transient syncError, keeps droppedSyncError sticky
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-2', state: 'synced', pendingCount: 0 });
+      }
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull();
+    });
+    expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 422');
+
+    // 4. Clicking Dismiss clears droppedSyncError
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(container.querySelector('.banner.error')).toBeNull();
+  });
+
+  it('handles thread-migrated across oldId -> newId and chained A -> B -> C migrations: updates sidebar, active thread, clears stale serverIds until server-ids arrives, preserves ChatView composer state, and routes IPC calls to latest ID', async () => {
+    storedMessages['thread-2'] = [
+      {
+        localId: 't2-u1',
+        serverId: 'stale-srv-u1',
+        role: 'user',
+        content: 'Existing question in thread 2',
+        playbook: 'oim-schema',
+        createdAt: '2026-08-01T11:00:00.000Z',
+      },
+      {
+        localId: 't2-a1',
+        serverId: 'stale-srv-a1',
+        role: 'assistant',
+        content: 'Existing answer in thread 2',
+        createdAt: '2026-08-01T11:00:05.000Z',
+      },
+    ];
+
+    (window as unknown as { api: Record<string, unknown> }).api.getSettings = vi
+      .fn()
+      .mockResolvedValue({ ...sampleSettings(), models: ['sonnet', 'opus'] });
+    const patchSpy = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api.patchThread;
+    const interruptSpy = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api.interrupt;
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
+
+    // Open thread-2 and type a draft in the composer
+    fireEvent.click(screen.getByText('Second Conversation'));
+    await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+    expect(latestChatViewProps?.conversationKey).toBe('thread-2');
+    expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual(['stale-srv-u1', 'stale-srv-a1']);
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Unsent follow-up across chained migration' } });
+
+    // Migrate thread-2 -> thread-2b -> thread-2c
+    const migratedB: ThreadMeta = {
+      ...storedThreads[1],
+      id: 'thread-2b',
+      title: 'Second Conversation',
+      initialPlaybook: 'oim-schema',
+      hasStarted: true,
+    };
+    const migratedC: ThreadMeta = {
+      ...migratedB,
+      id: 'thread-2c',
+      title: 'Second Conversation (Recreated)',
+    };
+    storedThreads = [storedThreads[0], migratedC];
+    storedMessages['thread-2c'] = storedMessages['thread-2'].map(({ serverId: _s, ...rest }) => rest);
+
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-migrated', oldThreadId: 'thread-2', thread: migratedB });
+      }
+      for (const l of syncListeners) {
+        l({ kind: 'thread-migrated', oldThreadId: 'thread-2b', thread: migratedC });
+      }
+    });
+
+    // Sidebar updated without duplicate rows, header updated, and composer draft survived!
+    await waitFor(() => {
+      expect(screen.getAllByText('Second Conversation (Recreated)').length).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.queryByText('Second Conversation')).toBeNull();
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
+      'Unsent follow-up across chained migration',
+    );
+    expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
+    expect(latestChatViewProps?.thread.id).toBe('thread-2c');
+    expect(latestChatViewProps?.conversationKey).toBe('thread-2');
+    expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, undefined]);
+
+    // Fresh server-ids event on thread-2c maps cleanly
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'server-ids', threadId: 'thread-2c', mapping: { 't2-a1': 'fresh-srv-a1' } });
+      }
+    });
+    await waitFor(() => {
+      expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, 'fresh-srv-a1']);
+    });
+
+    // Patching model routes to thread-2c
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'opus' } });
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledWith('thread-2c', { model: 'opus' }));
+
+    // Sending follow-up routes to thread-2c
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    await waitFor(() => {
+      expect(sendMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-2c',
+          text: 'Unsent follow-up across chained migration',
+          promptName: 'oim-schema',
+        }),
+      );
+    });
+
+    // Interrupting live turn routes to thread-2c
+    fireEvent.click(screen.getByRole('button', { name: /Stop/i }));
+    expect(interruptSpy).toHaveBeenCalledWith('thread-2c');
+  });
+
+  it('routes sendMessage to migrated thread.id via migratedIdsRef when thread-migrated arrives while validatePlaybook is in flight', async () => {
+    let resolvePreflight!: (v: { plausible: boolean }) => void;
+    (window as unknown as { api: Record<string, unknown> }).api.validatePlaybook = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ plausible: boolean }>((resolve) => {
+          resolvePreflight = resolve;
+        }),
+    );
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+    fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'First question during preflight migration' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+
+    await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+
+    const migrated1: ThreadMeta = {
+      ...storedThreads[0],
+      id: 'thread-1-recreated',
+    };
+    storedThreads = [migrated1, storedThreads[1]];
+
+    // Emit thread-migrated AND resolve validatePlaybook in the same synchronous turn before React re-renders
+    await act(async () => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-migrated', oldThreadId: 'thread-1', thread: migrated1 });
+      }
+      resolvePreflight({ plausible: true });
+    });
+
+    await waitFor(() => {
+      expect(sendMessageMock).toHaveBeenCalledTimes(1);
+      expect(sendMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1-recreated',
+          text: 'First question during preflight migration',
+          promptName: 'oim-getting-started',
+        }),
+      );
+    });
+  });
+
+  it('handles thread-deleted: removes swept empty conversation from sidebar, clears cached messages, and transitions activeThreadId cleanly', async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('First Conversation')).toBeTruthy();
+      expect(screen.getByText('Second Conversation')).toBeTruthy();
+    });
+
+    // Open thread-1 (empty desktop conversation)
+    fireEvent.click(screen.getByText('First Conversation'));
+    await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+    // Emit thread-deleted for thread-1 -> sidebar removes it and activeThreadId falls back to thread-2
+    storedThreads = [storedThreads[1]];
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-deleted', threadId: 'thread-1' });
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('First Conversation')).toBeNull();
+      expect(screen.getByText('Existing question in thread 2')).toBeTruthy();
+    });
+
+    // Emit thread-deleted for the last remaining thread (thread-2) -> falls back to empty state
+    storedThreads = [];
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-deleted', threadId: 'thread-2' });
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Second Conversation')).toBeNull();
+      expect(screen.getByText('No conversations yet.')).toBeTruthy();
+    });
+  });
+
+  it('guards in-flight openThread(threadId) against thread-deleted (late resolve & late reject) and thread-migrated races', async () => {
+    let resolveThread1Msgs!: (msgs: ChatMessage[]) => void;
+    let rejectThread2Msgs!: (err: Error) => void;
+    let resolveMigratingMsgs!: (msgs: ChatMessage[]) => void;
+
+    const t3: ThreadMeta = {
+      id: 'thread-3',
+      title: 'Third Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      updatedAt: '2026-08-01T12:00:00.000Z',
+      totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'synced',
+    };
+    storedThreads = [...storedThreads, t3];
+
+    (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+      .fn()
+      .mockImplementation((id: string) => {
+        if (id === 'thread-1') {
+          return new Promise<ChatMessage[]>((res) => {
+            resolveThread1Msgs = res;
+          });
+        }
+        if (id === 'thread-2') {
+          return new Promise<ChatMessage[]>((_res, rej) => {
+            rejectThread2Msgs = rej;
+          });
+        }
+        if (id === 'thread-3') {
+          return new Promise<ChatMessage[]>((res) => {
+            resolveMigratingMsgs = res;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+    const submitFeedbackSpy = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api
+      .submitFeedback;
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+    // (a1) Click thread-1 -> getMessages('thread-1') in flight -> thread-deleted('thread-1') arrives -> late resolve discarded
+    fireEvent.click(screen.getByText('First Conversation'));
+    storedThreads = storedThreads.filter((t) => t.id !== 'thread-1');
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-deleted', threadId: 'thread-1' });
+      }
+    });
+    await act(async () => {
+      resolveThread1Msgs([
+        { localId: 'ghost-1', role: 'assistant', content: 'Ghost message from deleted thread 1', createdAt: '' },
+      ]);
+    });
+    expect(screen.queryByText('Ghost message from deleted thread 1')).toBeNull();
+    expect(screen.queryByText('First Conversation')).toBeNull();
+
+    // (a2) thread-2 already started fallback openThread('thread-2') -> thread-deleted('thread-2') arrives -> late reject causes zero unhandled errors
+    storedThreads = storedThreads.filter((t) => t.id !== 'thread-2');
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-deleted', threadId: 'thread-2' });
+      }
+    });
+    await act(async () => {
+      rejectThread2Msgs(new Error('ENOENT deleted thread-2'));
+    });
+    expect(screen.queryByText('Second Conversation')).toBeNull();
+
+    // (b) thread-3 is now active with getMessages('thread-3') in flight -> thread-migrated('thread-3' -> 'thread-3-new') arrives BEFORE getMessages resolves
+    const migratedT3: ThreadMeta = { ...t3, id: 'thread-3-new', title: 'Third Conversation' };
+    storedThreads = [migratedT3];
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-migrated', oldThreadId: 'thread-3', thread: migratedT3 });
+      }
+    });
+
+    await act(async () => {
+      resolveMigratingMsgs([
+        {
+          localId: 't3-u1',
+          serverId: 'stale-old-server-id',
+          role: 'user',
+          content: 'Question in thread 3',
+          playbook: 'oim-schema',
+          createdAt: '',
+        },
+        {
+          localId: 't3-a1',
+          serverId: 'stale-old-assistant-id',
+          role: 'assistant',
+          content: 'Answer in thread 3 after migration',
+          createdAt: '',
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Answer in thread 3 after migration')).toBeTruthy();
+    });
+    expect(latestChatViewProps?.thread.id).toBe('thread-3-new');
+    expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, undefined]);
+
+    // Submitting feedback routes to 'thread-3-new' (proving messages landed on migrated key, not ghost 'thread-3')
+    submitFeedbackSpy.mockRejectedValueOnce(new Error('Message has not synced to the server yet'));
+    const goodAnswerBtn = document.querySelector('.feedback .icon-button') as HTMLButtonElement;
+    fireEvent.click(goodAnswerBtn);
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+    await waitFor(() => {
+      expect(submitFeedbackSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-3-new', messageLocalId: 't3-a1', rating: 1 }),
+      );
+    });
+  });
+
+  it('preserves sidebar row, messagesByThread, and rating controls when deleteThread or submitFeedback rejects', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      (window as unknown as { api: Record<string, unknown> }).api.deleteThread = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('HTTP 503 Unavailable'));
+      (window as unknown as { api: Record<string, unknown> }).api.submitFeedback = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Message has not synced to the server yet — try again in a moment'));
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
+
+      // Open Second Conversation so messagesByThread['thread-2'] is populated
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+
+      // (a) Click delete on Second Conversation -> deleteThread rejects -> sidebar row & messages remain intact
+      const activeRow = container.querySelector('.thread-item.active')!;
+      const deleteBtn = activeRow.querySelector('.thread-delete') as HTMLButtonElement;
+      fireEvent.click(deleteBtn);
+
+      await waitFor(() => expect(warnSpy).toHaveBeenCalled());
+      expect(screen.getAllByText('Second Conversation').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText('Existing question in thread 2')).toBeTruthy();
+      expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
+
+      // (b) Click Good answer feedback -> submitFeedback rejects -> error displayed in dialog, buttons re-enable, transcript intact
+      const thumbsUpBtn = container.querySelector('.feedback .icon-button') as HTMLButtonElement;
+      fireEvent.click(thumbsUpBtn);
+      const submitBtn = screen.getByRole('button', { name: 'Submit' }) as HTMLButtonElement;
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(
+          screen.getByText('Message has not synced to the server yet — try again in a moment'),
+        ).toBeTruthy();
+      });
+      expect(submitBtn.disabled).toBe(false);
+      expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
+    } finally {
+      confirmSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('unmounts cleanly while listThreads retry and getMessages are pending: unsubscribes IPC listeners once, clears 10s interval, and ignores post-unmount settlements', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      let rejectPendingListThreads!: (err: Error) => void;
+      let rejectPendingGetMessages!: (err: Error) => void;
+
+      const listThreadsMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          threads: storedThreads.map((t) => ({ ...t })),
+          serverReachable: false,
+          pendingSyncCount: 1,
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise((_res, rej) => {
+              rejectPendingListThreads = rej;
+            }),
+        );
+      (window as unknown as { api: Record<string, unknown> }).api.listThreads = listThreadsMock;
+      (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi.fn().mockImplementation(
+        () =>
+          new Promise<ChatMessage[]>((_res, rej) => {
+            rejectPendingGetMessages = rej;
+          }),
+      );
+
+      const offAgentSpy = vi.fn();
+      const offSyncSpy = vi.fn();
+      (window as unknown as { api: Record<string, unknown> }).api.onAgentEvent = vi
+        .fn()
+        .mockImplementation((listener: (event: AgentEvent) => void) => {
+          agentListeners.push(listener);
+          return () => {
+            offAgentSpy();
+            agentListeners = agentListeners.filter((l) => l !== listener);
+          };
+        });
+      (window as unknown as { api: Record<string, unknown> }).api.onSyncEvent = vi
+        .fn()
+        .mockImplementation((listener: (event: SyncEvent) => void) => {
+          syncListeners.push(listener);
+          return () => {
+            offSyncSpy();
+            syncListeners = syncListeners.filter((l) => l !== listener);
+          };
+        });
+
+      const { unmount } = render(<App />);
+      await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
+
+      // Start pending getMessages()
+      fireEvent.click(screen.getByText('Second Conversation'));
+
+      // Advance 10s so retry interval fires a pending listThreads()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(listThreadsMock).toHaveBeenCalledTimes(2);
+
+      // Unmount while BOTH listThreads() and getMessages() are still pending!
+      unmount();
+
+      expect(offAgentSpy).toHaveBeenCalledTimes(1);
+      expect(offSyncSpy).toHaveBeenCalledTimes(1);
+
+      // Advance 30s -> 10s retry interval was cleared, zero further listThreads calls
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(listThreadsMock).toHaveBeenCalledTimes(2);
+
+      // Reject both pending promises post-unmount -> zero unhandled rejections or React errors
+      await act(async () => {
+        rejectPendingListThreads(new Error('Post-unmount listThreads failure'));
+        rejectPendingGetMessages(new Error('Post-unmount getMessages failure'));
+      });
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves post-migration server-ids that arrive while openThread(oldId) getMessages is still in flight, while purging pre-migration serverIds', async () => {
+    const t3: ThreadMeta = {
+      id: 'thread-3',
+      title: 'Third Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      updatedAt: '2026-08-01T12:00:00.000Z',
+      totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'pending',
+    };
+    storedThreads = [t3, ...storedThreads];
+
+    let resolveThread3Messages!: (msgs: ChatMessage[]) => void;
+    const submitFeedbackSpy = vi.fn().mockResolvedValue(undefined);
+    (window as unknown as { api: Record<string, unknown> }).api.submitFeedback = submitFeedbackSpy;
+    (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+      .fn()
+      .mockImplementation((threadId: string) => {
+        if (threadId === 'thread-3') {
+          return new Promise<ChatMessage[]>((resolve) => {
+            resolveThread3Messages = resolve;
+          });
+        }
+        if (threadId === 'thread-3-new') {
+          return Promise.resolve([
+            {
+              localId: 't3-u1',
+              role: 'user',
+              content: 'Question in thread 3',
+              createdAt: '2026-08-01T12:00:00.000Z',
+            },
+            {
+              localId: 't3-a1',
+              serverId: 'post-migration-fresh-a1',
+              role: 'assistant',
+              content: 'Answer in thread 3',
+              rating: 1,
+              createdAt: '2026-08-01T12:00:05.000Z',
+            },
+          ]);
+        }
+        return Promise.resolve(storedMessages[threadId] ?? []);
+      });
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('Third Conversation')).toBeTruthy());
+
+    // Pre-migration server-ids on thread-3 MUST be cleared when thread-migrated fires
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'server-ids', threadId: 'thread-3', mapping: { 't3-u1': 'pre-migration-srv-u1' } });
+      }
+    });
+
+    // Begin openThread('thread-3') — getMessages('thread-3') stays in flight
+    fireEvent.click(screen.getByText('Third Conversation'));
+    expect(resolveThread3Messages).toBeTypeOf('function');
+
+    const migratedT3: ThreadMeta = {
+      ...t3,
+      id: 'thread-3-new',
+      syncState: 'synced',
+    };
+    storedThreads = [migratedT3, ...storedThreads.slice(1)];
+
+    // Both thread-migrated AND post-migration server-ids arrive BEFORE getMessages('thread-3') resolves!
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-migrated', oldThreadId: 'thread-3', thread: migratedT3 });
+      }
+      for (const l of syncListeners) {
+        l({
+          kind: 'server-ids',
+          threadId: 'thread-3-new',
+          mapping: { 't3-a1': 'post-migration-fresh-a1' },
+        });
+      }
+    });
+
+    // Now getMessages('thread-3') resolves with pre-migration stale serverIds from disk
+    await act(async () => {
+      resolveThread3Messages([
+        {
+          localId: 't3-u1',
+          serverId: 'stale-disk-u1',
+          role: 'user',
+          content: 'Question in thread 3',
+          createdAt: '2026-08-01T12:00:00.000Z',
+        },
+        {
+          localId: 't3-a1',
+          serverId: 'stale-disk-a1',
+          role: 'assistant',
+          content: 'Answer in thread 3',
+          createdAt: '2026-08-01T12:00:05.000Z',
+        },
+      ]);
+    });
+
+    await waitFor(() => expect(screen.getByText('Answer in thread 3')).toBeTruthy());
+    expect(latestChatViewProps?.thread.id).toBe('thread-3-new');
+    // Stale disk serverIds AND pre-migration recentServerIds are cleared, while post-migration fresh serverId is preserved!
+    expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([
+      undefined,
+      'post-migration-fresh-a1',
+    ]);
+
+    // Submitting message feedback on the assistant turn succeeds against thread-3-new and closes the dialog
+    const thumbsUpBtn = container.querySelector('.feedback .icon-button') as HTMLButtonElement;
+    expect(thumbsUpBtn).not.toBeNull();
+    fireEvent.click(thumbsUpBtn);
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() => {
+      expect(submitFeedbackSpy).toHaveBeenCalledWith({
+        threadId: 'thread-3-new',
+        messageLocalId: 't3-a1',
+        rating: 1,
+        comment: undefined,
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull());
+  });
+
+  it('discards stale slow openThread(thread-1) resolution after switching to fast thread-2 without evicting thread-2 messages', async () => {
+    let resolveSlowThread1Messages!: (msgs: ChatMessage[]) => void;
+    (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+      .fn()
+      .mockImplementation((threadId: string) => {
+        if (threadId === 'thread-1') {
+          return new Promise<ChatMessage[]>((resolve) => {
+            resolveSlowThread1Messages = resolve;
+          });
+        }
+        return Promise.resolve(storedMessages[threadId] ?? []);
+      });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
+
+    // 1. Click First Conversation -> getMessages('thread-1') stays pending
+    fireEvent.click(screen.getByText('First Conversation'));
+    expect(resolveSlowThread1Messages).toBeTypeOf('function');
+
+    // 2. Immediately switch to Second Conversation -> fast getMessages('thread-2') loads and renders
+    fireEvent.click(screen.getByText('Second Conversation'));
+    await waitFor(() => {
+      expect(screen.getByText('Existing question in thread 2')).toBeTruthy();
+      expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
+    });
+
+    // 3. Slow getMessages('thread-1') resolves late while user is viewing thread-2
+    await act(async () => {
+      resolveSlowThread1Messages([
+        {
+          localId: 't1-m1',
+          role: 'assistant',
+          content: 'Slow message from thread 1',
+          createdAt: '2026-08-01T10:00:05.000Z',
+        },
+      ]);
+    });
+
+    // Active thread-2 messages remain intact on screen and were NOT evicted by stale openThread('thread-1')
+    expect(screen.getByText('Existing question in thread 2')).toBeTruthy();
+    expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
+    expect(screen.queryByText('Slow message from thread 1')).toBeNull();
+    expect(latestChatViewProps?.thread.id).toBe('thread-2');
+    expect(latestChatViewProps?.messages.map((m) => m.localId)).toEqual(['t2-u1', 't2-a1']);
   });
 });
 
