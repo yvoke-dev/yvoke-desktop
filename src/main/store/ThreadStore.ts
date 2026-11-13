@@ -52,6 +52,8 @@ export class ThreadStore {
   private readonly lifecycleEpoch = new Map<string, number>();
   /** Per-thread promise chain serializing message-log mutations (see runExclusive). */
   private readonly opChain = new Map<string, Promise<void>>();
+  private readonly nonEmptyLogIds = new Set<string>();
+  private nonEmptyLogsInitialized = false;
 
   constructor(private readonly dir: string) {
     this.indexFile = path.join(dir, 'index.json');
@@ -76,6 +78,7 @@ export class ThreadStore {
 
   private async cleanupAbortedWriteIfReupserted(threadId: string): Promise<void> {
     if (!this.deletedIds.has(threadId)) {
+      this.nonEmptyLogIds.delete(threadId);
       await fsp.rm(this.messagesFile(threadId), { force: true }).catch(() => undefined);
       await fsp.rm(this.imageDir(threadId), { recursive: true, force: true }).catch(() => undefined);
     }
@@ -411,6 +414,7 @@ export class ThreadStore {
   delete(threadId: string): Promise<void> {
     this.validateThreadId(threadId);
     const epoch = this.bumpEpoch(threadId);
+    this.nonEmptyLogIds.delete(threadId);
     const prev = this.index[threadId];
     delete this.index[threadId];
     this.syncRemoteMapping(threadId, prev, undefined);
@@ -441,6 +445,7 @@ export class ThreadStore {
       if (!isStillTargetTombstone()) {
         return;
       }
+      this.nonEmptyLogIds.delete(threadId);
       const msgFile = this.messagesFile(threadId);
       const imgDir = this.imageDir(threadId);
       try {
@@ -632,11 +637,36 @@ export class ThreadStore {
     );
   }
 
+  private ensureNonEmptyLogsInitialized(): void {
+    if (!this.nonEmptyLogsInitialized) {
+      this.inspectLogsSync();
+    }
+  }
+
+  private setNonEmptyLogPresence(threadId: string, hasMessages: boolean): void {
+    this.ensureNonEmptyLogsInitialized();
+    if (hasMessages) {
+      this.nonEmptyLogIds.add(threadId);
+    } else {
+      this.nonEmptyLogIds.delete(threadId);
+    }
+  }
+
+  hasLocalMessages(threadId: string): boolean {
+    if (!isValidThreadId(threadId) || this.deletedIds.has(threadId)) {
+      return false;
+    }
+    this.ensureNonEmptyLogsInitialized();
+    return this.nonEmptyLogIds.has(threadId);
+  }
+
   /**
    * Synchronously inspects `<threadId>.jsonl` files via `readdirSync` + `statSync` without
    * reading file contents or running `JSON.parse`, skipping tombstoned IDs.
    */
   inspectLogsSync(): { nonEmptyIds: Set<string>; allLogIds: string[] } {
+    this.nonEmptyLogsInitialized = true;
+    this.nonEmptyLogIds.clear();
     const nonEmptyIds = new Set<string>();
     const allLogIds: string[] = [];
     let files: string[];
@@ -659,6 +689,7 @@ export class ThreadStore {
       allLogIds.push(threadId);
       if (stat.size > 0) {
         nonEmptyIds.add(threadId);
+        this.nonEmptyLogIds.add(threadId);
       }
     }
     return { nonEmptyIds, allLogIds };
@@ -690,6 +721,7 @@ export class ThreadStore {
       if (this.isStaleOrDeleted(threadId, epoch)) return [];
       const raw = await this.readRaw(threadId);
       if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      this.setNonEmptyLogPresence(threadId, raw.length > 0);
       return raw;
     });
   }
@@ -703,12 +735,14 @@ export class ThreadStore {
       if (this.isStaleOrDeleted(threadId, epoch)) return [];
       const hydrated = await this.hydrateImages(threadId, raw);
       if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      this.setNonEmptyLogPresence(threadId, raw.length > 0);
       return hydrated;
     });
   }
 
   async appendMessages(threadId: string, messages: ChatMessage[]): Promise<void> {
     this.validateThreadId(threadId);
+    if (messages.length === 0) return;
     const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
     return this.runExclusive(threadId, async () => {
       if (this.isStaleOrDeleted(threadId, epoch)) return;
@@ -719,12 +753,14 @@ export class ThreadStore {
         await this.cleanupAbortedWriteIfReupserted(threadId);
         return;
       }
+      if (stored.length === 0) return;
       const lines = stored.map((m) => JSON.stringify(m)).join('\n') + '\n';
       await fsp.appendFile(this.messagesFile(threadId), lines);
       if (this.isStaleOrDeleted(threadId, epoch)) {
         await this.cleanupAbortedWriteIfReupserted(threadId);
         return;
       }
+      this.setNonEmptyLogPresence(threadId, stored.length > 0);
 
       const assistantUsage = messages.find((m) => m.role === 'assistant')?.usage;
       const meta = this.index[threadId];
@@ -759,6 +795,11 @@ export class ThreadStore {
         return;
       }
       await this.collectImageGarbage(threadId, stored);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        await this.cleanupAbortedWriteIfReupserted(threadId);
+        return;
+      }
+      this.setNonEmptyLogPresence(threadId, stored.length > 0);
     });
   }
 
@@ -851,6 +892,7 @@ export class ThreadStore {
         return this.cleanMeta({ ...fallbackMeta, ...metaPatch, id: threadId });
       }
 
+      this.setNonEmptyLogPresence(threadId, cleanedMessages.length > 0);
       const prevMeta = this.index[threadId];
       const base = prevMeta ?? fallbackMeta;
       const mergedMeta = this.cleanMeta({

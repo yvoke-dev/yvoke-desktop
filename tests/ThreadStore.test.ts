@@ -1271,5 +1271,246 @@ describe('ThreadStore', () => {
       expect(store.findByRemoteId('rec-B')?.id).toBe('rec-B');
     });
   });
+
+  describe('O(1) nonEmptyLogIds & hasLocalMessages tracking', () => {
+    it('lazy-initializes once via inspectLogsSync, updates in O(1) across appendMessages / replaceMessages / readRawMessages / readMessages / prepareForRecreation, and preserves standalone mutations before first read', async () => {
+      const subDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-nonempty-happy-'));
+      try {
+        // Seed pre-existing non-empty log and corrupt/whitespace log BEFORE constructing ThreadStore
+        fs.writeFileSync(
+          path.join(subDir, 'seeded-valid.jsonl'),
+          JSON.stringify(message('sv-1', 'user')) + '\n',
+        );
+        fs.writeFileSync(path.join(subDir, 'seeded-corrupt.jsonl'), '   \n{bad-json\n');
+
+        const s = new ThreadStore(subDir);
+        const inspectSpy = vi.spyOn(s, 'inspectLogsSync');
+
+        // Standalone mutations/reads BEFORE the first hasLocalMessages() call:
+        // 1) readRawMessages('seeded-corrupt') parses 0 valid messages -> setNonEmptyLogPresence('seeded-corrupt', false)
+        //    must initialize first so a subsequent hasLocalMessages('seeded-corrupt') does NOT re-scan disk and see stat.size > 0!
+        expect(await s.readRawMessages('seeded-corrupt')).toEqual([]);
+        // 2) appendMessages('written-before-read', ...) before hasLocalMessages()
+        s.upsert(meta('written-before-read'));
+        await s.appendMessages('written-before-read', [message('wb-1', 'user')]);
+
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+        expect(s.hasLocalMessages('seeded-valid')).toBe(true);
+        expect(s.hasLocalMessages('seeded-corrupt')).toBe(false);
+        expect(s.hasLocalMessages('written-before-read')).toBe(true);
+        expect(s.hasLocalMessages('never-existed')).toBe(false);
+        // Zero additional inspectLogsSync calls across repeated O(1) lookups!
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+        // replaceMessages non-empty -> empty -> non-empty
+        s.upsert(meta('rep-thread'));
+        await s.replaceMessages('rep-thread', [message('rp-1', 'user')]);
+        expect(s.hasLocalMessages('rep-thread')).toBe(true);
+        await s.replaceMessages('rep-thread', []);
+        expect(s.hasLocalMessages('rep-thread')).toBe(false);
+
+        // prepareForRecreation with extraMessages (non-empty) vs empty
+        await s.prepareForRecreation(
+          'rec-nonempty',
+          meta('rec-nonempty'),
+          { remoteConversationId: 'srv-rec-1' },
+          [message('extra-1', 'user')],
+        );
+        expect(s.hasLocalMessages('rec-nonempty')).toBe(true);
+
+        await s.prepareForRecreation('rec-empty', meta('rec-empty'), {
+          remoteConversationId: 'srv-rec-2',
+        });
+        expect(s.hasLocalMessages('rec-empty')).toBe(false);
+
+        // External valid write picked up when readMessages() runs
+        fs.writeFileSync(
+          path.join(subDir, 'ext-read.jsonl'),
+          JSON.stringify(message('ext-1', 'assistant')) + '\n',
+        );
+        expect((await s.readMessages('ext-read')).map((m) => m.localId)).toEqual(['ext-1']);
+        expect(s.hasLocalMessages('ext-read')).toBe(true);
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+        await s.drain();
+      } finally {
+        fs.rmSync(subDir, { recursive: true, force: true });
+      }
+    });
+
+    it('handles invalid/tainted IDs, missing ENOENT dir (single init), 0-byte logs, empty appendMessages([]), corrupt log downgrade, bare readRaw isolation, and tombstones', async () => {
+      // 1. Tainted / invalid IDs return false without throwing or touching disk
+      const inspectMainSpy = vi.spyOn(store, 'inspectLogsSync');
+      expect(store.hasLocalMessages('')).toBe(false);
+      expect(store.hasLocalMessages('../escape')).toBe(false);
+      expect(store.hasLocalMessages(null as unknown as string)).toBe(false);
+      expect(store.hasLocalMessages(undefined as unknown as string)).toBe(false);
+      expect(store.hasLocalMessages(123 as unknown as string)).toBe(false);
+      expect(inspectMainSpy).not.toHaveBeenCalled();
+
+      // 2. Missing ENOENT directory marks nonEmptyLogsInitialized on first call (inspectLogsSync at most once)
+      const missingDir = path.join(dir, 'does-not-exist-yet');
+      const enoentStore = new ThreadStore(missingDir);
+      const enoentInspectSpy = vi.spyOn(enoentStore, 'inspectLogsSync');
+      expect(enoentStore.hasLocalMessages('any-thread')).toBe(false);
+      expect(enoentStore.hasLocalMessages('another-thread')).toBe(false);
+      expect(enoentStore.hasLocalMessages('any-thread')).toBe(false);
+      expect(enoentInspectSpy).toHaveBeenCalledTimes(1);
+
+      // 3. 0-byte .jsonl file & appendMessages(id, []) on empty and non-empty threads
+      fs.writeFileSync(path.join(dir, 'zero-byte.jsonl'), '');
+      expect(store.hasLocalMessages('zero-byte')).toBe(false);
+
+      store.upsert(meta('empty-append'));
+      await store.appendMessages('empty-append', []);
+      expect(fs.existsSync(path.join(dir, 'empty-append.jsonl'))).toBe(false);
+      expect(store.hasLocalMessages('empty-append')).toBe(false);
+
+      store.upsert(meta('keep-nonempty'));
+      await store.appendMessages('keep-nonempty', [message('kn-1', 'user')]);
+      expect(store.hasLocalMessages('keep-nonempty')).toBe(true);
+      await store.appendMessages('keep-nonempty', []);
+      expect(store.hasLocalMessages('keep-nonempty')).toBe(true);
+
+      // 4. Corrupt/whitespace-only .jsonl (stat.size > 0) starts true on stat scan, downgrades on readMessages, and bare readRaw does NOT mutate nonEmptyLogIds
+      const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-corrupt-downgrade-'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.writeFileSync(path.join(corruptDir, 'ws-only.jsonl'), '   \n\t\n');
+        fs.writeFileSync(path.join(corruptDir, 'bad-line.jsonl'), '{broken\n');
+        const cs = new ThreadStore(corruptDir);
+        expect(cs.hasLocalMessages('ws-only')).toBe(true);
+        expect(cs.hasLocalMessages('bad-line')).toBe(true);
+
+        // Bare readRaw must NOT mutate nonEmptyLogIds
+        await (cs as unknown as { readRaw: (id: string) => Promise<StoredChatMessage[]> }).readRaw('ws-only');
+        expect(cs.hasLocalMessages('ws-only')).toBe(true);
+
+        // Public readMessages / readRawMessages downgrade to false when 0 valid messages parse
+        expect(await cs.readMessages('ws-only')).toEqual([]);
+        expect(cs.hasLocalMessages('ws-only')).toBe(false);
+        expect(await cs.readRawMessages('bad-line')).toEqual([]);
+        expect(cs.hasLocalMessages('bad-line')).toBe(false);
+        await cs.drain();
+      } finally {
+        warnSpy.mockRestore();
+        fs.rmSync(corruptDir, { recursive: true, force: true });
+      }
+
+      // 5. Tombstoned thread returns false immediately even while unlink fails with EBUSY
+      store.upsert(meta('tomb-sticky'));
+      await store.appendMessages('tomb-sticky', [message('ts-1', 'user')]);
+      expect(store.hasLocalMessages('tomb-sticky')).toBe(true);
+
+      const origRm = fsp.rm.bind(fsp);
+      const rmBusySpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).includes('tomb-sticky')) {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        }
+        return origRm(target, opts);
+      });
+      const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await store.delete('tomb-sticky');
+        expect(store.isDeleted('tomb-sticky')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'tomb-sticky.jsonl'))).toBe(true);
+        expect(store.hasLocalMessages('tomb-sticky')).toBe(false);
+      } finally {
+        rmBusySpy.mockRestore();
+        warnSpy2.mockRestore();
+      }
+      await store.delete('tomb-sticky');
+    });
+
+    it('keeps hasLocalMessages(id) === false across stale/aborted appendMessages, replaceMessages, and prepareForRecreation (including mid-write delete + re-upsert cleanup)', async () => {
+      // Force initialization first
+      expect(store.hasLocalMessages('init-probe')).toBe(false);
+
+      // 1. Queued appendMessages, replaceMessages, prepareForRecreation aborted by synchronous delete(id) before execution
+      for (const mode of ['append', 'replace', 'recreate'] as const) {
+        const id = `stale-${mode}`;
+        store.upsert(meta(id));
+
+        let releaseBlocker!: () => void;
+        const blocker = new Promise<void>((res) => {
+          releaseBlocker = res;
+        });
+        let enteredBlocker!: () => void;
+        const blockerEntered = new Promise<void>((res) => {
+          enteredBlocker = res;
+        });
+
+        const origReadFile = fsp.readFile.bind(fsp);
+        const readSpy = vi.spyOn(fsp, 'readFile').mockImplementationOnce(async (...args) => {
+          enteredBlocker();
+          await blocker;
+          return origReadFile(...(args as Parameters<typeof origReadFile>));
+        });
+
+        try {
+          const readP = store.readRawMessages(id);
+          await blockerEntered;
+
+          const writeP =
+            mode === 'append'
+              ? store.appendMessages(id, [message('m1', 'user')])
+              : mode === 'replace'
+                ? store.replaceMessages(id, [message('m1', 'user')])
+                : store.prepareForRecreation(id, meta(id), { remoteConversationId: `r-${id}` }, [
+                    message('m1', 'user'),
+                  ]);
+          const delP = store.delete(id);
+
+          releaseBlocker();
+          await Promise.all([readP, writeP, delP]);
+          expect(store.hasLocalMessages(id)).toBe(false);
+        } finally {
+          readSpy.mockRestore();
+          releaseBlocker();
+        }
+      }
+
+      // 2. Mid-write delete(id) + immediate re-upsert(meta(id)) triggers cleanupAbortedWriteIfReupserted() and leaves re-upserted empty thread at hasLocalMessages(id) === false
+      const reupsertId = 'mid-write-reupsert';
+      store.upsert(meta(reupsertId));
+
+      const origRename = fsp.rename.bind(fsp);
+      let releaseRename!: () => void;
+      const renameGate = new Promise<void>((res) => {
+        releaseRename = res;
+      });
+      let notifyRename!: () => void;
+      const renameEntered = new Promise<void>((res) => {
+        notifyRename = res;
+      });
+
+      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementationOnce(async (oldPath, newPath) => {
+        await origRename(oldPath, newPath);
+        notifyRename();
+        await renameGate;
+      });
+
+      try {
+        const replaceP = store.replaceMessages(reupsertId, [message('rw-1', 'user')]);
+        await renameEntered;
+
+        // Delete generation 1 AND immediately re-upsert empty generation 2 while writeRaw is mid-flight!
+        const delGen1 = store.delete(reupsertId);
+        store.upsert(meta(reupsertId));
+        expect(store.isDeleted(reupsertId)).toBe(false);
+
+        releaseRename();
+        await Promise.all([replaceP, delGen1]);
+        await store.drain(reupsertId);
+
+        expect(store.get(reupsertId)).toBeDefined();
+        expect(fs.existsSync(path.join(dir, `${reupsertId}.jsonl`))).toBe(false);
+        expect(store.hasLocalMessages(reupsertId)).toBe(false);
+      } finally {
+        renameSpy.mockRestore();
+        releaseRename();
+      }
+    });
+  });
 });
 

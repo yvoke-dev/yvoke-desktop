@@ -903,6 +903,97 @@ describe('App conversation switching with in-progress turn', () => {
     expect(container.querySelector('.banner.error')).toBeNull();
   });
 
+  it('Finding B1: updates sidebar row sync-dot in place on sync-state (pending / error), preserves transient syncError on pendingCount > 0, and skips refreshThreads on synthetic count-only threadId === ""', async () => {
+    const listThreadsMock = (window as unknown as { api: { listThreads: ReturnType<typeof vi.fn> } }).api.listThreads;
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('First Conversation')).toBeTruthy();
+      expect(screen.getByText('Second Conversation')).toBeTruthy();
+    });
+    const initialListCalls = listThreadsMock.mock.calls.length;
+
+    const getRowDot = (title: string): Element | null =>
+      screen.getByText(title).closest('.thread-item')?.querySelector('.sync-dot') ?? null;
+
+    expect(getRowDot('First Conversation')).toBeNull();
+    expect(getRowDot('Second Conversation')).toBeNull();
+
+    // 1. Happy path: pending sync-state on thread-1 updates row to .sync-dot.pending in place WITHOUT calling listThreads()
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 2 });
+      }
+    });
+    expect(getRowDot('First Conversation')?.classList.contains('pending')).toBe(true);
+    expect(getRowDot('Second Conversation')).toBeNull();
+    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls);
+    expect(screen.getByText(/2 turns waiting to sync to the server…/i)).toBeTruthy();
+
+    // Unchanged syncState ('pending' again on thread-1) and unknown threadId are safe no-ops
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 2 });
+        l({ kind: 'sync-state', threadId: 'non-existent', state: 'pending', pendingCount: 2 });
+      }
+    });
+    expect(getRowDot('First Conversation')?.classList.contains('pending')).toBe(true);
+    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls);
+
+    // 2. Error sync-state on thread-2 updates thread-2 row to .sync-dot.error AND sets transient syncError
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'error',
+          pendingCount: 1,
+          detail: 'Retry failed',
+        });
+      }
+    });
+    expect(getRowDot('Second Conversation')?.classList.contains('error')).toBe(true);
+    expect(screen.getByText(/1 turn waiting to sync to the server — Retry failed/i)).toBeTruthy();
+
+    // 3. Negative boundary #1: post-scan pending sync-state with pendingCount > 0 MUST NOT clear transient syncError!
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 3 });
+      }
+    });
+    expect(screen.getByText(/3 turns waiting to sync to the server — Retry failed/i)).toBeTruthy();
+
+    // 4. Negative boundary #2: paired state: 'synced' refresh check:
+    //    - synthetic count-only { threadId: '', state: 'synced', pendingCount: 0 } clears pendingSync & syncError, preserves row indicators, and adds +0 listThreads calls
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: '', state: 'synced', pendingCount: 0 });
+      }
+    });
+    expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull();
+    expect(getRowDot('Second Conversation')?.classList.contains('error')).toBe(true);
+    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls); // +0 calls!
+
+    //    - real { threadId: 'thread-1', state: 'synced', pendingCount: 0 } clears thread-1 dot and triggers +1 refreshThreads() call!
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-1', state: 'synced', pendingCount: 0 });
+      }
+    });
+    await waitFor(() => {
+      expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls + 1);
+    });
+    expect(getRowDot('First Conversation')).toBeNull();
+
+    // 5. Negative boundary #3: sync-state targeting a deleted threadId (deletedIdsRef) is ignored cleanly
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-deleted', threadId: 'thread-2' });
+        l({ kind: 'sync-state', threadId: 'thread-2', state: 'pending', pendingCount: 1 });
+      }
+    });
+    expect(screen.queryByText('Second Conversation')).toBeNull();
+  });
+
   it('handles thread-recreated across single and chained recreations (r1 -> r2) and late-discovered orphans: updates sidebar in place, keeps activeThreadId and ChatView thread.id unchanged, clears stale serverIds until new server-ids arrive, and inserts orphans sorted by updatedAt desc without stealing focus', async () => {
     storedMessages['thread-2'] = [
       {

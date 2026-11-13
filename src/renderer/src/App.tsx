@@ -523,15 +523,30 @@ export default function App(): React.JSX.Element {
               if (mountedRef.current) setAuth(status);
             })
             .catch(() => undefined);
-        } else {
+        } else if (event.state === 'synced' || event.pendingCount === 0) {
           setSyncError(null);
+        }
+        if (event.threadId && !deletedIdsRef.current.has(event.threadId)) {
+          const updateRowState = (list: ThreadMeta[]): ThreadMeta[] => {
+            const match = list.find((t) => t.id === event.threadId);
+            if (!match || match.syncState === event.state) return list;
+            return list.map((t) =>
+              t.id === event.threadId ? { ...t, syncState: event.state } : t,
+            );
+          };
+          threadsRef.current = updateRowState(threadsRef.current);
+          setThreads((prev) => {
+            const next = updateRowState(prev);
+            threadsRef.current = next;
+            return next;
+          });
         }
         // The server names a conversation from its first question but only learns that question
         // when the turn syncs — which happens *after* turn-complete. Re-reading the list here is
         // what replaces the placeholder title without waiting for the next unrelated refresh.
         // Unlike the agent events above, this handler is not filtered to the active thread, so a
         // turn that finishes off screen refreshes its sidebar row too.
-        if (event.state === 'synced') {
+        if (event.state === 'synced' && event.threadId) {
           void refreshThreads();
         }
       } else if (event.kind === 'server-ids') {
