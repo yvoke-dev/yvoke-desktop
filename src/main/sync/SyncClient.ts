@@ -16,6 +16,9 @@ import {
 /** How long the connection probe waits before calling the server unreachable. */
 export const VERIFY_TIMEOUT_MS = 10_000;
 
+const MESSAGES_PAGE_SIZE = 500;
+const MAX_MESSAGE_PAGES = 20;
+
 /**
  * Whatever the server said, made safe to render in the About pane: bearer tokens redacted (a
  * gateway that echoes the request would otherwise hand one back) and length capped, since the
@@ -127,28 +130,42 @@ export class SyncClient {
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      const raw = `${method} ${p} failed (${response.status}): ${text}`;
+      const safeBody = probeMessage(text);
+      const raw = safeBody
+        ? `${method} ${p} failed (${response.status}): ${safeBody}`
+        : `${method} ${p} failed (${response.status})`;
       throw new SyncApiError(response.status, tagAttributedError('Yvoke Backend', raw));
     }
     if (response.status === 204) {
       return undefined as T;
     }
     try {
-      if (allowEmpty) {
-        const text = await response.text();
-        if (!text.trim()) {
+      const text = await response.text();
+      if (!text.trim()) {
+        if (allowEmpty) {
           return undefined as T;
         }
-        return JSON.parse(text) as T;
+        throw new Error(`empty response body from ${method} ${p}`);
       }
-      return (await response.json()) as T;
+      return JSON.parse(text) as T;
     } catch (err) {
-      throw new Error(tagAttributedError('Yvoke Backend', err));
+      throw new Error(tagAttributedError('Yvoke Backend', probeMessage(err)));
     }
   }
 
+  private async requestObjectArray<T>(p: string): Promise<T[]> {
+    const parsed = await this.request<unknown>('GET', p);
+    if (
+      !Array.isArray(parsed) ||
+      !parsed.every((item) => typeof item === 'object' && item !== null && !Array.isArray(item))
+    ) {
+      throw new Error(tagAttributedError('Yvoke Backend', `unexpected non-array response from GET ${p}`));
+    }
+    return parsed as T[];
+  }
+
   listConversations(): Promise<ConversationDto[]> {
-    return this.request('GET', '/conversations?limit=200&offset=0');
+    return this.requestObjectArray<ConversationDto>('/conversations?limit=200&offset=0');
   }
 
   createConversation(title: string | null, settings: Record<string, unknown>): Promise<ConversationDto> {
@@ -180,8 +197,39 @@ export class SyncClient {
     return this.request('DELETE', `/conversations/${conversationId}`, undefined, false, true);
   }
 
-  getMessages(conversationId: string): Promise<MessageDto[]> {
-    return this.request('GET', `/conversations/${conversationId}/messages?limit=500&offset=0`);
+  getMessages(conversationId: string, limit = MESSAGES_PAGE_SIZE, offset = 0): Promise<MessageDto[]> {
+    return this.requestObjectArray<MessageDto>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}&offset=${offset}`,
+    );
+  }
+
+  /**
+   * Fetches up to `MAX_MESSAGE_PAGES` (10,000 messages) in 500-message pages for reconciliation.
+   * Deduplicates via `seenIds` so unpaginated mocks terminate immediately, and sets `truncated: true`
+   * if all 20 pages return full batches of unseen messages.
+   */
+  async getAllMessages(conversationId: string): Promise<{ messages: MessageDto[]; truncated: boolean }> {
+    const messages: MessageDto[] = [];
+    const seenIds = new Set<string>();
+
+    for (let page = 0; page < MAX_MESSAGE_PAGES; page += 1) {
+      const offset = page * MESSAGES_PAGE_SIZE;
+      const batch = await this.getMessages(conversationId, MESSAGES_PAGE_SIZE, offset);
+      let added = 0;
+      for (const msg of batch) {
+        if (typeof msg.id === 'string') {
+          if (seenIds.has(msg.id)) continue;
+          seenIds.add(msg.id);
+        }
+        messages.push(msg);
+        added += 1;
+      }
+      if (batch.length < MESSAGES_PAGE_SIZE || added === 0) {
+        return { messages, truncated: false };
+      }
+    }
+
+    return { messages, truncated: true };
   }
 
   appendMessages(conversationId: string, messages: NewMessagePayload[]): Promise<{ ids: string[] }> {

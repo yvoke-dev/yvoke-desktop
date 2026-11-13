@@ -17,6 +17,7 @@ desktop usage.
 | **Write multi-agent traces** | A completed multi-agent turn is uploaded step by step (including each step's playbook name and resolved version number) and appears in the web app's trace viewer alongside runs the web performed. |
 | **Mark itself as the desktop** | Conversations are created labelled as coming from the desktop and the desktop version that created them, which is what lets the web sidebar mark them as desktop conversations and lets the conversation header and the admin conversation register show which desktop version started each one. |
 | **Share a conversation's settings with the web** | The model, the thinking level and the selected profile are written together alongside any existing server-side conversation settings under the keys the web app uses, so the two surfaces see the same choices without overwriting one another. |
+| **Reconcile and clean up conversations** | At startup, the app reads server messages for conversations with unsaved local work so only missing trailing turns are uploaded, recreates conversations that disappeared from the server whenever local messages exist, and removes untouched empty desktop-created conversations once per launch. |
 
 ## How it behaves
 
@@ -52,6 +53,27 @@ desktop usage.
   conversation settings back in the background to repair it.
 - **A rating is refused rather than queued** when the answer has not yet been accepted by the server —
   there is no id to attach it to.
+- **Startup compares unsaved local turns against the server's stored messages.** When the app starts
+  with unsaved local turns, it reads up to 10,000 messages per affected conversation from the server,
+  adopts the server identifiers of turns that had already been saved before a crash, and uploads only
+  trailing unsaved turns along with their ratings and multi-agent traces (leaving any unsaved gap
+  earlier than a later server-saved message local rather than overwriting the server conversation).
+- **Missing server conversations with local messages are recreated in full, preserving their creation desktop version.**
+  Whenever the server reports a conversation missing and this machine holds cached messages or waiting
+  turns for it, the app creates a new server conversation with the same settings and the original
+  creation desktop version (leaving legacy conversations created before version recording unversioned),
+  then uploads every cached turn, rating, and multi-agent trace in chronological order.
+- **Turns rejected as invalid are dropped for the session with a dismissible error banner and retried once on the next launch.**
+  If the server rejects a turn as invalid (other than an expired sign-in token or a missing
+  conversation), the app stops retrying that turn for the rest of the session, shows a sticky
+  dismissible error banner, and tries it once more on the next app launch while it remains unrecorded on
+  the server.
+- **Confirmed-empty stale desktop conversations are deleted once per launch.** Once per launch after
+  reaching the server, for any desktop-created conversation at least five minutes old that still has a
+  blank or default placeholder title, has not been touched in the current session, and has zero local
+  messages, the app checks whether the server holds at least one message for it and deletes the
+  conversation when the server confirms it is empty (leaving web-created conversations untouched and
+  doing nothing if the check fails).
 
 ## Limits
 
@@ -67,14 +89,20 @@ desktop usage.
   and older conversations created before version recording was introduced carry no version at all.
 - **Searches from this app are not rate-limited by anything.** The web app's per-user cap does not
   cover this route.
-- **A dropped turn drops its trace.** If the server rejects a turn as invalid, the multi-agent trace
-  waiting to be linked to it is discarded without a word.
-- **Nothing de-duplicates.** Re-sending the same turn creates a second copy of it on the server; multi-agent
-  trace uploads therefore skip retrying network drops, internal server errors, gateway timeouts, and
-  malformed responses, though a gateway error returned after the server committed can still record a
+- **A rejected turn sets its trace aside for the session.** If the server rejects a turn as invalid, its
+  pending multi-agent trace is not uploaded during that session (and is rebuilt from the local message
+  cache only if the turn succeeds on the next launch's single retry).
+- **Live retries carry no idempotency key, though startup comparison avoids re-sending committed turns across restarts.**
+  Re-sending the same turn after a dropped connection mid-reply can create a second copy on the server
+  within a session, and startup comparison stops at 10,000 server messages per conversation; multi-agent
+  trace uploads likewise skip retrying network drops, internal server errors, gateway timeouts, and
+  malformed responses during a session, though a gateway error returned after the server committed can still record a
   duplicate trace row.
-- **Which conversations the sidebar shows is entirely the server's decision.** The app asks for the
-  signed-in user's conversations and lists what comes back; it applies no filter of its own.
+- **The sidebar applies no topic or visibility filter to the 200 most recent conversations the server returns.**
+  Refresh asks for the signed-in user's 200 most recently updated conversations and merges all of them
+  alongside retaining locally cached conversations past 200 (pruning only unopened header-only entries
+  outside that 200-conversation window and deleting untouched empty desktop-created conversations once
+  per launch).
 
 ## Not supported
 

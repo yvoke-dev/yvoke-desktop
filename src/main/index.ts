@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
-import { DEFAULT_APPEARANCE } from '../shared/types';
+import { assertValidThreadId, DEFAULT_APPEARANCE } from '../shared/types';
 import type {
   FeedbackRequest,
   PlaybookValidationRequest,
@@ -237,22 +237,42 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   );
   handle(IpcChannels.citationGet, (_e, ref) => appCore.getCitation(ref));
 
+  const requireThreadId = (value: unknown): string => {
+    assertValidThreadId(value);
+    return value;
+  };
+
   handle(IpcChannels.threadsList, () => appCore.listThreads());
   handle(IpcChannels.threadsCreate, () => appCore.createThread());
-  handle(IpcChannels.threadsDelete, (_e, threadId: string) => appCore.deleteThread(threadId));
-  handle(IpcChannels.threadsPatch, (_e, threadId: string, update: Partial<ThreadMeta>) =>
-    appCore.patchThread(threadId, update),
+  handle(IpcChannels.threadsDelete, (_e, threadId: unknown) =>
+    appCore.deleteThread(requireThreadId(threadId)),
   );
-  handle(IpcChannels.threadsMessages, (_e, threadId: string) => appCore.getMessages(threadId));
+  handle(IpcChannels.threadsPatch, (_e, threadId: unknown, update: Partial<ThreadMeta>) =>
+    appCore.patchThread(requireThreadId(threadId), update ?? {}),
+  );
+  handle(IpcChannels.threadsMessages, (_e, threadId: unknown) =>
+    appCore.getMessages(requireThreadId(threadId)),
+  );
   handle(IpcChannels.threadsSearch, (_e, query: string) => appCore.searchThreads(String(query ?? '')));
 
-  handle(IpcChannels.chatSend, (_e, request: SendMessageRequest) => appCore.sendMessage(request));
-  handle(IpcChannels.chatInterrupt, (_e, threadId: string) => appCore.agent.interrupt(threadId));
-  handle(IpcChannels.chatSubmitClarification, (_e, _threadId: string, toolUseId: string, answer: string) => {
-    return appCore.agent.resolveClarification(toolUseId, answer);
+  handle(IpcChannels.chatSend, (_e, request: SendMessageRequest) => {
+    requireThreadId(request?.threadId);
+    return appCore.sendMessage(request);
+  });
+  handle(IpcChannels.chatInterrupt, (_e, threadId: unknown) =>
+    appCore.interrupt(typeof threadId === 'string' ? threadId : ''),
+  );
+  handle(IpcChannels.chatSubmitClarification, (_e, _threadId: unknown, toolUseId: unknown, answer: unknown) => {
+    return appCore.agent.resolveClarification(
+      typeof toolUseId === 'string' ? toolUseId : '',
+      typeof answer === 'string' ? answer : '',
+    );
   });
 
-  handle(IpcChannels.feedbackSubmit, (_e, request: FeedbackRequest) => appCore.submitFeedback(request));
+  handle(IpcChannels.feedbackSubmit, (_e, request: FeedbackRequest) => {
+    requireThreadId(request?.threadId);
+    return appCore.submitFeedback(request);
+  });
 
   handle(IpcChannels.authStatus, () => appCore.authStatus());
   handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());

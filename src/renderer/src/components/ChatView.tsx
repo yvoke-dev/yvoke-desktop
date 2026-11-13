@@ -296,13 +296,18 @@ export function ChatView(props: {
    * has since been superseded. Every run takes a ticket here and only acts if it still holds it.
    */
   const runIdRef = useRef(0);
+  const threadIdRef = useRef(thread.id);
+  threadIdRef.current = thread.id;
 
-  // When switching conversations, retire the transient cards and composer attachments.
+  // When switching conversations, retire the transient cards and composer state.
   const isMac = typeof navigator !== 'undefined' && /Mac|darwin|iPhone|iPad/i.test(navigator.userAgent || '');
   const sendShortcut = isMac ? '⌘↵' : 'Ctrl+↵';
 
   useEffect(() => {
     runIdRef.current += 1;
+    setDraft('');
+    setPickerFilter('');
+    setPromptOverride(null);
     setPreflight(null);
     setChecking(false);
     setPlaybookRequired(false);
@@ -624,12 +629,18 @@ export function ChatView(props: {
     setAttachments([]);
   };
 
+  const latestSendRef = useRef(send);
+  latestSendRef.current = send;
+  const orchestratorActiveRef = useRef(orchestratorActive);
+  orchestratorActiveRef.current = orchestratorActive;
+
   /**
    * Preflight playbook check: runs on the conversation's first message.
    * Fails open at every step so a check that cannot run never blocks a question.
    */
   const runPreflight = async (text: string, prompt: McpPromptInfo, imagesToSend?: ImageAttachment[]): Promise<void> => {
     const runId = ++runIdRef.current;
+    const runThreadId = thread.id;
     setChecking(true);
     setPreflight(null);
     let verdict: PlaybookValidation;
@@ -638,11 +649,17 @@ export function ChatView(props: {
     } catch {
       verdict = { plausible: true };
     }
-    // Superseded — by a thread switch or by a later run.
-    if (runIdRef.current !== runId || orchestratorActive) return;
+    // Superseded — by a conversation switch or by a later run.
+    if (
+      runIdRef.current !== runId ||
+      threadIdRef.current !== runThreadId ||
+      orchestratorActiveRef.current
+    ) {
+      return;
+    }
     setChecking(false);
     if (verdict.plausible) {
-      send(text, prompt.name, imagesToSend);
+      latestSendRef.current(text, prompt.name, imagesToSend);
       return;
     }
     setPreflight({

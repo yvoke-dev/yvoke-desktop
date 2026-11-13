@@ -16,6 +16,7 @@ import type {
   SyncEvent,
   ThreadMeta,
   ThreadSearchHit,
+  ThreadsListResult,
   UpdateCheckResult,
 } from '../shared/types';
 
@@ -30,7 +31,7 @@ export interface DesktopApi {
   checkForUpdates(): Promise<UpdateCheckResult>;
   getSettings(): Promise<AppSettings>;
   setSettings(update: Partial<AppSettings>): Promise<AppSettings>;
-  listThreads(): Promise<{ threads: ThreadMeta[]; serverReachable: boolean }>;
+  listThreads(): Promise<ThreadsListResult>;
   createThread(): Promise<ThreadMeta>;
   deleteThread(threadId: string): Promise<void>;
   patchThread(threadId: string, update: Partial<ThreadMeta>): Promise<ThreadMeta | undefined>;

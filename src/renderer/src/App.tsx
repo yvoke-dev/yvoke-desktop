@@ -43,6 +43,7 @@ export interface LiveTurn {
 }
 
 const EMPTY_TURN: LiveTurn = { running: false, liveText: '', liveThinking: '', blocks: [] };
+const MAX_RECENT_SERVER_ID_THREADS = 200;
 
 export default function App(): React.JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -57,14 +58,34 @@ export default function App(): React.JSX.Element {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [pendingSync, setPendingSync] = useState(0);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [droppedSyncError, setDroppedSyncError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const mountedRef = useRef(true);
   const activeThreadIdRef = useRef<string | null>(null);
   activeThreadIdRef.current = activeThreadId;
+  const threadsRef = useRef<ThreadMeta[]>([]);
+  threadsRef.current = threads;
   const liveTurnsByThreadRef = useRef<Record<string, LiveTurn>>({});
   liveTurnsByThreadRef.current = liveTurnsByThread;
   const promptsCountRef = useRef(0);
   promptsCountRef.current = prompts.length;
   const initialPromptsLoadedRef = useRef(false);
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+  const recreationEpochByThreadRef = useRef<Map<string, number>>(new Map());
+  const recentServerIdsByThreadRef = useRef<Map<string, Record<string, string>>>(new Map());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const overlayRecentServerIds = useCallback((threadId: string, msgs: ChatMessage[]): ChatMessage[] => {
+    const recent = recentServerIdsByThreadRef.current.get(threadId);
+    if (!recent) return msgs;
+    return msgs.map((m) => (recent[m.localId] ? { ...m, serverId: recent[m.localId] } : m));
+  }, []);
 
   const messages = useMemo(
     () => (activeThreadId ? messagesByThread[activeThreadId] ?? [] : []),
@@ -80,15 +101,50 @@ export default function App(): React.JSX.Element {
 
   /** Re-read the conversation list. Returns whether the server answered, for callers that need it. */
   const refreshThreads = useCallback(async () => {
-    const result = await window.api.listThreads();
-    setThreads(result.threads);
+    let result: Awaited<ReturnType<typeof window.api.listThreads>>;
+    try {
+      result = await window.api.listThreads();
+    } catch (error) {
+      if (mountedRef.current) {
+        console.warn('Failed to list threads:', error);
+      }
+      return false;
+    }
+    if (!mountedRef.current) return false;
+    setThreads(() => {
+      const seen = new Set<string>();
+      const next: ThreadMeta[] = [];
+      for (const raw of result.threads) {
+        if (deletedIdsRef.current.has(raw.id) || seen.has(raw.id)) continue;
+        seen.add(raw.id);
+        next.push(raw);
+      }
+      threadsRef.current = next;
+      return next;
+    });
     setServerReachable(result.serverReachable);
+    if (typeof result.pendingSyncCount === 'number') {
+      setPendingSync(result.pendingSyncCount);
+      if (result.pendingSyncCount === 0) {
+        setSyncError(null);
+      }
+    }
     if (result.serverReachable && initialPromptsLoadedRef.current && promptsCountRef.current === 0) {
-      void window.api.listPrompts().then((list) => {
-        promptsCountRef.current = list.length;
-        setPrompts(list);
-      });
-      void window.api.listOrchestratorProfiles().then(setProfiles);
+      void window.api
+        .listPrompts()
+        .then((list) => {
+          if (!mountedRef.current) return;
+          promptsCountRef.current = list.length;
+          setPrompts(list);
+        })
+        .catch(() => undefined);
+      void window.api
+        .listOrchestratorProfiles()
+        .then((list) => {
+          if (!mountedRef.current) return;
+          setProfiles(list);
+        })
+        .catch(() => undefined);
     }
     return result.serverReachable;
   }, []);
@@ -101,32 +157,70 @@ export default function App(): React.JSX.Element {
    * check failed — exactly when `refreshThreads()` is still reporting unreachable.
    */
   const refreshServer = useCallback(async () => {
-    void window.api.authStatus().then(setAuth);
+    void window.api
+      .authStatus()
+      .then((status) => {
+        if (mountedRef.current) setAuth(status);
+      })
+      .catch(() => undefined);
     const shouldFetchCatalogues = !initialPromptsLoadedRef.current || promptsCountRef.current > 0;
     if (!(await refreshThreads())) return;
+    if (!mountedRef.current) return;
     if (shouldFetchCatalogues) {
-      void window.api.listPrompts().then((list) => {
-        promptsCountRef.current = list.length;
-        setPrompts(list);
-      });
-      void window.api.listOrchestratorProfiles().then(setProfiles);
+      void window.api
+        .listPrompts()
+        .then((list) => {
+          if (!mountedRef.current) return;
+          promptsCountRef.current = list.length;
+          setPrompts(list);
+        })
+        .catch(() => undefined);
+      void window.api
+        .listOrchestratorProfiles()
+        .then((list) => {
+          if (!mountedRef.current) return;
+          setProfiles(list);
+        })
+        .catch(() => undefined);
     }
   }, [refreshThreads]);
 
   useEffect(() => {
-    void window.api.getAppVersion().then(setAppVersion);
-    void window.api.getSettings().then(setSettings);
-    void window.api.authStatus().then(setAuth);
+    void window.api
+      .getAppVersion()
+      .then((v) => {
+        if (mountedRef.current) setAppVersion(v);
+      })
+      .catch(() => undefined);
+    void window.api
+      .getSettings()
+      .then((s) => {
+        if (mountedRef.current) setSettings(s);
+      })
+      .catch(() => undefined);
+    void window.api
+      .authStatus()
+      .then((status) => {
+        if (mountedRef.current) setAuth(status);
+      })
+      .catch(() => undefined);
     void window.api
       .listPrompts()
       .then((list) => {
+        if (!mountedRef.current) return;
         promptsCountRef.current = list.length;
         setPrompts(list);
       })
+      .catch(() => undefined)
       .finally(() => {
         initialPromptsLoadedRef.current = true;
       });
-    void window.api.listOrchestratorProfiles().then(setProfiles);
+    void window.api
+      .listOrchestratorProfiles()
+      .then((list) => {
+        if (mountedRef.current) setProfiles(list);
+      })
+      .catch(() => undefined);
     void refreshThreads();
   }, [refreshThreads]);
 
@@ -156,6 +250,77 @@ export default function App(): React.JSX.Element {
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   }, [prompts, profiles, settings?.showPrototypePlaybooks]);
 
+  const openThread = useCallback(
+    async (threadId: string) => {
+      if (deletedIdsRef.current.has(threadId)) return;
+      activeThreadIdRef.current = threadId;
+      setActiveThreadId(threadId);
+      // A finished turn's live state is only ever a leftover error or stop notice, and it is retired
+      // by having been read rather than by the turn ending: the first open after a background failure
+      // surfaces it and marks it read, the next one clears it. A running turn keeps everything —
+      // surviving a switch is the whole point of per-thread live turns.
+      setLiveTurnsByThread((prev) => {
+        const current = prev[threadId];
+        if (!current || current.running || (!current.error && !current.notice)) return prev;
+        return { ...prev, [threadId]: current.seen ? EMPTY_TURN : { ...current, seen: true } };
+      });
+      const epochAtStart = recreationEpochByThreadRef.current.get(threadId) ?? 0;
+      let msgs: ChatMessage[];
+      try {
+        msgs = await window.api.getMessages(threadId);
+      } catch (error) {
+        if (mountedRef.current && !deletedIdsRef.current.has(threadId)) {
+          console.warn('Failed to load messages:', error);
+        }
+        return;
+      }
+      if (
+        !mountedRef.current ||
+        deletedIdsRef.current.has(threadId) ||
+        activeThreadIdRef.current !== threadId
+      ) {
+        return;
+      }
+      const currentEpoch = recreationEpochByThreadRef.current.get(threadId) ?? 0;
+      const strippedMsgs =
+        currentEpoch !== epochAtStart ? msgs.map(({ serverId: _stale, ...rest }) => rest) : msgs;
+      const normalizedMsgs = overlayRecentServerIds(threadId, strippedMsgs);
+      setMessagesByThread((prev) => {
+        // If a turn is currently running for this thread, prev[threadId] contains the in-flight
+        // user message which has not been written to disk yet. Avoid clobbering in-memory messages.
+        if (liveTurnsByThreadRef.current[threadId]?.running && (prev[threadId]?.length ?? 0) > 0) {
+          return prev;
+        }
+        // Every open re-reads from disk, so a cached entry for a conversation nobody is looking at is
+        // never read again — only the open thread and any with a turn still in flight are
+        // load-bearing (the latter hold optimistic messages the store does not have yet). Holding the
+        // rest would keep every transcript opened this session, tool results included, resident.
+        const next: Record<string, ChatMessage[]> = { [threadId]: normalizedMsgs };
+        for (const [id, cached] of Object.entries(prev)) {
+          if (id !== threadId && liveTurnsByThreadRef.current[id]?.running) {
+            next[id] = cached;
+          }
+        }
+        return next;
+      });
+      // Drop live turns that carry nothing: a clean turn-complete leaves EMPTY_TURN behind for every
+      // thread that has ever run one. Anything still holding an error or an unread notice stays.
+      setLiveTurnsByThread((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const [id, turn] of Object.entries(prev)) {
+          if (id === threadId) continue;
+          if (!turn.running && !turn.error && !turn.notice && !turn.clarifyingQuestion && turn.blocks.length === 0) {
+            delete next[id];
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    },
+    [overlayRecentServerIds],
+  );
+
   useEffect(() => {
     // Live text/thinking events arrive per-token, each carrying the full accumulated string. A
     // setState per token forces a full markdown+KaTeX re-parse (O(n^2)), so we coalesce them:
@@ -167,12 +332,13 @@ export default function App(): React.JSX.Element {
 
     const flushLive = (): void => {
       flushTimer = null;
-      if (pendingLiveByThread.size === 0) return;
+      if (pendingLiveByThread.size === 0 || !mountedRef.current) return;
       const entries = new Map(pendingLiveByThread);
       pendingLiveByThread.clear();
       setLiveTurnsByThread((prev) => {
         const next = { ...prev };
         for (const [tId, { text, thinking }] of entries.entries()) {
+          if (deletedIdsRef.current.has(tId)) continue;
           const current = next[tId] ?? EMPTY_TURN;
           next[tId] = {
             ...current,
@@ -201,35 +367,38 @@ export default function App(): React.JSX.Element {
     };
 
     const offAgent = window.api.onAgentEvent((event: AgentEvent) => {
+      if (!mountedRef.current) return;
+      const { threadId } = event;
+      if (deletedIdsRef.current.has(threadId)) return;
       switch (event.kind) {
         case 'turn-start':
-          cancelFlushForThread(event.threadId);
+          cancelFlushForThread(threadId);
           setLiveTurnsByThread((prev) => ({
             ...prev,
-            [event.threadId]: { running: true, liveText: '', liveThinking: '', blocks: [] },
+            [threadId]: { running: true, liveText: '', liveThinking: '', blocks: [] },
           }));
           break;
         case 'live-text': {
-          const entry = pendingLiveByThread.get(event.threadId) ?? {};
+          const entry = pendingLiveByThread.get(threadId) ?? {};
           entry.text = event.text;
-          pendingLiveByThread.set(event.threadId, entry);
+          pendingLiveByThread.set(threadId, entry);
           scheduleFlush();
           break;
         }
         case 'live-thinking': {
-          const entry = pendingLiveByThread.get(event.threadId) ?? {};
+          const entry = pendingLiveByThread.get(threadId) ?? {};
           entry.thinking = event.text;
-          pendingLiveByThread.set(event.threadId, entry);
+          pendingLiveByThread.set(threadId, entry);
           scheduleFlush();
           break;
         }
         case 'assistant-block':
-          cancelFlushForThread(event.threadId);
+          cancelFlushForThread(threadId);
           setLiveTurnsByThread((prev) => {
-            const current = prev[event.threadId] ?? { running: true, liveText: '', liveThinking: '', blocks: [] };
+            const current = prev[threadId] ?? { running: true, liveText: '', liveThinking: '', blocks: [] };
             return {
               ...prev,
-              [event.threadId]: {
+              [threadId]: {
                 ...current,
                 liveText: '',
                 liveThinking: '',
@@ -240,10 +409,10 @@ export default function App(): React.JSX.Element {
           break;
         case 'tool-result':
           setLiveTurnsByThread((prev) => {
-            const current = prev[event.threadId] ?? EMPTY_TURN;
+            const current = prev[threadId] ?? EMPTY_TURN;
             return {
               ...prev,
-              [event.threadId]: {
+              [threadId]: {
                 ...current,
                 clarifyingQuestion:
                   current.clarifyingQuestion?.toolUseId === event.toolUseId
@@ -260,11 +429,11 @@ export default function App(): React.JSX.Element {
           });
           break;
         case 'turn-complete': {
-          cancelFlushForThread(event.threadId);
-          const onScreen = event.threadId === activeThreadIdRef.current;
+          cancelFlushForThread(threadId);
+          const onScreen = threadId === activeThreadIdRef.current;
           setLiveTurnsByThread((prev) => ({
             ...prev,
-            [event.threadId]: !event.isError
+            [threadId]: !event.isError
               ? EMPTY_TURN
               : event.aborted
                 ? { ...EMPTY_TURN, notice: 'Processing stopped.', seen: onScreen }
@@ -273,26 +442,31 @@ export default function App(): React.JSX.Element {
           if (!event.isError) {
             setMessagesByThread((prev) => ({
               ...prev,
-              [event.threadId]: [...(prev[event.threadId] ?? []), event.message],
+              [threadId]: [...(prev[threadId] ?? []), event.message],
             }));
           }
           void refreshThreads();
           break;
         }
         case 'error': {
-          cancelFlushForThread(event.threadId);
-          const onScreen = event.threadId === activeThreadIdRef.current;
+          cancelFlushForThread(threadId);
+          const onScreen = threadId === activeThreadIdRef.current;
           setLiveTurnsByThread((prev) => ({
             ...prev,
-            [event.threadId]: { ...EMPTY_TURN, error: event.message, seen: onScreen },
+            [threadId]: { ...EMPTY_TURN, error: event.message, seen: onScreen },
           }));
-          void window.api.authStatus().then(setAuth);
+          void window.api
+            .authStatus()
+            .then((status) => {
+              if (mountedRef.current) setAuth(status);
+            })
+            .catch(() => undefined);
           break;
         }
         case 'review-enforced': {
           // Mirror the main process: the draft answer was discarded, so drop the prose already
           // streamed into the live view and keep only the delegation trace.
-          cancelFlushForThread(event.threadId);
+          cancelFlushForThread(threadId);
           const notice =
             event.reason === 'skipped'
               ? 'No review pass in that answer — asking the reviewer before delivering…'
@@ -300,10 +474,10 @@ export default function App(): React.JSX.Element {
                 ? `The reviewer returned no clear verdict — revising (round ${event.round ?? 1})…`
                 : `The reviewer rejected that draft — revising (round ${event.round ?? 1})…`;
           setLiveTurnsByThread((prev) => {
-            const current = prev[event.threadId] ?? EMPTY_TURN;
+            const current = prev[threadId] ?? EMPTY_TURN;
             return {
               ...prev,
-              [event.threadId]: {
+              [threadId]: {
                 ...current,
                 liveText: '',
                 blocks: current.blocks.map((b) => ({ ...b, text: '' })).filter((b) => b.thinking || b.toolCalls.length > 0),
@@ -315,10 +489,10 @@ export default function App(): React.JSX.Element {
         }
         case 'clarifying-question':
           setLiveTurnsByThread((prev) => {
-            const current = prev[event.threadId] ?? EMPTY_TURN;
+            const current = prev[threadId] ?? EMPTY_TURN;
             return {
               ...prev,
-              [event.threadId]: {
+              [threadId]: {
                 ...current,
                 clarifyingQuestion: {
                   toolUseId: event.toolUseId,
@@ -334,21 +508,65 @@ export default function App(): React.JSX.Element {
       }
     });
     const offSync = window.api.onSyncEvent((event: SyncEvent) => {
+      if (!mountedRef.current) return;
       if (event.kind === 'sync-state') {
         setPendingSync(event.pendingCount);
-        setSyncError(event.state === 'error' ? (event.detail ?? 'Sync failed — retrying.') : null);
         if (event.state === 'error') {
-          void window.api.authStatus().then(setAuth);
+          if (event.dropped) {
+            setDroppedSyncError(
+              event.detail ??
+                'A queued conversation turn was rejected by the server and could not be synced.',
+            );
+            if (event.pendingCount === 0) {
+              setSyncError(null);
+            }
+          } else {
+            setSyncError(event.detail ?? 'Sync failed — retrying.');
+          }
+          void window.api
+            .authStatus()
+            .then((status) => {
+              if (mountedRef.current) setAuth(status);
+            })
+            .catch(() => undefined);
+        } else if (event.acked || event.state === 'synced' || event.pendingCount === 0) {
+          setSyncError(null);
+        }
+        if (event.threadId && !deletedIdsRef.current.has(event.threadId)) {
+          const updateRowState = (list: ThreadMeta[]): ThreadMeta[] => {
+            const match = list.find((t) => t.id === event.threadId);
+            if (!match || match.syncState === event.state) return list;
+            return list.map((t) =>
+              t.id === event.threadId ? { ...t, syncState: event.state } : t,
+            );
+          };
+          threadsRef.current = updateRowState(threadsRef.current);
+          setThreads((prev) => {
+            const next = updateRowState(prev);
+            threadsRef.current = next;
+            return next;
+          });
         }
         // The server names a conversation from its first question but only learns that question
         // when the turn syncs — which happens *after* turn-complete. Re-reading the list here is
         // what replaces the placeholder title without waiting for the next unrelated refresh.
         // Unlike the agent events above, this handler is not filtered to the active thread, so a
         // turn that finishes off screen refreshes its sidebar row too.
-        if (event.state === 'synced') {
+        if (event.state === 'synced' && event.threadId) {
           void refreshThreads();
         }
       } else if (event.kind === 'server-ids') {
+        if (deletedIdsRef.current.has(event.threadId)) return;
+        const recentMap = recentServerIdsByThreadRef.current;
+        const existingRecent = recentMap.get(event.threadId);
+        recentMap.delete(event.threadId);
+        if (recentMap.size >= MAX_RECENT_SERVER_ID_THREADS) {
+          const oldestKey = recentMap.keys().next().value;
+          if (oldestKey !== undefined) {
+            recentMap.delete(oldestKey);
+          }
+        }
+        recentMap.set(event.threadId, { ...existingRecent, ...event.mapping });
         setMessagesByThread((prev) => {
           const msgs = prev[event.threadId];
           if (!msgs) return prev;
@@ -359,6 +577,69 @@ export default function App(): React.JSX.Element {
             ),
           };
         });
+      } else if (event.kind === 'thread-recreated') {
+        if (deletedIdsRef.current.has(event.thread.id)) return;
+        recentServerIdsByThreadRef.current.delete(event.thread.id);
+        recreationEpochByThreadRef.current.set(
+          event.thread.id,
+          (recreationEpochByThreadRef.current.get(event.thread.id) ?? 0) + 1,
+        );
+        const upsertRecreated = (list: ThreadMeta[]): ThreadMeta[] => {
+          if (list.some((t) => t.id === event.thread.id)) {
+            return list.map((t) => (t.id === event.thread.id ? event.thread : t));
+          }
+          return [...list, event.thread].sort((a, b) =>
+            (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
+          );
+        };
+        threadsRef.current = upsertRecreated(threadsRef.current);
+        setThreads((prev) => {
+          const next = upsertRecreated(prev);
+          threadsRef.current = next;
+          return next;
+        });
+        setMessagesByThread((prev) => {
+          const existing = prev[event.thread.id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [event.thread.id]: existing.map(({ serverId: _stale, ...rest }) => rest),
+          };
+        });
+      } else if (event.kind === 'thread-deleted') {
+        deletedIdsRef.current.add(event.threadId);
+        recentServerIdsByThreadRef.current.delete(event.threadId);
+        recreationEpochByThreadRef.current.delete(event.threadId);
+        cancelFlushForThread(event.threadId);
+        const remaining = threadsRef.current.filter((t) => t.id !== event.threadId);
+        threadsRef.current = remaining;
+
+        setThreads((prev) => prev.filter((t) => t.id !== event.threadId));
+        setMessagesByThread((prev) => {
+          if (!(event.threadId in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.threadId];
+          return next;
+        });
+        setLiveTurnsByThread((prev) => {
+          if (!(event.threadId in prev)) return prev;
+          const next = { ...prev };
+          delete next[event.threadId];
+          return next;
+        });
+
+        if (
+          activeThreadIdRef.current === event.threadId &&
+          !liveTurnsByThreadRef.current[event.threadId]?.running
+        ) {
+          const fallback = remaining[0] ?? null;
+          if (fallback) {
+            void openThread(fallback.id);
+          } else {
+            activeThreadIdRef.current = null;
+            setActiveThreadId(null);
+          }
+        }
       }
     });
     return () => {
@@ -366,51 +647,7 @@ export default function App(): React.JSX.Element {
       offAgent();
       offSync();
     };
-  }, [refreshThreads]);
-
-  const openThread = useCallback(async (threadId: string) => {
-    setActiveThreadId(threadId);
-    // A finished turn's live state is only ever a leftover error or stop notice, and it is retired
-    // by having been read rather than by the turn ending: the first open after a background failure
-    // surfaces it and marks it read, the next one clears it. A running turn keeps everything —
-    // surviving a switch is the whole point of per-thread live turns.
-    setLiveTurnsByThread((prev) => {
-      const current = prev[threadId];
-      if (!current || current.running || (!current.error && !current.notice)) return prev;
-      return { ...prev, [threadId]: current.seen ? EMPTY_TURN : { ...current, seen: true } };
-    });
-    const msgs = await window.api.getMessages(threadId);
-    setMessagesByThread((prev) => {
-      // If a turn is currently running for this thread, prev[threadId] contains the in-flight
-      // user message which has not been written to disk yet. Avoid clobbering in-memory messages.
-      if (liveTurnsByThreadRef.current[threadId]?.running && (prev[threadId]?.length ?? 0) > 0) {
-        return prev;
-      }
-      // Every open re-reads from disk, so a cached entry for a conversation nobody is looking at is
-      // never read again — only the open thread and any with a turn still in flight are
-      // load-bearing (the latter hold optimistic messages the store does not have yet). Holding the
-      // rest would keep every transcript opened this session, tool results included, resident.
-      const next: Record<string, ChatMessage[]> = { [threadId]: msgs };
-      for (const [id, cached] of Object.entries(prev)) {
-        if (id !== threadId && liveTurnsByThreadRef.current[id]?.running) next[id] = cached;
-      }
-      return next;
-    });
-    // Drop live turns that carry nothing: a clean turn-complete leaves EMPTY_TURN behind for every
-    // thread that has ever run one. Anything still holding an error or an unread notice stays.
-    setLiveTurnsByThread((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const [id, turn] of Object.entries(prev)) {
-        if (id === threadId) continue;
-        if (!turn.running && !turn.error && !turn.notice && !turn.clarifyingQuestion && turn.blocks.length === 0) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, []);
+  }, [refreshThreads, openThread]);
 
   const createThread = useCallback(async () => {
     const thread = await window.api.createThread();
@@ -420,7 +657,23 @@ export default function App(): React.JSX.Element {
 
   const deleteThread = useCallback(
     async (threadId: string) => {
-      await window.api.deleteThread(threadId);
+      try {
+        await window.api.deleteThread(threadId);
+      } catch (error) {
+        if (mountedRef.current) {
+          console.warn('Failed to delete thread:', error);
+        }
+        return;
+      }
+      deletedIdsRef.current.add(threadId);
+      recentServerIdsByThreadRef.current.delete(threadId);
+      recreationEpochByThreadRef.current.delete(threadId);
+      if (!mountedRef.current) return;
+      setThreads((prev) => {
+        const next = prev.filter((t) => t.id !== threadId);
+        threadsRef.current = next;
+        return next;
+      });
       setMessagesByThread((prev) => {
         const next = { ...prev };
         delete next[threadId];
@@ -432,6 +685,7 @@ export default function App(): React.JSX.Element {
         return next;
       });
       if (activeThreadIdRef.current === threadId) {
+        activeThreadIdRef.current = null;
         setActiveThreadId(null);
       }
       await refreshThreads();
@@ -443,6 +697,7 @@ export default function App(): React.JSX.Element {
     async (text: string, promptName?: string, images?: ImageAttachment[]) => {
       if (!activeThreadId) return;
       const threadId = activeThreadId;
+      if (deletedIdsRef.current.has(threadId)) return;
       const userMessage: ChatMessage = {
         localId: `optimistic-${Date.now()}`,
         role: 'user',
@@ -462,6 +717,7 @@ export default function App(): React.JSX.Element {
       try {
         await window.api.sendMessage({ threadId, text, promptName, images });
       } catch (error) {
+        if (!mountedRef.current) return;
         // The question never reached the agent, so the card that was posted ahead of it has to go
         // with it — otherwise a rejected send (an attachment the main-process validator refuses,
         // say) leaves a message standing in the transcript that nothing will ever answer.
@@ -484,7 +740,9 @@ export default function App(): React.JSX.Element {
       try {
         await window.api.patchThread(threadId, update);
       } catch (error) {
-        console.warn('Failed to patch thread:', error);
+        if (mountedRef.current) {
+          console.warn('Failed to patch thread:', error);
+        }
       } finally {
         await refreshThreads();
       }
@@ -554,16 +812,25 @@ export default function App(): React.JSX.Element {
           serverReachable={serverReachable}
           pendingSync={pendingSync}
           syncError={syncError}
+          droppedSyncError={droppedSyncError}
+          onDismissDroppedSyncError={() => setDroppedSyncError(null)}
           onServerSignIn={() => {
-            void window.api.serverSignIn().then(() => {
-              void refreshServer();
-            });
+            void window.api
+              .serverSignIn()
+              .then(() => {
+                if (mountedRef.current) void refreshServer();
+              })
+              .catch(() => undefined);
           }}
           onRetryAuth={() => {
-            void window.api.authStatus().then((status) => {
-              setAuth(status);
-              void refreshServer();
-            });
+            void window.api
+              .authStatus()
+              .then((status) => {
+                if (!mountedRef.current) return;
+                setAuth(status);
+                void refreshServer();
+              })
+              .catch(() => undefined);
           }}
           onRetryServer={() => {
             void refreshServer();
@@ -576,7 +843,9 @@ export default function App(): React.JSX.Element {
             auth={auth}
             onAuthChange={() => void refreshServer()}
             onSave={async (update) => {
-              setSettings(await window.api.setSettings(update));
+              const saved = await window.api.setSettings(update);
+              if (!mountedRef.current) return;
+              setSettings(saved);
               setShowSettings(false);
               // A save can change the server address or auth mode, so re-check auth too — not just
               // the list and the catalogues.
@@ -593,12 +862,37 @@ export default function App(): React.JSX.Element {
             profiles={profiles}
             liveTurn={liveTurn}
             onSend={sendMessage}
-            onInterrupt={() => activeThreadId && void window.api.interrupt(activeThreadId)}
+            onInterrupt={() => {
+              if (activeThreadId) {
+                void window.api.interrupt(activeThreadId);
+              }
+            }}
             onPatchThread={(update) => void patchThread(activeThread.id, update)}
             onFeedback={async (messageLocalId, rating, comment) => {
-              await window.api.submitFeedback({ threadId: activeThread.id, messageLocalId, rating, comment });
-              const updated = await window.api.getMessages(activeThread.id);
-              setMessagesByThread((prev) => ({ ...prev, [activeThread.id]: updated }));
+              const targetId = activeThread.id;
+              await window.api.submitFeedback({
+                threadId: targetId,
+                messageLocalId,
+                rating,
+                comment,
+              });
+              if (!mountedRef.current || deletedIdsRef.current.has(targetId)) return;
+              const epochAtStart = recreationEpochByThreadRef.current.get(targetId) ?? 0;
+              const updated = await window.api.getMessages(targetId);
+              if (
+                !mountedRef.current ||
+                deletedIdsRef.current.has(targetId) ||
+                activeThreadIdRef.current !== targetId
+              ) {
+                return;
+              }
+              const currentEpoch = recreationEpochByThreadRef.current.get(targetId) ?? 0;
+              const stripped =
+                currentEpoch !== epochAtStart
+                  ? updated.map(({ serverId: _stale, ...rest }) => rest)
+                  : updated;
+              const overlaid = overlayRecentServerIds(targetId, stripped);
+              setMessagesByThread((prev) => ({ ...prev, [targetId]: overlaid }));
             }}
           />
         ) : (

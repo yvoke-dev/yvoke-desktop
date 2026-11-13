@@ -1,9 +1,10 @@
 import fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ThreadStore } from '../src/main/store/ThreadStore';
-import { isThreadStarted, type ChatMessage, type ThreadMeta } from '../src/shared/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isValidStoredMessage, ThreadStore, type StoredChatMessage } from '../src/main/store/ThreadStore';
+import { isThreadStarted, type ChatMessage, type ImageAttachment, type ThreadMeta } from '../src/shared/types';
 
 function meta(id: string): ThreadMeta {
   return {
@@ -476,6 +477,1048 @@ describe('ThreadStore', () => {
 
       const raw = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
       expect('hasStarted' in raw.t1).toBe(false);
+    });
+  });
+
+  describe('startup scan, migration, validation & corrupt-index hardening', () => {
+    const sampleImage = (id = 'img-1'): ImageAttachment => ({
+      id,
+      mediaType: 'image/png',
+      data: Buffer.from('fake-png-bytes').toString('base64'),
+      name: 'diagram.png',
+      size: 14,
+      description: 'Architecture diagram',
+    });
+
+    it('listLogThreadIds enumerates valid <id>.jsonl files and returns [] when directory is missing', async () => {
+      const missingStore = new ThreadStore(path.join(dir, 'does-not-exist-yet'));
+      expect(await missingStore.listLogThreadIds()).toEqual([]);
+
+      store.upsert(meta('t-alpha'));
+      store.upsert(meta('t-beta'));
+      await store.appendMessages('t-alpha', [message('u1', 'user')]);
+      await store.appendMessages('t-beta', [message('u2', 'user')]);
+      // Noise files/dirs that must be ignored
+      fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignore');
+      fs.writeFileSync(path.join(dir, 'bad name.jsonl'), '{}');
+      fs.mkdirSync(path.join(dir, 'images', 't-alpha'), { recursive: true });
+
+      const ids = await store.listLogThreadIds();
+      expect(ids.sort()).toEqual(['t-alpha', 't-beta']);
+    });
+
+    it('readRawMessages skips image blob disk reads (zero-blob proof) and skips corrupt JSONL lines', async () => {
+      store.upsert(meta('t1'));
+      await store.appendMessages('t1', [
+        { ...message('u1', 'user'), images: [sampleImage('img-1')] },
+        message('a1', 'assistant'),
+      ]);
+      // Append corrupt, non-object, and incomplete-shape JSON lines
+      fs.appendFileSync(
+        path.join(dir, 't1.jsonl'),
+        '{corrupt-line\nnull\n123\n{"bad":true}\n{"localId":"x","role":"system","content":"nope"}\n{"localId":"y","role":"user"}\n',
+      );
+
+      // Delete the underlying .png blob on disk to prove non-tautologically that readRawMessages
+      // never touches threads/images/<id>/* whereas readMessages drops the missing image.
+      const imgDir = path.join(dir, 'images', 't1');
+      const files = fs.readdirSync(imgDir);
+      expect(files).toHaveLength(1);
+      fs.rmSync(path.join(imgDir, files[0]));
+
+      const readFileSpy = vi.spyOn(fsp, 'readFile');
+      try {
+        const rawMsgs: StoredChatMessage[] = await store.readRawMessages('t1');
+        expect(rawMsgs).toHaveLength(2);
+        expect(rawMsgs[0].images).toHaveLength(1);
+        expect(rawMsgs[0].images?.[0].file).toBe(files[0]);
+        expect(rawMsgs[0].images?.[0].data).toBeUndefined();
+        expect(rawMsgs[0].images?.[0].description).toBe('Architecture diagram');
+
+        const imageReads = readFileSpy.mock.calls.filter(([p]) => String(p).includes(`${path.sep}images${path.sep}`));
+        expect(imageReads).toHaveLength(0);
+      } finally {
+        readFileSpy.mockRestore();
+      }
+
+      // Contrast: readMessages attempts blob hydration and drops the missing blob
+      const hydrated = await store.readMessages('t1');
+      expect(hydrated).toHaveLength(2);
+      expect(hydrated[0].images).toBeUndefined();
+    });
+
+    it('applyServerIds returns { hasUnsynced: true } when unsynced messages remain and { hasUnsynced: false } when all have serverId', async () => {
+      store.upsert(meta('t1'));
+      expect(await store.applyServerIds('t1', {})).toEqual({ hasUnsynced: false });
+
+      await store.appendMessages('t1', [
+        message('u1', 'user'),
+        message('a1', 'assistant'),
+        message('u2', 'user'),
+      ]);
+
+      const partial = await store.applyServerIds('t1', { u1: 'srv-u1', a1: 'srv-a1' });
+      expect(partial).toEqual({ hasUnsynced: true });
+
+      const complete = await store.applyServerIds('t1', { u2: 'srv-u2' });
+      expect(complete).toEqual({ hasUnsynced: false });
+    });
+
+    it('rejects tainted non-string / empty / traversal threadIds (including null & undefined without coercion)', async () => {
+      // Seed literal "null" and "undefined" threads to prove null/undefined never coerce to strings!
+      store.upsert(meta('null'));
+      store.upsert(meta('undefined'));
+      const taintedIds: unknown[] = [null, undefined, 123, {}, '', '   ', '../escape', 'a/b'];
+      for (const bad of taintedIds) {
+        expect(() => store.get(bad as string)).toThrow(/Invalid threadId/);
+        expect(() => store.delete(bad as string)).toThrow(/Invalid threadId/);
+        await expect(store.readRawMessages(bad as string)).rejects.toThrow(/Invalid threadId/);
+        await expect(store.applyServerIds(bad as string, {})).rejects.toThrow(/Invalid threadId/);
+        await expect(store.prepareForRecreation(bad as string, meta('valid-target'), {})).rejects.toThrow(
+          /Invalid threadId/,
+        );
+      }
+      // Neither 'null' nor 'undefined' thread was deleted or touched by passing null/undefined
+      expect(store.get('null')?.id).toBe('null');
+      expect(store.get('undefined')?.id).toBe('undefined');
+    });
+
+    it('loadIndex accepts {} cleanly without .corrupt, round-trips valid entries, and quarantines non-object / malformed JSON', () => {
+      const indexDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-idx-'));
+      try {
+        const indexFile = path.join(indexDir, 'index.json');
+
+        // 1. Valid empty object {} must NOT create .corrupt
+        fs.writeFileSync(indexFile, '{}');
+        const emptyStore = new ThreadStore(indexDir);
+        expect(emptyStore.list()).toEqual([]);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(false);
+
+        // 2. Valid { [id]: ThreadMeta } round-trips cleanly without .corrupt
+        emptyStore.upsert(meta('valid-1'));
+        const reloadedValid = new ThreadStore(indexDir);
+        expect(reloadedValid.list().map((t) => t.id)).toEqual(['valid-1']);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(false);
+
+        // 3. Non-objects and malformed payloads are quarantined/filtered safely without throwing
+        for (const payload of ['null', '"str"', '123', '[]', '{"bad": null}', '{corrupt']) {
+          fs.rmSync(indexFile + '.corrupt', { force: true });
+          fs.writeFileSync(indexFile, payload);
+          const recovered = new ThreadStore(indexDir);
+          expect(recovered.list()).toEqual([]);
+          expect(fs.existsSync(indexFile + '.corrupt')).toBe(true);
+        }
+      } finally {
+        fs.rmSync(indexDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('durable tombstones, inspectLogsSync, findByRemoteId & prepareForRecreation', () => {
+    const sampleImage = (id = 'img-rem-1'): ImageAttachment => ({
+      id,
+      mediaType: 'image/png',
+      data: Buffer.from('fake-png-bytes').toString('base64'),
+      name: 'diagram.png',
+      size: 14,
+      description: 'Architecture diagram',
+    });
+
+    it('exports canonical isValidStoredMessage validator', () => {
+      expect(isValidStoredMessage({ localId: 'u1', role: 'user', content: 'hi', createdAt: '2026-01-01T00:00:00Z' })).toBe(true);
+      expect(isValidStoredMessage({ localId: 'a1', role: 'assistant', content: '', createdAt: '2026-01-01T00:00:00Z' })).toBe(true);
+      expect(isValidStoredMessage(null)).toBe(false);
+      expect(isValidStoredMessage(undefined)).toBe(false);
+      expect(isValidStoredMessage([])).toBe(false);
+      expect(isValidStoredMessage({ localId: '', role: 'user', content: 'hi' })).toBe(false);
+      expect(isValidStoredMessage({ localId: 'x', role: 'system', content: 'hi' })).toBe(false);
+      expect(isValidStoredMessage({ localId: 'x', role: 'user', content: 123 })).toBe(false);
+    });
+
+    it('retains tombstone in deleted.json when fsp.rm fails (EBUSY/EPERM), hides tombstoned log across restart, and unlinks deleted.json once background cleanup succeeds', async () => {
+      store.upsert(meta('locked-1'));
+      await store.appendMessages('locked-1', [message('u1', 'user'), message('a1', 'assistant')]);
+
+      const origRm = fsp.rm.bind(fsp);
+      const rmSpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).includes('locked-1')) {
+          throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+        }
+        return origRm(target, opts);
+      });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await store.delete('locked-1');
+        expect(store.get('locked-1')).toBeUndefined();
+        expect(store.isDeleted('locked-1')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'locked-1.jsonl'))).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(true);
+        expect(JSON.parse(fs.readFileSync(path.join(dir, 'deleted.json'), 'utf8'))).toEqual(['locked-1']);
+
+        // Excluded from all enumeration and reads while tombstoned
+        expect(await store.listLogThreadIds()).not.toContain('locked-1');
+        expect(store.inspectLogsSync().allLogIds).not.toContain('locked-1');
+        expect(store.inspectLogsSync().nonEmptyIds.has('locked-1')).toBe(false);
+        expect(await store.readRawMessages('locked-1')).toEqual([]);
+        expect(await store.readMessages('locked-1')).toEqual([]);
+
+        // Restart while STILL locked: remains tombstoned, never resurrected as orphan
+        const reopenedLocked = new ThreadStore(dir);
+        expect(reopenedLocked.isDeleted('locked-1')).toBe(true);
+        expect(reopenedLocked.inspectLogsSync().allLogIds).not.toContain('locked-1');
+        expect(await reopenedLocked.listLogThreadIds()).not.toContain('locked-1');
+        await reopenedLocked.drain();
+        expect(reopenedLocked.isDeleted('locked-1')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(true);
+      } finally {
+        rmSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+
+      // Restart once file lock is released: synchronous inspection still skips it, and background cleanup unlinks both files
+      const reopenedClean = new ThreadStore(dir);
+      expect(reopenedClean.isDeleted('locked-1')).toBe(true);
+      expect(reopenedClean.inspectLogsSync().allLogIds).not.toContain('locked-1');
+      await reopenedClean.drain();
+      expect(reopenedClean.isDeleted('locked-1')).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'locked-1.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+    });
+
+    it('prevents queued appendMessages, replaceMessages, applyServerIds, setFeedback, and prepareForRecreation from resurrecting <id>.jsonl or index[id] after delete(id)', async () => {
+      store.upsert(meta('race-del'));
+      await store.appendMessages('race-del', [message('u0', 'user')]);
+
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((res) => {
+        releaseGate = res;
+      });
+
+      // Hold the per-thread opChain while queueing every write operation behind it
+      const blocker = (store as unknown as { runExclusive: (id: string, fn: () => Promise<void>) => Promise<void> }).runExclusive(
+        'race-del',
+        () => gate,
+      );
+
+      const appendSpy = vi.spyOn(fsp, 'appendFile');
+      try {
+        const qAppend = store.appendMessages('race-del', [
+          { ...message('u1', 'user'), images: [sampleImage('img-race')] },
+          message('a1', 'assistant'),
+        ]);
+        const qReplace = store.replaceMessages('race-del', [message('u2', 'user')]);
+        const qServerIds = store.applyServerIds('race-del', { u0: 'srv-0' });
+        const qFeedback = store.setFeedback('race-del', 'u0', 1, 'great');
+        const qRecreate = store.prepareForRecreation(
+          'race-del',
+          meta('race-del'),
+          { remoteConversationId: 'r-after-del', syncState: 'pending' },
+          [{ localId: 'u3', role: 'user', content: 'extra', createdAt: '2026-06-10T10:05:00Z' }],
+        );
+
+        // Delete synchronously BEFORE releasing the gate
+        const delPromise = store.delete('race-del');
+        expect(store.isDeleted('race-del')).toBe(true);
+        expect(store.get('race-del')).toBeUndefined();
+
+        releaseGate();
+        await Promise.all([blocker, qAppend, qReplace, qServerIds, qFeedback, qRecreate, delPromise]);
+        expect(appendSpy).not.toHaveBeenCalled();
+      } finally {
+        appendSpy.mockRestore();
+        releaseGate();
+      }
+      await store.drain('race-del');
+
+      expect(store.get('race-del')).toBeUndefined();
+      expect(store.findByRemoteId('r-after-del')).toBeUndefined();
+      expect(fs.existsSync(path.join(dir, 'race-del.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'images', 'race-del'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+      expect(store.isDeleted('race-del')).toBe(false);
+    });
+
+    it('takes zero-write fast path on header-only delete(id) and clears tombstone + aborts stale fsp.rm on re-upsert', async () => {
+      store.upsert(meta('header-only'));
+      const writeSyncSpy = vi.spyOn(fs, 'writeFileSync');
+      try {
+        await store.delete('header-only');
+        const deletedWrites = writeSyncSpy.mock.calls.filter(([target]) =>
+          String(target).includes('deleted.json'),
+        );
+        expect(deletedWrites).toHaveLength(0);
+      } finally {
+        writeSyncSpy.mockRestore();
+      }
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+      expect(store.isDeleted('header-only')).toBe(false);
+
+      // Re-upsert after delete(id) clears tombstone and aborts queued background fsp.rm
+      store.upsert(meta('re-admitted'));
+      await store.appendMessages('re-admitted', [message('u1', 'user')]);
+
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((res) => {
+        releaseGate = res;
+      });
+      const blocker = (store as unknown as { runExclusive: (id: string, fn: () => Promise<void>) => Promise<void> }).runExclusive(
+        're-admitted',
+        () => gate,
+      );
+
+      try {
+        const delPromise = store.delete('re-admitted');
+        expect(store.isDeleted('re-admitted')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(true);
+
+        // Re-upsert before background cleanup runs
+        store.upsert({ ...meta('re-admitted'), title: 'Back in top 200' });
+        expect(store.isDeleted('re-admitted')).toBe(false);
+        expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+
+        releaseGate();
+        await Promise.all([blocker, delPromise]);
+      } finally {
+        releaseGate();
+      }
+      await store.drain('re-admitted');
+
+      expect(store.get('re-admitted')?.title).toBe('Back in top 200');
+      expect(fs.existsSync(path.join(dir, 're-admitted.jsonl'))).toBe(true);
+      expect((await store.readMessages('re-admitted')).map((m) => m.localId)).toEqual(['u1']);
+    });
+
+    it('quarantines corrupt/non-array deleted.json to .corrupt and salvages mixed-validity deleted.json without throwing', async () => {
+      const tombDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-tomb-'));
+      try {
+        const deletedFile = path.join(tombDir, 'deleted.json');
+
+        // 1. Corrupt / non-array payloads quarantined to .corrupt
+        for (const bad of ['{corrupt', 'null', '{}', '"str"', '123']) {
+          fs.rmSync(deletedFile + '.corrupt', { force: true });
+          fs.writeFileSync(deletedFile, bad);
+          const s = new ThreadStore(tombDir);
+          await s.drain();
+          expect(fs.existsSync(deletedFile + '.corrupt')).toBe(true);
+        }
+
+        // 2. Mixed-validity array ["tombstoned-1", "../escape", "", 42, null]
+        fs.rmSync(deletedFile + '.corrupt', { force: true });
+        fs.writeFileSync(
+          path.join(tombDir, 'tombstoned-1.jsonl'),
+          JSON.stringify(message('u1', 'user')) + '\n',
+        );
+        fs.writeFileSync(
+          path.join(tombDir, 'healthy-1.jsonl'),
+          JSON.stringify(message('u2', 'user')) + '\n',
+        );
+        const mixedRaw = JSON.stringify(['tombstoned-1', '../escape', '', 42, null]);
+        fs.writeFileSync(deletedFile, mixedRaw);
+
+        const salvaged = new ThreadStore(tombDir);
+        // Synchronously retains valid tombstone, preserves .corrupt backup, and skips tombstone in inspectLogsSync
+        expect(salvaged.isDeleted('tombstoned-1')).toBe(true);
+        expect(salvaged.isDeleted('../escape')).toBe(false);
+        expect(fs.existsSync(deletedFile + '.corrupt')).toBe(true);
+        expect(fs.readFileSync(deletedFile + '.corrupt', 'utf8')).toBe(mixedRaw);
+        expect(salvaged.inspectLogsSync().allLogIds).toEqual(['healthy-1']);
+
+        // Background cleanup completes cleanly without throwing on invalid entries and removes tombstoned-1 + deleted.json
+        await salvaged.drain();
+        expect(fs.existsSync(path.join(tombDir, 'tombstoned-1.jsonl'))).toBe(false);
+        expect(fs.existsSync(path.join(tombDir, 'healthy-1.jsonl'))).toBe(true);
+        expect(fs.existsSync(deletedFile)).toBe(false);
+        expect(salvaged.isDeleted('tombstoned-1')).toBe(false);
+      } finally {
+        fs.rmSync(tombDir, { recursive: true, force: true });
+      }
+    });
+
+    it('inspectLogsSync distinguishes nonEmptyIds vs 0-byte logs, skips tombstones and invalid filenames, and performs 0 file reads', async () => {
+      const missingDirStore = new ThreadStore(path.join(dir, 'nonexistent-subdir'));
+      expect(missingDirStore.inspectLogsSync()).toEqual({ nonEmptyIds: new Set(), allLogIds: [] });
+
+      store.upsert(meta('non-empty'));
+      await store.appendMessages('non-empty', [message('u1', 'user')]);
+      fs.writeFileSync(path.join(dir, 'zero-byte.jsonl'), '');
+      fs.writeFileSync(path.join(dir, 'bad name.jsonl'), '{"localId":"x"}');
+      fs.writeFileSync(path.join(dir, 'tomb-log.jsonl'), JSON.stringify(message('u2', 'user')) + '\n');
+
+      // Tombstone tomb-log while blocking fsp.rm temporarily so tomb-log.jsonl is still on disk during inspectLogsSync
+      const origRm = fsp.rm.bind(fsp);
+      const rmSpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).includes('tomb-log')) {
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        }
+        return origRm(target, opts);
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await store.delete('tomb-log');
+      } finally {
+        rmSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+
+      const readSyncSpy = vi.spyOn(fs, 'readFileSync');
+      const readAsyncSpy = vi.spyOn(fsp, 'readFile');
+      try {
+        const inspected = store.inspectLogsSync();
+        expect([...inspected.nonEmptyIds].sort()).toEqual(['non-empty']);
+        expect([...inspected.allLogIds].sort()).toEqual(['non-empty', 'zero-byte']);
+        expect(readSyncSpy).not.toHaveBeenCalled();
+        expect(readAsyncSpy).not.toHaveBeenCalled();
+      } finally {
+        readSyncSpy.mockRestore();
+        readAsyncSpy.mockRestore();
+      }
+    });
+
+    it('findByRemoteId & prepareForRecreation maintain O(1) remote mapping across initial and chained recreations, preserve concurrent patches, and keep local files in place', async () => {
+      store.upsert({ ...meta('local-1'), sessionId: 'sess-warm', hasStarted: true });
+      await store.appendMessages('local-1', [
+        { ...message('u1', 'user'), images: [sampleImage('img-keep')] },
+        message('a1', 'assistant', { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      ]);
+      await store.applyServerIds('local-1', { u1: 'old-srv-u1', a1: 'old-srv-a1' });
+      await store.setFeedback('local-1', 'a1', 1, 'spot on');
+
+      // Initially maps local-1 -> local-1
+      expect(store.findByRemoteId('local-1')?.id).toBe('local-1');
+
+      // Simulate concurrent patch while prepareForRecreation is queued behind an op
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((res) => {
+        releaseGate = res;
+      });
+      const blocker = (store as unknown as { runExclusive: (id: string, fn: () => Promise<void>) => Promise<void> }).runExclusive(
+        'local-1',
+        () => gate,
+      );
+
+      let updatedMeta!: ThreadMeta;
+      try {
+        const staleSnapshot = store.get('local-1')!;
+        const recreatePromise = store.prepareForRecreation(
+          'local-1',
+          staleSnapshot,
+          {
+            remoteConversationId: 'remote-r1',
+            syncState: 'pending',
+            remoteSettings: { client: 'desktop', model: 'sonnet' },
+          },
+          [
+            { localId: 'a1', role: 'assistant', content: 'dup-ignored', createdAt: '2026-06-10T10:01:00Z' },
+            {
+              localId: 'u2',
+              serverId: 'stale-u2',
+              role: 'user',
+              content: 'queue-only follow-up',
+              createdAt: '2026-06-10T10:02:00Z',
+            },
+          ],
+        );
+
+        // Concurrent patch lands BEFORE blocker releases
+        store.patch('local-1', { title: 'User Renamed During Create' });
+        releaseGate();
+
+        updatedMeta = await Promise.all([blocker, recreatePromise]).then(([, m]) => m);
+      } finally {
+        releaseGate();
+      }
+      expect(updatedMeta.id).toBe('local-1');
+      expect(updatedMeta.remoteConversationId).toBe('remote-r1');
+      expect(updatedMeta.title).toBe('User Renamed During Create');
+      expect(updatedMeta.sessionId).toBe('sess-warm');
+
+      // Initial id -> r1: findByRemoteId('remote-r1') resolves local-1, AND findByRemoteId('local-1') is evicted!
+      expect(store.findByRemoteId('remote-r1')?.id).toBe('local-1');
+      expect(store.findByRemoteId('local-1')).toBeUndefined();
+
+      // Zero file/image renames: local-1.jsonl and images/local-1 stay in place, serverIds stripped
+      expect(fs.existsSync(path.join(dir, 'local-1.jsonl'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'images', 'local-1'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'remote-r1.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'images', 'remote-r1'))).toBe(false);
+
+      const rawAfterR1 = await store.readRawMessages('local-1');
+      expect(rawAfterR1.map((m) => m.localId)).toEqual(['u1', 'a1', 'u2']);
+      expect(rawAfterR1.every((m) => m.serverId === undefined)).toBe(true);
+      expect(rawAfterR1[1].feedback).toEqual({ rating: 1, comment: 'spot on' });
+      const hydrated = await store.readMessages('local-1');
+      expect(hydrated[0].images?.[0].data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
+
+      // Chained recreation r1 -> r2 evicts r1
+      await store.prepareForRecreation('local-1', updatedMeta, { remoteConversationId: 'remote-r2' }, []);
+      expect(store.findByRemoteId('remote-r2')?.id).toBe('local-1');
+      expect(store.findByRemoteId('remote-r1')).toBeUndefined();
+      expect(store.findByRemoteId('local-1')).toBeUndefined();
+
+      // Reload from disk preserves remoteConversationId & findByRemoteId
+      const reopened = new ThreadStore(dir);
+      expect(reopened.findByRemoteId('remote-r2')?.id).toBe('local-1');
+      expect(reopened.findByRemoteId('remote-r1')).toBeUndefined();
+      expect(reopened.findByRemoteId('local-1')).toBeUndefined();
+
+      // Deleting local-1 evicts remote-r2 from findByRemoteId
+      await store.delete('local-1');
+      expect(store.findByRemoteId('remote-r2')).toBeUndefined();
+    });
+
+    it('loadIndex enforces key === val.id, validates remoteConversationId, omits self remoteConversationId cleanly, and deterministically resolves duplicate remoteConversationId collisions', () => {
+      const idxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-remote-idx-'));
+      try {
+        const indexFile = path.join(idxDir, 'index.json');
+
+        // 1. Self remoteConversationId === id is omitted silently WITHOUT creating .corrupt
+        fs.writeFileSync(
+          indexFile,
+          JSON.stringify({
+            'self-id': { ...meta('self-id'), remoteConversationId: 'self-id' },
+          }),
+        );
+        const cleanSelf = new ThreadStore(idxDir);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(false);
+        expect('remoteConversationId' in cleanSelf.get('self-id')!).toBe(false);
+        expect(cleanSelf.findByRemoteId('self-id')?.id).toBe('self-id');
+
+        // 2. Rejects key !== val.id, strips invalid remoteConversationId: '../evil', resolves recreated vs recreated to newer updatedAt, and prefers native id === remoteId over recreated even when recreated has newer updatedAt
+        fs.writeFileSync(
+          indexFile,
+          JSON.stringify({
+            mismatched_key: { ...meta('different-id') },
+            'bad-remote': { ...meta('bad-remote'), remoteConversationId: '../evil' },
+            'rec-older': {
+              ...meta('rec-older'),
+              remoteConversationId: 'shared-r1',
+              updatedAt: '2026-06-10T10:00:00Z',
+            },
+            'rec-newer': {
+              ...meta('rec-newer'),
+              remoteConversationId: 'shared-r1',
+              updatedAt: '2026-06-10T12:00:00Z',
+            },
+            'native-r2': {
+              ...meta('native-r2'),
+              updatedAt: '2026-06-10T09:00:00Z',
+            },
+            'rec-claims-native': {
+              ...meta('rec-claims-native'),
+              remoteConversationId: 'native-r2',
+              updatedAt: '2026-06-10T15:00:00Z',
+            },
+          }),
+        );
+
+        const loaded = new ThreadStore(idxDir);
+        expect(fs.existsSync(indexFile + '.corrupt')).toBe(true);
+
+        // key !== val.id rejected
+        expect(loaded.get('mismatched_key')).toBeUndefined();
+        expect(loaded.get('different-id')).toBeUndefined();
+
+        // invalid remoteConversationId stripped
+        expect(loaded.get('bad-remote')?.remoteConversationId).toBeUndefined();
+        expect(loaded.findByRemoteId('bad-remote')?.id).toBe('bad-remote');
+
+        // recreated vs recreated -> newer updatedAt wins 'shared-r1', older stripped
+        expect(loaded.findByRemoteId('shared-r1')?.id).toBe('rec-newer');
+        expect(loaded.get('rec-newer')?.remoteConversationId).toBe('shared-r1');
+        expect(loaded.get('rec-older')?.remoteConversationId).toBeUndefined();
+        expect(loaded.findByRemoteId('rec-older')?.id).toBe('rec-older');
+
+        // native vs recreated -> native 'native-r2' wins even though rec-claims-native has newer updatedAt
+        expect(loaded.findByRemoteId('native-r2')?.id).toBe('native-r2');
+        expect(loaded.get('rec-claims-native')?.remoteConversationId).toBeUndefined();
+        expect(loaded.findByRemoteId('rec-claims-native')?.id).toBe('rec-claims-native');
+      } finally {
+        fs.rmSync(idxDir, { recursive: true, force: true });
+      }
+    });
+
+    it('aborts prepareForRecreation when delete(id) fires mid-writeRaw without resurrecting index[id] or remoteToLocalId', async () => {
+      store.upsert(meta('mid-write-del'));
+      await store.appendMessages('mid-write-del', [message('u1', 'user'), message('a1', 'assistant')]);
+
+      const origRename = fsp.rename.bind(fsp);
+      let releaseWriteRaw!: () => void;
+      let notifyWriteEntered!: () => void;
+      const writeEntered = new Promise<void>((res) => {
+        notifyWriteEntered = res;
+      });
+      const writeGate = new Promise<void>((res) => {
+        releaseWriteRaw = res;
+      });
+
+      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementation(async (oldPath, newPath) => {
+        if (String(newPath).endsWith('mid-write-del.jsonl')) {
+          notifyWriteEntered();
+          await writeGate;
+        }
+        return origRename(oldPath, newPath);
+      });
+
+      try {
+        const snapshot = store.get('mid-write-del')!;
+        const recreatePromise = store.prepareForRecreation(
+          'mid-write-del',
+          snapshot,
+          { remoteConversationId: 'r1-ghost', syncState: 'pending' },
+          [{ localId: 'u2', role: 'user', content: 'extra', createdAt: '2026-06-10T10:02:00Z' }],
+        );
+
+        await writeEntered;
+        // Delete while writeRaw is suspended mid-flight inside prepareForRecreation
+        const delPromise = store.delete('mid-write-del');
+        expect(store.get('mid-write-del')).toBeUndefined();
+
+        releaseWriteRaw();
+        await Promise.all([recreatePromise, delPromise]);
+      } finally {
+        renameSpy.mockRestore();
+        releaseWriteRaw();
+      }
+      await store.drain('mid-write-del');
+
+      expect(store.get('mid-write-del')).toBeUndefined();
+      expect(store.findByRemoteId('r1-ghost')).toBeUndefined();
+      expect(store.findByRemoteId('mid-write-del')).toBeUndefined();
+      expect(fs.existsSync(path.join(dir, 'mid-write-del.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+
+      const reloaded = new ThreadStore(dir);
+      await reloaded.drain();
+      expect(reloaded.get('mid-write-del')).toBeUndefined();
+      expect(reloaded.findByRemoteId('r1-ghost')).toBeUndefined();
+    });
+
+    it('returns { hasUnsynced: false } and leaves no files behind when delete(id) fires mid-writeRaw during applyServerIds', async () => {
+      store.upsert(meta('mid-ack-del'));
+      await store.appendMessages('mid-ack-del', [message('u1', 'user'), message('a1', 'assistant')]);
+
+      const origRename = fsp.rename.bind(fsp);
+      let releaseAckWrite!: () => void;
+      let notifyAckEntered!: () => void;
+      const ackEntered = new Promise<void>((res) => {
+        notifyAckEntered = res;
+      });
+      const ackGate = new Promise<void>((res) => {
+        releaseAckWrite = res;
+      });
+      const ackRenameSpy = vi.spyOn(fsp, 'rename').mockImplementation(async (oldPath, newPath) => {
+        if (String(newPath).endsWith('mid-ack-del.jsonl')) {
+          notifyAckEntered();
+          await ackGate;
+        }
+        return origRename(oldPath, newPath);
+      });
+
+      try {
+        const ackPromise = store.applyServerIds('mid-ack-del', { u1: 'srv-u1' });
+        await ackEntered;
+        const delAckPromise = store.delete('mid-ack-del');
+        releaseAckWrite();
+        const [ackResult] = await Promise.all([ackPromise, delAckPromise]);
+        expect(ackResult).toEqual({ hasUnsynced: false });
+      } finally {
+        ackRenameSpy.mockRestore();
+        releaseAckWrite();
+      }
+      await store.drain('mid-ack-del');
+      expect(fs.existsSync(path.join(dir, 'mid-ack-del.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+    });
+
+    it('enforces monotonic lifecycleEpoch across delete -> upsert -> appendMessages -> delete without clearing a newer tombstone', async () => {
+      store.upsert(meta('gen-race'));
+      await store.appendMessages('gen-race', [message('u0', 'user')]);
+
+      const origRm = fsp.rm.bind(fsp);
+      let releaseFirstRm!: () => void;
+      let notifyFirstRm!: () => void;
+      const firstRmEntered = new Promise<void>((res) => {
+        notifyFirstRm = res;
+      });
+      const firstRmGate = new Promise<void>((res) => {
+        releaseFirstRm = res;
+      });
+      let rmCallCount = 0;
+
+      const rmSpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).endsWith('gen-race.jsonl')) {
+          rmCallCount += 1;
+          if (rmCallCount === 1) {
+            await origRm(target, opts);
+            notifyFirstRm();
+            await firstRmGate;
+            return;
+          }
+          // Simulate EPERM on delete #2 so we verify cleanup #1 NEVER cleared delete #2's tombstone!
+          throw Object.assign(new Error('EPERM on gen 2'), { code: 'EPERM' });
+        }
+        return origRm(target, opts);
+      });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const appendSpy = vi.spyOn(fsp, 'appendFile');
+
+      try {
+        const del1 = store.delete('gen-race');
+        await firstRmEntered;
+
+        // Re-admit generation 2, queue a write in generation 2, then delete #2 BEFORE cleanup #1 finishes!
+        store.upsert({ ...meta('gen-race'), title: 'Gen 2' });
+        const gen2Append = store.appendMessages('gen-race', [message('u-gen2', 'user')]);
+        const del2 = store.delete('gen-race');
+
+        // Put a dummy file back if needed to simulate EPERM retention on delete #2
+        fs.writeFileSync(
+          path.join(dir, 'gen-race.jsonl'),
+          '{"localId":"leftover","role":"user","content":"x","createdAt":"2026-06-10T10:00:00Z"}\n',
+        );
+
+        releaseFirstRm();
+        await Promise.all([del1, gen2Append, del2]);
+        expect(appendSpy).not.toHaveBeenCalled();
+
+        // cleanup #1 must NOT have wiped delete #2's tombstone while gen-race.jsonl failed EPERM on delete #2!
+        expect(store.get('gen-race')).toBeUndefined();
+        expect(store.isDeleted('gen-race')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(true);
+      } finally {
+        rmSpy.mockRestore();
+        appendSpy.mockRestore();
+        warnSpy.mockRestore();
+        releaseFirstRm();
+      }
+
+      // Now let delete #3 clean up cleanly
+      await store.delete('gen-race');
+      await store.drain('gen-race');
+      expect(store.isDeleted('gen-race')).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'gen-race.jsonl'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+    });
+
+    it('swallows persistDeletedSync disk errors during background tombstone cleanup without unhandled rejection', async () => {
+      store.upsert(meta('t-persist-err'));
+      await store.appendMessages('t-persist-err', [message('u1', 'user')]);
+      store.upsert(meta('other-tomb'));
+      await store.appendMessages('other-tomb', [message('u2', 'user')]);
+
+      const origRm = fsp.rm.bind(fsp);
+      // Keep 'other-tomb' in deletedIds so persistDeletedSync attempts writeFileSync('deleted.json.tmp')
+      const blockOtherSpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).includes('other-tomb')) {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        }
+        return origRm(target, opts);
+      });
+      const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await store.delete('other-tomb');
+        const origWriteSync = fs.writeFileSync.bind(fs);
+        let enteredCleanup = false;
+        const writeErrSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation((target, data, options) => {
+          if (enteredCleanup && String(target).includes('deleted.json')) {
+            throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+          }
+          return origWriteSync(target, data, options as fs.WriteFileOptions);
+        });
+        try {
+          const delPromise = store.delete('t-persist-err');
+          enteredCleanup = true;
+          await expect(delPromise).resolves.toBeUndefined();
+        } finally {
+          writeErrSpy.mockRestore();
+        }
+      } finally {
+        blockOtherSpy.mockRestore();
+        warnSpy2.mockRestore();
+      }
+      await store.delete('other-tomb');
+      await store.drain();
+    });
+
+    it('excludes tombstoned threads in loadIndex() when deleted.json coexists with stale index.json without quarantining to .corrupt', async () => {
+      const crashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-crash-idx-'));
+      try {
+        fs.writeFileSync(
+          path.join(crashDir, 'index.json'),
+          JSON.stringify({
+            'tomb-1': { ...meta('tomb-1'), remoteConversationId: 'r-tomb-1' },
+            'healthy-1': meta('healthy-1'),
+          }),
+        );
+        fs.writeFileSync(path.join(crashDir, 'deleted.json'), JSON.stringify(['tomb-1']));
+
+        const recovered = new ThreadStore(crashDir);
+        expect(recovered.get('tomb-1')).toBeUndefined();
+        expect(recovered.findByRemoteId('r-tomb-1')).toBeUndefined();
+        expect(recovered.findByRemoteId('tomb-1')).toBeUndefined();
+        expect(recovered.list().map((t) => t.id)).toEqual(['healthy-1']);
+        expect(fs.existsSync(path.join(crashDir, 'index.json.corrupt'))).toBe(false);
+        await recovered.drain();
+      } finally {
+        fs.rmSync(crashDir, { recursive: true, force: true });
+      }
+    });
+
+    it('syncRemoteMapping preserves native id === nextRemote precedence over recreated remoteConversationId on upsert and patch', () => {
+      store.upsert(meta('native-A'));
+      store.upsert({ ...meta('rec-B'), remoteConversationId: 'native-A' });
+
+      expect(store.findByRemoteId('native-A')?.id).toBe('native-A');
+      expect(store.get('rec-B')?.remoteConversationId).toBeUndefined();
+      expect(store.findByRemoteId('rec-B')?.id).toBe('rec-B');
+
+      // Same precedence on patch()
+      store.patch('rec-B', { remoteConversationId: 'native-A' });
+      expect(store.findByRemoteId('native-A')?.id).toBe('native-A');
+      expect(store.get('rec-B')?.remoteConversationId).toBeUndefined();
+      expect(store.findByRemoteId('rec-B')?.id).toBe('rec-B');
+    });
+  });
+
+  describe('O(1) nonEmptyLogIds & hasLocalMessages tracking', () => {
+    it('lazy-initializes once via inspectLogsSync, updates in O(1) across appendMessages / replaceMessages / readRawMessages / readMessages / prepareForRecreation, and preserves standalone mutations before first read', async () => {
+      const subDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-nonempty-happy-'));
+      try {
+        // Seed pre-existing non-empty log and corrupt/whitespace log BEFORE constructing ThreadStore
+        fs.writeFileSync(
+          path.join(subDir, 'seeded-valid.jsonl'),
+          JSON.stringify(message('sv-1', 'user')) + '\n',
+        );
+        fs.writeFileSync(path.join(subDir, 'seeded-corrupt.jsonl'), '   \n{bad-json\n');
+
+        const s = new ThreadStore(subDir);
+        const inspectSpy = vi.spyOn(s, 'inspectLogsSync');
+
+        // Standalone mutations/reads BEFORE the first hasLocalMessages() call:
+        // 1) readRawMessages('seeded-corrupt') parses 0 valid messages -> setNonEmptyLogPresence('seeded-corrupt', false)
+        //    must initialize first so a subsequent hasLocalMessages('seeded-corrupt') does NOT re-scan disk and see stat.size > 0!
+        expect(await s.readRawMessages('seeded-corrupt')).toEqual([]);
+        // 2) appendMessages('written-before-read', ...) before hasLocalMessages()
+        s.upsert(meta('written-before-read'));
+        await s.appendMessages('written-before-read', [message('wb-1', 'user')]);
+
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+        expect(s.hasLocalMessages('seeded-valid')).toBe(true);
+        expect(s.hasLocalMessages('seeded-corrupt')).toBe(false);
+        expect(s.hasLocalMessages('written-before-read')).toBe(true);
+        expect(s.hasLocalMessages('never-existed')).toBe(false);
+        // Zero additional inspectLogsSync calls across repeated O(1) lookups!
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+        // replaceMessages non-empty -> empty -> non-empty
+        s.upsert(meta('rep-thread'));
+        await s.replaceMessages('rep-thread', [message('rp-1', 'user')]);
+        expect(s.hasLocalMessages('rep-thread')).toBe(true);
+        await s.replaceMessages('rep-thread', []);
+        expect(s.hasLocalMessages('rep-thread')).toBe(false);
+
+        // prepareForRecreation with extraMessages (non-empty) vs empty
+        await s.prepareForRecreation(
+          'rec-nonempty',
+          meta('rec-nonempty'),
+          { remoteConversationId: 'srv-rec-1' },
+          [message('extra-1', 'user')],
+        );
+        expect(s.hasLocalMessages('rec-nonempty')).toBe(true);
+
+        await s.prepareForRecreation('rec-empty', meta('rec-empty'), {
+          remoteConversationId: 'srv-rec-2',
+        });
+        expect(s.hasLocalMessages('rec-empty')).toBe(false);
+
+        // External valid write picked up when readMessages() runs
+        fs.writeFileSync(
+          path.join(subDir, 'ext-read.jsonl'),
+          JSON.stringify(message('ext-1', 'assistant')) + '\n',
+        );
+        expect((await s.readMessages('ext-read')).map((m) => m.localId)).toEqual(['ext-1']);
+        expect(s.hasLocalMessages('ext-read')).toBe(true);
+        expect(inspectSpy).toHaveBeenCalledTimes(1);
+
+        await s.drain();
+      } finally {
+        fs.rmSync(subDir, { recursive: true, force: true });
+      }
+    });
+
+    it('handles invalid/tainted IDs, missing ENOENT dir (single init), 0-byte logs, empty appendMessages([]), corrupt log downgrade, bare readRaw isolation, and tombstones', async () => {
+      // 1. Tainted / invalid IDs return false without throwing or touching disk
+      const inspectMainSpy = vi.spyOn(store, 'inspectLogsSync');
+      expect(store.hasLocalMessages('')).toBe(false);
+      expect(store.hasLocalMessages('../escape')).toBe(false);
+      expect(store.hasLocalMessages(null as unknown as string)).toBe(false);
+      expect(store.hasLocalMessages(undefined as unknown as string)).toBe(false);
+      expect(store.hasLocalMessages(123 as unknown as string)).toBe(false);
+      expect(inspectMainSpy).not.toHaveBeenCalled();
+
+      // 2. Missing ENOENT directory marks nonEmptyLogsInitialized on first call (inspectLogsSync at most once)
+      const missingDir = path.join(dir, 'does-not-exist-yet');
+      const enoentStore = new ThreadStore(missingDir);
+      const enoentInspectSpy = vi.spyOn(enoentStore, 'inspectLogsSync');
+      expect(enoentStore.hasLocalMessages('any-thread')).toBe(false);
+      expect(enoentStore.hasLocalMessages('another-thread')).toBe(false);
+      expect(enoentStore.hasLocalMessages('any-thread')).toBe(false);
+      expect(enoentInspectSpy).toHaveBeenCalledTimes(1);
+
+      // 3. 0-byte .jsonl file & appendMessages(id, []) on empty and non-empty threads
+      fs.writeFileSync(path.join(dir, 'zero-byte.jsonl'), '');
+      expect(store.hasLocalMessages('zero-byte')).toBe(false);
+
+      store.upsert(meta('empty-append'));
+      await store.appendMessages('empty-append', []);
+      expect(fs.existsSync(path.join(dir, 'empty-append.jsonl'))).toBe(false);
+      expect(store.hasLocalMessages('empty-append')).toBe(false);
+
+      store.upsert(meta('keep-nonempty'));
+      await store.appendMessages('keep-nonempty', [message('kn-1', 'user')]);
+      expect(store.hasLocalMessages('keep-nonempty')).toBe(true);
+      await store.appendMessages('keep-nonempty', []);
+      expect(store.hasLocalMessages('keep-nonempty')).toBe(true);
+
+      // 4. Corrupt/whitespace-only .jsonl (stat.size > 0) starts true on stat scan, downgrades on readMessages, and bare readRaw does NOT mutate nonEmptyLogIds
+      const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-corrupt-downgrade-'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.writeFileSync(path.join(corruptDir, 'ws-only.jsonl'), '   \n\t\n');
+        fs.writeFileSync(path.join(corruptDir, 'bad-line.jsonl'), '{broken\n');
+        const cs = new ThreadStore(corruptDir);
+        expect(cs.hasLocalMessages('ws-only')).toBe(true);
+        expect(cs.hasLocalMessages('bad-line')).toBe(true);
+
+        // Bare readRaw must NOT mutate nonEmptyLogIds
+        await (cs as unknown as { readRaw: (id: string) => Promise<StoredChatMessage[]> }).readRaw('ws-only');
+        expect(cs.hasLocalMessages('ws-only')).toBe(true);
+
+        // Public readMessages / readRawMessages downgrade to false when 0 valid messages parse
+        expect(await cs.readMessages('ws-only')).toEqual([]);
+        expect(cs.hasLocalMessages('ws-only')).toBe(false);
+        expect(await cs.readRawMessages('bad-line')).toEqual([]);
+        expect(cs.hasLocalMessages('bad-line')).toBe(false);
+        await cs.drain();
+      } finally {
+        warnSpy.mockRestore();
+        fs.rmSync(corruptDir, { recursive: true, force: true });
+      }
+
+      // 5. Tombstoned thread returns false immediately even while unlink fails with EBUSY
+      store.upsert(meta('tomb-sticky'));
+      await store.appendMessages('tomb-sticky', [message('ts-1', 'user')]);
+      expect(store.hasLocalMessages('tomb-sticky')).toBe(true);
+
+      const origRm = fsp.rm.bind(fsp);
+      const rmBusySpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
+        if (String(target).includes('tomb-sticky')) {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        }
+        return origRm(target, opts);
+      });
+      const warnSpy2 = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await store.delete('tomb-sticky');
+        expect(store.isDeleted('tomb-sticky')).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'tomb-sticky.jsonl'))).toBe(true);
+        expect(store.hasLocalMessages('tomb-sticky')).toBe(false);
+      } finally {
+        rmBusySpy.mockRestore();
+        warnSpy2.mockRestore();
+      }
+      await store.delete('tomb-sticky');
+    });
+
+    it('keeps hasLocalMessages(id) === false across stale/aborted appendMessages, replaceMessages, and prepareForRecreation (including mid-write delete + re-upsert cleanup)', async () => {
+      // Force initialization first
+      expect(store.hasLocalMessages('init-probe')).toBe(false);
+
+      // 1. Queued appendMessages, replaceMessages, prepareForRecreation aborted by synchronous delete(id) before execution
+      for (const mode of ['append', 'replace', 'recreate'] as const) {
+        const id = `stale-${mode}`;
+        store.upsert(meta(id));
+
+        let releaseBlocker!: () => void;
+        const blocker = new Promise<void>((res) => {
+          releaseBlocker = res;
+        });
+        let enteredBlocker!: () => void;
+        const blockerEntered = new Promise<void>((res) => {
+          enteredBlocker = res;
+        });
+
+        const origReadFile = fsp.readFile.bind(fsp);
+        const readSpy = vi.spyOn(fsp, 'readFile').mockImplementationOnce(async (...args) => {
+          enteredBlocker();
+          await blocker;
+          return origReadFile(...(args as Parameters<typeof origReadFile>));
+        });
+
+        try {
+          const readP = store.readRawMessages(id);
+          await blockerEntered;
+
+          const writeP =
+            mode === 'append'
+              ? store.appendMessages(id, [message('m1', 'user')])
+              : mode === 'replace'
+                ? store.replaceMessages(id, [message('m1', 'user')])
+                : store.prepareForRecreation(id, meta(id), { remoteConversationId: `r-${id}` }, [
+                    message('m1', 'user'),
+                  ]);
+          const delP = store.delete(id);
+
+          releaseBlocker();
+          await Promise.all([readP, writeP, delP]);
+          expect(store.hasLocalMessages(id)).toBe(false);
+        } finally {
+          readSpy.mockRestore();
+          releaseBlocker();
+        }
+      }
+
+      // 2. Mid-write delete(id) + immediate re-upsert(meta(id)) triggers cleanupAbortedWriteIfReupserted() and leaves re-upserted empty thread at hasLocalMessages(id) === false
+      const reupsertId = 'mid-write-reupsert';
+      store.upsert(meta(reupsertId));
+
+      const origRename = fsp.rename.bind(fsp);
+      let releaseRename!: () => void;
+      const renameGate = new Promise<void>((res) => {
+        releaseRename = res;
+      });
+      let notifyRename!: () => void;
+      const renameEntered = new Promise<void>((res) => {
+        notifyRename = res;
+      });
+
+      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementationOnce(async (oldPath, newPath) => {
+        await origRename(oldPath, newPath);
+        notifyRename();
+        await renameGate;
+      });
+
+      try {
+        const replaceP = store.replaceMessages(reupsertId, [message('rw-1', 'user')]);
+        await renameEntered;
+
+        // Delete generation 1 AND immediately re-upsert empty generation 2 while writeRaw is mid-flight!
+        const delGen1 = store.delete(reupsertId);
+        store.upsert(meta(reupsertId));
+        expect(store.isDeleted(reupsertId)).toBe(false);
+
+        releaseRename();
+        await Promise.all([replaceP, delGen1]);
+        await store.drain(reupsertId);
+
+        expect(store.get(reupsertId)).toBeDefined();
+        expect(fs.existsSync(path.join(dir, `${reupsertId}.jsonl`))).toBe(false);
+        expect(store.hasLocalMessages(reupsertId)).toBe(false);
+      } finally {
+        renameSpy.mockRestore();
+        releaseRename();
+      }
     });
   });
 });

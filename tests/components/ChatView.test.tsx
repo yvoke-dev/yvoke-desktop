@@ -74,6 +74,7 @@ interface ChatOpts {
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
   liveTurn?: LiveTurn;
+  onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
 
@@ -86,7 +87,7 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
-      onSend={onSend}
+      onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
       onFeedback={async () => undefined}
@@ -2016,7 +2017,7 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state on macOS', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
@@ -2061,7 +2062,7 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state on Windows and Linux', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
@@ -2630,7 +2631,7 @@ describe('deterministic platform shortcut labels', () => {
     });
   });
 
-  describe('Wave 1: Agent Mode & Playbook Locking in ChatView', () => {
+  describe('Agent Mode & Playbook Locking in ChatView', () => {
     it('DOM Structure & Tooltip: asserts inner select[aria-label="Agent mode"] is nested inside .composer-select-wrapper with unstarted tooltip', () => {
       const { container } = renderChat({
         thread: { ...THREAD, orchestratorProfile: undefined },
@@ -3105,6 +3106,251 @@ describe('playbook version display across chat UI surfaces', () => {
     expect(kickers[1]).toContain('oim-schema');
     expect(kickers[1]).not.toContain('vundefined');
     expect(kickers[1]).not.toMatch(/oim-schema\s+v\d/);
+  });
+});
+
+describe('immutable thread.id composer preservation & 3-way preflight resolution', () => {
+  it('preserves draft, pickerFilter, image attachments, and promptOverride when metadata updates on the same thread.id across recreations', async () => {
+    const originalFileReader = window.FileReader;
+    try {
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsDataURL() {
+          this.result =
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          setTimeout(() => this.onload?.(), 0);
+        }
+      }
+      window.FileReader = MockFileReader as unknown as typeof FileReader;
+
+      const { container, rerender } = renderChat({
+        thread: { ...THREAD, id: 'immutable-t1', title: 'Recreating Chat', syncState: 'pending' },
+      });
+
+      // 1. Filter picker and type a draft + attach an image before choosing playbook
+      const filterInput = screen.getByLabelText('Filter playbooks') as HTMLInputElement;
+      fireEvent.change(filterInput, { target: { value: 'schema' } });
+      expect(filterInput.value).toBe('schema');
+
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: 'Draft across recreation' } });
+
+      const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+      const pngFile = new File(['pngdata'], 'diagram.png', { type: 'image/png' });
+      fireEvent.change(fileInput, { target: { files: [pngFile] } });
+      await waitFor(() => expect(container.querySelector('.attachment-pill')).not.toBeNull());
+
+      // First recreation updates remoteConversationId -> 'r1', syncState, and title on the same thread.id
+      rerender(
+        chat({
+          thread: {
+            ...THREAD,
+            id: 'immutable-t1',
+            remoteConversationId: 'r1',
+            title: 'Recreating Chat (1)',
+            syncState: 'pending',
+          },
+        }),
+      );
+
+      expect((screen.getByLabelText('Filter playbooks') as HTMLInputElement).value).toBe('schema');
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Draft across recreation');
+      expect(container.querySelector('.attachment-pill')).not.toBeNull();
+
+      // 2. Pick playbook ('oim-schema' -> sets promptOverride) and chain second recreation -> 'r2'
+      const row = [...container.querySelectorAll<HTMLButtonElement>('.picker-row')].find((r) =>
+        r.textContent?.includes('oim-schema'),
+      )!;
+      fireEvent.click(row);
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+
+      rerender(
+        chat({
+          thread: {
+            ...THREAD,
+            id: 'immutable-t1',
+            remoteConversationId: 'r2',
+            title: 'Recreating Chat (2)',
+            syncState: 'synced',
+          },
+        }),
+      );
+
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Draft across recreation');
+      expect(container.querySelector('.attachment-pill')).not.toBeNull();
+      expect(container.querySelector('.active-playbook')?.textContent).toContain('oim-schema');
+    } finally {
+      window.FileReader = originalFileReader;
+    }
+  });
+
+  it('resets draft, pickerFilter, attachments, promptOverride, preflight, checking, and attachmentError on switching to a different thread.id and cancels stale validatePlaybook', async () => {
+    const originalFileReader = window.FileReader;
+    try {
+      class MockFileReader {
+        result: string | ArrayBuffer | null = null;
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        readAsDataURL() {
+          this.result =
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+          setTimeout(() => this.onload?.(), 0);
+        }
+      }
+      window.FileReader = MockFileReader as unknown as typeof FileReader;
+
+      const gate = deferred();
+      validatePlaybook.mockReturnValueOnce(gate.promise);
+
+      const { container, rerender } = renderChat({
+        thread: { ...THREAD, id: 't-1', title: 'First' },
+      });
+
+      // Populate pickerFilter, valid attachment, attachmentError, promptOverride, draft, and start preflight check
+      const filterInput = screen.getByLabelText('Filter playbooks') as HTMLInputElement;
+      fireEvent.change(filterInput, { target: { value: 'getting' } });
+
+      const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['png'], 'valid.png', { type: 'image/png' })] },
+      });
+      await waitFor(() => expect(container.querySelector('.attachment-pill')).not.toBeNull());
+
+      fireEvent.change(fileInput, {
+        target: { files: [new File(['pdf'], 'bad.pdf', { type: 'application/pdf' })] },
+      });
+      await waitFor(() => expect(container.querySelector('.chat-notices .banner.error')).not.toBeNull());
+
+      ask(container, 'Question in t-1', 'oim-getting-started');
+      await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(true);
+
+      // Switch to genuinely different thread.id 't-2'
+      rerender(
+        chat({
+          thread: { ...THREAD, id: 't-2', title: 'Second' },
+        }),
+      );
+
+      // Every composer state item from t-1 is reset and t-2 is unlocked
+      const textarea2 = container.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea2.value).toBe('');
+      expect(textarea2.disabled).toBe(false);
+      expect((screen.getByLabelText('Filter playbooks') as HTMLInputElement).value).toBe('');
+      expect(container.querySelector('.attachment-pill')).toBeNull();
+      expect(container.querySelector('.chat-notices .banner.error')).toBeNull();
+      expect(container.querySelector('.active-playbook')).toBeNull();
+      expect(container.querySelector('.preflight-checking')).toBeNull();
+
+      // Typing on t-2 enables Send button unaffected by t-1's pending preflight
+      fireEvent.change(textarea2, { target: { value: 'Fresh question on t-2' } });
+      const sendBtn2 = container.querySelector('.composer-send') as HTMLButtonElement;
+      expect(sendBtn2.disabled).toBe(false);
+
+      // Stale t-1 preflight resolves with non-plausible card -> completely ignored on t-2
+      await act(async () => {
+        gate.settle({ plausible: false, reason: 'Stale recommendation from t-1' });
+        await gate.promise;
+      });
+      expect(screen.queryByText('Stale recommendation from t-1')).toBeNull();
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      window.FileReader = originalFileReader;
+    }
+  });
+
+  it('re-enables composer controls (checking: false) and fails open when validatePlaybook rejects across metadata updates on the same thread.id', async () => {
+    let rejectCheck!: (err: Error) => void;
+    validatePlaybook.mockReturnValueOnce(
+      new Promise<PlaybookValidation>((_resolve, reject) => {
+        rejectCheck = reject;
+      }),
+    );
+    const routedSends: Array<{ threadId: string; remoteConversationId?: string; text: string; promptName?: string }> = [];
+
+    const { container, rerender } = renderChat({
+      thread: { ...THREAD, id: 't-err-same' },
+      onSend: (text, promptName) => routedSends.push({ threadId: 't-err-same', text, promptName }),
+    });
+
+    ask(container, 'Question when validator throws', 'oim-getting-started');
+    await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(true);
+
+    rerender(
+      chat({
+        thread: { ...THREAD, id: 't-err-same', remoteConversationId: 'remote-after-err', syncState: 'pending' },
+        onSend: (text, promptName) =>
+          routedSends.push({ threadId: 't-err-same', remoteConversationId: 'remote-after-err', text, promptName }),
+      }),
+    );
+
+    await act(async () => {
+      rejectCheck(new Error('IPC channel failed'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.preflight-checking')).toBeNull();
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+    expect(routedSends).toEqual([
+      {
+        threadId: 't-err-same',
+        remoteConversationId: 'remote-after-err',
+        text: 'Question when validator throws',
+        promptName: 'oim-getting-started',
+      },
+    ]);
+  });
+
+  it('completes in-flight validatePlaybook across background recreation metadata updates on the same thread.id and dispatches latest onSend', async () => {
+    const gate = deferred();
+    validatePlaybook.mockReturnValueOnce(gate.promise);
+    const routedSends: Array<{ threadId: string; remoteConversationId?: string; text: string; promptName?: string }> = [];
+
+    const { container, rerender } = renderChat({
+      thread: { ...THREAD, id: 'same-id' },
+      onSend: (text, promptName) => routedSends.push({ threadId: 'same-id', text, promptName }),
+    });
+
+    ask(container, 'Question mid-recreation', 'oim-getting-started');
+    await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
+
+    // Background 404 recreation updates remoteConversationId, syncState, and title on the same thread.id while validatePlaybook is in flight
+    rerender(
+      chat({
+        thread: {
+          ...THREAD,
+          id: 'same-id',
+          remoteConversationId: 'recreated-remote-id',
+          syncState: 'synced',
+          title: 'Recreated Title',
+        },
+        onSend: (text, promptName) =>
+          routedSends.push({ threadId: 'same-id', remoteConversationId: 'recreated-remote-id', text, promptName }),
+      }),
+    );
+
+    // Still checking — metadata update on the same thread.id did NOT abort preflight
+    expect(container.querySelector('.preflight-checking')).not.toBeNull();
+
+    await act(async () => {
+      gate.settle({ plausible: true });
+      await gate.promise;
+    });
+
+    expect(container.querySelector('.preflight-checking')).toBeNull();
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    expect(routedSends).toEqual([
+      {
+        threadId: 'same-id',
+        remoteConversationId: 'recreated-remote-id',
+        text: 'Question mid-recreation',
+        promptName: 'oim-getting-started',
+      },
+    ]);
   });
 });
 

@@ -318,5 +318,142 @@ describe('spec/ modular structure', () => {
     expect(readme).not.toContain('and the app tells the server nothing about itself either');
     expect(readme).toContain('only new conversations record the desktop version that created them');
   });
+
+  it('documents startup sync recovery, missing-conversation recreation, #201+ local cache preservation, once-per-launch rejected-turn retry, and empty desktop conversation cleanup without stale contradictions', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+    const multiAgent = norm(readFileSync(resolve(SPEC_DIR, '03_multi_agent_investigations.md'), 'utf8'));
+    const whereConversationsLive = norm(readFileSync(resolve(SPEC_DIR, '04_where_conversations_live.md'), 'utf8'));
+    const serverContract = norm(readFileSync(resolve(SPEC_DIR, '07_what_the_app_tells_the_server.md'), 'utf8'));
+    const readme = norm(specReadme());
+
+    // Positive capabilities & limits in 04_where_conversations_live.md
+    expect(whereConversationsLive).toContain('Undelivered turns resume automatically when the app starts.');
+    expect(whereConversationsLive).toContain('without opening a browser sign-in prompt');
+    expect(whereConversationsLive).toContain('up to 10,000 messages');
+    expect(whereConversationsLive).toContain(
+      'A conversation missing on the server is recreated whenever local messages exist.',
+    );
+    expect(whereConversationsLive).toContain(
+      'links the local conversation seamlessly to the replacement without disturbing any open composer draft',
+    );
+    expect(whereConversationsLive).not.toContain('moves the local conversation');
+    expect(whereConversationsLive).toContain('Deleting a conversation from the web app alone');
+    expect(whereConversationsLive).toContain(
+      'A turn the server rejects as invalid is set aside for the session and retried once on the next launch.',
+    );
+    expect(whereConversationsLive).toContain(
+      'because the turn stays in the local message log as unsaved on the server, the next app launch attempts it once more',
+    );
+    expect(whereConversationsLive).toContain('sticky dismissible error banner');
+    expect(whereConversationsLive).toContain(
+      "Conversations past the server's 200-conversation refresh window stay cached and listed while they still exist on the server.",
+    );
+    expect(whereConversationsLive).toContain('remain listed, openable, and searchable in the sidebar');
+    expect(whereConversationsLive).toContain(
+      'Uncached conversations past the 200 most recent on the server do not appear in the sidebar.',
+    );
+    expect(whereConversationsLive).toContain(
+      'Untouched empty desktop conversations are cleaned up once per launch.',
+    );
+    expect(whereConversationsLive).toContain(
+      'Startup comparison inspects at most 10,000 server messages per conversation.',
+    );
+    expect(whereConversationsLive).toContain(
+      'Unsaved local turns stranded earlier than a later server-saved message are skipped.',
+    );
+    expect(whereConversationsLive).toContain(
+      'Aside from the once-per-launch cleanup of untouched, empty desktop-created conversations at least five minutes old, nothing local is ever aged out or deleted automatically.',
+    );
+
+    // Negative contradiction guards in 04_where_conversations_live.md
+    expect(whereConversationsLive).not.toContain(
+      'Past 200 conversations, the oldest are deleted from this machine on every refresh.',
+    );
+    expect(whereConversationsLive).not.toContain(
+      'Conversations past the 200 most recent drop out of the sidebar, even when their local cache is kept.',
+    );
+    expect(whereConversationsLive).not.toContain(
+      'because the turn remains unrecorded in the local message log',
+    );
+    expect(whereConversationsLive).not.toContain('Undelivered turns are not sent when the app starts.');
+    expect(whereConversationsLive).not.toContain(
+      'The "waiting to sync" banner counts one conversation, not the backlog',
+    );
+    expect(whereConversationsLive).not.toContain('A corrupt sync queue is preserved but never delivered.');
+    expect(whereConversationsLive).not.toContain(
+      '- Any retention policy. Nothing local is ever aged out or deleted automatically.',
+    );
+
+    // 01_asking_questions.md & spec/README.md Decision #3 agree on #201+ preservation and empty cleanup
+    expect(askingQuestions).toContain(
+      'Refresh fetches the 200 most recently updated conversations from the server, while locally cached conversations past 200 stay in the sidebar.',
+    );
+    expect(askingQuestions).toContain('remain listed, openable, and searchable in the sidebar');
+    expect(askingQuestions).toContain(
+      'Untouched empty desktop-created conversations at least five minutes old',
+    );
+    expect(askingQuestions).not.toContain(
+      'The sidebar lists the 200 most recently updated conversations, and the rest are deleted from this machine.',
+    );
+    expect(askingQuestions).not.toContain(
+      'The sidebar lists at most the 200 most recently updated conversations.',
+    );
+
+    expect(readme).toContain(
+      'Past 200 conversations, uncached conversations on the server do not appear in the sidebar, while locally cached ones stay listed with unrefreshed headers.',
+    );
+    expect(readme).not.toContain(
+      'Past 200 conversations, the oldest are silently deleted from the machine on every refresh.',
+    );
+    expect(readme).not.toContain(
+      'older conversations drop out of the sidebar even though cached transcripts stay on disk',
+    );
+
+    // 03_multi_agent_investigations.md documents rebuilding multi-agent traces from the local message cache
+    expect(multiAgent).toContain(
+      'desktop-authored multi-agent traces are rebuilt from the local message cache and uploaded once those turns receive server identifiers',
+    );
+    expect(multiAgent).not.toContain('A run whose answer the server rejects loses its trace silently');
+
+    // 07_what_the_app_tells_the_server.md documents startup comparison, missing-conversation recreation, once-per-launch retry, and empty cleanup
+    expect(serverContract).toContain(
+      "Startup compares unsaved local turns against the server's stored messages.",
+    );
+    expect(serverContract).toContain(
+      'Missing server conversations with local messages are recreated in full, preserving their creation desktop version.',
+    );
+    expect(serverContract).toContain(
+      'Turns rejected as invalid are dropped for the session with a dismissible error banner and retried once on the next launch.',
+    );
+    expect(serverContract).toContain(
+      'Confirmed-empty stale desktop conversations are deleted once per launch.',
+    );
+    expect(serverContract).toContain(
+      'The sidebar applies no topic or visibility filter to the 200 most recent conversations the server returns',
+    );
+    expect(serverContract).toContain('retaining locally cached conversations past 200');
+    expect(serverContract).not.toContain('A dropped turn drops its trace.');
+    expect(serverContract).not.toContain('Nothing de-duplicates.');
+    expect(serverContract).not.toContain(
+      "Which conversations the sidebar shows is entirely the server's decision. The app asks for the signed-in user's conversations and lists what comes back; it applies no filter of its own.",
+    );
+
+    // Functional-spec purity guard: no internal TypeScript identifiers, endpoints, HTTP status numbers, or .jsonl extensions
+    for (const [name, doc] of [
+      ['01_asking_questions.md', askingQuestions],
+      ['03_multi_agent_investigations.md', multiAgent],
+      ['04_where_conversations_live.md', whereConversationsLive],
+      ['07_what_the_app_tells_the_server.md', serverContract],
+      ['README.md', readme],
+    ] as const) {
+      expect(
+        doc,
+        `${name} must remain pure functional specification prose without internal code/HTTP identifiers`,
+      ).not.toMatch(
+        /\b(AppCore|ThreadStore|SyncClient|SyncQueue|reconcileWithRemote|remoteConversationId|serverId|localId|desktopVersion|404|4xx)\b|GET \/conversations|\.jsonl\b/,
+      );
+    }
+  });
 });
 

@@ -567,4 +567,184 @@ describe('SyncClient full 9-endpoint contract & error handling', () => {
   });
 });
 
+describe('SyncClient pagination, SSO HTML/non-array guards & secret redaction', () => {
+  it('getMessages defaults to limit=500&offset=0 and supports custom limit/offset such as (id, 1, 0)', async () => {
+    const urls: string[] = [];
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async (url: string) => {
+        urls.push(url);
+        return new Response(JSON.stringify([]), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+
+    await client.getMessages('conv-99');
+    await client.getMessages('conv-99', 1, 0);
+    await client.getMessages('conv-99', 500, 1000);
+
+    expect(urls).toEqual([
+      'https://server.example/api/chat/v1/conversations/conv-99/messages?limit=500&offset=0',
+      'https://server.example/api/chat/v1/conversations/conv-99/messages?limit=1&offset=0',
+      'https://server.example/api/chat/v1/conversations/conv-99/messages?limit=500&offset=1000',
+    ]);
+  });
+
+  it('getAllMessages pages across multiple 500-item pages until a short page is returned', async () => {
+    const makeBatch = (start: number, count: number) =>
+      Array.from({ length: count }, (_, idx) => ({
+        id: `msg-${start + idx}`,
+        role: (start + idx) % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `content-${start + idx}`,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        cachedTokens: null,
+        thoughtTokens: null,
+        createdAt: '2026-06-10T10:00:00Z',
+        feedbackRating: null,
+        feedbackComment: null,
+      }));
+
+    const calls: string[] = [];
+    const client = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async (url: string) => {
+        calls.push(url);
+        const parsed = new URL(url);
+        const offset = Number(parsed.searchParams.get('offset') ?? 0);
+        if (offset === 0) return new Response(JSON.stringify(makeBatch(0, 500)), { status: 200 });
+        if (offset === 500) return new Response(JSON.stringify(makeBatch(500, 500)), { status: 200 });
+        return new Response(JSON.stringify(makeBatch(1000, 120)), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+
+    const result = await client.getAllMessages('conv-paged');
+    expect(result.truncated).toBe(false);
+    expect(result.messages).toHaveLength(1120);
+    expect(result.messages[0].id).toBe('msg-0');
+    expect(result.messages[1119].id).toBe('msg-1119');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('getAllMessages terminates on unpaginated seenIds repeats, marks truncated: true at 20 full pages (10,000 msgs), and propagates SyncApiError(404)', async () => {
+    // 1. Unpaginated mock returning identical 500 IDs on every call
+    const staticBatch = Array.from({ length: 500 }, (_, idx) => ({
+      id: `dup-${idx}`,
+      role: 'user' as const,
+      content: `c-${idx}`,
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+      cachedTokens: null,
+      thoughtTokens: null,
+      createdAt: 't0',
+      feedbackRating: null,
+      feedbackComment: null,
+    }));
+    let repeatCalls = 0;
+    const unpaginatedClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async () => {
+        repeatCalls += 1;
+        return new Response(JSON.stringify(staticBatch), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const deduped = await unpaginatedClient.getAllMessages('conv-unpaginated');
+    expect(repeatCalls).toBe(2);
+    expect(deduped.truncated).toBe(false);
+    expect(deduped.messages).toHaveLength(500);
+
+    // 2. 20 full pages (10,000 distinct messages) -> stops at page 20 and sets truncated: true
+    let cappedCalls = 0;
+    const cappedClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async (url: string) => {
+        cappedCalls += 1;
+        const offset = Number(new URL(url).searchParams.get('offset') ?? 0);
+        const batch = Array.from({ length: 500 }, (_, idx) => ({
+          id: `m-${offset + idx}`,
+          role: 'user' as const,
+          content: 'text',
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          cachedTokens: null,
+          thoughtTokens: null,
+          createdAt: 't0',
+          feedbackRating: null,
+          feedbackComment: null,
+        }));
+        return new Response(JSON.stringify(batch), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    const capped = await cappedClient.getAllMessages('conv-huge');
+    expect(cappedCalls).toBe(20);
+    expect(capped.truncated).toBe(true);
+    expect(capped.messages).toHaveLength(10_000);
+
+    // 3. 404 Not Found propagates as SyncApiError(404)
+    const missingClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'tok',
+      fetchFn: (async () => new Response('Conversation not found', { status: 404 })) as unknown as typeof fetch,
+    });
+    await expect(missingClient.getAllMessages('missing-id')).rejects.toSatisfy(
+      (err: unknown) => err instanceof SyncApiError && err.status === 404,
+    );
+  });
+
+  it('rejects 200 OK SSO HTML sign-in pages and non-array JSON payloads across listConversations, getMessages, and getAllMessages', async () => {
+    const invalidBodies = [
+      '<!DOCTYPE html><html><body>Sign in</body></html>',
+      '{"login": true}',
+      'null',
+      '"unexpected-string"',
+      '123',
+      '[null]',
+    ];
+    for (const body of invalidBodies) {
+      const client = new SyncClient({
+        getBaseUrl: () => 'https://server.example',
+        getToken: async () => 'tok',
+        fetchFn: (async () =>
+          new Response(body, { status: 200, headers: { 'Content-Type': 'text/html' } })) as unknown as typeof fetch,
+      });
+
+      await expect(client.listConversations()).rejects.toThrow(/^Yvoke Backend:/);
+      await expect(client.getMessages('c-1')).rejects.toThrow(/^Yvoke Backend:/);
+      await expect(client.getAllMessages('c-1')).rejects.toThrow(/^Yvoke Backend:/);
+    }
+  });
+
+  it('redacts echoed Bearer JWTs & Anthropic keys and bounds 10 KB HTML error bodies in SyncApiError.message', async () => {
+    const leakedJwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.super-secret-claims.sig123';
+    const leakedApiKey = 'sk-ant-api03-verySecretAnthropicKeyValue987654';
+    const hugeGatewayBody = `<html>Gateway rejected Authorization: Bearer ${leakedJwt} and key ${leakedApiKey} ${'X'.repeat(10_000)}</html>`;
+
+    for (const status of [400, 401, 500]) {
+      const client = new SyncClient({
+        getBaseUrl: () => 'https://server.example',
+        getToken: async () => 'tok',
+        fetchFn: (async () => new Response(hugeGatewayBody, { status })) as unknown as typeof fetch,
+      });
+
+      await expect(client.appendMessages('c-1', [{ role: 'user', content: 'hi' }])).rejects.toSatisfy((err: unknown) => {
+        if (!(err instanceof SyncApiError)) return false;
+        expect(err.status).toBe(status);
+        expect(err.message).toMatch(/^Yvoke Backend:/);
+        expect(err.message).not.toContain(leakedJwt);
+        expect(err.message).not.toContain('verySecretAnthropicKeyValue987654');
+        expect(err.message).toContain('Bearer [REDACTED]');
+        expect(err.message).toContain('sk-ant-[REDACTED]');
+        expect(err.message.length).toBeLessThan(420);
+        return true;
+      });
+    }
+  });
+});
+
 
