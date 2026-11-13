@@ -903,7 +903,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(container.querySelector('.banner.error')).toBeNull();
   });
 
-  it('Finding B1: updates sidebar row sync-dot in place on sync-state (pending / error), preserves transient syncError on pendingCount > 0, and skips refreshThreads on synthetic count-only threadId === ""', async () => {
+  it('updates sidebar row sync-dot in place on pending and error sync-state events without calling listThreads()', async () => {
     const listThreadsMock = (window as unknown as { api: { listThreads: ReturnType<typeof vi.fn> } }).api.listThreads;
     render(<App />);
     await waitFor(() => {
@@ -918,7 +918,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(getRowDot('First Conversation')).toBeNull();
     expect(getRowDot('Second Conversation')).toBeNull();
 
-    // 1. Happy path: pending sync-state on thread-1 updates row to .sync-dot.pending in place WITHOUT calling listThreads()
+    // Pending sync-state on thread-1 updates row to .sync-dot.pending in place WITHOUT calling listThreads()
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 2 });
@@ -939,7 +939,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(getRowDot('First Conversation')?.classList.contains('pending')).toBe(true);
     expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls);
 
-    // 2. Error sync-state on thread-2 updates thread-2 row to .sync-dot.error AND sets transient syncError
+    // Error sync-state on thread-2 updates thread-2 row to .sync-dot.error AND sets transient syncError
     act(() => {
       for (const l of syncListeners) {
         l({
@@ -953,17 +953,63 @@ describe('App conversation switching with in-progress turn', () => {
     });
     expect(getRowDot('Second Conversation')?.classList.contains('error')).toBe(true);
     expect(screen.getByText(/1 turn waiting to sync to the server — Retry failed/i)).toBeTruthy();
+  });
 
-    // 3. Negative boundary #1: post-scan pending sync-state with pendingCount > 0 MUST NOT clear transient syncError!
+  it('preserves transient syncError detail when an unacknowledged post-scan pending sync-state arrives', async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('First Conversation')).toBeTruthy();
+      expect(screen.getByText('Second Conversation')).toBeTruthy();
+    });
+
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'error',
+          pendingCount: 1,
+          detail: 'Retry failed',
+        });
+      }
+    });
+    expect(screen.getByText(/1 turn waiting to sync to the server — Retry failed/i)).toBeTruthy();
+
+    // Post-scan pending sync-state with pendingCount > 0 (omitting acked) MUST NOT clear transient syncError
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 3 });
       }
     });
     expect(screen.getByText(/3 turns waiting to sync to the server — Retry failed/i)).toBeTruthy();
+  });
 
-    // 4. Negative boundary #2: paired state: 'synced' refresh check:
-    //    - synthetic count-only { threadId: '', state: 'synced', pendingCount: 0 } clears pendingSync & syncError, preserves row indicators, and adds +0 listThreads calls
+  it('skips refreshThreads on synthetic count-only threadId === "" synced event while refreshing on real threadId synced event', async () => {
+    const listThreadsMock = (window as unknown as { api: { listThreads: ReturnType<typeof vi.fn> } }).api.listThreads;
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('First Conversation')).toBeTruthy();
+      expect(screen.getByText('Second Conversation')).toBeTruthy();
+    });
+    const initialListCalls = listThreadsMock.mock.calls.length;
+
+    const getRowDot = (title: string): Element | null =>
+      screen.getByText(title).closest('.thread-item')?.querySelector('.sync-dot') ?? null;
+
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'sync-state', threadId: 'thread-1', state: 'pending', pendingCount: 2 });
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'error',
+          pendingCount: 2,
+          detail: 'Retry failed',
+        });
+      }
+    });
+
+    // Synthetic count-only { threadId: '', state: 'synced', pendingCount: 0 } clears pendingSync & syncError, preserves row indicators, and adds +0 listThreads calls
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'sync-state', threadId: '', state: 'synced', pendingCount: 0 });
@@ -971,9 +1017,9 @@ describe('App conversation switching with in-progress turn', () => {
     });
     expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull();
     expect(getRowDot('Second Conversation')?.classList.contains('error')).toBe(true);
-    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls); // +0 calls!
+    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls);
 
-    //    - real { threadId: 'thread-1', state: 'synced', pendingCount: 0 } clears thread-1 dot and triggers +1 refreshThreads() call!
+    // Real { threadId: 'thread-1', state: 'synced', pendingCount: 0 } clears thread-1 dot and triggers +1 refreshThreads() call
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'sync-state', threadId: 'thread-1', state: 'synced', pendingCount: 0 });
@@ -983,8 +1029,15 @@ describe('App conversation switching with in-progress turn', () => {
       expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls + 1);
     });
     expect(getRowDot('First Conversation')).toBeNull();
+  });
 
-    // 5. Negative boundary #3: sync-state targeting a deleted threadId (deletedIdsRef) is ignored cleanly
+  it('ignores sync-state events targeting a conversation already removed by thread-deleted', async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText('First Conversation')).toBeTruthy();
+      expect(screen.getByText('Second Conversation')).toBeTruthy();
+    });
+
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'thread-deleted', threadId: 'thread-2' });
@@ -994,7 +1047,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(screen.queryByText('Second Conversation')).toBeNull();
   });
 
-  it('handles thread-recreated across single and chained recreations (r1 -> r2) and late-discovered orphans: updates sidebar in place, keeps activeThreadId and ChatView thread.id unchanged, clears stale serverIds until new server-ids arrive, and inserts orphans sorted by updatedAt desc without stealing focus', async () => {
+  it('updates sidebar and active ChatView in place across chained r1 -> r2 thread-recreated events while preserving composer draft, clearing stale serverIds, and routing actions to immutable thread.id', async () => {
     storedMessages['thread-2'] = [
       {
         localId: 't2-u1',
@@ -1085,55 +1138,6 @@ describe('App conversation switching with in-progress turn', () => {
     expect(latestChatViewProps?.thread.remoteConversationId).toBe('r2');
     expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, undefined]);
 
-    // Late-discovered background orphans insert sorted by updatedAt desc without stealing focus
-    const orphanMiddle: ThreadMeta = {
-      id: 'orphan-mid',
-      title: 'Middle Orphan Chat',
-      model: 'sonnet',
-      thinkingLevel: 'medium',
-      createdAt: '2026-08-01T10:30:00.000Z',
-      updatedAt: '2026-08-01T10:30:00.000Z',
-      totals: { inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      syncState: 'pending',
-      hasStarted: true,
-    };
-    const orphanNewest: ThreadMeta = {
-      id: 'orphan-newest',
-      title: 'Newest Orphan Chat',
-      model: 'sonnet',
-      thinkingLevel: 'medium',
-      createdAt: '2026-08-01T12:30:00.000Z',
-      updatedAt: '2026-08-01T12:30:00.000Z',
-      totals: { inputTokens: 20, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      syncState: 'pending',
-      hasStarted: true,
-    };
-    storedThreads = [orphanNewest, recreatedR2, orphanMiddle, storedThreads[0]];
-
-    act(() => {
-      for (const l of syncListeners) {
-        l({ kind: 'thread-recreated', thread: orphanMiddle });
-        l({ kind: 'thread-recreated', thread: orphanNewest });
-      }
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('Newest Orphan Chat')).toBeTruthy();
-      expect(screen.getByText('Middle Orphan Chat')).toBeTruthy();
-    });
-    const sidebarTitles = Array.from(container.querySelectorAll('.thread-title')).map((el) => el.textContent);
-    expect(sidebarTitles).toEqual([
-      'Newest Orphan Chat',
-      'Second Conversation (Recreated)',
-      'Middle Orphan Chat',
-      'First Conversation',
-    ]);
-    // Focus remained on thread-2
-    expect(latestChatViewProps?.thread.id).toBe('thread-2');
-    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
-      'Unsent follow-up across chained recreation',
-    );
-
     // Fresh server-ids event on thread-2 maps cleanly
     act(() => {
       for (const l of syncListeners) {
@@ -1163,6 +1167,64 @@ describe('App conversation switching with in-progress turn', () => {
     // Interrupting live turn routes to immutable thread-2
     fireEvent.click(screen.getByRole('button', { name: /Stop/i }));
     expect(interruptSpy).toHaveBeenCalledWith('thread-2');
+  });
+
+  it('inserts late-discovered orphan conversations on thread-recreated sorted by updatedAt descending without stealing active focus or composer draft', async () => {
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('Second Conversation'));
+    await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Unsent follow-up while orphans arrive' } });
+
+    const orphanMiddle: ThreadMeta = {
+      id: 'orphan-mid',
+      title: 'Middle Orphan Chat',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:30:00.000Z',
+      updatedAt: '2026-08-01T10:30:00.000Z',
+      totals: { inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'pending',
+      hasStarted: true,
+    };
+    const orphanNewest: ThreadMeta = {
+      id: 'orphan-newest',
+      title: 'Newest Orphan Chat',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T12:30:00.000Z',
+      updatedAt: '2026-08-01T12:30:00.000Z',
+      totals: { inputTokens: 20, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'pending',
+      hasStarted: true,
+    };
+    storedThreads = [orphanNewest, storedThreads[1], orphanMiddle, storedThreads[0]];
+
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'thread-recreated', thread: orphanMiddle });
+        l({ kind: 'thread-recreated', thread: orphanNewest });
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Newest Orphan Chat')).toBeTruthy();
+      expect(screen.getByText('Middle Orphan Chat')).toBeTruthy();
+    });
+    const sidebarTitles = Array.from(container.querySelectorAll('.thread-title')).map((el) => el.textContent);
+    expect(sidebarTitles).toEqual([
+      'Newest Orphan Chat',
+      'Second Conversation',
+      'Middle Orphan Chat',
+      'First Conversation',
+    ]);
+    expect(latestChatViewProps?.thread.id).toBe('thread-2');
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
+      'Unsent follow-up while orphans arrive',
+    );
   });
 
   it('completes in-flight validatePlaybook and sends to immutable thread.id when thread-recreated arrives mid-preflight', async () => {
@@ -1318,10 +1380,9 @@ describe('App conversation switching with in-progress turn', () => {
     });
   });
 
-  it('guards in-flight openThread(threadId) against thread-deleted (late resolve & late reject) and thread-recreated races', async () => {
+  it('discards late getMessages resolve and ignores late getMessages reject when thread-deleted arrives during in-flight openThread', async () => {
     let resolveThread1Msgs!: (msgs: ChatMessage[]) => void;
     let rejectThread2Msgs!: (err: Error) => void;
-    let resolveRecreatingMsgs!: (msgs: ChatMessage[]) => void;
 
     const t3: ThreadMeta = {
       id: 'thread-3',
@@ -1348,21 +1409,13 @@ describe('App conversation switching with in-progress turn', () => {
             rejectThread2Msgs = rej;
           });
         }
-        if (id === 'thread-3') {
-          return new Promise<ChatMessage[]>((res) => {
-            resolveRecreatingMsgs = res;
-          });
-        }
         return Promise.resolve([]);
       });
-
-    const submitFeedbackSpy = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api
-      .submitFeedback;
 
     render(<App />);
     await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
 
-    // (a1) Click thread-1 -> getMessages('thread-1') in flight -> thread-deleted('thread-1') arrives -> late resolve discarded
+    // Click thread-1 -> getMessages('thread-1') in flight -> thread-deleted('thread-1') arrives -> late resolve discarded
     fireEvent.click(screen.getByText('First Conversation'));
     storedThreads = storedThreads.filter((t) => t.id !== 'thread-1');
     act(() => {
@@ -1378,7 +1431,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(screen.queryByText('Ghost message from deleted thread 1')).toBeNull();
     expect(screen.queryByText('First Conversation')).toBeNull();
 
-    // (a2) thread-2 already started fallback openThread('thread-2') -> thread-deleted('thread-2') arrives -> late reject causes zero unhandled errors
+    // thread-2 started fallback openThread('thread-2') -> thread-deleted('thread-2') arrives -> late reject causes zero unhandled errors
     storedThreads = storedThreads.filter((t) => t.id !== 'thread-2');
     act(() => {
       for (const l of syncListeners) {
@@ -1389,15 +1442,50 @@ describe('App conversation switching with in-progress turn', () => {
       rejectThread2Msgs(new Error('ENOENT deleted thread-2'));
     });
     expect(screen.queryByText('Second Conversation')).toBeNull();
+  });
 
-    // (b) thread-3 is now active with getMessages('thread-3') in flight -> thread-recreated arrives BEFORE getMessages resolves
+  it('strips stale pre-recreation serverIds and routes feedback to immutable thread.id when thread-recreated arrives during in-flight openThread', async () => {
+    let resolveRecreatingMsgs!: (msgs: ChatMessage[]) => void;
+
+    const t3: ThreadMeta = {
+      id: 'thread-3',
+      title: 'Third Conversation',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      updatedAt: '2026-08-01T12:00:00.000Z',
+      totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'synced',
+    };
+    storedThreads = [...storedThreads, t3];
+
+    (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+      .fn()
+      .mockImplementation((id: string) => {
+        if (id === 'thread-3') {
+          return new Promise<ChatMessage[]>((res) => {
+            resolveRecreatingMsgs = res;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+    const submitFeedbackSpy = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api
+      .submitFeedback;
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Third Conversation')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('Third Conversation'));
+
+    // thread-3 has getMessages('thread-3') in flight -> thread-recreated arrives BEFORE getMessages resolves
     const recreatedT3: ThreadMeta = {
       ...t3,
       id: 'thread-3',
       remoteConversationId: 'remote-3-recreated',
       title: 'Third Conversation',
     };
-    storedThreads = [recreatedT3];
+    storedThreads = [...storedThreads.slice(0, 2), recreatedT3];
     act(() => {
       for (const l of syncListeners) {
         l({ kind: 'thread-recreated', thread: recreatedT3 });

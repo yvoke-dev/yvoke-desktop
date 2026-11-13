@@ -360,7 +360,7 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
     });
   });
 
-  describe('Wave 1 Remediation: isValidThreadId, assertValidThreadId & recreation contracts', () => {
+  describe('isValidThreadId, assertValidThreadId & recreation contracts', () => {
     it('isValidThreadId accepts [a-zA-Z0-9\\-_]+ and rejects empty, traversal, whitespace, and non-strings', () => {
       expect(isValidThreadId('t1')).toBe(true);
       expect(isValidThreadId('thread_ABC-123')).toBe(true);

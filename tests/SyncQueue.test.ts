@@ -182,7 +182,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
     queue.dispose();
   });
 
-  describe('Wave 1: tail-loop flush, per-thread hold, 404/4xx/500 matrix, corrupt-queue recovery & redaction', () => {
+  describe('tail-loop flush, per-thread hold, 404/4xx/500 matrix, corrupt-queue recovery & redaction', () => {
     let subSeq = 0;
     const noopTimeout = (() => 0) as unknown as typeof setTimeout;
     const customDeps = (client: SyncClient, extra: Partial<SyncQueueDeps> = {}): SyncQueueDeps => ({
@@ -889,7 +889,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
       q.dispose();
     });
 
-    it('Gate 3 High #2: reconcileThreadTurns with resetAttempts: true supersedes postSnapshot this.flushing (turn3 absent from inspectedLocalIds) so r1 receives [turn1, turn2, turn3] in chronological order', async () => {
+    it('reconcileThreadTurns with resetAttempts: true supersedes postSnapshot this.flushing (turn3 absent from inspectedLocalIds) so r1 receives [turn1, turn2, turn3] in chronological order', async () => {
       for (const staleOutcome of ['reject', 'resolve'] as const) {
         const uploadedCalls: Array<{ remoteId: string; contents: string[] }> = [];
         let currentRemoteId = 'r0-dead';

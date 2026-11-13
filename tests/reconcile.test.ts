@@ -36,7 +36,7 @@ function remoteDto(
   };
 }
 
-describe('reconcile module (Wave 1)', () => {
+describe('reconcile module', () => {
   describe('toNewMessagePayload', () => {
     it('builds user and assistant payloads from StoredChatMessage without base64 blob hydration', () => {
       const userMsg: StoredChatMessage = {
@@ -644,7 +644,7 @@ describe('reconcile module (Wave 1)', () => {
     });
   });
 
-  describe('groupLocalTurns & countUnqueuedLocalTurns (Wave 1 Remediation)', () => {
+  describe('groupLocalTurns & countUnqueuedLocalTurns', () => {
     it('groupLocalTurns groups synced anchors, unsynced [user, assistant] pairs, singletons, and ignoreServerIds mode', () => {
       const msgs: StoredChatMessage[] = [
         { localId: 'u1', serverId: 's1', role: 'user', content: 'Q1', createdAt: '2026-06-10T10:00:00Z' },

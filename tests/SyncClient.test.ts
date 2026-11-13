@@ -567,7 +567,7 @@ describe('SyncClient full 9-endpoint contract & error handling', () => {
   });
 });
 
-describe('SyncClient Wave 1: pagination, SSO HTML/non-array guards & secret redaction', () => {
+describe('SyncClient pagination, SSO HTML/non-array guards & secret redaction', () => {
   it('getMessages defaults to limit=500&offset=0 and supports custom limit/offset such as (id, 1, 0)', async () => {
     const urls: string[] = [];
     const client = new SyncClient({

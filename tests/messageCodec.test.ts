@@ -149,7 +149,7 @@ describe('serialize/parse round-trip', () => {
   });
 });
 
-describe('decodeQueuedMessagePayload (Wave 1)', () => {
+describe('decodeQueuedMessagePayload', () => {
   it('decodes assistant <think>, tool-call wire markers, playbook, playbookVersion, and usage', () => {
     const wire = serializeAssistantContent(
       {

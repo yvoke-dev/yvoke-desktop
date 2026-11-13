@@ -2017,7 +2017,7 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state on macOS', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
@@ -2062,7 +2062,7 @@ describe('deterministic platform shortcut labels', () => {
       });
     });
 
-    it('displays empty-catalogue connection guidance placeholder in default empty prompts state', () => {
+    it('displays empty-catalogue connection guidance placeholder in default empty prompts state on Windows and Linux', () => {
       const { container } = renderChat({ prompts: [] });
       const textarea = container.querySelector('textarea')!;
       expect(textarea.placeholder).toBe(
@@ -2631,7 +2631,7 @@ describe('deterministic platform shortcut labels', () => {
     });
   });
 
-  describe('Wave 1: Agent Mode & Playbook Locking in ChatView', () => {
+  describe('Agent Mode & Playbook Locking in ChatView', () => {
     it('DOM Structure & Tooltip: asserts inner select[aria-label="Agent mode"] is nested inside .composer-select-wrapper with unstarted tooltip', () => {
       const { container } = renderChat({
         thread: { ...THREAD, orchestratorProfile: undefined },

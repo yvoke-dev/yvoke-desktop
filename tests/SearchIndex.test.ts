@@ -213,7 +213,7 @@ describe('SearchIndex', () => {
     expect(await index.search('anything')).toEqual([]);
   });
 
-  describe('Wave 1: tainted threadId filename boundary', () => {
+  describe('tainted threadId filename boundary', () => {
     it('refresh() ignores .jsonl files with invalid threadId filenames while indexing valid logs', async () => {
       writeLog('valid-thread_1', [message('m1', 'user', 'searchable token alpha')]);
       fs.writeFileSync(

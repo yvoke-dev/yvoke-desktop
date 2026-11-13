@@ -480,7 +480,7 @@ describe('ThreadStore', () => {
     });
   });
 
-  describe('Wave 1: startup scan, migration, validation & corrupt-index hardening', () => {
+  describe('startup scan, migration, validation & corrupt-index hardening', () => {
     const sampleImage = (id = 'img-1'): ImageAttachment => ({
       id,
       mediaType: 'image/png',
@@ -614,7 +614,7 @@ describe('ThreadStore', () => {
     });
   });
 
-  describe('Wave 1 Remediation: durable tombstones, inspectLogsSync, findByRemoteId & prepareForRecreation', () => {
+  describe('durable tombstones, inspectLogsSync, findByRemoteId & prepareForRecreation', () => {
     const sampleImage = (id = 'img-rem-1'): ImageAttachment => ({
       id,
       mediaType: 'image/png',
@@ -1038,7 +1038,7 @@ describe('ThreadStore', () => {
       }
     });
 
-    it('Gate 3 High #1: aborts prepareForRecreation and applyServerIds when delete(id) fires mid-writeRaw without resurrecting index[id] or remoteToLocalId', async () => {
+    it('aborts prepareForRecreation when delete(id) fires mid-writeRaw without resurrecting index[id] or remoteToLocalId', async () => {
       store.upsert(meta('mid-write-del'));
       await store.appendMessages('mid-write-del', [message('u1', 'user'), message('a1', 'assistant')]);
 
@@ -1092,11 +1092,13 @@ describe('ThreadStore', () => {
       await reloaded.drain();
       expect(reloaded.get('mid-write-del')).toBeUndefined();
       expect(reloaded.findByRemoteId('r1-ghost')).toBeUndefined();
+    });
 
-      // Also verify applyServerIds returns { hasUnsynced: false } when delete(id) fires mid-writeRaw
+    it('returns { hasUnsynced: false } and leaves no files behind when delete(id) fires mid-writeRaw during applyServerIds', async () => {
       store.upsert(meta('mid-ack-del'));
       await store.appendMessages('mid-ack-del', [message('u1', 'user'), message('a1', 'assistant')]);
 
+      const origRename = fsp.rename.bind(fsp);
       let releaseAckWrite!: () => void;
       let notifyAckEntered!: () => void;
       const ackEntered = new Promise<void>((res) => {
@@ -1129,8 +1131,7 @@ describe('ThreadStore', () => {
       expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
     });
 
-    it('Gate 3 Medium #3: enforces monotonic lifecycleEpoch across delete -> upsert -> appendMessages -> delete, swallows persistDeletedSync errors in background cleanup, and excludes tombstones in loadIndex()', async () => {
-      // 1. Generation race: delete #1 (suspended fsp.rm) -> upsert -> appendMessages -> delete #2 (with EPERM on #2)
+    it('enforces monotonic lifecycleEpoch across delete -> upsert -> appendMessages -> delete without clearing a newer tombstone', async () => {
       store.upsert(meta('gen-race'));
       await store.appendMessages('gen-race', [message('u0', 'user')]);
 
@@ -1172,7 +1173,10 @@ describe('ThreadStore', () => {
         const del2 = store.delete('gen-race');
 
         // Put a dummy file back if needed to simulate EPERM retention on delete #2
-        fs.writeFileSync(path.join(dir, 'gen-race.jsonl'), '{"localId":"leftover","role":"user","content":"x","createdAt":"2026-06-10T10:00:00Z"}\n');
+        fs.writeFileSync(
+          path.join(dir, 'gen-race.jsonl'),
+          '{"localId":"leftover","role":"user","content":"x","createdAt":"2026-06-10T10:00:00Z"}\n',
+        );
 
         releaseFirstRm();
         await Promise.all([del1, gen2Append, del2]);
@@ -1195,13 +1199,15 @@ describe('ThreadStore', () => {
       expect(store.isDeleted('gen-race')).toBe(false);
       expect(fs.existsSync(path.join(dir, 'gen-race.jsonl'))).toBe(false);
       expect(fs.existsSync(path.join(dir, 'deleted.json'))).toBe(false);
+    });
 
-      // 2. Background scheduleTombstoneCleanup catches persistDeletedSync disk errors without unhandled rejection
+    it('swallows persistDeletedSync disk errors during background tombstone cleanup without unhandled rejection', async () => {
       store.upsert(meta('t-persist-err'));
       await store.appendMessages('t-persist-err', [message('u1', 'user')]);
       store.upsert(meta('other-tomb'));
       await store.appendMessages('other-tomb', [message('u2', 'user')]);
 
+      const origRm = fsp.rm.bind(fsp);
       // Keep 'other-tomb' in deletedIds so persistDeletedSync attempts writeFileSync('deleted.json.tmp')
       const blockOtherSpy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, opts) => {
         if (String(target).includes('other-tomb')) {
@@ -1231,8 +1237,11 @@ describe('ThreadStore', () => {
         blockOtherSpy.mockRestore();
         warnSpy2.mockRestore();
       }
+      await store.delete('other-tomb');
+      await store.drain();
+    });
 
-      // 3. loadIndex() + deleted.json crash window: tombstones win over stale index.json without .corrupt
+    it('excludes tombstoned threads in loadIndex() when deleted.json coexists with stale index.json without quarantining to .corrupt', async () => {
       const crashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'threads-crash-idx-'));
       try {
         fs.writeFileSync(
@@ -1256,7 +1265,7 @@ describe('ThreadStore', () => {
       }
     });
 
-    it('Gate 3 Low #4: syncRemoteMapping preserves native id === nextRemote precedence over recreated remoteConversationId on upsert and patch', () => {
+    it('syncRemoteMapping preserves native id === nextRemote precedence over recreated remoteConversationId on upsert and patch', () => {
       store.upsert(meta('native-A'));
       store.upsert({ ...meta('rec-B'), remoteConversationId: 'native-A' });
 
