@@ -1811,5 +1811,331 @@ describe('App conversation switching with in-progress turn', () => {
     expect(latestChatViewProps?.thread.id).toBe('thread-2');
     expect(latestChatViewProps?.messages.map((m) => m.localId)).toEqual(['t2-u1', 't2-a1']);
   });
+
+  it('clears the transient sync retry error banner on the first acknowledged turn upload while more turns remain pending without re-listing threads', async () => {
+    const listThreadsMock = (window as unknown as { api: { listThreads: ReturnType<typeof vi.fn> } }).api.listThreads;
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+    const initialListCalls = listThreadsMock.mock.calls.length;
+
+    const getFirstRowDot = (): Element | null =>
+      screen.getByText('First Conversation').closest('.thread-item')?.querySelector('.sync-dot') ?? null;
+
+    // 1. Transient error on a 20-turn backlog surfaces "Sync failed — retrying." and .sync-dot.error
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'error',
+          pendingCount: 20,
+        });
+      }
+    });
+    expect(getFirstRowDot()?.classList.contains('error')).toBe(true);
+    expect(screen.getByText(/20 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+
+    // 2. First turn uploads (acked: true, 19 turns still pending): clears error prose immediately, flips dot to pending, +0 listThreads calls
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'pending',
+          pendingCount: 19,
+          acked: true,
+        });
+      }
+    });
+    expect(screen.queryByText(/Sync failed — retrying\./i)).toBeNull();
+    expect(screen.getByText(/19 turns waiting to sync to the server…/i)).toBeTruthy();
+    expect(getFirstRowDot()?.classList.contains('pending')).toBe(true);
+    expect(getFirstRowDot()?.classList.contains('error')).toBe(false);
+    expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls);
+
+    // 3. Final turn drains (state: 'synced', acked: true): triggers refreshThreads (+1 listThreads call) and hides banner
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'synced',
+          pendingCount: 0,
+          acked: true,
+        });
+      }
+    });
+    await waitFor(() => {
+      expect(listThreadsMock).toHaveBeenCalledTimes(initialListCalls + 1);
+    });
+    expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull();
+  });
+
+  it('keeps the transient sync retry error banner visible across unacknowledged pending sync-state events from startup scan or offline enqueue', async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'error',
+          pendingCount: 2,
+        });
+      }
+    });
+    expect(screen.getByText(/2 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+
+    // Unacknowledged startup scan discovery + offline enqueue must preserve "Sync failed — retrying."
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'pending',
+          pendingCount: 3,
+        });
+        l({
+          kind: 'sync-state',
+          threadId: '',
+          state: 'pending',
+          pendingCount: 4,
+        });
+      }
+    });
+    expect(screen.getByText(/4 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+  });
+
+  it('clears stale transient syncError when a dropped turn drains pendingCount to zero while keeping active syncError when turns remain pending', async () => {
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+    // 1. Active transient syncError across 2 queued turns
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'error',
+          pendingCount: 2,
+          detail: 'Backend 503 retrying',
+        });
+      }
+    });
+    expect(screen.getByText(/2 turns waiting to sync to the server — Backend 503 retrying/i)).toBeTruthy();
+
+    // 2. Non-final turn dropped (pendingCount: 1 > 0): surfaces droppedSyncError AND keeps active transient syncError
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-2',
+          state: 'error',
+          dropped: true,
+          pendingCount: 1,
+          detail: 'Turn rejected (HTTP 422)',
+        });
+      }
+    });
+    expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 422');
+    expect(screen.getByText(/1 turn waiting to sync to the server — Backend 503 retrying/i)).toBeTruthy();
+
+    // 3. Final turn dropped (pendingCount: 0): updates droppedSyncError AND clears stale transient syncError
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'error',
+          dropped: true,
+          pendingCount: 0,
+          detail: 'Final turn rejected (HTTP 400)',
+        });
+      }
+    });
+    expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 400');
+    expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull();
+
+    // 4. Subsequent unacknowledged offline turn enqueue renders clean pending text without flashing stale "Backend 503 retrying"
+    act(() => {
+      for (const l of syncListeners) {
+        l({
+          kind: 'sync-state',
+          threadId: 'thread-1',
+          state: 'pending',
+          pendingCount: 1,
+        });
+      }
+    });
+    expect(screen.getByText(/1 turn waiting to sync to the server…/i)).toBeTruthy();
+    expect(screen.queryByText(/Backend 503 retrying/i)).toBeNull();
+  });
+
+  it('clears stale transient syncError when refreshThreads reports pendingSyncCount of zero so subsequent offline turns do not flash old errors', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    (window as unknown as { api: Record<string, unknown> }).api.listThreads = vi
+      .fn()
+      .mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: true,
+        pendingSyncCount: storedThreads.some((t) => t.id === 'thread-1') ? 1 : 0,
+      }));
+
+    try {
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // 1. thread-1 hits a transient retry error (pendingCount: 1)
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'sync-state',
+            threadId: 'thread-1',
+            state: 'error',
+            pendingCount: 1,
+            detail: 'Stale failing thread error',
+          });
+        }
+      });
+      expect(screen.getByText(/1 turn waiting to sync to the server — Stale failing thread error/i)).toBeTruthy();
+
+      // 2. User deletes thread-1 -> deleteThread calls refreshThreads() which resolves with pendingSyncCount: 0
+      storedThreads = storedThreads.filter((t) => t.id !== 'thread-1');
+      const firstRow = screen.getByText('First Conversation').closest('.thread-item') as HTMLElement;
+      fireEvent.click(firstRow.querySelector('.thread-delete') as HTMLButtonElement);
+      await waitFor(() => expect(screen.queryByText('First Conversation')).toBeNull());
+      await waitFor(() => expect(screen.queryByText(/waiting to sync to the server/i)).toBeNull());
+
+      // 3. New unacknowledged turn enqueued on thread-2 must NOT flash "Stale failing thread error"
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'sync-state',
+            threadId: 'thread-2',
+            state: 'pending',
+            pendingCount: 1,
+          });
+        }
+      });
+      expect(container.textContent).toContain('1 turn waiting to sync to the server…');
+      expect(screen.queryByText(/Stale failing thread error/i)).toBeNull();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('preserves active transient syncError when refreshThreads resolves with non-zero or omitted pendingSyncCount', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    let nextPendingCount: number | undefined = 2;
+    (window as unknown as { api: Record<string, unknown> }).api.listThreads = vi
+      .fn()
+      .mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: true,
+        ...(nextPendingCount !== undefined ? { pendingSyncCount: nextPendingCount } : {}),
+      }));
+
+    try {
+      render(<App />);
+      await waitFor(() => {
+        expect(screen.getByText('First Conversation')).toBeTruthy();
+        expect(screen.getByText('Second Conversation')).toBeTruthy();
+      });
+
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'sync-state',
+            threadId: 'thread-2',
+            state: 'error',
+            pendingCount: 2,
+          });
+        }
+      });
+      expect(screen.getByText(/2 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+
+      // 1. Delete thread-1 while thread-2 still has pendingSyncCount: 2 -> error banner MUST stay visible!
+      storedThreads = storedThreads.filter((t) => t.id !== 'thread-1');
+      const firstRow = screen.getByText('First Conversation').closest('.thread-item') as HTMLElement;
+      fireEvent.click(firstRow.querySelector('.thread-delete') as HTMLButtonElement);
+      await waitFor(() => expect(screen.queryByText('First Conversation')).toBeNull());
+      expect(screen.getByText(/2 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+
+      // 2. Trigger another refreshThreads() (via patchThread) resolving with pendingSyncCount: undefined -> error banner MUST stay visible!
+      nextPendingCount = undefined;
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+      await act(async () => {
+        latestChatViewProps?.onPatchThread({ thinkingLevel: 'high' });
+      });
+      await waitFor(() => {
+        expect((window as unknown as { api: { patchThread: ReturnType<typeof vi.fn> } }).api.patchThread).toHaveBeenCalledWith(
+          'thread-2',
+          { thinkingLevel: 'high' },
+        );
+      });
+      expect(screen.getByText(/2 turns waiting to sync to the server — Sync failed — retrying\./i)).toBeTruthy();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('preserves sticky droppedSyncError across acknowledged turn uploads and zero-pending thread refreshes until dismissed', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    (window as unknown as { api: Record<string, unknown> }).api.listThreads = vi
+      .fn()
+      .mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: true,
+        pendingSyncCount: 0,
+      }));
+
+    try {
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'sync-state',
+            threadId: 'thread-1',
+            state: 'error',
+            dropped: true,
+            pendingCount: 2,
+            detail: 'Sticky rejected turn (HTTP 413)',
+          });
+        }
+      });
+      expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 413');
+
+      // 1. Acknowledged upload with remaining turns (acked: true, pendingCount: 1) does NOT clear droppedSyncError
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'sync-state',
+            threadId: 'thread-2',
+            state: 'pending',
+            pendingCount: 1,
+            acked: true,
+          });
+        }
+      });
+      expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 413');
+
+      // 2. Deleting thread-1 -> refreshThreads() resolving with pendingSyncCount: 0 does NOT clear droppedSyncError
+      storedThreads = storedThreads.filter((t) => t.id !== 'thread-1');
+      const firstRow = screen.getByText('First Conversation').closest('.thread-item') as HTMLElement;
+      fireEvent.click(firstRow.querySelector('.thread-delete') as HTMLButtonElement);
+      await waitFor(() => expect(screen.queryByText('First Conversation')).toBeNull());
+      expect(container.querySelector('.banner.error')?.textContent).toContain('HTTP 413');
+
+      // 3. Explicit Dismiss clears droppedSyncError
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(container.querySelector('.banner.error')).toBeNull();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
 });
 

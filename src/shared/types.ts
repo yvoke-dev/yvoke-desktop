@@ -650,7 +650,7 @@ export type AgentEvent =
   | { kind: 'review-enforced'; threadId: string; reason: 'skipped' | 'rejected' | 'unclear'; round?: number };
 
 export type SyncEvent =
-  | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string; dropped?: boolean }
+  | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string; dropped?: boolean; acked?: boolean }
   | { kind: 'server-ids'; threadId: string; mapping: Record<string, string> }
   | { kind: 'thread-recreated'; thread: ThreadMeta }
   | { kind: 'thread-deleted'; threadId: string };

@@ -313,8 +313,11 @@ export class SyncQueue {
 
   removeThread(threadId: string): number {
     this.heldThreads.delete(threadId);
+    if (this.flushing?.threadId === threadId) {
+      this.flushing = null;
+    }
     const before = this.queue.length;
-    this.queue = this.queue.filter((t) => t.threadId !== threadId || t === this.flushing);
+    this.queue = this.queue.filter((t) => t.threadId !== threadId);
     const removed = before - this.queue.length;
     if (removed > 0) {
       this.persist();
@@ -409,6 +412,7 @@ export class SyncQueue {
             threadId: turn.threadId,
             state: this.pendingCount(turn.threadId) > 0 ? 'pending' : 'synced',
             pendingCount: this.reportedPendingCount(),
+            acked: true,
           });
         }
       } catch (error) {

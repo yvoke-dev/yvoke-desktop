@@ -6432,7 +6432,7 @@ describe('Wave 2: Startup Conversation & Message Sync Recovery', () => {
       expect(revertedOld?.remoteConversationId).toBe('old-500');
       expect(revertedOld?.syncState).toBe('pending');
       expect((core as any).startupDirtyThreads.has('inflight-500-old')).toBe(true);
-      expect((core as any).threadsWithUnsyncedMessages.has('inflight-500-old')).toBe(true);
+      expect('threadsWithUnsyncedMessages' in (core as any)).toBe(false);
       expect((await core.searchThreads('RevertSearchToken500Old')).map((h) => h.threadId)).toEqual([
         'inflight-500-old',
       ]);
@@ -6810,13 +6810,18 @@ describe('Wave 2: Startup Conversation & Message Sync Recovery', () => {
         },
       ]);
 
-      // Prune scan tracking sets on deleteThread
+      // Prune consolidated scan tracking sets on deleteThread and dispose()
+      (errCore as any).scanDiscoveredOrphans.add('keep-error');
       (errCore as any).scanPendingFlippedThreads.add('keep-error');
-      (errCore as any).notifiedScanPendingThreads.add('keep-error');
       vi.spyOn(errCore.syncClient, 'deleteConversation').mockResolvedValueOnce(undefined);
       await errCore.deleteThread('keep-error');
+      expect((errCore as any).scanDiscoveredOrphans.has('keep-error')).toBe(false);
       expect((errCore as any).scanPendingFlippedThreads.has('keep-error')).toBe(false);
-      expect((errCore as any).notifiedScanPendingThreads.has('keep-error')).toBe(false);
+      (errCore as any).scanDiscoveredOrphans.add('residual-orphan');
+      (errCore as any).scanPendingFlippedThreads.add('residual-flip');
+      errCore.dispose();
+      expect((errCore as any).scanDiscoveredOrphans.size).toBe(0);
+      expect((errCore as any).scanPendingFlippedThreads.size).toBe(0);
     } finally {
       fs.rmSync(dirErr, { recursive: true, force: true });
     }
@@ -7445,6 +7450,1158 @@ describe('Wave 2: Startup Conversation & Message Sync Recovery', () => {
       ]);
     } finally {
       releaseBarrier();
+    }
+  });
+
+  it('closes warm agent sessions, purges per-thread tracking state, records mapped remote tombstones, and emits thread-deleted on empty-conversation sweep and empty-404 prune unless disposed', async () => {
+    const dirSweep = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-forget-sweep-'));
+    let core: AppCore | undefined;
+    try {
+      const made = makeCore({ dir: dirSweep });
+      core = made.core;
+      const { syncEvents } = made;
+      const closeSpy = vi.spyOn(core.agent, 'closeThread');
+
+      // 1. Empty-conversation sweep path (remoteConversationId !== id, stale placeholder)
+      const staleIso = '2026-01-01T00:00:00.000Z';
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'sweep-forget-1',
+          remoteConversationId: 'sweep-mapped-remote-1',
+          title: 'New Conversation',
+          createdAt: staleIso,
+          updatedAt: staleIso,
+          remoteSettings: { client: 'desktop' },
+        }),
+      );
+      (core as any).deferredMissingRecreationThreads.add('sweep-forget-1');
+      (core as any).startupDirtyThreads.add('sweep-forget-1');
+      (core as any).lastAttemptedRemoteByThread.set('sweep-forget-1', 'sweep-mapped-remote-1');
+      (core as any).verifiedOffPageThreads.add('sweep-forget-1');
+      (core as any).sweepSparedThreads.add('sweep-forget-1');
+      (core as any).playbookBackfillChecked.add('sweep-forget-1');
+      (core as any).scanDiscoveredOrphans.add('sweep-forget-1');
+      (core as any).scanPendingFlippedThreads.add('sweep-forget-1');
+
+      vi.spyOn(core.syncClient, 'getMessages').mockResolvedValueOnce([]);
+      vi.spyOn(core.syncClient, 'deleteConversation').mockResolvedValueOnce(undefined);
+
+      (core as any).triggerEmptyConversationSweep(['sweep-forget-1']);
+      await core.waitForStartupTasks();
+
+      expect(closeSpy).toHaveBeenCalledWith('sweep-forget-1');
+      expect((core as any).deletingOrDeletedThreads.has('sweep-forget-1')).toBe(true);
+      expect((core as any).deletingOrDeletedThreads.has('sweep-mapped-remote-1')).toBe(true);
+      expect((core as any).completedDeletedThreads.has('sweep-forget-1')).toBe(true);
+      for (const setName of [
+        'deferredMissingRecreationThreads',
+        'startupDirtyThreads',
+        'lastAttemptedRemoteByThread',
+        'verifiedOffPageThreads',
+        'sweepSparedThreads',
+        'playbookBackfillChecked',
+        'scanDiscoveredOrphans',
+        'scanPendingFlippedThreads',
+      ]) {
+        expect((core as any)[setName].has('sweep-forget-1')).toBe(false);
+      }
+      expect(core.threads.get('sweep-forget-1')).toBeUndefined();
+      expect(syncEvents).toContainEqual({ kind: 'thread-deleted', threadId: 'sweep-forget-1' });
+
+      // 2. Empty-404 prune path in doReconcileSingleThread (all 11 per-thread tracking sets populated)
+      closeSpy.mockClear();
+      syncEvents.length = 0;
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'prune-forget-1',
+          remoteConversationId: 'prune-mapped-remote-1',
+          title: 'Prunable Empty 404',
+          hasStarted: true,
+        }),
+      );
+      (core as any).deferredMissingRecreationThreads.add('prune-forget-1');
+      (core as any).unqueuedStartupTurnsByThread.set('prune-forget-1', 1);
+      (core as any).startupDirtyThreads.add('prune-forget-1');
+      (core as any).lastAttemptedRemoteByThread.set('prune-forget-1', 'prune-mapped-remote-1');
+      (core as any).threadsWithLocalMessages.add('prune-forget-1');
+      (core as any).verifiedOffPageThreads.add('prune-forget-1');
+      (core as any).sweepSparedThreads.add('prune-forget-1');
+      (core as any).playbookBackfillChecked.add('prune-forget-1');
+      (core as any).scanDiscoveredOrphans.add('prune-forget-1');
+      (core as any).scanPendingFlippedThreads.add('prune-forget-1');
+      (core as any).sessionTouchedThreads.add('prune-forget-1');
+
+      const pruneOut = await (core as any).reconcileSingleThread('prune-forget-1', {
+        knownMissing: true,
+      });
+      expect(pruneOut).toBe('pruned');
+      expect(closeSpy).toHaveBeenCalledWith('prune-forget-1');
+      expect((core as any).deletingOrDeletedThreads.has('prune-forget-1')).toBe(true);
+      expect((core as any).deletingOrDeletedThreads.has('prune-mapped-remote-1')).toBe(true);
+      expect((core as any).completedDeletedThreads.has('prune-forget-1')).toBe(true);
+      for (const setName of [
+        'deferredMissingRecreationThreads',
+        'unqueuedStartupTurnsByThread',
+        'startupDirtyThreads',
+        'lastAttemptedRemoteByThread',
+        'threadsWithLocalMessages',
+        'verifiedOffPageThreads',
+        'sweepSparedThreads',
+        'playbookBackfillChecked',
+        'scanDiscoveredOrphans',
+        'scanPendingFlippedThreads',
+        'sessionTouchedThreads',
+      ]) {
+        expect((core as any)[setName].has('prune-forget-1')).toBe(false);
+      }
+      expect(syncEvents).toContainEqual({ kind: 'thread-deleted', threadId: 'prune-forget-1' });
+
+      // 3. Empty-404 prune suppresses thread-deleted when core is disposed before emission
+      syncEvents.length = 0;
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'prune-disposed-1',
+          title: 'Disposed Prune',
+          hasStarted: true,
+        }),
+      );
+      const origRemove = core.searchIndex.remove.bind(core.searchIndex);
+      vi.spyOn(core.searchIndex, 'remove').mockImplementationOnce((id) => {
+        origRemove(id);
+        core!.dispose();
+      });
+      expect(
+        await (core as any).reconcileSingleThread('prune-disposed-1', { knownMissing: true }),
+      ).toBe('pruned');
+      expect(syncEvents).toEqual([]);
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirSweep, { recursive: true, force: true });
+    }
+  });
+
+  it('closes warm agent sessions and purges per-thread tracking state without emitting thread-deleted on explicit deleteThread and post-recreation completed-delete abort', async () => {
+    const dirForget = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-forget-silent-'));
+    let core: AppCore | undefined;
+    try {
+      const made = makeCore({ dir: dirForget });
+      core = made.core;
+      const { syncEvents } = made;
+      const closeSpy = vi.spyOn(core.agent, 'closeThread');
+      const allSets = [
+        'deferredMissingRecreationThreads',
+        'unqueuedStartupTurnsByThread',
+        'startupDirtyThreads',
+        'lastAttemptedRemoteByThread',
+        'threadsWithLocalMessages',
+        'verifiedOffPageThreads',
+        'sweepSparedThreads',
+        'playbookBackfillChecked',
+        'scanDiscoveredOrphans',
+        'scanPendingFlippedThreads',
+        'sessionTouchedThreads',
+      ] as const;
+
+      const seedAll = (id: string) => {
+        (core as any).deferredMissingRecreationThreads.add(id);
+        (core as any).unqueuedStartupTurnsByThread.set(id, 2);
+        (core as any).startupDirtyThreads.add(id);
+        (core as any).lastAttemptedRemoteByThread.set(id, `remote-${id}`);
+        (core as any).threadsWithLocalMessages.add(id);
+        (core as any).verifiedOffPageThreads.add(id);
+        (core as any).sweepSparedThreads.add(id);
+        (core as any).playbookBackfillChecked.add(id);
+        (core as any).scanDiscoveredOrphans.add(id);
+        (core as any).scanPendingFlippedThreads.add(id);
+        (core as any).sessionTouchedThreads.add(id);
+      };
+
+      // 1. Explicit deleteThread
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'explicit-del-1',
+          remoteConversationId: 'explicit-remote-1',
+          title: 'Explicit Delete',
+          hasStarted: true,
+        }),
+      );
+      seedAll('explicit-del-1');
+      vi.spyOn(core.syncClient, 'deleteConversation').mockResolvedValue(undefined);
+
+      await core.deleteThread('explicit-del-1');
+      expect(closeSpy).toHaveBeenCalledWith('explicit-del-1');
+      expect((core as any).deletingOrDeletedThreads.has('explicit-del-1')).toBe(true);
+      expect((core as any).deletingOrDeletedThreads.has('explicit-remote-1')).toBe(true);
+      for (const s of allSets) {
+        expect((core as any)[s].has('explicit-del-1')).toBe(false);
+      }
+      expect(syncEvents.filter((e) => e.kind === 'thread-deleted')).toEqual([]);
+
+      // 2. Post-save completed-delete branch in abortRecreatedConversationIfDeleted
+      closeSpy.mockClear();
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'abort-del-1',
+          remoteConversationId: 'abort-orig-remote-1',
+          title: 'Abort Delete',
+          hasStarted: true,
+        }),
+      );
+      await core.threads.appendMessages('abort-del-1', [
+        { localId: 'ad-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'abort-created-remote-1',
+        title: 'Abort Delete',
+        createdAt: '2026-10-12T10:00:00.000Z',
+        updatedAt: '2026-10-12T10:00:00.000Z',
+        settings: {},
+      });
+      const origPrepare = core.threads.prepareForRecreation.bind(core.threads);
+      vi.spyOn(core.threads, 'prepareForRecreation').mockImplementationOnce(async (id, fb, patch, extra) => {
+        const res = await origPrepare(id, fb, patch, extra);
+        await core!.deleteThread('abort-del-1');
+        closeSpy.mockClear();
+        // Re-seed tracking entries right after deleteThread so abortRecreatedConversationIfDeleted itself must call forgetThread!
+        seedAll('abort-del-1');
+        return res;
+      });
+
+      const out = await (core as any).reconcileSingleThread('abort-del-1', { knownMissing: true });
+      expect(out).toBe('deferred');
+      expect(closeSpy).toHaveBeenCalledWith('abort-del-1');
+      for (const s of allSets) {
+        expect((core as any)[s].has('abort-del-1')).toBe(false);
+      }
+      expect(syncEvents.filter((e) => e.kind === 'thread-deleted')).toEqual([]);
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirForget, { recursive: true, force: true });
+    }
+  });
+
+  it('drains scanDiscoveredOrphans and scanPendingFlippedThreads unconditionally during emitPostScanDiscoveries and clears both sets on dispose', async () => {
+    const dirDrain = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-scan-drain-'));
+    let core: AppCore | undefined;
+    try {
+      const tDir = path.join(dirDrain, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tDir, 'index.json'),
+        JSON.stringify({
+          'flipped-then-synced': makeThreadMeta({
+            id: 'flipped-then-synced',
+            title: 'Flipped Then Synced',
+            syncState: 'synced',
+            hasStarted: true,
+          }),
+        }),
+      );
+      fs.writeFileSync(
+        path.join(tDir, 'flipped-then-synced.jsonl'),
+        [
+          JSON.stringify({ localId: 'fts-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T09:00:00.000Z' }),
+          JSON.stringify({ localId: 'fts-a1', role: 'assistant', content: 'A', createdAt: '2026-10-12T09:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+
+      const made = makeCore({ dir: dirDrain });
+      core = made.core;
+      const { syncEvents } = made;
+      await (core as any).ensureLocalThreadScan();
+      expect((core as any).scanPendingFlippedThreads.has('flipped-then-synced')).toBe(true);
+
+      // Simulate thread finishing sync BEFORE emitPostScanDiscoveries runs, plus a phantom orphan missing from index
+      core.threads.setSyncState('flipped-then-synced', 'synced');
+      (core as any).unqueuedStartupTurnsByThread.delete('flipped-then-synced');
+      (core as any).startupDirtyThreads.delete('flipped-then-synced');
+      (core as any).scanDiscoveredOrphans.add('missing-from-index-orphan');
+
+      (core as any).emitPostScanDiscoveries(0);
+
+      // Both sets MUST be unconditionally drained even though both entries were skipped!
+      expect((core as any).scanPendingFlippedThreads.size).toBe(0);
+      expect((core as any).scanDiscoveredOrphans.size).toBe(0);
+      expect(syncEvents).toEqual([]);
+
+      // Subsequent offline turn on flipped-then-synced + offline listThreads() must NOT re-emit a stale scan event
+      core.threads.setSyncState('flipped-then-synced', 'pending');
+      vi.spyOn(core.syncClient, 'listConversations').mockRejectedValueOnce(new Error('Offline'));
+      await core.listThreads();
+      await core.waitForStartupTasks();
+      expect(syncEvents).toEqual([]);
+
+      // Verify dispose() clears both sets
+      (core as any).scanDiscoveredOrphans.add('orphan-before-dispose');
+      (core as any).scanPendingFlippedThreads.add('flip-before-dispose');
+      core.dispose();
+      expect((core as any).scanDiscoveredOrphans.size).toBe(0);
+      expect((core as any).scanPendingFlippedThreads.size).toBe(0);
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirDrain, { recursive: true, force: true });
+    }
+  });
+
+  it('emits thread-recreated exactly once across both scan-before-recreation and recreation-before-scan orderings', async () => {
+    // 1. Scan-before-recreation: ensureLocalThreadScan discovers orphan first, then 404 recreation runs before emitPostScanDiscoveries
+    const dirOrder1 = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-order-scan-first-'));
+    let core1: AppCore | undefined;
+    try {
+      const tDir = path.join(dirOrder1, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tDir, 'orphan-scan-first.jsonl'),
+        [
+          JSON.stringify({ localId: 'osf-u1', role: 'user', content: 'Scan first Q', createdAt: '2026-10-12T09:00:00.000Z' }),
+          JSON.stringify({ localId: 'osf-a1', role: 'assistant', content: 'Scan first A', createdAt: '2026-10-12T09:00:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+
+      const made = makeCore({ dir: dirOrder1 });
+      core1 = made.core;
+      const { syncEvents } = made;
+      await (core1 as any).ensureLocalThreadScan();
+      expect((core1 as any).scanDiscoveredOrphans.has('orphan-scan-first')).toBe(true);
+
+      vi.spyOn(core1.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'recreated-scan-first',
+        title: 'Scan first Q',
+        createdAt: '2026-10-12T09:00:00.000Z',
+        updatedAt: '2026-10-12T09:00:05.000Z',
+        settings: {},
+      });
+      expect(
+        await (core1 as any).reconcileSingleThread('orphan-scan-first', { knownMissing: true }),
+      ).toBe('recreated');
+      expect((core1 as any).scanDiscoveredOrphans.has('orphan-scan-first')).toBe(false);
+
+      // Now emitPostScanDiscoveries runs -> must NOT emit a 2nd thread-recreated!
+      (core1 as any).emitPostScanDiscoveries(0);
+      const recreated1 = syncEvents.filter(
+        (e) => e.kind === 'thread-recreated' && e.thread.id === 'orphan-scan-first',
+      );
+      expect(recreated1).toHaveLength(1);
+    } finally {
+      if (core1) {
+        await core1.drain();
+        core1.dispose();
+      }
+      fs.rmSync(dirOrder1, { recursive: true, force: true });
+    }
+
+    // 2. Recreation-before-scan: unindexed orphan recreated on 404 BEFORE ensureLocalThreadScan visits its .jsonl
+    const dirOrder2 = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-order-recreate-first-'));
+    let core2: AppCore | undefined;
+    try {
+      const tDir = path.join(dirOrder2, 'threads');
+      fs.mkdirSync(tDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(tDir, 'orphan-recreate-first.jsonl'),
+        [
+          JSON.stringify({ localId: 'orf-u1', role: 'user', content: 'Recreate first Q', createdAt: '2026-10-12T09:10:00.000Z' }),
+          JSON.stringify({ localId: 'orf-a1', role: 'assistant', content: 'Recreate first A', createdAt: '2026-10-12T09:10:05.000Z' }),
+        ].join('\n') + '\n',
+      );
+
+      const made = makeCore({ dir: dirOrder2 });
+      core2 = made.core;
+      const { syncEvents } = made;
+      expect((core2 as any).initialIndexedIds.has('orphan-recreate-first')).toBe(false);
+
+      const origListLogs = core2.threads.listLogThreadIds.bind(core2.threads);
+      let releaseListLogs!: () => void;
+      const listLogsGate = new Promise<void>((res) => {
+        releaseListLogs = res;
+      });
+      vi.spyOn(core2.threads, 'listLogThreadIds').mockImplementationOnce(async () => {
+        await listLogsGate;
+        return origListLogs();
+      });
+      vi.spyOn(core2.syncClient, 'listConversations').mockRejectedValueOnce(new Error('Offline'));
+      vi.spyOn(core2.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'recreated-before-scan',
+        title: 'Recreate first Q',
+        createdAt: '2026-10-12T09:10:00.000Z',
+        updatedAt: '2026-10-12T09:10:05.000Z',
+        settings: {},
+      });
+
+      try {
+        // Start offline listThreads() -> ensureLocalThreadScan is gated at listLogThreadIds
+        const listP = core2.listThreads();
+        await listP;
+
+        // Recreate orphan-recreate-first on 404 BEFORE ensureLocalThreadScan visits its .jsonl!
+        expect(
+          await (core2 as any).reconcileSingleThread('orphan-recreate-first', { knownMissing: true }),
+        ).toBe('recreated');
+        expect((core2 as any).initialIndexedIds.has('orphan-recreate-first')).toBe(true);
+
+        // Release listLogThreadIds -> scan visits orphan-recreate-first.jsonl and runs emitPostScanDiscoveries
+        releaseListLogs();
+        await core2.waitForStartupTasks();
+
+        const recreated2 = syncEvents.filter(
+          (e) => e.kind === 'thread-recreated' && e.thread.id === 'orphan-recreate-first',
+        );
+        expect(recreated2).toHaveLength(1);
+      } finally {
+        releaseListLogs();
+      }
+    } finally {
+      if (core2) {
+        await core2.drain();
+        core2.dispose();
+      }
+      fs.rmSync(dirOrder2, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves warm agent sessions, local messages, and per-thread tracking state when deleteThread or empty-conversation sweep fails with HTTP 500', async () => {
+    const dir500 = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-500-preserve-'));
+    let core: AppCore | undefined;
+    try {
+      const made = makeCore({ dir: dir500 });
+      core = made.core;
+      const { syncEvents } = made;
+      const closeSpy = vi.spyOn(core.agent, 'closeThread');
+
+      // 1. deleteThread 500 failure
+      core.threads.upsert(makeThreadMeta({ id: 'del-500-keep', title: 'Keep On 500', hasStarted: true }));
+      await core.threads.appendMessages('del-500-keep', [
+        { localId: 'dk-u1', role: 'user', content: 'Keep Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+      (core as any).verifiedOffPageThreads.add('del-500-keep');
+      (core as any).playbookBackfillChecked.add('del-500-keep');
+
+      vi.spyOn(core.syncClient, 'deleteConversation').mockRejectedValueOnce(
+        new SyncApiError(500, 'Delete 500'),
+      );
+      await expect(core.deleteThread('del-500-keep')).rejects.toThrow('Delete 500');
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect((core as any).verifiedOffPageThreads.has('del-500-keep')).toBe(true);
+      expect((core as any).playbookBackfillChecked.has('del-500-keep')).toBe(true);
+      expect(await core.threads.readMessages('del-500-keep')).toHaveLength(1);
+
+      // 2. triggerEmptyConversationSweep 500 failure
+      const staleIso = '2026-01-01T00:00:00.000Z';
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'sweep-500-keep',
+          title: 'New Conversation',
+          createdAt: staleIso,
+          updatedAt: staleIso,
+          remoteSettings: { client: 'desktop' },
+        }),
+      );
+      (core as any).verifiedOffPageThreads.add('sweep-500-keep');
+      vi.spyOn(core.syncClient, 'getMessages').mockResolvedValueOnce([]);
+      vi.spyOn(core.syncClient, 'deleteConversation').mockRejectedValueOnce(
+        new SyncApiError(500, 'Sweep 500'),
+      );
+
+      (core as any).triggerEmptyConversationSweep(['sweep-500-keep']);
+      await core.waitForStartupTasks();
+
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect(core.threads.get('sweep-500-keep')).toBeDefined();
+      expect((core as any).verifiedOffPageThreads.has('sweep-500-keep')).toBe(true);
+      expect(syncEvents.filter((e) => e.kind === 'thread-deleted')).toEqual([]);
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dir500, { recursive: true, force: true });
+    }
+  });
+
+  it('reverts in-memory remoteConversationId, indexes extraMessages, marks dirty state, and deletes the aborted server conversation once even when persistIndex throws ENOSPC during both prepareForRecreation and revert', async () => {
+    const dirEnospc = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-enospc-revert-'));
+    let core: AppCore | undefined;
+    try {
+      fs.writeFileSync(
+        path.join(dirEnospc, 'sync-queue.json'),
+        JSON.stringify([
+          {
+            threadId: 'enospc-t',
+            localIds: ['eq-u1', 'eq-a1'],
+            messages: [
+              { role: 'user', content: 'EnospcExtraUniqueToken question' },
+              { role: 'assistant', content: 'EnospcExtraUniqueToken answer' },
+            ],
+            enqueuedAt: '2026-10-12T10:00:00.000Z',
+            attempts: 0,
+          },
+        ]),
+      );
+
+      core = makeCore({ dir: dirEnospc }).core;
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'enospc-t',
+          remoteConversationId: 'old-enospc-remote',
+          title: 'ENOSPC Topic',
+          syncState: 'synced',
+          hasStarted: true,
+        }),
+      );
+      (core as any).startupDirtyThreads.delete('enospc-t');
+
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-enospc-conv',
+        title: 'ENOSPC Topic',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      const deletedConvIds: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedConvIds.push(convId);
+      });
+      const logErrSpy = vi.spyOn(logger, 'logError');
+
+      // Fail persistIndex() with ENOSPC both inside prepareForRecreation AND inside revertRecreatedThreadMeta's patch()!
+      vi.spyOn(core.threads as any, 'persistIndex').mockImplementation(() => {
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      });
+
+      const out = await (core as any).reconcileSingleThread('enospc-t', { knownMissing: true });
+      expect(out).toBe('error');
+
+      // In-memory index and remoteToLocalId MUST still be reverted despite secondary ENOSPC in patch()!
+      expect(core.threads.get('enospc-t')?.remoteConversationId).toBe('old-enospc-remote');
+      expect(core.threads.get('enospc-t')?.syncState).toBe('pending');
+      expect(core.threads.findByRemoteId('old-enospc-remote')?.id).toBe('enospc-t');
+      expect(core.threads.findByRemoteId('created-enospc-conv')).toBeUndefined();
+
+      // extraMessages merged into .jsonl before persistIndex failed ARE indexed and dirty/local flags restored
+      expect((await core.searchThreads('EnospcExtraUniqueToken')).map((h) => h.threadId)).toEqual([
+        'enospc-t',
+      ]);
+      expect((core as any).startupDirtyThreads.has('enospc-t')).toBe(true);
+      expect((core as any).threadsWithLocalMessages.has('enospc-t')).toBe(true);
+      expect((core as any).abortedRecreatedRemoteIds.has('created-enospc-conv')).toBe(true);
+      expect((core as any).deletingOrDeletedThreads.has('created-enospc-conv')).toBe(true);
+      expect(deletedConvIds).toEqual(['created-enospc-conv']);
+      expect(logErrSpy).toHaveBeenCalled();
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirEnospc, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves concurrent metadata edits without indexing unpersisted extraMessages when prepareForRecreation fails during writeRaw before index mutation', async () => {
+    const dirWriteRaw = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-writeraw-fail-'));
+    let core: AppCore | undefined;
+    try {
+      fs.writeFileSync(
+        path.join(dirWriteRaw, 'sync-queue.json'),
+        JSON.stringify([
+          {
+            threadId: 'writeraw-t',
+            localIds: ['wr-u1', 'wr-a1'],
+            messages: [
+              { role: 'user', content: 'WriteRawUnpersistedToken question' },
+              { role: 'assistant', content: 'WriteRawUnpersistedToken answer' },
+            ],
+            enqueuedAt: '2026-10-12T10:00:00.000Z',
+            attempts: 0,
+          },
+        ]),
+      );
+
+      core = makeCore({ dir: dirWriteRaw }).core;
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'writeraw-t',
+          remoteConversationId: 'old-wr-remote',
+          title: 'Initial Title',
+          syncState: 'synced',
+          hasStarted: true,
+        }),
+      );
+
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-wr-conv',
+        title: 'Initial Title',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      const deletedConvIds: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedConvIds.push(convId);
+      });
+
+      vi.spyOn(core.threads as any, 'writeRaw').mockImplementationOnce(async () => {
+        // Simulate concurrent metadata rename while writeRaw is in flight before failing!
+        core!.threads.patch('writeraw-t', { title: 'Concurrent Live Rename' });
+        throw new Error('EIO: writeRaw disk failure');
+      });
+
+      const out = await (core as any).reconcileSingleThread('writeraw-t', { knownMissing: true });
+      expect(out).toBe('error');
+
+      // Concurrent title edit preserved (setSyncState('pending') path taken, not overwritten by oldMeta.title)
+      expect(core.threads.get('writeraw-t')?.title).toBe('Concurrent Live Rename');
+      expect(core.threads.get('writeraw-t')?.remoteConversationId).toBe('old-wr-remote');
+      expect(core.threads.get('writeraw-t')?.syncState).toBe('pending');
+
+      // Unpersisted extraMessages were NOT added to SearchIndex since localLogMutated === false
+      expect(await core.searchThreads('WriteRawUnpersistedToken')).toEqual([]);
+      expect(deletedConvIds).toEqual(['created-wr-conv']);
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirWriteRaw, { recursive: true, force: true });
+    }
+  });
+
+  it('delegates commitErr on already-deleted or in-flight-deleting threads to abortRecreatedConversationIfDeleted without resurrecting tombstones', async () => {
+    const dirDelRace = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-commiterr-delrace-'));
+    let core: AppCore | undefined;
+    try {
+      fs.writeFileSync(
+        path.join(dirDelRace, 'sync-queue.json'),
+        JSON.stringify([
+          {
+            threadId: 'commit-inflight-del',
+            localIds: ['cid-u1', 'cid-a1'],
+            messages: [
+              { role: 'user', content: 'InflightCommitErrToken Q' },
+              { role: 'assistant', content: 'InflightCommitErrToken A' },
+            ],
+            enqueuedAt: '2026-10-12T10:00:00.000Z',
+            attempts: 0,
+          },
+        ]),
+      );
+
+      core = makeCore({ dir: dirDelRace }).core;
+      const closeSpy = vi.spyOn(core.agent, 'closeThread');
+
+      // Case 1: Completed delete right before commitErr -> delegates to abortRecreatedConversationIfDeleted, forgets thread, never resurrects
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'commit-already-del',
+          remoteConversationId: 'old-already-del',
+          title: 'Already Deleted Before CommitErr',
+          hasStarted: true,
+        }),
+      );
+      await core.threads.appendMessages('commit-already-del', [
+        { localId: 'cad-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-already-del',
+        title: 'Already Deleted Before CommitErr',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      const deleteCallsCase1: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deleteCallsCase1.push(convId);
+      });
+      const origPrepare = core.threads.prepareForRecreation.bind(core.threads);
+      vi.spyOn(core.threads, 'prepareForRecreation').mockImplementationOnce(async (id, fb, patch, extra) => {
+        const res = await origPrepare(id, fb, patch, extra);
+        await core!.deleteThread('commit-already-del');
+        closeSpy.mockClear();
+        (core as any).startupDirtyThreads.add('commit-already-del');
+        throw new Error('commitErr after completed delete');
+      });
+
+      const out1 = await (core as any).reconcileSingleThread('commit-already-del', { knownMissing: true });
+      expect(out1).toBe('deferred');
+      expect(core.threads.get('commit-already-del')).toBeUndefined();
+      expect(core.threads.isDeleted('commit-already-del') || !(core.threads.list().some((t) => t.id === 'commit-already-del'))).toBe(true);
+      expect(closeSpy).toHaveBeenCalledWith('commit-already-del');
+      expect((core as any).startupDirtyThreads.has('commit-already-del')).toBe(false);
+      // 1 call from deleteThread('commit-already-del' -> 'created-already-del') + 1 call from abortRecreatedConversationIfDeleted
+      expect(deleteCallsCase1.filter((id) => id === 'created-already-del')).toHaveLength(2);
+
+      // Case 2: In-flight deleteThread (later rejecting 500) active when commitErr fires -> restores rollback state via patch
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'commit-inflight-del',
+          remoteConversationId: 'old-inflight-del',
+          title: 'Inflight Delete CommitErr',
+          hasStarted: true,
+        }),
+      );
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-inflight-del',
+        title: 'Inflight Delete CommitErr',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+
+      let rejectInflightDel!: (err: Error) => void;
+      const inflightDelGate = new Promise<void>((_res, rej) => {
+        rejectInflightDel = rej;
+      });
+      let delInflightPromise!: Promise<void>;
+      let createdDelCallCount = 0;
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        if (convId === 'created-inflight-del') {
+          createdDelCallCount += 1;
+          if (createdDelCallCount === 1) {
+            await inflightDelGate;
+          }
+        }
+      });
+      vi.spyOn(core.syncQueue, 'reconcileThreadTurns').mockImplementationOnce(() => {
+        delInflightPromise = core!.deleteThread('commit-inflight-del');
+        throw new Error('commitErr while deleteThread in flight');
+      });
+
+      try {
+        const out2 = await (core as any).reconcileSingleThread('commit-inflight-del', { knownMissing: true });
+        expect(out2).toBe('deferred');
+        // 1 call from in-flight deleteThread + strictly 1 call from abortRecreatedConversationIfDeleted
+        expect(createdDelCallCount).toBe(2);
+
+        rejectInflightDel(new SyncApiError(500, 'Inflight 500'));
+        await expect(delInflightPromise).rejects.toThrow('Inflight 500');
+
+        expect(core.threads.get('commit-inflight-del')?.remoteConversationId).toBe('old-inflight-del');
+        expect(core.threads.get('commit-inflight-del')?.syncState).toBe('pending');
+        expect((core as any).startupDirtyThreads.has('commit-inflight-del')).toBe(true);
+        expect((core as any).threadsWithLocalMessages.has('commit-inflight-del')).toBe(true);
+        expect((await core.searchThreads('InflightCommitErrToken')).map((h) => h.threadId)).toEqual([
+          'commit-inflight-del',
+        ]);
+      } finally {
+        rejectInflightDel(new SyncApiError(500, 'cleanup'));
+      }
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirDelRace, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets the thread without issuing a duplicate server DELETE when deleteThread completes while commitErr server cleanup is in flight', async () => {
+    const dirCleanupDel = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-commiterr-midcleanup-del-'));
+    let core: AppCore | undefined;
+    try {
+      core = makeCore({ dir: dirCleanupDel }).core;
+      const closeSpy = vi.spyOn(core.agent, 'closeThread');
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'mid-cleanup-del',
+          remoteConversationId: 'old-mid-cleanup',
+          title: 'Mid Cleanup Delete',
+          hasStarted: true,
+        }),
+      );
+      await core.threads.appendMessages('mid-cleanup-del', [
+        { localId: 'mcd-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-mid-cleanup-del',
+        title: 'Mid Cleanup Delete',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      vi.spyOn(core.syncQueue, 'reconcileThreadTurns').mockImplementationOnce(() => {
+        throw new Error('commitErr before mid-cleanup delete');
+      });
+
+      let releaseCreatedDelete!: () => void;
+      const createdDeleteGate = new Promise<void>((res) => {
+        releaseCreatedDelete = res;
+      });
+      let notifyCreatedDeleteEntered!: () => void;
+      const createdDeleteEntered = new Promise<void>((res) => {
+        notifyCreatedDeleteEntered = res;
+      });
+      const deletedRemoteIds: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedRemoteIds.push(convId);
+        if (convId === 'created-mid-cleanup-del' && deletedRemoteIds.filter((x) => x === convId).length === 1) {
+          notifyCreatedDeleteEntered();
+          await createdDeleteGate;
+        }
+      });
+
+      try {
+        const recP = (core as any).reconcileSingleThread('mid-cleanup-del', { knownMissing: true });
+        await createdDeleteEntered;
+
+        // While deleteAbortedServerConversation('created-mid-cleanup-del') is in flight, user deletes thread (200 OK on reverted 'old-mid-cleanup')
+        await core.deleteThread('mid-cleanup-del');
+        closeSpy.mockClear();
+        (core as any).startupDirtyThreads.add('mid-cleanup-del');
+
+        releaseCreatedDelete();
+        expect(await recP).toBe('deferred');
+
+        // Strictly 1 DELETE to 'created-mid-cleanup-del' (skipRemoteDelete: true prevented a 2nd DELETE!)
+        expect(deletedRemoteIds.filter((id) => id === 'created-mid-cleanup-del')).toHaveLength(1);
+        expect(deletedRemoteIds.filter((id) => id === 'old-mid-cleanup')).toHaveLength(1);
+        expect(closeSpy).toHaveBeenCalledWith('mid-cleanup-del');
+        expect((core as any).startupDirtyThreads.has('mid-cleanup-del')).toBe(false);
+        expect(core.threads.get('mid-cleanup-del')).toBeUndefined();
+      } finally {
+        releaseCreatedDelete();
+      }
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirCleanupDel, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves rollback state without issuing a duplicate server DELETE when an in-flight deleteThread starts during commitErr server cleanup and later rejects with HTTP 500', async () => {
+    const dirCleanup500 = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-commiterr-midcleanup-500-'));
+    let core: AppCore | undefined;
+    try {
+      core = makeCore({ dir: dirCleanup500 }).core;
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'mid-cleanup-500',
+          remoteConversationId: 'old-mid-500',
+          title: 'Mid Cleanup 500 Delete',
+          hasStarted: true,
+        }),
+      );
+      await core.threads.appendMessages('mid-cleanup-500', [
+        { localId: 'mc5-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-mid-cleanup-500',
+        title: 'Mid Cleanup 500 Delete',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      vi.spyOn(core.syncQueue, 'reconcileThreadTurns').mockImplementationOnce(() => {
+        throw new Error('commitErr before mid-cleanup 500 delete');
+      });
+
+      let releaseCreatedDelete!: () => void;
+      const createdDeleteGate = new Promise<void>((res) => {
+        releaseCreatedDelete = res;
+      });
+      let notifyCreatedDeleteEntered!: () => void;
+      const createdDeleteEntered = new Promise<void>((res) => {
+        notifyCreatedDeleteEntered = res;
+      });
+      let rejectOldDelete!: (err: Error) => void;
+      const oldDeleteGate = new Promise<void>((_res, rej) => {
+        rejectOldDelete = rej;
+      });
+      const deletedRemoteIds: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedRemoteIds.push(convId);
+        if (convId === 'created-mid-cleanup-500' && deletedRemoteIds.filter((x) => x === convId).length === 1) {
+          notifyCreatedDeleteEntered();
+          await createdDeleteGate;
+        } else if (convId === 'old-mid-500') {
+          await oldDeleteGate;
+        }
+      });
+
+      try {
+        const recP = (core as any).reconcileSingleThread('mid-cleanup-500', { knownMissing: true });
+        await createdDeleteEntered;
+
+        // Start deleteThread('mid-cleanup-500') while commitErr server cleanup is in flight
+        const delP = core.deleteThread('mid-cleanup-500');
+        void delP.catch(() => undefined);
+
+        releaseCreatedDelete();
+        expect(await recP).toBe('deferred');
+
+        // Strictly 1 DELETE to 'created-mid-cleanup-500'
+        expect(deletedRemoteIds.filter((id) => id === 'created-mid-cleanup-500')).toHaveLength(1);
+
+        // Reject deleteThread('old-mid-500') with 500 -> thread & rollback state remain intact!
+        rejectOldDelete(new SyncApiError(500, 'Old delete 500'));
+        await expect(delP).rejects.toThrow('Old delete 500');
+
+        expect(core.threads.get('mid-cleanup-500')?.remoteConversationId).toBe('old-mid-500');
+        expect(core.threads.get('mid-cleanup-500')?.syncState).toBe('pending');
+        expect((core as any).startupDirtyThreads.has('mid-cleanup-500')).toBe(true);
+        expect((core as any).threadsWithLocalMessages.has('mid-cleanup-500')).toBe(true);
+      } finally {
+        releaseCreatedDelete();
+        rejectOldDelete(new SyncApiError(500, 'cleanup'));
+      }
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirCleanup500, { recursive: true, force: true });
+    }
+  });
+
+  it('halts without issuing a duplicate server DELETE when dispose fires while commitErr server cleanup is in flight', async () => {
+    const dirCleanupDisp = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-commiterr-midcleanup-disp-'));
+    let dispCore: AppCore | undefined;
+    try {
+      dispCore = makeCore({ dir: dirCleanupDisp }).core;
+      dispCore.threads.upsert(
+        makeThreadMeta({
+          id: 'mid-cleanup-disp',
+          remoteConversationId: 'old-mid-disp',
+          title: 'Mid Cleanup Dispose',
+          hasStarted: true,
+        }),
+      );
+      await dispCore.threads.appendMessages('mid-cleanup-disp', [
+        { localId: 'mcdp-u1', role: 'user', content: 'Q', createdAt: '2026-10-12T10:00:00.000Z' },
+      ]);
+
+      vi.spyOn(dispCore.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-mid-cleanup-disp',
+        title: 'Mid Cleanup Dispose',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+      vi.spyOn(dispCore.syncQueue, 'reconcileThreadTurns').mockImplementationOnce(() => {
+        throw new Error('commitErr before mid-cleanup dispose');
+      });
+
+      let releaseCreatedDelete!: () => void;
+      const createdDeleteGate = new Promise<void>((res) => {
+        releaseCreatedDelete = res;
+      });
+      let notifyCreatedDeleteEntered!: () => void;
+      const createdDeleteEntered = new Promise<void>((res) => {
+        notifyCreatedDeleteEntered = res;
+      });
+      const deletedRemoteIds: string[] = [];
+      vi.spyOn(dispCore.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedRemoteIds.push(convId);
+        if (convId === 'created-mid-cleanup-disp' && deletedRemoteIds.length === 1) {
+          notifyCreatedDeleteEntered();
+          await createdDeleteGate;
+        }
+      });
+
+      try {
+        const recP = (dispCore as any).reconcileSingleThread('mid-cleanup-disp', { knownMissing: true });
+        await createdDeleteEntered;
+
+        // Dispose while deleteAbortedServerConversation('created-mid-cleanup-disp') is in flight!
+        dispCore.dispose();
+        releaseCreatedDelete();
+
+        expect(await recP).toBe('halt');
+        // Strictly 1 DELETE call even though this.disposed became true!
+        expect(deletedRemoteIds).toEqual(['created-mid-cleanup-disp']);
+      } finally {
+        releaseCreatedDelete();
+      }
+    } finally {
+      if (dispCore) {
+        await dispCore.drain();
+        dispCore.dispose();
+      }
+      fs.rmSync(dirCleanupDisp, { recursive: true, force: true });
+    }
+  });
+
+  it('removes search index entries, deletes the aborted server conversation, and emits thread-deleted when persistIndex throws ENOSPC inside forgetThread', async () => {
+    const dirForgetEnospc = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-forget-enospc-'));
+    let core: AppCore | undefined;
+    try {
+      const made = makeCore({ dir: dirForgetEnospc });
+      core = made.core;
+      const { syncEvents } = made;
+      const logErrSpy = vi.spyOn(logger, 'logError');
+
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'enospc-del-abort',
+          remoteConversationId: 'orig-enospc-del-remote',
+          title: 'ENOSPC Delete Abort',
+          hasStarted: true,
+        }),
+      );
+      await core.threads.appendMessages('enospc-del-abort', [
+        {
+          localId: 'eda-u1',
+          role: 'user',
+          content: 'EnospcAbortSearchToken question',
+          createdAt: '2026-10-12T10:00:00.000Z',
+        },
+      ]);
+      core.searchIndex.addMessages('enospc-del-abort', [
+        {
+          localId: 'eda-u1',
+          role: 'user',
+          content: 'EnospcAbortSearchToken question',
+          createdAt: '2026-10-12T10:00:00.000Z',
+        },
+      ]);
+
+      const staleIso = '2026-01-01T00:00:00.000Z';
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'enospc-sweep-1',
+          remoteConversationId: 'enospc-sweep-remote-1',
+          title: 'New Conversation',
+          createdAt: staleIso,
+          updatedAt: staleIso,
+          remoteSettings: { client: 'desktop' },
+        }),
+      );
+      core.searchIndex.addMessages('enospc-sweep-1', [
+        {
+          localId: 'esw-u1',
+          role: 'user',
+          content: 'EnospcSweepSearchToken stale',
+          createdAt: staleIso,
+        },
+      ]);
+
+      core.threads.upsert(
+        makeThreadMeta({
+          id: 'enospc-prune-1',
+          remoteConversationId: 'enospc-prune-remote-1',
+          title: 'ENOSPC Empty 404 Prune',
+          hasStarted: true,
+        }),
+      );
+      core.searchIndex.addMessages('enospc-prune-1', [
+        {
+          localId: 'epr-u1',
+          role: 'user',
+          content: 'EnospcPruneSearchToken empty404',
+          createdAt: staleIso,
+        },
+      ]);
+
+      vi.spyOn(core.syncClient, 'createConversation').mockResolvedValueOnce({
+        id: 'created-enospc-del-conv',
+        title: 'ENOSPC Delete Abort',
+        createdAt: '2026-10-12T10:05:00.000Z',
+        updatedAt: '2026-10-12T10:05:00.000Z',
+        settings: {},
+      });
+
+      let releaseOrigDelete!: () => void;
+      const origDeleteGate = new Promise<void>((res) => {
+        releaseOrigDelete = res;
+      });
+      const deletedConvIds: string[] = [];
+      vi.spyOn(core.syncClient, 'deleteConversation').mockImplementation(async (convId) => {
+        deletedConvIds.push(convId);
+        if (convId === 'orig-enospc-del-remote') {
+          await origDeleteGate;
+        }
+      });
+
+      let persistEnospcCount = 0;
+      vi.spyOn(core.threads as any, 'persistIndex').mockImplementation(() => {
+        persistEnospcCount += 1;
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      });
+
+      let delPromise!: Promise<void>;
+      const origWriteRaw = (core.threads as any).writeRaw.bind(core.threads);
+      vi.spyOn(core.threads as any, 'writeRaw').mockImplementationOnce(
+        async (...args: unknown[]) => {
+          await origWriteRaw(...args);
+          // Start deleteThread before index.remoteConversationId mutates so deleteThread targets 'orig-enospc-del-remote'
+          // and ONLY abortRecreatedConversationIfDeleted can delete 'created-enospc-del-conv'.
+          delPromise = core!.deleteThread('enospc-del-abort');
+        },
+      );
+
+      const origPrepare = core.threads.prepareForRecreation.bind(core.threads);
+      vi.spyOn(core.threads, 'prepareForRecreation').mockImplementationOnce(
+        async (id, fb, patch, extra) => {
+          try {
+            return await origPrepare(id, fb, patch, extra);
+          } catch (err) {
+            releaseOrigDelete();
+            await delPromise;
+            core!.searchIndex.addMessages('enospc-del-abort', [
+              {
+                localId: 'eda-u2',
+                role: 'user',
+                content: 'EnospcAbortPostDeleteToken lingering',
+                createdAt: '2026-10-12T10:06:00.000Z',
+              },
+            ]);
+            throw err;
+          }
+        },
+      );
+
+      try {
+        const out = await (core as any).reconcileSingleThread('enospc-del-abort', {
+          knownMissing: true,
+        });
+        expect(out).toBe('deferred');
+        expect(persistEnospcCount).toBeGreaterThanOrEqual(3);
+        expect(deletedConvIds).toContain('orig-enospc-del-remote');
+        expect(deletedConvIds).toContain('created-enospc-del-conv');
+        expect(await core.searchThreads('EnospcAbortSearchToken')).toEqual([]);
+        expect(await core.searchThreads('EnospcAbortPostDeleteToken')).toEqual([]);
+        expect(syncEvents.filter((e) => e.kind === 'thread-deleted')).toEqual([]);
+
+        // Verify triggerEmptyConversationSweep also removes searchIndex entry and emits thread-deleted despite ENOSPC
+        vi.spyOn(core.syncClient, 'getMessages').mockResolvedValueOnce([]);
+        (core as any).triggerEmptyConversationSweep(['enospc-sweep-1']);
+        await core.waitForStartupTasks();
+
+        expect(deletedConvIds).toContain('enospc-sweep-remote-1');
+        expect(core.threads.get('enospc-sweep-1')).toBeUndefined();
+        expect(await core.searchThreads('EnospcSweepSearchToken')).toEqual([]);
+        expect(syncEvents).toContainEqual({ kind: 'thread-deleted', threadId: 'enospc-sweep-1' });
+
+        // Verify empty-404 prune also removes searchIndex entry and emits thread-deleted despite ENOSPC
+        expect(
+          await (core as any).reconcileSingleThread('enospc-prune-1', { knownMissing: true }),
+        ).toBe('pruned');
+        expect(core.threads.get('enospc-prune-1')).toBeUndefined();
+        expect(await core.searchThreads('EnospcPruneSearchToken')).toEqual([]);
+        expect(syncEvents).toContainEqual({ kind: 'thread-deleted', threadId: 'enospc-prune-1' });
+        expect(logErrSpy).toHaveBeenCalledWith(
+          'store',
+          expect.stringContaining('ENOSPC: no space left on device'),
+        );
+      } finally {
+        releaseOrigDelete();
+      }
+    } finally {
+      if (core) {
+        await core.drain();
+        core.dispose();
+      }
+      fs.rmSync(dirForgetEnospc, { recursive: true, force: true });
     }
   });
 });

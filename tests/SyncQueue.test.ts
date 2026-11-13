@@ -955,5 +955,165 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
         q.dispose();
       }
     });
+
+    it('marks sync-state events with acked: true when appendMessages succeeds across multi-turn backlogs and final drain', async () => {
+      const q = new SyncQueue(
+        customDeps(
+          fakeClient(async (threadId, messages) => ({
+            ids: (messages as unknown[]).map((_, idx) => `${threadId}-srv-${idx}`),
+          })),
+        ),
+      );
+
+      q.holdThreads(['t-backlog']);
+      for (let n = 1; n <= 20; n += 1) {
+        q.enqueue(turn('t-backlog', n));
+      }
+      events = [];
+
+      q.unholdThread('t-backlog');
+      await q.flush();
+
+      const syncStates = events.filter(
+        (e): e is Extract<SyncEvent, { kind: 'sync-state' }> => e.kind === 'sync-state',
+      );
+      expect(syncStates).toHaveLength(20);
+      expect(syncStates[0]).toEqual({
+        kind: 'sync-state',
+        threadId: 't-backlog',
+        state: 'pending',
+        pendingCount: 19,
+        acked: true,
+      });
+      for (let i = 1; i < 19; i += 1) {
+        expect(syncStates[i]).toEqual({
+          kind: 'sync-state',
+          threadId: 't-backlog',
+          state: 'pending',
+          pendingCount: 19 - i,
+          acked: true,
+        });
+      }
+      expect(syncStates[19]).toEqual({
+        kind: 'sync-state',
+        threadId: 't-backlog',
+        state: 'synced',
+        pendingCount: 0,
+        acked: true,
+      });
+      q.dispose();
+    });
+
+    it('omits acked on local enqueue, queue-cap overflow, non-retriable drops, and retryable backoff sync-state events', async () => {
+      // 1. Local enqueue + MAX_QUEUE_LENGTH (500) overflow
+      events = [];
+      const capQueue = new SyncQueue(
+        customDeps(fakeClient(() => new Promise<{ ids: string[] }>(() => {}))),
+      );
+      for (let n = 0; n <= 500; n += 1) {
+        capQueue.enqueue(turn('t-cap-no-ack', n));
+      }
+      const capStateEvents = events.filter(
+        (e): e is Extract<SyncEvent, { kind: 'sync-state' }> => e.kind === 'sync-state',
+      );
+      expect(capStateEvents.some((e) => e.state === 'pending')).toBe(true);
+      expect(capStateEvents.some((e) => e.state === 'error' && e.dropped === true)).toBe(true);
+      for (const evt of capStateEvents) {
+        expect('acked' in evt).toBe(false);
+      }
+      capQueue.dispose();
+
+      // 2. Non-retriable 422 drop, 404 -> drop, 401 backoff, 404 -> retry backoff, and 500 backoff
+      const scenarios: Array<{
+        name: string;
+        err: SyncApiError;
+        onMissing?: () => Promise<'drop' | 'retry'>;
+      }> = [
+        { name: '422-drop', err: new SyncApiError(422, 'Yvoke Backend: Unprocessable') },
+        {
+          name: '404-drop',
+          err: new SyncApiError(404, 'Yvoke Backend: Missing'),
+          onMissing: async () => 'drop',
+        },
+        { name: '401-backoff', err: new SyncApiError(401, 'Yvoke Backend: Unauthorized') },
+        {
+          name: '404-retry',
+          err: new SyncApiError(404, 'Yvoke Backend: Missing'),
+          onMissing: async () => 'retry',
+        },
+        { name: '500-backoff', err: new SyncApiError(500, 'Yvoke Backend: Internal error') },
+      ];
+
+      for (const scenario of scenarios) {
+        events = [];
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw scenario.err;
+            }),
+            {
+              onMissingConversation: scenario.onMissing,
+              setTimeoutFn: noopTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn(`t-${scenario.name}`, 1));
+        await q.flush();
+
+        const stateEvents = events.filter(
+          (e): e is Extract<SyncEvent, { kind: 'sync-state' }> => e.kind === 'sync-state',
+        );
+        expect(stateEvents.length).toBeGreaterThanOrEqual(2); // enqueue + error
+        for (const evt of stateEvents) {
+          expect('acked' in evt).toBe(false);
+        }
+        q.dispose();
+      }
+    });
+
+    it('emits zero acked sync-state events when an in-flight upload resolves after removeThread, reconcileThreadTurns supersession, or dispose', async () => {
+      for (const raceMode of ['removeThread', 'supersede', 'dispose'] as const) {
+        events = [];
+        let resolveInFlight!: (res: { ids: string[] }) => void;
+
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(
+              () =>
+                new Promise<{ ids: string[] }>((res) => {
+                  resolveInFlight = res;
+                }),
+            ),
+          ),
+        );
+
+        q.enqueue(turn(`t-${raceMode}`, 1));
+        await Promise.resolve();
+        // Clear synchronous enqueue 'pending' event so we inspect post-resolution emissions strictly
+        events = [];
+
+        if (raceMode === 'removeThread') {
+          expect(q.removeThread(`t-${raceMode}`)).toBe(1);
+          expect(q.pendingCount()).toBe(0);
+        } else if (raceMode === 'supersede') {
+          q.holdThreads([`t-${raceMode}`]);
+          q.reconcileThreadTurns(
+            `t-${raceMode}`,
+            [{ ...turn(`t-${raceMode}`, 1), enqueuedAt: '2026-06-10T10:00:00Z', attempts: 0 }],
+            new Set(['u1', 'a1']),
+            { resetAttempts: true },
+          );
+        } else {
+          q.dispose();
+        }
+
+        resolveInFlight({ ids: ['srv-u1', 'srv-a1'] });
+        await q.flush();
+
+        expect(events.filter((e) => e.kind === 'sync-state' && e.acked === true)).toEqual([]);
+        expect(events).toEqual([]);
+        q.dispose();
+      }
+    });
   });
 });

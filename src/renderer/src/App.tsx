@@ -125,6 +125,9 @@ export default function App(): React.JSX.Element {
     setServerReachable(result.serverReachable);
     if (typeof result.pendingSyncCount === 'number') {
       setPendingSync(result.pendingSyncCount);
+      if (result.pendingSyncCount === 0) {
+        setSyncError(null);
+      }
     }
     if (result.serverReachable && initialPromptsLoadedRef.current && promptsCountRef.current === 0) {
       void window.api
@@ -514,6 +517,9 @@ export default function App(): React.JSX.Element {
               event.detail ??
                 'A queued conversation turn was rejected by the server and could not be synced.',
             );
+            if (event.pendingCount === 0) {
+              setSyncError(null);
+            }
           } else {
             setSyncError(event.detail ?? 'Sync failed — retrying.');
           }
@@ -523,7 +529,7 @@ export default function App(): React.JSX.Element {
               if (mountedRef.current) setAuth(status);
             })
             .catch(() => undefined);
-        } else if (event.state === 'synced' || event.pendingCount === 0) {
+        } else if (event.acked || event.state === 'synced' || event.pendingCount === 0) {
           setSyncError(null);
         }
         if (event.threadId && !deletedIdsRef.current.has(event.threadId)) {
