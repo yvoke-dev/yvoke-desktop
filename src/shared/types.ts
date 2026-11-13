@@ -652,7 +652,6 @@ export type AgentEvent =
 export type SyncEvent =
   | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string; dropped?: boolean }
   | { kind: 'server-ids'; threadId: string; mapping: Record<string, string> }
-  | { kind: 'thread-migrated'; oldThreadId: string; thread: ThreadMeta }
   | { kind: 'thread-recreated'; thread: ThreadMeta }
   | { kind: 'thread-deleted'; threadId: string };
 

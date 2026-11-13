@@ -903,7 +903,7 @@ describe('App conversation switching with in-progress turn', () => {
     expect(container.querySelector('.banner.error')).toBeNull();
   });
 
-  it('handles thread-migrated across oldId -> newId and chained A -> B -> C migrations: updates sidebar, active thread, clears stale serverIds until server-ids arrives, preserves ChatView composer state, and routes IPC calls to latest ID', async () => {
+  it('handles thread-recreated across single and chained recreations (r1 -> r2) and late-discovered orphans: updates sidebar in place, keeps activeThreadId and ChatView thread.id unchanged, clears stale serverIds until new server-ids arrive, and inserts orphans sorted by updatedAt desc without stealing focus', async () => {
     storedMessages['thread-2'] = [
       {
         localId: 't2-u1',
@@ -934,82 +934,147 @@ describe('App conversation switching with in-progress turn', () => {
     // Open thread-2 and type a draft in the composer
     fireEvent.click(screen.getByText('Second Conversation'));
     await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
-    expect(latestChatViewProps?.conversationKey).toBe('thread-2');
+    expect(Object.keys(latestChatViewProps ?? {}).sort()).toEqual([
+      'liveTurn',
+      'messages',
+      'onFeedback',
+      'onInterrupt',
+      'onPatchThread',
+      'onSend',
+      'profiles',
+      'prompts',
+      'settings',
+      'thread',
+    ]);
+    expect(latestChatViewProps?.thread.id).toBe('thread-2');
     expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual(['stale-srv-u1', 'stale-srv-a1']);
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'Unsent follow-up across chained migration' } });
+    fireEvent.change(textarea, { target: { value: 'Unsent follow-up across chained recreation' } });
 
-    // Migrate thread-2 -> thread-2b -> thread-2c
-    const migratedB: ThreadMeta = {
+    // Chained 404 recreations on immutable thread-2: remoteConversationId 'r1' -> 'r2'
+    const recreatedR1: ThreadMeta = {
       ...storedThreads[1],
-      id: 'thread-2b',
+      id: 'thread-2',
+      remoteConversationId: 'r1',
       title: 'Second Conversation',
       initialPlaybook: 'oim-schema',
       hasStarted: true,
+      syncState: 'pending',
     };
-    const migratedC: ThreadMeta = {
-      ...migratedB,
-      id: 'thread-2c',
+    const recreatedR2: ThreadMeta = {
+      ...recreatedR1,
+      id: 'thread-2',
+      remoteConversationId: 'r2',
       title: 'Second Conversation (Recreated)',
+      syncState: 'synced',
     };
-    storedThreads = [storedThreads[0], migratedC];
-    storedMessages['thread-2c'] = storedMessages['thread-2'].map(({ serverId: _s, ...rest }) => rest);
+    storedThreads = [storedThreads[0], recreatedR2];
+    storedMessages['thread-2'] = storedMessages['thread-2'].map(({ serverId: _s, ...rest }) => rest);
 
     act(() => {
       for (const l of syncListeners) {
-        l({ kind: 'thread-migrated', oldThreadId: 'thread-2', thread: migratedB });
+        l({ kind: 'thread-recreated', thread: recreatedR1 });
       }
       for (const l of syncListeners) {
-        l({ kind: 'thread-migrated', oldThreadId: 'thread-2b', thread: migratedC });
+        l({ kind: 'thread-recreated', thread: recreatedR2 });
       }
     });
 
-    // Sidebar updated without duplicate rows, header updated, and composer draft survived!
+    // Sidebar updated in place without duplicate rows, activeThreadId & thread.id unchanged, composer draft survived!
     await waitFor(() => {
       expect(screen.getAllByText('Second Conversation (Recreated)').length).toBeGreaterThanOrEqual(1);
     });
     expect(screen.queryByText('Second Conversation')).toBeNull();
     expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
-      'Unsent follow-up across chained migration',
+      'Unsent follow-up across chained recreation',
     );
     expect(screen.getByText('Existing answer in thread 2')).toBeTruthy();
-    expect(latestChatViewProps?.thread.id).toBe('thread-2c');
-    expect(latestChatViewProps?.conversationKey).toBe('thread-2');
+    expect(latestChatViewProps?.thread.id).toBe('thread-2');
+    expect(latestChatViewProps?.thread.remoteConversationId).toBe('r2');
     expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, undefined]);
 
-    // Fresh server-ids event on thread-2c maps cleanly
+    // Late-discovered background orphans insert sorted by updatedAt desc without stealing focus
+    const orphanMiddle: ThreadMeta = {
+      id: 'orphan-mid',
+      title: 'Middle Orphan Chat',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T10:30:00.000Z',
+      updatedAt: '2026-08-01T10:30:00.000Z',
+      totals: { inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'pending',
+      hasStarted: true,
+    };
+    const orphanNewest: ThreadMeta = {
+      id: 'orphan-newest',
+      title: 'Newest Orphan Chat',
+      model: 'sonnet',
+      thinkingLevel: 'medium',
+      createdAt: '2026-08-01T12:30:00.000Z',
+      updatedAt: '2026-08-01T12:30:00.000Z',
+      totals: { inputTokens: 20, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      syncState: 'pending',
+      hasStarted: true,
+    };
+    storedThreads = [orphanNewest, recreatedR2, orphanMiddle, storedThreads[0]];
+
     act(() => {
       for (const l of syncListeners) {
-        l({ kind: 'server-ids', threadId: 'thread-2c', mapping: { 't2-a1': 'fresh-srv-a1' } });
+        l({ kind: 'thread-recreated', thread: orphanMiddle });
+        l({ kind: 'thread-recreated', thread: orphanNewest });
+      }
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Newest Orphan Chat')).toBeTruthy();
+      expect(screen.getByText('Middle Orphan Chat')).toBeTruthy();
+    });
+    const sidebarTitles = Array.from(container.querySelectorAll('.thread-title')).map((el) => el.textContent);
+    expect(sidebarTitles).toEqual([
+      'Newest Orphan Chat',
+      'Second Conversation (Recreated)',
+      'Middle Orphan Chat',
+      'First Conversation',
+    ]);
+    // Focus remained on thread-2
+    expect(latestChatViewProps?.thread.id).toBe('thread-2');
+    expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
+      'Unsent follow-up across chained recreation',
+    );
+
+    // Fresh server-ids event on thread-2 maps cleanly
+    act(() => {
+      for (const l of syncListeners) {
+        l({ kind: 'server-ids', threadId: 'thread-2', mapping: { 't2-a1': 'fresh-srv-a1' } });
       }
     });
     await waitFor(() => {
       expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, 'fresh-srv-a1']);
     });
 
-    // Patching model routes to thread-2c
+    // Patching model routes to immutable thread-2
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'opus' } });
-    await waitFor(() => expect(patchSpy).toHaveBeenCalledWith('thread-2c', { model: 'opus' }));
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledWith('thread-2', { model: 'opus' }));
 
-    // Sending follow-up routes to thread-2c
+    // Sending follow-up routes to immutable thread-2
     fireEvent.click(screen.getByRole('button', { name: /Send/i }));
     await waitFor(() => {
       expect(sendMessageMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          threadId: 'thread-2c',
-          text: 'Unsent follow-up across chained migration',
+          threadId: 'thread-2',
+          text: 'Unsent follow-up across chained recreation',
           promptName: 'oim-schema',
         }),
       );
     });
 
-    // Interrupting live turn routes to thread-2c
+    // Interrupting live turn routes to immutable thread-2
     fireEvent.click(screen.getByRole('button', { name: /Stop/i }));
-    expect(interruptSpy).toHaveBeenCalledWith('thread-2c');
+    expect(interruptSpy).toHaveBeenCalledWith('thread-2');
   });
 
-  it('routes sendMessage to migrated thread.id via migratedIdsRef when thread-migrated arrives while validatePlaybook is in flight', async () => {
+  it('completes in-flight validatePlaybook and sends to immutable thread.id when thread-recreated arrives mid-preflight', async () => {
     let resolvePreflight!: (v: { plausible: boolean }) => void;
     (window as unknown as { api: Record<string, unknown> }).api.validatePlaybook = vi.fn().mockImplementation(
       () =>
@@ -1026,21 +1091,23 @@ describe('App conversation switching with in-progress turn', () => {
     fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: 'First question during preflight migration' } });
+    fireEvent.change(textarea, { target: { value: 'First question during preflight recreation' } });
     fireEvent.click(screen.getByRole('button', { name: /Send/i }));
 
     await waitFor(() => expect(container.querySelector('.preflight-checking')).not.toBeNull());
 
-    const migrated1: ThreadMeta = {
+    const recreated1: ThreadMeta = {
       ...storedThreads[0],
-      id: 'thread-1-recreated',
+      id: 'thread-1',
+      remoteConversationId: 'remote-1-recreated',
+      title: 'First Conversation (Recreated)',
     };
-    storedThreads = [migrated1, storedThreads[1]];
+    storedThreads = [recreated1, storedThreads[1]];
 
-    // Emit thread-migrated AND resolve validatePlaybook in the same synchronous turn before React re-renders
+    // Emit thread-recreated AND resolve validatePlaybook in the same synchronous turn
     await act(async () => {
       for (const l of syncListeners) {
-        l({ kind: 'thread-migrated', oldThreadId: 'thread-1', thread: migrated1 });
+        l({ kind: 'thread-recreated', thread: recreated1 });
       }
       resolvePreflight({ plausible: true });
     });
@@ -1049,12 +1116,77 @@ describe('App conversation switching with in-progress turn', () => {
       expect(sendMessageMock).toHaveBeenCalledTimes(1);
       expect(sendMessageMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          threadId: 'thread-1-recreated',
-          text: 'First question during preflight migration',
+          threadId: 'thread-1',
+          text: 'First question during preflight recreation',
           promptName: 'oim-getting-started',
         }),
       );
     });
+    expect(latestChatViewProps?.thread.id).toBe('thread-1');
+    expect(latestChatViewProps?.thread.remoteConversationId).toBe('remote-1-recreated');
+  });
+
+  it('ignores thread-recreated arriving after thread-deleted or deleteThread for the same thread.id (deletedIdsRef prevents resurrection)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const { container } = render(<App />);
+      await waitFor(() => {
+        expect(screen.getByText('First Conversation')).toBeTruthy();
+        expect(screen.getByText('Second Conversation')).toBeTruthy();
+      });
+
+      const deletedT1Snapshot = { ...storedThreads[0] };
+      const deletedT2Snapshot = { ...storedThreads[1] };
+
+      // 1. Sweep deletes thread-1 via thread-deleted event
+      storedThreads = [storedThreads[1]];
+      act(() => {
+        for (const l of syncListeners) {
+          l({ kind: 'thread-deleted', threadId: 'thread-1' });
+        }
+      });
+      await waitFor(() => expect(screen.queryByText('First Conversation')).toBeNull());
+
+      // Late thread-recreated for thread-1 arrives -> must NOT resurrect in sidebar
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'thread-recreated',
+            thread: {
+              ...deletedT1Snapshot,
+              remoteConversationId: 'resurrected-r1',
+              title: 'Resurrected Ghost 1',
+            },
+          });
+        }
+      });
+      expect(screen.queryByText('Resurrected Ghost 1')).toBeNull();
+      expect(screen.queryByText('First Conversation')).toBeNull();
+
+      // 2. User deletes thread-2 via sidebar delete button
+      storedThreads = [];
+      const row2 = container.querySelector('.thread-item')!;
+      fireEvent.click(row2.querySelector('.thread-delete') as HTMLButtonElement);
+      await waitFor(() => expect(screen.queryByText('Second Conversation')).toBeNull());
+
+      // Late thread-recreated for thread-2 arrives -> must NOT resurrect in sidebar
+      act(() => {
+        for (const l of syncListeners) {
+          l({
+            kind: 'thread-recreated',
+            thread: {
+              ...deletedT2Snapshot,
+              remoteConversationId: 'resurrected-r2',
+              title: 'Resurrected Ghost 2',
+            },
+          });
+        }
+      });
+      expect(screen.queryByText('Resurrected Ghost 2')).toBeNull();
+      expect(screen.getByText('No conversations yet.')).toBeTruthy();
+    } finally {
+      confirmSpy.mockRestore();
+    }
   });
 
   it('handles thread-deleted: removes swept empty conversation from sidebar, clears cached messages, and transitions activeThreadId cleanly', async () => {
@@ -1095,10 +1227,10 @@ describe('App conversation switching with in-progress turn', () => {
     });
   });
 
-  it('guards in-flight openThread(threadId) against thread-deleted (late resolve & late reject) and thread-migrated races', async () => {
+  it('guards in-flight openThread(threadId) against thread-deleted (late resolve & late reject) and thread-recreated races', async () => {
     let resolveThread1Msgs!: (msgs: ChatMessage[]) => void;
     let rejectThread2Msgs!: (err: Error) => void;
-    let resolveMigratingMsgs!: (msgs: ChatMessage[]) => void;
+    let resolveRecreatingMsgs!: (msgs: ChatMessage[]) => void;
 
     const t3: ThreadMeta = {
       id: 'thread-3',
@@ -1127,7 +1259,7 @@ describe('App conversation switching with in-progress turn', () => {
         }
         if (id === 'thread-3') {
           return new Promise<ChatMessage[]>((res) => {
-            resolveMigratingMsgs = res;
+            resolveRecreatingMsgs = res;
           });
         }
         return Promise.resolve([]);
@@ -1167,17 +1299,22 @@ describe('App conversation switching with in-progress turn', () => {
     });
     expect(screen.queryByText('Second Conversation')).toBeNull();
 
-    // (b) thread-3 is now active with getMessages('thread-3') in flight -> thread-migrated('thread-3' -> 'thread-3-new') arrives BEFORE getMessages resolves
-    const migratedT3: ThreadMeta = { ...t3, id: 'thread-3-new', title: 'Third Conversation' };
-    storedThreads = [migratedT3];
+    // (b) thread-3 is now active with getMessages('thread-3') in flight -> thread-recreated arrives BEFORE getMessages resolves
+    const recreatedT3: ThreadMeta = {
+      ...t3,
+      id: 'thread-3',
+      remoteConversationId: 'remote-3-recreated',
+      title: 'Third Conversation',
+    };
+    storedThreads = [recreatedT3];
     act(() => {
       for (const l of syncListeners) {
-        l({ kind: 'thread-migrated', oldThreadId: 'thread-3', thread: migratedT3 });
+        l({ kind: 'thread-recreated', thread: recreatedT3 });
       }
     });
 
     await act(async () => {
-      resolveMigratingMsgs([
+      resolveRecreatingMsgs([
         {
           localId: 't3-u1',
           serverId: 'stale-old-server-id',
@@ -1190,26 +1327,27 @@ describe('App conversation switching with in-progress turn', () => {
           localId: 't3-a1',
           serverId: 'stale-old-assistant-id',
           role: 'assistant',
-          content: 'Answer in thread 3 after migration',
+          content: 'Answer in thread 3 after recreation',
           createdAt: '',
         },
       ]);
     });
 
     await waitFor(() => {
-      expect(screen.getByText('Answer in thread 3 after migration')).toBeTruthy();
+      expect(screen.getByText('Answer in thread 3 after recreation')).toBeTruthy();
     });
-    expect(latestChatViewProps?.thread.id).toBe('thread-3-new');
+    expect(latestChatViewProps?.thread.id).toBe('thread-3');
+    expect(latestChatViewProps?.thread.remoteConversationId).toBe('remote-3-recreated');
     expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([undefined, undefined]);
 
-    // Submitting feedback routes to 'thread-3-new' (proving messages landed on migrated key, not ghost 'thread-3')
+    // Submitting feedback routes to immutable 'thread-3'
     submitFeedbackSpy.mockRejectedValueOnce(new Error('Message has not synced to the server yet'));
     const goodAnswerBtn = document.querySelector('.feedback .icon-button') as HTMLButtonElement;
     fireEvent.click(goodAnswerBtn);
     fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
     await waitFor(() => {
       expect(submitFeedbackSpy).toHaveBeenCalledWith(
-        expect.objectContaining({ threadId: 'thread-3-new', messageLocalId: 't3-a1', rating: 1 }),
+        expect.objectContaining({ threadId: 'thread-3', messageLocalId: 't3-a1', rating: 1 }),
       );
     });
   });
@@ -1262,12 +1400,14 @@ describe('App conversation switching with in-progress turn', () => {
     }
   });
 
-  it('unmounts cleanly while listThreads retry and getMessages are pending: unsubscribes IPC listeners once, clears 10s interval, and ignores post-unmount settlements', async () => {
+  it('unmounts cleanly while listThreads retry and getMessages are pending: unsubscribes IPC listeners once, clears 10s interval, and ignores post-unmount getMessages / thread-recreated completions', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       let rejectPendingListThreads!: (err: Error) => void;
+      let resolvePendingGetMessages!: (msgs: ChatMessage[]) => void;
       let rejectPendingGetMessages!: (err: Error) => void;
+      let capturedSyncListener: ((event: SyncEvent) => void) | null = null;
 
       const listThreadsMock = vi
         .fn()
@@ -1283,12 +1423,20 @@ describe('App conversation switching with in-progress turn', () => {
             }),
         );
       (window as unknown as { api: Record<string, unknown> }).api.listThreads = listThreadsMock;
-      (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi.fn().mockImplementation(
-        () =>
-          new Promise<ChatMessage[]>((_res, rej) => {
-            rejectPendingGetMessages = rej;
-          }),
-      );
+      (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<ChatMessage[]>((res) => {
+              resolvePendingGetMessages = res;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<ChatMessage[]>((_res, rej) => {
+              rejectPendingGetMessages = rej;
+            }),
+        );
 
       const offAgentSpy = vi.fn();
       const offSyncSpy = vi.fn();
@@ -1304,6 +1452,7 @@ describe('App conversation switching with in-progress turn', () => {
       (window as unknown as { api: Record<string, unknown> }).api.onSyncEvent = vi
         .fn()
         .mockImplementation((listener: (event: SyncEvent) => void) => {
+          capturedSyncListener = listener;
           syncListeners.push(listener);
           return () => {
             offSyncSpy();
@@ -1314,7 +1463,8 @@ describe('App conversation switching with in-progress turn', () => {
       const { unmount } = render(<App />);
       await waitFor(() => expect(screen.getByText('Second Conversation')).toBeTruthy());
 
-      // Start pending getMessages()
+      // Start pending getMessages() resolutions and rejections
+      fireEvent.click(screen.getByText('First Conversation'));
       fireEvent.click(screen.getByText('Second Conversation'));
 
       // Advance 10s so retry interval fires a pending listThreads()
@@ -1328,6 +1478,7 @@ describe('App conversation switching with in-progress turn', () => {
 
       expect(offAgentSpy).toHaveBeenCalledTimes(1);
       expect(offSyncSpy).toHaveBeenCalledTimes(1);
+      expect(syncListeners).toHaveLength(0);
 
       // Advance 30s -> 10s retry interval was cleared, zero further listThreads calls
       await act(async () => {
@@ -1335,8 +1486,15 @@ describe('App conversation switching with in-progress turn', () => {
       });
       expect(listThreadsMock).toHaveBeenCalledTimes(2);
 
-      // Reject both pending promises post-unmount -> zero unhandled rejections or React errors
+      // Settle pending promises AND invoke stale thread-recreated post-unmount -> zero unhandled rejections or React errors
       await act(async () => {
+        capturedSyncListener?.({
+          kind: 'thread-recreated',
+          thread: { ...storedThreads[1], remoteConversationId: 'post-unmount-r2' },
+        });
+        resolvePendingGetMessages([
+          { localId: 'late-1', role: 'assistant', content: 'Post-unmount message', createdAt: '' },
+        ]);
         rejectPendingListThreads(new Error('Post-unmount listThreads failure'));
         rejectPendingGetMessages(new Error('Post-unmount getMessages failure'));
       });
@@ -1347,7 +1505,7 @@ describe('App conversation switching with in-progress turn', () => {
     }
   });
 
-  it('preserves post-migration server-ids that arrive while openThread(oldId) getMessages is still in flight, while purging pre-migration serverIds', async () => {
+  it('preserves post-recreation server-ids that arrive while openThread(id) getMessages is still in flight, while purging pre-recreation serverIds', async () => {
     const t3: ThreadMeta = {
       id: 'thread-3',
       title: 'Third Conversation',
@@ -1361,17 +1519,19 @@ describe('App conversation switching with in-progress turn', () => {
     storedThreads = [t3, ...storedThreads];
 
     let resolveThread3Messages!: (msgs: ChatMessage[]) => void;
+    let thread3CallCount = 0;
     const submitFeedbackSpy = vi.fn().mockResolvedValue(undefined);
     (window as unknown as { api: Record<string, unknown> }).api.submitFeedback = submitFeedbackSpy;
     (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
       .fn()
       .mockImplementation((threadId: string) => {
         if (threadId === 'thread-3') {
-          return new Promise<ChatMessage[]>((resolve) => {
-            resolveThread3Messages = resolve;
-          });
-        }
-        if (threadId === 'thread-3-new') {
+          thread3CallCount += 1;
+          if (thread3CallCount === 1) {
+            return new Promise<ChatMessage[]>((resolve) => {
+              resolveThread3Messages = resolve;
+            });
+          }
           return Promise.resolve([
             {
               localId: 't3-u1',
@@ -1381,10 +1541,10 @@ describe('App conversation switching with in-progress turn', () => {
             },
             {
               localId: 't3-a1',
-              serverId: 'post-migration-fresh-a1',
+              serverId: 'post-recreation-fresh-a1',
               role: 'assistant',
               content: 'Answer in thread 3',
-              rating: 1,
+              feedback: { rating: 1 },
               createdAt: '2026-08-01T12:00:05.000Z',
             },
           ]);
@@ -1395,10 +1555,10 @@ describe('App conversation switching with in-progress turn', () => {
     const { container } = render(<App />);
     await waitFor(() => expect(screen.getByText('Third Conversation')).toBeTruthy());
 
-    // Pre-migration server-ids on thread-3 MUST be cleared when thread-migrated fires
+    // Pre-recreation server-ids on thread-3 MUST be cleared when thread-recreated fires
     act(() => {
       for (const l of syncListeners) {
-        l({ kind: 'server-ids', threadId: 'thread-3', mapping: { 't3-u1': 'pre-migration-srv-u1' } });
+        l({ kind: 'server-ids', threadId: 'thread-3', mapping: { 't3-u1': 'pre-recreation-srv-u1' } });
       }
     });
 
@@ -1406,28 +1566,29 @@ describe('App conversation switching with in-progress turn', () => {
     fireEvent.click(screen.getByText('Third Conversation'));
     expect(resolveThread3Messages).toBeTypeOf('function');
 
-    const migratedT3: ThreadMeta = {
+    const recreatedT3: ThreadMeta = {
       ...t3,
-      id: 'thread-3-new',
+      id: 'thread-3',
+      remoteConversationId: 'remote-3-fresh',
       syncState: 'synced',
     };
-    storedThreads = [migratedT3, ...storedThreads.slice(1)];
+    storedThreads = [recreatedT3, ...storedThreads.slice(1)];
 
-    // Both thread-migrated AND post-migration server-ids arrive BEFORE getMessages('thread-3') resolves!
+    // Both thread-recreated AND post-recreation server-ids arrive BEFORE getMessages('thread-3') resolves!
     act(() => {
       for (const l of syncListeners) {
-        l({ kind: 'thread-migrated', oldThreadId: 'thread-3', thread: migratedT3 });
+        l({ kind: 'thread-recreated', thread: recreatedT3 });
       }
       for (const l of syncListeners) {
         l({
           kind: 'server-ids',
-          threadId: 'thread-3-new',
-          mapping: { 't3-a1': 'post-migration-fresh-a1' },
+          threadId: 'thread-3',
+          mapping: { 't3-a1': 'post-recreation-fresh-a1' },
         });
       }
     });
 
-    // Now getMessages('thread-3') resolves with pre-migration stale serverIds from disk
+    // Now getMessages('thread-3') resolves with pre-recreation stale serverIds from disk
     await act(async () => {
       resolveThread3Messages([
         {
@@ -1448,14 +1609,15 @@ describe('App conversation switching with in-progress turn', () => {
     });
 
     await waitFor(() => expect(screen.getByText('Answer in thread 3')).toBeTruthy());
-    expect(latestChatViewProps?.thread.id).toBe('thread-3-new');
-    // Stale disk serverIds AND pre-migration recentServerIds are cleared, while post-migration fresh serverId is preserved!
+    expect(latestChatViewProps?.thread.id).toBe('thread-3');
+    expect(latestChatViewProps?.thread.remoteConversationId).toBe('remote-3-fresh');
+    // Stale disk serverIds AND pre-recreation recentServerIds are cleared, while post-recreation fresh serverId is preserved!
     expect(latestChatViewProps?.messages.map((m) => m.serverId)).toEqual([
       undefined,
-      'post-migration-fresh-a1',
+      'post-recreation-fresh-a1',
     ]);
 
-    // Submitting message feedback on the assistant turn succeeds against thread-3-new and closes the dialog
+    // Submitting message feedback on the assistant turn succeeds against immutable thread-3 and closes the dialog
     const thumbsUpBtn = container.querySelector('.feedback .icon-button') as HTMLButtonElement;
     expect(thumbsUpBtn).not.toBeNull();
     fireEvent.click(thumbsUpBtn);
@@ -1463,13 +1625,53 @@ describe('App conversation switching with in-progress turn', () => {
 
     await waitFor(() => {
       expect(submitFeedbackSpy).toHaveBeenCalledWith({
-        threadId: 'thread-3-new',
+        threadId: 'thread-3',
         messageLocalId: 't3-a1',
         rating: 1,
         comment: undefined,
       });
     });
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Submit' })).toBeNull());
+  });
+
+  it('leaves App interactive without corrupting messagesByThread when openThread getMessages rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      (window as unknown as { api: Record<string, unknown> }).api.getMessages = vi
+        .fn()
+        .mockImplementation(async (threadId: string) => {
+          if (threadId === 'thread-1') {
+            throw new Error('Disk read error on thread-1');
+          }
+          return storedMessages[threadId] ?? [];
+        });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Open thread-2 first so messagesByThread['thread-2'] is loaded
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+
+      // Open thread-1 whose getMessages rejects
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => {
+        expect(warnSpy).toHaveBeenCalledWith('Failed to load messages:', expect.any(Error));
+      });
+
+      // App stays interactive on thread-1 with clean empty messages, and switching back to thread-2 works cleanly
+      expect(latestChatViewProps?.thread.id).toBe('thread-1');
+      expect(latestChatViewProps?.messages).toEqual([]);
+      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+      expect(textarea.disabled).toBe(false);
+
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
+      expect(latestChatViewProps?.thread.id).toBe('thread-2');
+      expect(latestChatViewProps?.messages.map((m) => m.localId)).toEqual(['t2-u1', 't2-a1']);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('discards stale slow openThread(thread-1) resolution after switching to fast thread-2 without evicting thread-2 messages', async () => {

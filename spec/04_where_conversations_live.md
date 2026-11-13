@@ -40,8 +40,8 @@ or lose the network mid-conversation.
   a conversation does not exist and this machine holds at least one cached message or waiting turn for
   it, the app creates a replacement conversation on the server — preserving its model, thinking level,
   multi-agent profile, and original creation desktop version (leaving older unversioned conversations
-  unversioned) — moves the local conversation, search index entry, and open composer draft seamlessly to
-  the replacement, and re-uploads every cached turn, rating, and desktop multi-agent trace in
+  unversioned) — links the local conversation seamlessly to the replacement without disturbing any open
+  composer draft, and re-uploads every cached turn, rating, and desktop multi-agent trace in
   chronological order. Deleting a conversation from the web app alone therefore causes a desktop machine
   that still holds its cached messages to recreate it on startup; deleting from the desktop app removes
   both copies.

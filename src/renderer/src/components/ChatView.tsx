@@ -225,7 +225,6 @@ function UsageLine({ usage }: { usage: UsageTotals }): React.JSX.Element {
 
 export function ChatView(props: {
   thread: ThreadMeta;
-  conversationKey?: string;
   settings: AppSettings;
   messages: ChatMessage[];
   prompts: McpPromptInfo[];
@@ -238,7 +237,6 @@ export function ChatView(props: {
 }): React.JSX.Element {
   const {
     thread,
-    conversationKey,
     settings,
     messages,
     prompts,
@@ -249,7 +247,6 @@ export function ChatView(props: {
     onPatchThread,
     onFeedback,
   } = props;
-  const effectiveThreadKey = conversationKey ?? thread.id;
   // Orchestrator mode replaces the single-playbook + model/thinking controls with a profile.
   const orchestratorActive = !!thread.orchestratorProfile;
   // Prototype profiles are hidden under the same setting as prototype playbooks. `profiles` stays
@@ -278,7 +275,7 @@ export function ChatView(props: {
   // THIS thread (see `activePrompt` below). Keying the override to the thread is what retires it on
   // a switch, so no render can show a previous conversation's pick.
   const [promptOverride, setPromptOverride] = useState<{
-    threadKey: string;
+    threadId: string;
     prompt: McpPromptInfo | null;
   } | null>(null);
   const [highlight, setHighlight] = useState(0);
@@ -299,8 +296,8 @@ export function ChatView(props: {
    * has since been superseded. Every run takes a ticket here and only acts if it still holds it.
    */
   const runIdRef = useRef(0);
-  const effectiveThreadKeyRef = useRef(effectiveThreadKey);
-  effectiveThreadKeyRef.current = effectiveThreadKey;
+  const threadIdRef = useRef(thread.id);
+  threadIdRef.current = thread.id;
 
   // When switching conversations, retire the transient cards and composer state.
   const isMac = typeof navigator !== 'undefined' && /Mac|darwin|iPhone|iPad/i.test(navigator.userAgent || '');
@@ -319,7 +316,7 @@ export function ChatView(props: {
     setLightboxImage(null);
     setIsDraggingOver(false);
     dragCounterRef.current = 0;
-  }, [effectiveThreadKey]);
+  }, [thread.id]);
 
   // Close image lightbox on Escape key.
   useEffect(() => {
@@ -356,7 +353,7 @@ export function ChatView(props: {
 
   const activePrompt = useMemo<McpPromptInfo | null>(() => {
     if (orchestratorActive) return null;
-    if (!isPlaybookLocked && promptOverride?.threadKey === effectiveThreadKey) return promptOverride.prompt;
+    if (!isPlaybookLocked && promptOverride?.threadId === thread.id) return promptOverride.prompt;
     if (initialUserPlaybook) {
       const messageVersion =
         initialUserMessage?.playbook?.trim() === initialUserPlaybook
@@ -383,7 +380,7 @@ export function ChatView(props: {
     orchestratorActive,
     isPlaybookLocked,
     promptOverride,
-    effectiveThreadKey,
+    thread.id,
     initialUserPlaybook,
     initialUserMessage,
     prompts,
@@ -584,7 +581,7 @@ export function ChatView(props: {
 
   const pickPrompt = (prompt: McpPromptInfo): void => {
     if (isPlaybookLocked) return;
-    setPromptOverride({ threadKey: effectiveThreadKey, prompt });
+    setPromptOverride({ threadId: thread.id, prompt });
     // Only the "/token" the autocomplete is completing gets consumed. The picker grid and the
     // refusal card are both reachable with a real question already typed, and that question is
     // the whole point of the turn — clearing it made the user retype it.
@@ -616,7 +613,7 @@ export function ChatView(props: {
     // make it the active one so the composer agrees with what was just asked.
     if (!isPlaybookLocked && promptName && promptName !== activePrompt?.name) {
       const matching = prompts.find((p) => p.name === promptName);
-      if (matching) setPromptOverride({ threadKey: effectiveThreadKey, prompt: matching });
+      if (matching) setPromptOverride({ threadId: thread.id, prompt: matching });
     }
     const effectivePromptName = isPlaybookLocked ? (activePrompt?.name ?? initialUserPlaybook) : promptName;
     if (!isPlaybookLocked && !orchestratorActive && !effectivePromptName) {
@@ -643,7 +640,7 @@ export function ChatView(props: {
    */
   const runPreflight = async (text: string, prompt: McpPromptInfo, imagesToSend?: ImageAttachment[]): Promise<void> => {
     const runId = ++runIdRef.current;
-    const runKey = effectiveThreadKey;
+    const runThreadId = thread.id;
     setChecking(true);
     setPreflight(null);
     let verdict: PlaybookValidation;
@@ -655,7 +652,7 @@ export function ChatView(props: {
     // Superseded — by a conversation switch or by a later run.
     if (
       runIdRef.current !== runId ||
-      effectiveThreadKeyRef.current !== runKey ||
+      threadIdRef.current !== runThreadId ||
       orchestratorActiveRef.current
     ) {
       return;
@@ -731,7 +728,7 @@ export function ChatView(props: {
     // Backspace on an empty draft clears the active playbook before any messages are sent.
     if (!isPlaybookLocked && e.key === 'Backspace' && draft === '' && activePrompt) {
       e.preventDefault();
-      setPromptOverride({ threadKey: effectiveThreadKey, prompt: null });
+      setPromptOverride({ threadId: thread.id, prompt: null });
       return;
     }
     if (!e.altKey && (e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -1189,7 +1186,7 @@ export function ChatView(props: {
                       data-tip="Remove playbook"
                       disabled={controlsDisabled}
                       onClick={() => {
-                        setPromptOverride({ threadKey: effectiveThreadKey, prompt: null });
+                        setPromptOverride({ threadId: thread.id, prompt: null });
                       }}
                     >
                       <CloseIcon size={11} />

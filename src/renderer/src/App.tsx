@@ -70,9 +70,8 @@ export default function App(): React.JSX.Element {
   const promptsCountRef = useRef(0);
   promptsCountRef.current = prompts.length;
   const initialPromptsLoadedRef = useRef(false);
-  const migratedIdsRef = useRef<Map<string, string>>(new Map());
-  const originIdByThreadRef = useRef<Map<string, string>>(new Map());
   const deletedIdsRef = useRef<Set<string>>(new Set());
+  const recreationEpochByThreadRef = useRef<Map<string, number>>(new Map());
   const recentServerIdsByThreadRef = useRef<Map<string, Record<string, string>>>(new Map());
 
   useEffect(() => {
@@ -80,16 +79,6 @@ export default function App(): React.JSX.Element {
     return () => {
       mountedRef.current = false;
     };
-  }, []);
-
-  const resolveThreadId = useCallback((id: string): string => {
-    let cur = id;
-    const visited = new Set<string>();
-    while (migratedIdsRef.current.has(cur) && !visited.has(cur)) {
-      visited.add(cur);
-      cur = migratedIdsRef.current.get(cur)!;
-    }
-    return cur;
   }, []);
 
   const overlayRecentServerIds = useCallback((threadId: string, msgs: ChatMessage[]): ChatMessage[] => {
@@ -122,23 +111,13 @@ export default function App(): React.JSX.Element {
       return false;
     }
     if (!mountedRef.current) return false;
-    setThreads((prev) => {
-      const byId = new Map<string, ThreadMeta>();
-      for (const p of prev) {
-        byId.set(p.id, p);
-      }
+    setThreads(() => {
       const seen = new Set<string>();
       const next: ThreadMeta[] = [];
       for (const raw of result.threads) {
-        const resolvedId = resolveThreadId(raw.id);
-        if (deletedIdsRef.current.has(raw.id) || deletedIdsRef.current.has(resolvedId)) continue;
-        if (seen.has(resolvedId)) continue;
-        seen.add(resolvedId);
-        if (resolvedId !== raw.id) {
-          next.push(byId.get(resolvedId) ?? { ...raw, id: resolvedId });
-        } else {
-          next.push(raw);
-        }
+        if (deletedIdsRef.current.has(raw.id) || seen.has(raw.id)) continue;
+        seen.add(raw.id);
+        next.push(raw);
       }
       threadsRef.current = next;
       return next;
@@ -165,7 +144,7 @@ export default function App(): React.JSX.Element {
         .catch(() => undefined);
     }
     return result.serverReachable;
-  }, [resolveThreadId]);
+  }, []);
 
   /**
    * The list plus the catalogues only the server can supply — skipped when it is not answering.
@@ -270,66 +249,52 @@ export default function App(): React.JSX.Element {
 
   const openThread = useCallback(
     async (threadId: string) => {
-      const initialTarget = resolveThreadId(threadId);
-      if (deletedIdsRef.current.has(threadId) || deletedIdsRef.current.has(initialTarget)) return;
-      activeThreadIdRef.current = initialTarget;
-      setActiveThreadId(initialTarget);
+      if (deletedIdsRef.current.has(threadId)) return;
+      activeThreadIdRef.current = threadId;
+      setActiveThreadId(threadId);
       // A finished turn's live state is only ever a leftover error or stop notice, and it is retired
       // by having been read rather than by the turn ending: the first open after a background failure
       // surfaces it and marks it read, the next one clears it. A running turn keeps everything —
       // surviving a switch is the whole point of per-thread live turns.
       setLiveTurnsByThread((prev) => {
-        const current = prev[initialTarget];
+        const current = prev[threadId];
         if (!current || current.running || (!current.error && !current.notice)) return prev;
-        return { ...prev, [initialTarget]: current.seen ? EMPTY_TURN : { ...current, seen: true } };
+        return { ...prev, [threadId]: current.seen ? EMPTY_TURN : { ...current, seen: true } };
       });
+      const epochAtStart = recreationEpochByThreadRef.current.get(threadId) ?? 0;
       let msgs: ChatMessage[];
       try {
-        msgs = await window.api.getMessages(initialTarget);
+        msgs = await window.api.getMessages(threadId);
       } catch (error) {
-        const resolvedAfterErr = resolveThreadId(initialTarget);
-        if (
-          mountedRef.current &&
-          !deletedIdsRef.current.has(threadId) &&
-          !deletedIdsRef.current.has(initialTarget) &&
-          !deletedIdsRef.current.has(resolvedAfterErr)
-        ) {
+        if (mountedRef.current && !deletedIdsRef.current.has(threadId)) {
           console.warn('Failed to load messages:', error);
         }
         return;
       }
-      const targetId = resolveThreadId(initialTarget);
       if (
         !mountedRef.current ||
         deletedIdsRef.current.has(threadId) ||
-        deletedIdsRef.current.has(initialTarget) ||
-        deletedIdsRef.current.has(targetId)
+        activeThreadIdRef.current !== threadId
       ) {
         return;
       }
-      if (activeThreadIdRef.current !== initialTarget && activeThreadIdRef.current !== targetId) {
-        return;
-      }
+      const currentEpoch = recreationEpochByThreadRef.current.get(threadId) ?? 0;
       const strippedMsgs =
-        targetId !== initialTarget ? msgs.map(({ serverId: _stale, ...rest }) => rest) : msgs;
-      const normalizedMsgs = overlayRecentServerIds(targetId, strippedMsgs);
-      if (activeThreadIdRef.current === initialTarget && targetId !== initialTarget) {
-        activeThreadIdRef.current = targetId;
-        setActiveThreadId(targetId);
-      }
+        currentEpoch !== epochAtStart ? msgs.map(({ serverId: _stale, ...rest }) => rest) : msgs;
+      const normalizedMsgs = overlayRecentServerIds(threadId, strippedMsgs);
       setMessagesByThread((prev) => {
-        // If a turn is currently running for this thread, prev[targetId] contains the in-flight
+        // If a turn is currently running for this thread, prev[threadId] contains the in-flight
         // user message which has not been written to disk yet. Avoid clobbering in-memory messages.
-        if (liveTurnsByThreadRef.current[targetId]?.running && (prev[targetId]?.length ?? 0) > 0) {
+        if (liveTurnsByThreadRef.current[threadId]?.running && (prev[threadId]?.length ?? 0) > 0) {
           return prev;
         }
         // Every open re-reads from disk, so a cached entry for a conversation nobody is looking at is
         // never read again — only the open thread and any with a turn still in flight are
         // load-bearing (the latter hold optimistic messages the store does not have yet). Holding the
         // rest would keep every transcript opened this session, tool results included, resident.
-        const next: Record<string, ChatMessage[]> = { [targetId]: normalizedMsgs };
+        const next: Record<string, ChatMessage[]> = { [threadId]: normalizedMsgs };
         for (const [id, cached] of Object.entries(prev)) {
-          if (id !== targetId && id !== initialTarget && liveTurnsByThreadRef.current[id]?.running) {
+          if (id !== threadId && liveTurnsByThreadRef.current[id]?.running) {
             next[id] = cached;
           }
         }
@@ -341,7 +306,7 @@ export default function App(): React.JSX.Element {
         let changed = false;
         const next = { ...prev };
         for (const [id, turn] of Object.entries(prev)) {
-          if (id === targetId) continue;
+          if (id === threadId) continue;
           if (!turn.running && !turn.error && !turn.notice && !turn.clarifyingQuestion && turn.blocks.length === 0) {
             delete next[id];
             changed = true;
@@ -350,7 +315,7 @@ export default function App(): React.JSX.Element {
         return changed ? next : prev;
       });
     },
-    [resolveThreadId, overlayRecentServerIds],
+    [overlayRecentServerIds],
   );
 
   useEffect(() => {
@@ -369,8 +334,7 @@ export default function App(): React.JSX.Element {
       pendingLiveByThread.clear();
       setLiveTurnsByThread((prev) => {
         const next = { ...prev };
-        for (const [rawId, { text, thinking }] of entries.entries()) {
-          const tId = resolveThreadId(rawId);
+        for (const [tId, { text, thinking }] of entries.entries()) {
           if (deletedIdsRef.current.has(tId)) continue;
           const current = next[tId] ?? EMPTY_TURN;
           next[tId] = {
@@ -401,11 +365,10 @@ export default function App(): React.JSX.Element {
 
     const offAgent = window.api.onAgentEvent((event: AgentEvent) => {
       if (!mountedRef.current) return;
-      const threadId = resolveThreadId(event.threadId);
-      if (deletedIdsRef.current.has(event.threadId) || deletedIdsRef.current.has(threadId)) return;
+      const { threadId } = event;
+      if (deletedIdsRef.current.has(threadId)) return;
       switch (event.kind) {
         case 'turn-start':
-          cancelFlushForThread(event.threadId);
           cancelFlushForThread(threadId);
           setLiveTurnsByThread((prev) => ({
             ...prev,
@@ -427,7 +390,6 @@ export default function App(): React.JSX.Element {
           break;
         }
         case 'assistant-block':
-          cancelFlushForThread(event.threadId);
           cancelFlushForThread(threadId);
           setLiveTurnsByThread((prev) => {
             const current = prev[threadId] ?? { running: true, liveText: '', liveThinking: '', blocks: [] };
@@ -464,7 +426,6 @@ export default function App(): React.JSX.Element {
           });
           break;
         case 'turn-complete': {
-          cancelFlushForThread(event.threadId);
           cancelFlushForThread(threadId);
           const onScreen = threadId === activeThreadIdRef.current;
           setLiveTurnsByThread((prev) => ({
@@ -485,7 +446,6 @@ export default function App(): React.JSX.Element {
           break;
         }
         case 'error': {
-          cancelFlushForThread(event.threadId);
           cancelFlushForThread(threadId);
           const onScreen = threadId === activeThreadIdRef.current;
           setLiveTurnsByThread((prev) => ({
@@ -503,7 +463,6 @@ export default function App(): React.JSX.Element {
         case 'review-enforced': {
           // Mirror the main process: the draft answer was discarded, so drop the prose already
           // streamed into the live view and keep only the delegation trace.
-          cancelFlushForThread(event.threadId);
           cancelFlushForThread(threadId);
           const notice =
             event.reason === 'skipped'
@@ -576,79 +535,60 @@ export default function App(): React.JSX.Element {
           void refreshThreads();
         }
       } else if (event.kind === 'server-ids') {
-        const resolvedId = resolveThreadId(event.threadId);
-        if (deletedIdsRef.current.has(event.threadId) || deletedIdsRef.current.has(resolvedId)) return;
+        if (deletedIdsRef.current.has(event.threadId)) return;
         const recentMap = recentServerIdsByThreadRef.current;
-        const existingRecent = recentMap.get(resolvedId);
-        recentMap.delete(resolvedId);
+        const existingRecent = recentMap.get(event.threadId);
+        recentMap.delete(event.threadId);
         if (recentMap.size >= MAX_RECENT_SERVER_ID_THREADS) {
           const oldestKey = recentMap.keys().next().value;
           if (oldestKey !== undefined) {
             recentMap.delete(oldestKey);
           }
         }
-        recentMap.set(resolvedId, { ...existingRecent, ...event.mapping });
+        recentMap.set(event.threadId, { ...existingRecent, ...event.mapping });
         setMessagesByThread((prev) => {
-          const targetKey = prev[resolvedId] ? resolvedId : event.threadId;
-          const msgs = prev[targetKey];
+          const msgs = prev[event.threadId];
           if (!msgs) return prev;
           return {
             ...prev,
-            [targetKey]: msgs.map((m) =>
+            [event.threadId]: msgs.map((m) =>
               event.mapping[m.localId] ? { ...m, serverId: event.mapping[m.localId] } : m,
             ),
           };
         });
-      } else if (event.kind === 'thread-migrated') {
-        const origin = originIdByThreadRef.current.get(event.oldThreadId) ?? event.oldThreadId;
-        originIdByThreadRef.current.set(event.thread.id, origin);
-        migratedIdsRef.current.set(event.oldThreadId, event.thread.id);
-        recentServerIdsByThreadRef.current.delete(event.oldThreadId);
+      } else if (event.kind === 'thread-recreated') {
+        if (deletedIdsRef.current.has(event.thread.id)) return;
         recentServerIdsByThreadRef.current.delete(event.thread.id);
-        cancelFlushForThread(event.oldThreadId);
-
-        setThreads((prev) => {
-          const hasNew = prev.some((t) => t.id === event.thread.id);
-          const hadOld = prev.some((t) => t.id === event.oldThreadId);
-          let next: ThreadMeta[];
-          if (hasNew) {
-            next = prev
-              .filter((t) => t.id !== event.oldThreadId)
-              .map((t) => (t.id === event.thread.id ? event.thread : t));
-          } else if (hadOld) {
-            next = prev.map((t) => (t.id === event.oldThreadId ? event.thread : t));
-          } else {
-            next = [event.thread, ...prev];
+        recreationEpochByThreadRef.current.set(
+          event.thread.id,
+          (recreationEpochByThreadRef.current.get(event.thread.id) ?? 0) + 1,
+        );
+        const upsertRecreated = (list: ThreadMeta[]): ThreadMeta[] => {
+          if (list.some((t) => t.id === event.thread.id)) {
+            return list.map((t) => (t.id === event.thread.id ? event.thread : t));
           }
+          return [...list, event.thread].sort((a, b) =>
+            (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
+          );
+        };
+        threadsRef.current = upsertRecreated(threadsRef.current);
+        setThreads((prev) => {
+          const next = upsertRecreated(prev);
           threadsRef.current = next;
           return next;
         });
-
         setMessagesByThread((prev) => {
-          const oldMsgs = prev[event.oldThreadId];
-          if (!oldMsgs) return prev;
-          const cleared = oldMsgs.map(({ serverId: _stale, ...rest }) => rest);
-          const next = { ...prev, [event.thread.id]: cleared };
-          delete next[event.oldThreadId];
-          return next;
+          const existing = prev[event.thread.id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [event.thread.id]: existing.map(({ serverId: _stale, ...rest }) => rest),
+          };
         });
-
-        setLiveTurnsByThread((prev) => {
-          if (!(event.oldThreadId in prev)) return prev;
-          const next = { ...prev, [event.thread.id]: prev[event.oldThreadId] };
-          delete next[event.oldThreadId];
-          return next;
-        });
-
-        if (activeThreadIdRef.current === event.oldThreadId) {
-          activeThreadIdRef.current = event.thread.id;
-          setActiveThreadId(event.thread.id);
-        }
       } else if (event.kind === 'thread-deleted') {
-        const resolvedDeletedId = resolveThreadId(event.threadId);
         deletedIdsRef.current.add(event.threadId);
         recentServerIdsByThreadRef.current.delete(event.threadId);
-        recentServerIdsByThreadRef.current.delete(resolvedDeletedId);
+        recreationEpochByThreadRef.current.delete(event.threadId);
         cancelFlushForThread(event.threadId);
         const remaining = threadsRef.current.filter((t) => t.id !== event.threadId);
         threadsRef.current = remaining;
@@ -686,7 +626,7 @@ export default function App(): React.JSX.Element {
       offAgent();
       offSync();
     };
-  }, [refreshThreads, openThread, resolveThreadId]);
+  }, [refreshThreads, openThread]);
 
   const createThread = useCallback(async () => {
     const thread = await window.api.createThread();
@@ -696,9 +636,8 @@ export default function App(): React.JSX.Element {
 
   const deleteThread = useCallback(
     async (threadId: string) => {
-      const resolvedId = resolveThreadId(threadId);
       try {
-        await window.api.deleteThread(resolvedId);
+        await window.api.deleteThread(threadId);
       } catch (error) {
         if (mountedRef.current) {
           console.warn('Failed to delete thread:', error);
@@ -706,40 +645,37 @@ export default function App(): React.JSX.Element {
         return;
       }
       deletedIdsRef.current.add(threadId);
-      deletedIdsRef.current.add(resolvedId);
       recentServerIdsByThreadRef.current.delete(threadId);
-      recentServerIdsByThreadRef.current.delete(resolvedId);
+      recreationEpochByThreadRef.current.delete(threadId);
       if (!mountedRef.current) return;
       setThreads((prev) => {
-        const next = prev.filter((t) => t.id !== threadId && t.id !== resolvedId);
+        const next = prev.filter((t) => t.id !== threadId);
         threadsRef.current = next;
         return next;
       });
       setMessagesByThread((prev) => {
         const next = { ...prev };
         delete next[threadId];
-        delete next[resolvedId];
         return next;
       });
       setLiveTurnsByThread((prev) => {
         const next = { ...prev };
         delete next[threadId];
-        delete next[resolvedId];
         return next;
       });
-      if (activeThreadIdRef.current === threadId || activeThreadIdRef.current === resolvedId) {
+      if (activeThreadIdRef.current === threadId) {
         activeThreadIdRef.current = null;
         setActiveThreadId(null);
       }
       await refreshThreads();
     },
-    [refreshThreads, resolveThreadId],
+    [refreshThreads],
   );
 
   const sendMessage = useCallback(
     async (text: string, promptName?: string, images?: ImageAttachment[]) => {
       if (!activeThreadId) return;
-      const threadId = resolveThreadId(activeThreadId);
+      const threadId = activeThreadId;
       if (deletedIdsRef.current.has(threadId)) return;
       const userMessage: ChatMessage = {
         localId: `optimistic-${Date.now()}`,
@@ -761,29 +697,27 @@ export default function App(): React.JSX.Element {
         await window.api.sendMessage({ threadId, text, promptName, images });
       } catch (error) {
         if (!mountedRef.current) return;
-        const currentId = resolveThreadId(threadId);
         // The question never reached the agent, so the card that was posted ahead of it has to go
         // with it — otherwise a rejected send (an attachment the main-process validator refuses,
         // say) leaves a message standing in the transcript that nothing will ever answer.
         setMessagesByThread((prev) => ({
           ...prev,
-          [currentId]: (prev[currentId] ?? []).filter((m) => m.localId !== userMessage.localId),
+          [threadId]: (prev[threadId] ?? []).filter((m) => m.localId !== userMessage.localId),
         }));
         setLiveTurnsByThread((prev) => ({
           ...prev,
-          [currentId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },
+          [threadId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },
         }));
         await refreshThreads();
       }
     },
-    [activeThreadId, refreshThreads, resolveThreadId],
+    [activeThreadId, refreshThreads],
   );
 
   const patchThread = useCallback(
     async (threadId: string, update: Partial<ThreadMeta>) => {
-      const resolvedId = resolveThreadId(threadId);
       try {
-        await window.api.patchThread(resolvedId, update);
+        await window.api.patchThread(threadId, update);
       } catch (error) {
         if (mountedRef.current) {
           console.warn('Failed to patch thread:', error);
@@ -792,16 +726,13 @@ export default function App(): React.JSX.Element {
         await refreshThreads();
       }
     },
-    [refreshThreads, resolveThreadId],
+    [refreshThreads],
   );
 
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
   );
-  const activeConversationKey = activeThread
-    ? (originIdByThreadRef.current.get(activeThread.id) ?? activeThread.id)
-    : undefined;
 
   // Density and answer type size are two CSS variables, so they belong on the document root
   // rather than threaded through every component that reads them. (Theme is not here: it comes
@@ -904,7 +835,6 @@ export default function App(): React.JSX.Element {
         ) : activeThread ? (
           <ChatView
             thread={activeThread}
-            conversationKey={activeConversationKey}
             settings={settings}
             messages={messages}
             prompts={visiblePrompts}
@@ -913,33 +843,35 @@ export default function App(): React.JSX.Element {
             onSend={sendMessage}
             onInterrupt={() => {
               if (activeThreadId) {
-                void window.api.interrupt(resolveThreadId(activeThreadId));
+                void window.api.interrupt(activeThreadId);
               }
             }}
             onPatchThread={(update) => void patchThread(activeThread.id, update)}
             onFeedback={async (messageLocalId, rating, comment) => {
-              const targetId = resolveThreadId(activeThread.id);
+              const targetId = activeThread.id;
               await window.api.submitFeedback({
                 threadId: targetId,
                 messageLocalId,
                 rating,
                 comment,
               });
-              const latestId = resolveThreadId(targetId);
-              if (!mountedRef.current || deletedIdsRef.current.has(latestId)) return;
-              const updated = await window.api.getMessages(latestId);
-              const storeKey = resolveThreadId(latestId);
+              if (!mountedRef.current || deletedIdsRef.current.has(targetId)) return;
+              const epochAtStart = recreationEpochByThreadRef.current.get(targetId) ?? 0;
+              const updated = await window.api.getMessages(targetId);
               if (
                 !mountedRef.current ||
-                deletedIdsRef.current.has(storeKey) ||
-                (activeThreadIdRef.current !== latestId && activeThreadIdRef.current !== storeKey)
+                deletedIdsRef.current.has(targetId) ||
+                activeThreadIdRef.current !== targetId
               ) {
                 return;
               }
+              const currentEpoch = recreationEpochByThreadRef.current.get(targetId) ?? 0;
               const stripped =
-                storeKey !== latestId ? updated.map(({ serverId: _stale, ...rest }) => rest) : updated;
-              const overlaid = overlayRecentServerIds(storeKey, stripped);
-              setMessagesByThread((prev) => ({ ...prev, [storeKey]: overlaid }));
+                currentEpoch !== epochAtStart
+                  ? updated.map(({ serverId: _stale, ...rest }) => rest)
+                  : updated;
+              const overlaid = overlayRecentServerIds(targetId, stripped);
+              setMessagesByThread((prev) => ({ ...prev, [targetId]: overlaid }));
             }}
           />
         ) : (

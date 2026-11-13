@@ -334,6 +334,10 @@ describe('spec/ modular structure', () => {
     expect(whereConversationsLive).toContain(
       'A conversation missing on the server is recreated whenever local messages exist.',
     );
+    expect(whereConversationsLive).toContain(
+      'links the local conversation seamlessly to the replacement without disturbing any open composer draft',
+    );
+    expect(whereConversationsLive).not.toContain('moves the local conversation');
     expect(whereConversationsLive).toContain('Deleting a conversation from the web app alone');
     expect(whereConversationsLive).toContain(
       'A turn the server rejects as invalid is set aside for the session and retried once on the next launch.',
@@ -447,7 +451,7 @@ describe('spec/ modular structure', () => {
         doc,
         `${name} must remain pure functional specification prose without internal code/HTTP identifiers`,
       ).not.toMatch(
-        /\b(AppCore|ThreadStore|SyncClient|SyncQueue|reconcileWithRemote|serverId|localId|desktopVersion|404|4xx)\b|GET \/conversations|\.jsonl\b/,
+        /\b(AppCore|ThreadStore|SyncClient|SyncQueue|reconcileWithRemote|remoteConversationId|serverId|localId|desktopVersion|404|4xx)\b|GET \/conversations|\.jsonl\b/,
       );
     }
   });

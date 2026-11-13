@@ -3600,7 +3600,6 @@ describe('Wave 2: Startup Conversation & Message Sync Recovery', () => {
           e.thread.remoteConversationId === 'new-orch',
       ),
     ).toBe(true);
-    expect(syncEvents.some((e) => e.kind === 'thread-migrated')).toBe(false);
     expect(runSpy.mock.calls[0][0].conversationId).toBe('new-orch');
 
     // Verify Part B (legacy-old -> remoteConversationId: 'mid-leg'): custom title 'OIM Sizing' kept, desktopVersion OMITTED (never stamped with 1.3.1!)
