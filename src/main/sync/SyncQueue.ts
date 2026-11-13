@@ -14,7 +14,7 @@ export interface QueuedTurn {
 }
 
 export type HeldThreadResolution = 'ready' | 'deferred';
-export type MissingConversationResolution = 'migrated' | 'recreated' | 'deferred' | 'retry' | 'drop';
+export type MissingConversationResolution = 'recreated' | 'deferred' | 'retry' | 'drop';
 
 export interface SyncQueueDeps {
   client: SyncClient;
@@ -241,26 +241,6 @@ export class SyncQueue {
       }));
   }
 
-  replaceThreadTurns(threadId: string, turns: readonly QueuedTurn[]): void {
-    let insertAt = this.queue.findIndex((t) => t.threadId === threadId && t !== this.flushing);
-    this.queue = this.queue.filter((t) => t.threadId !== threadId || t === this.flushing);
-    if (turns.length > 0) {
-      const normalized = turns.map((t) => ({
-        threadId,
-        localIds: [...t.localIds],
-        messages: [...t.messages],
-        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
-        attempts: t.attempts ?? 0,
-      }));
-      if (insertAt < 0 || insertAt > this.queue.length) {
-        insertAt = this.queue.length;
-      }
-      this.queue.splice(insertAt, 0, ...normalized);
-      this.enforceQueueCap();
-    }
-    this.persist();
-  }
-
   /**
    * Reconciles queued turns for `threadId` safely against in-flight `this.flushing` and any
    * `postSnapshot` turns enqueued concurrently after `inspectedLocalIds` was snapshotted.
@@ -328,44 +308,6 @@ export class SyncQueue {
     this.persist();
     if (this.flushPromise && this.pendingCount(threadId) > 0 && !this.heldThreads.has(threadId)) {
       this.flushRequested = true;
-    }
-  }
-
-  migrateThread(oldId: string, newId: string, replacementTurns?: readonly QueuedTurn[]): void {
-    this.heldThreads.delete(oldId);
-    if (oldId === newId && !replacementTurns) return;
-
-    if (replacementTurns !== undefined) {
-      let insertAt = this.queue.findIndex((t) => t.threadId === oldId && t !== this.flushing);
-      this.queue = this.queue.filter((t) => t.threadId !== oldId || t === this.flushing);
-      const normalized = replacementTurns.map((t) => ({
-        threadId: newId,
-        localIds: [...t.localIds],
-        messages: [...t.messages],
-        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
-        attempts: 0,
-      }));
-      if (insertAt < 0 || insertAt > this.queue.length) {
-        insertAt = this.queue.length;
-      }
-      if (normalized.length > 0) {
-        this.queue.splice(insertAt, 0, ...normalized);
-        this.enforceQueueCap();
-      }
-      this.persist();
-      return;
-    }
-
-    let changed = false;
-    for (const item of this.queue) {
-      if (item.threadId === oldId) {
-        item.threadId = newId;
-        item.attempts = 0;
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.persist();
     }
   }
 
@@ -494,7 +436,7 @@ export class SyncQueue {
           if (this.disposed) {
             return 'completed';
           }
-          if (outcome === 'migrated' || outcome === 'recreated') {
+          if (outcome === 'recreated') {
             continue;
           }
           if (outcome === 'deferred') {

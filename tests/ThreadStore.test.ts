@@ -564,117 +564,6 @@ describe('ThreadStore', () => {
       expect(complete).toEqual({ hasUnsynced: false });
     });
 
-    it('migrateThread moves .jsonl and images/<oldId> -> <newId>, strips stale serverIds, preserves feedback + extraMessages, and updates index.json', async () => {
-      store.upsert({ ...meta('old-id'), sessionId: 'sess-1', hasStarted: true });
-      await store.appendMessages('old-id', [
-        { ...message('u1', 'user'), images: [sampleImage('img-1')] },
-        message('a1', 'assistant', { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
-      ]);
-      await store.applyServerIds('old-id', { u1: 'stale-srv-u1', a1: 'stale-srv-a1' });
-      await store.setFeedback('old-id', 'a1', 1, 'helpful');
-
-      const newThreadMeta: ThreadMeta = {
-        ...meta('new-id'),
-        sessionId: 'sess-1',
-        hasStarted: true,
-        syncState: 'pending',
-      };
-      const extra: StoredChatMessage[] = [
-        { localId: 'a1', role: 'assistant', content: 'duplicate-ignored', createdAt: '2026-06-10T10:01:00Z' },
-        { localId: 'u2', role: 'user', content: 'queue-only-question', createdAt: '2026-06-10T10:02:00Z', serverId: 'stale-u2' },
-      ];
-
-      await store.migrateThread('old-id', newThreadMeta, extra);
-
-      expect(store.get('old-id')).toBeUndefined();
-      expect(store.get('new-id')?.sessionId).toBe('sess-1');
-      expect(fs.existsSync(path.join(dir, 'old-id.jsonl'))).toBe(false);
-      expect(fs.existsSync(path.join(dir, 'images', 'old-id'))).toBe(false);
-      expect(fs.existsSync(path.join(dir, 'new-id.jsonl'))).toBe(true);
-      expect(fs.existsSync(path.join(dir, 'images', 'new-id'))).toBe(true);
-
-      const rawMigrated = await store.readRawMessages('new-id');
-      expect(rawMigrated.map((m) => m.localId)).toEqual(['u1', 'a1', 'u2']);
-      expect(rawMigrated.every((m) => m.serverId === undefined)).toBe(true);
-      expect(rawMigrated[0].images?.[0].file).toBeTruthy();
-      expect(rawMigrated[1].feedback).toEqual({ rating: 1, comment: 'helpful' });
-
-      const hydratedMigrated = await store.readMessages('new-id');
-      expect(hydratedMigrated[0].images?.[0].data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
-
-      const reopened = new ThreadStore(dir);
-      expect(reopened.get('old-id')).toBeUndefined();
-      expect(reopened.get('new-id')?.id).toBe('new-id');
-    });
-
-    it('migrateThread succeeds when threads/images/<oldId> does not exist', async () => {
-      store.upsert(meta('no-img-old'));
-      await store.appendMessages('no-img-old', [message('u1', 'user')]);
-      await store.migrateThread('no-img-old', meta('no-img-new'));
-
-      expect(store.get('no-img-old')).toBeUndefined();
-      expect((await store.readMessages('no-img-new')).map((m) => m.localId)).toEqual(['u1']);
-    });
-
-    it('migrateThread falls back to recursive copy + rm when rename throws EXDEV', async () => {
-      store.upsert(meta('exdev-old'));
-      await store.appendMessages('exdev-old', [{ ...message('u1', 'user'), images: [sampleImage('img-exdev')] }]);
-
-      const origRename = fsp.rename.bind(fsp);
-      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementation(async (oldPath, newPath) => {
-        if (String(oldPath).includes(`${path.sep}images${path.sep}`)) {
-          throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
-        }
-        return origRename(oldPath, newPath);
-      });
-
-      try {
-        await store.migrateThread('exdev-old', meta('exdev-new'));
-      } finally {
-        renameSpy.mockRestore();
-      }
-
-      expect(fs.existsSync(path.join(dir, 'images', 'exdev-old'))).toBe(false);
-      expect(fs.existsSync(path.join(dir, 'images', 'exdev-new'))).toBe(true);
-      const msgs = await store.readMessages('exdev-new');
-      expect(msgs[0].images?.[0].data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
-    });
-
-    it('migrateThread preserves <oldId>.jsonl, images/<oldId>, and index.json if <newId>.jsonl write fails', async () => {
-      store.upsert(meta('atomic-old'));
-      await store.appendMessages('atomic-old', [{ ...message('u1', 'user'), images: [sampleImage('img-atomic')] }]);
-
-      const origWriteFile = fsp.writeFile.bind(fsp);
-      const writeSpy = vi.spyOn(fsp, 'writeFile').mockImplementation(async (target, data, opts) => {
-        if (String(target).includes('atomic-new.jsonl')) {
-          throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
-        }
-        return origWriteFile(target, data, opts as BufferEncoding);
-      });
-
-      try {
-        await expect(store.migrateThread('atomic-old', meta('atomic-new'))).rejects.toThrow(/ENOSPC/);
-      } finally {
-        writeSpy.mockRestore();
-      }
-
-      expect(fs.existsSync(path.join(dir, 'atomic-old.jsonl'))).toBe(true);
-      expect(fs.existsSync(path.join(dir, 'images', 'atomic-old'))).toBe(true);
-      expect(store.get('atomic-old')?.id).toBe('atomic-old');
-      expect(store.get('atomic-new')).toBeUndefined();
-      expect((await store.readMessages('atomic-old')).map((m) => m.localId)).toEqual(['u1']);
-    });
-
-    it('rejects self-migration (oldId === newMeta.id) without deleting <sameId>.jsonl or images', async () => {
-      store.upsert(meta('same-id'));
-      await store.appendMessages('same-id', [{ ...message('u1', 'user'), images: [sampleImage('img-same')] }]);
-
-      await expect(store.migrateThread('same-id', meta('same-id'))).rejects.toThrow(/same/i);
-      expect(fs.existsSync(path.join(dir, 'same-id.jsonl'))).toBe(true);
-      expect(fs.existsSync(path.join(dir, 'images', 'same-id'))).toBe(true);
-      expect(store.get('same-id')?.id).toBe('same-id');
-    });
-
     it('rejects tainted non-string / empty / traversal threadIds (including null & undefined without coercion)', async () => {
       // Seed literal "null" and "undefined" threads to prove null/undefined never coerce to strings!
       store.upsert(meta('null'));
@@ -685,8 +574,7 @@ describe('ThreadStore', () => {
         expect(() => store.delete(bad as string)).toThrow(/Invalid threadId/);
         await expect(store.readRawMessages(bad as string)).rejects.toThrow(/Invalid threadId/);
         await expect(store.applyServerIds(bad as string, {})).rejects.toThrow(/Invalid threadId/);
-        await expect(store.migrateThread(bad as string, meta('valid-target'))).rejects.toThrow(/Invalid threadId/);
-        await expect(store.migrateThread('null', { ...meta('valid-target'), id: bad as string })).rejects.toThrow(
+        await expect(store.prepareForRecreation(bad as string, meta('valid-target'), {})).rejects.toThrow(
           /Invalid threadId/,
         );
       }

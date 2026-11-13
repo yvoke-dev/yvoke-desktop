@@ -809,10 +809,12 @@ describe('End-to-End Web Communication Contract (AppCore + SyncQueue + SyncClien
       expect(stripMeta(backfillServerPair)).toEqual(stripMeta(liveServerPair));
       expect(stripMeta(recreatedServerPair)).toEqual(stripMeta(liveServerPair));
 
-      // Verify IPC main/index.ts chatInterrupt contract routes oldId -> recreatedConv.id through appCore.interrupt
+      // Verify local threadId remains immutable (with remoteConversationId pointing at recreatedConv.id)
+      // and IPC main/index.ts chatInterrupt routes immutable local threadId through appCore.interrupt
+      expect(appCore2.threads.get(backfillConv.id)?.remoteConversationId).toBe(recreatedConv.id);
       const interruptSpy = vi.spyOn(appCore2.agent, 'interrupt').mockResolvedValue(undefined);
       await appCore2.interrupt(backfillConv.id);
-      expect(interruptSpy).toHaveBeenCalledWith(recreatedConv.id);
+      expect(interruptSpy).toHaveBeenCalledWith(backfillConv.id);
 
       const mainSource = fs.readFileSync(
         path.resolve(__dirname, '../src/main/index.ts'),

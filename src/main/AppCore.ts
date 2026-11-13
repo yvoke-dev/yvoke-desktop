@@ -26,11 +26,13 @@ import type {
 } from '../shared/types';
 import {
   ALLOWED_IMAGE_MEDIA_TYPES,
+  assertValidThreadId,
   controlPlaybookNames,
   DEFAULT_ORCHESTRATOR_SETTINGS,
   isPlaybookValidationExcluded,
   isThreadStarted,
   isUserSelectablePlaybook,
+  isValidThreadId,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_COUNT,
   MAX_TOTAL_IMAGE_BYTES,
@@ -49,7 +51,7 @@ import { ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
 import { SettingsStore } from './settings/Settings';
 import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore, type StoredChatMessage } from './store/ThreadStore';
-import { parseStoredContent } from './store/messageCodec';
+import { decodeQueuedMessagePayload, parseStoredContent } from './store/messageCodec';
 import { SyncApiError, SyncClient, type ConversationDto, type MessageDto } from './sync/SyncClient';
 import {
   SyncQueue,
@@ -59,6 +61,7 @@ import {
 } from './sync/SyncQueue';
 import {
   buildAllTurnsForRecreation,
+  countUnqueuedLocalTurns,
   formatSyncedUserContent,
   reconcileWithRemote,
   reconstructOrphanThreadMeta,
@@ -86,7 +89,7 @@ function isPlaceholderTitle(title: string | null | undefined): boolean {
   return PLACEHOLDER_TITLES.has(trimmed.toLowerCase());
 }
 
-type ReconcileOutcome = 'ready' | 'migrated' | 'deferred' | 'pruned' | 'halt' | 'error';
+type ReconcileOutcome = 'ready' | 'recreated' | 'deferred' | 'pruned' | 'halt' | 'error';
 
 interface DeferredRecoveryTrace {
   conversationId: string;
@@ -241,16 +244,23 @@ export class AppCore {
   private disposed = false;
   private localScanPromise: Promise<void> | null = null;
   private localScanCompleted = false;
+  private readonly postListContinuations = new Set<Promise<void>>();
+  private readonly initialIndexedIds: ReadonlySet<string>;
+  private readonly newlyInsertedOrphans = new Set<string>();
+  private readonly enrichedOrphans = new Set<string>();
+  private readonly notifiedScanOrphans = new Set<string>();
+  private readonly startupDirtyThreads = new Set<string>();
+  private readonly sessionEnqueuedLocalIds = new Set<string>();
+  private readonly lastAttemptedRemoteByThread = new Map<string, string>();
   private readonly threadsWithLocalMessages = new Set<string>();
   private readonly threadsWithUnsyncedMessages = new Set<string>();
   private readonly unqueuedStartupTurnsByThread = new Map<string, number>();
   private readonly verifiedOffPageThreads = new Set<string>();
-  private readonly migratedThreadMap = new Map<string, string>();
   private readonly deletingOrDeletedThreads = new Set<string>();
   private readonly sessionTouchedThreads = new Set<string>();
   private readonly sweepSparedThreads = new Set<string>();
   private readonly sessionDroppedLocalIds = new Set<string>();
-  private readonly deferredMissingMigrationThreads = new Set<string>();
+  private readonly deferredMissingRecreationThreads = new Set<string>();
   private readonly reconcileInFlight = new Map<string, Promise<ReconcileOutcome>>();
   private recoveryPromise: Promise<void> | null = null;
   private pendingRecoveryServerIds: ReadonlySet<string> | null = null;
@@ -268,22 +278,30 @@ export class AppCore {
     for (const line of webAccessDiagnostics(this.settings.get())) log('web', line);
     const threadsDir = path.join(deps.userDataDir, 'threads');
     this.threads = new ThreadStore(threadsDir);
+    this.initialIndexedIds = new Set(this.threads.list().map((t) => t.id));
     this.searchIndex = new SearchIndex(threadsDir, path.join(deps.userDataDir, 'search-index.json'));
     this.serverAuth = new ServerAuth(() => this.settings.get(), deps.tokenCache, deps.openBrowser);
     this.syncClient = new SyncClient({
       getBaseUrl: () => this.settings.get().serverBaseUrl,
       getToken: (force) => this.serverAuth.getAccessToken(force),
     });
+    const syncQueueClient = {
+      appendMessages: (
+        threadId: string,
+        messages: Parameters<SyncClient['appendMessages']>[1],
+      ) => {
+        const targetRemoteId = this.remoteIdFor(threadId);
+        this.lastAttemptedRemoteByThread.set(threadId, targetRemoteId);
+        return this.syncClient.appendMessages(targetRemoteId, messages);
+      },
+    } as SyncClient;
     this.syncQueue = new SyncQueue({
-      client: this.syncClient,
+      client: syncQueueClient,
       file: path.join(deps.userDataDir, 'sync-queue.json'),
       emit: (event) => {
         if (event.kind === 'sync-state') {
-          const resolvedId = this.isValidThreadId(event.threadId)
-            ? this.resolveThreadId(event.threadId)
-            : event.threadId;
-          if (this.isValidThreadId(resolvedId)) {
-            this.threads.setSyncState(resolvedId, event.state);
+          if (isValidThreadId(event.threadId)) {
+            this.threads.setSyncState(event.threadId, event.state);
           }
           if (event.state === 'error' && !event.dropped) {
             this.flushHitBackoff = true;
@@ -305,23 +323,30 @@ export class AppCore {
       },
     });
 
-    // Scoped startup hold: ONLY hold pre-existing startup thread IDs (never newly created ones).
-    const startupHoldIds = new Set<string>();
+    // Purge any tombstoned or malformed thread IDs from sync-queue.json FIRST so deleted
+    // conversations never hold SyncQueue, inflate pendingSyncCount, or probe the server.
     for (const qid of this.syncQueue.queuedThreadIds()) {
-      if (this.isValidThreadId(qid)) {
-        startupHoldIds.add(qid);
+      if (!isValidThreadId(qid) || this.threads.isDeleted(qid)) {
+        this.syncQueue.removeThread(qid);
       }
     }
-    try {
-      for (const file of fs.readdirSync(threadsDir)) {
-        if (!file.endsWith('.jsonl')) continue;
-        const id = file.slice(0, -'.jsonl'.length);
-        if (this.isValidThreadId(id)) {
-          startupHoldIds.add(id);
+
+    // Scoped startup hold & dirty set: strictly surviving startup SyncQueue threads and non-tombstoned .jsonl files.
+    const { nonEmptyIds, allLogIds } = this.threads.inspectLogsSync();
+    for (const id of nonEmptyIds) {
+      this.threadsWithLocalMessages.add(id);
+    }
+    const startupHoldIds = new Set<string>();
+    for (const qid of this.syncQueue.queuedThreadIds()) {
+      if (isValidThreadId(qid)) {
+        startupHoldIds.add(qid);
+        if (this.syncQueue.pendingCount(qid) > 0) {
+          this.startupDirtyThreads.add(qid);
         }
       }
-    } catch {
-      // Missing threads directory on first launch — nothing to hold.
+    }
+    for (const id of allLogIds) {
+      startupHoldIds.add(id);
     }
     if (startupHoldIds.size > 0) {
       this.syncQueue.holdThreads(startupHoldIds);
@@ -347,9 +372,8 @@ export class AppCore {
         }
       },
       onSessionId: (threadId, sessionId, profile) => {
-        const resolvedId = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
-        if (this.isValidThreadId(resolvedId)) {
-          this.threads.setSessionId(resolvedId, sessionId, profile);
+        if (isValidThreadId(threadId)) {
+          this.threads.setSessionId(threadId, sessionId, profile);
         }
       },
       onTurnPersist: (threadId, userMessage, assistantMessage) =>
@@ -368,24 +392,9 @@ export class AppCore {
       .catch((err) => logError('search', `index sweep failed: ${err instanceof Error ? err.message : String(err)}`));
   }
 
-  private isValidThreadId(threadId: unknown): threadId is string {
-    return typeof threadId === 'string' && threadId.length > 0 && /^[a-zA-Z0-9\-_]+$/.test(threadId);
-  }
-
-  private assertValidThreadId(threadId: unknown): asserts threadId is string {
-    if (!this.isValidThreadId(threadId)) {
-      throw new Error(`Invalid threadId: ${String(threadId)}`);
-    }
-  }
-
-  private resolveThreadId(threadId: string): string {
-    let current = threadId;
-    const visited = new Set<string>();
-    while (this.migratedThreadMap.has(current) && !visited.has(current)) {
-      visited.add(current);
-      current = this.migratedThreadMap.get(current)!;
-    }
-    return current;
+  private remoteIdFor(threadId: string): string {
+    const remoteId = this.threads.get(threadId)?.remoteConversationId;
+    return typeof remoteId === 'string' && isValidThreadId(remoteId) ? remoteId : threadId;
   }
 
   private unqueuedStartupTurnsTotal(): number {
@@ -402,27 +411,32 @@ export class AppCore {
 
   /** Wait for any in-flight startup scan, recovery, or once-per-launch empty sweep to settle. */
   async waitForStartupTasks(): Promise<void> {
-    while (this.localScanPromise || this.recoveryPromise || this.emptySweepPromise) {
+    while (
+      this.localScanPromise ||
+      this.postListContinuations.size > 0 ||
+      this.recoveryPromise ||
+      this.emptySweepPromise
+    ) {
       await Promise.all([
         this.localScanPromise ?? Promise.resolve(),
+        Promise.all(Array.from(this.postListContinuations)),
         this.recoveryPromise ?? Promise.resolve(),
         this.emptySweepPromise ?? Promise.resolve(),
       ]);
     }
   }
 
-  private async onAgentTurnSettled(rawThreadId: string): Promise<void> {
-    if (this.disposed || !this.isValidThreadId(rawThreadId)) return;
-    const threadId = this.resolveThreadId(rawThreadId);
+  private async onAgentTurnSettled(threadId: string): Promise<void> {
+    if (this.disposed || !isValidThreadId(threadId)) return;
     const tail = this.persistTails.get(threadId);
     if (tail) {
       await tail;
     }
     if (this.disposed || this.agent.isBusy(threadId)) return;
 
-    if (this.deferredMissingMigrationThreads.has(threadId)) {
+    if (this.deferredMissingRecreationThreads.has(threadId)) {
       const outcome = await this.reconcileSingleThread(threadId, { knownMissing: true });
-      if (!this.disposed && outcome === 'migrated' && this.syncQueue.pendingCount() > 0) {
+      if (!this.disposed && outcome === 'recreated' && this.syncQueue.pendingCount() > 0) {
         await this.syncQueue.flush();
       }
       return;
@@ -454,75 +468,85 @@ export class AppCore {
           const idx = cursor++;
           if (idx >= logIds.length) return;
           const id = logIds[idx];
-          if (this.deletingOrDeletedThreads.has(id) || this.migratedThreadMap.has(id)) {
+          if (this.deletingOrDeletedThreads.has(id) || this.threads.isDeleted(id)) {
             continue;
           }
           const raw = await this.threads.readRawMessages(id);
-          if (this.disposed || this.deletingOrDeletedThreads.has(id) || this.migratedThreadMap.has(id)) {
-            continue;
-          }
-          if (raw.length === 0) {
+          if (
+            this.disposed ||
+            this.deletingOrDeletedThreads.has(id) ||
+            this.threads.isDeleted(id) ||
+            raw.length === 0
+          ) {
             continue;
           }
           this.threadsWithLocalMessages.add(id);
 
-          if (!this.threads.get(id)) {
+          const excluded = new Set<string>([
+            ...this.sessionDroppedLocalIds,
+            ...this.sessionEnqueuedLocalIds,
+          ]);
+          const queuedTurns = this.syncQueue.getQueuedTurns(id);
+          const unqueuedTurns = countUnqueuedLocalTurns(raw, queuedTurns, excluded);
+          const anyPreExistingUnsynced = raw.some((m) => !m.serverId && !excluded.has(m.localId));
+
+          if (anyPreExistingUnsynced || unqueuedTurns > 0) {
+            this.threadsWithUnsyncedMessages.add(id);
+            this.startupDirtyThreads.add(id);
+          }
+          if (unqueuedTurns > 0) {
+            this.unqueuedStartupTurnsByThread.set(id, unqueuedTurns);
+          }
+
+          const existing = this.threads.get(id);
+          if (!existing) {
             const reconstructed = reconstructOrphanThreadMeta({
               threadId: id,
               messages: raw,
               defaultModel: settings.defaultModel,
               defaultThinkingLevel: settings.defaultThinkingLevel,
             });
-            if (reconstructed) {
-              this.threads.upsert(reconstructed);
-            }
-          }
-
-          let lastSyncedIdx = -1;
-          let anyUnsynced = false;
-          for (let i = 0; i < raw.length; i += 1) {
-            if (raw[i].serverId) {
-              lastSyncedIdx = i;
-            } else if (!this.sessionDroppedLocalIds.has(raw[i].localId)) {
-              anyUnsynced = true;
-            }
-          }
-          if (anyUnsynced) {
-            this.threadsWithUnsyncedMessages.add(id);
-          }
-
-          const queuedIds = new Set(this.syncQueue.getQueuedTurns(id).flatMap((t) => t.localIds));
-          let unqueuedTurns = 0;
-          let mIdx = lastSyncedIdx + 1;
-          while (mIdx < raw.length) {
-            const cur = raw[mIdx];
-            if (cur.serverId) {
-              mIdx += 1;
-              continue;
-            }
             if (
-              mIdx + 1 < raw.length &&
-              cur.role === 'user' &&
-              raw[mIdx + 1].role === 'assistant' &&
-              !raw[mIdx + 1].serverId
+              reconstructed &&
+              !this.deletingOrDeletedThreads.has(id) &&
+              !this.threads.isDeleted(id)
             ) {
-              const pairIds = [cur.localId, raw[mIdx + 1].localId];
-              if (
-                !pairIds.some((lid) => queuedIds.has(lid) || this.sessionDroppedLocalIds.has(lid))
-              ) {
-                unqueuedTurns += 1;
+              if (!anyPreExistingUnsynced && unqueuedTurns === 0 && this.syncQueue.pendingCount(id) === 0) {
+                reconstructed.syncState = 'synced';
               }
-              mIdx += 2;
-              continue;
+              this.threads.upsert(reconstructed);
+              this.newlyInsertedOrphans.add(id);
             }
-            if (!queuedIds.has(cur.localId) && !this.sessionDroppedLocalIds.has(cur.localId)) {
-              unqueuedTurns += 1;
+          } else if (!this.initialIndexedIds.has(id)) {
+            const reconstructed = reconstructOrphanThreadMeta({
+              threadId: id,
+              messages: raw,
+              defaultModel: settings.defaultModel,
+              defaultThinkingLevel: settings.defaultThinkingLevel,
+            });
+            if (
+              reconstructed &&
+              !this.deletingOrDeletedThreads.has(id) &&
+              !this.threads.isDeleted(id)
+            ) {
+              const nextSyncState =
+                anyPreExistingUnsynced || unqueuedTurns > 0 || this.syncQueue.pendingCount(id) > 0
+                  ? 'pending'
+                  : existing.syncState;
+              this.threads.patch(id, {
+                totals: reconstructed.totals,
+                hasStarted: true,
+                ...(existing.orchestratorProfile ||
+                existing.initialPlaybook ||
+                !reconstructed.initialPlaybook
+                  ? {}
+                  : { initialPlaybook: reconstructed.initialPlaybook }),
+                syncState: nextSyncState,
+              });
+              this.enrichedOrphans.add(id);
             }
-            mIdx += 1;
-          }
-
-          if (unqueuedTurns > 0) {
-            this.unqueuedStartupTurnsByThread.set(id, unqueuedTurns);
+          } else if (anyPreExistingUnsynced || unqueuedTurns > 0) {
+            this.threads.setSyncState(id, 'pending');
           }
         }
       };
@@ -609,16 +633,16 @@ export class AppCore {
    * message through unchallenged rather than stalling it on a check that cannot be made.
    */
   async validatePlaybook(request: PlaybookValidationRequest): Promise<PlaybookValidation> {
-    if (!request || !this.isValidThreadId(request.threadId)) {
+    if (!request || !isValidThreadId(request.threadId)) {
       return PASSES;
     }
-    const resolvedId = this.resolveThreadId(request.threadId);
-    this.sessionTouchedThreads.add(resolvedId);
+    const threadId = request.threadId;
+    this.sessionTouchedThreads.add(threadId);
 
     const settings = this.settings.get();
     if (settings.playbookValidationEnabled === false) return PASSES;
 
-    const thread = this.threads.get(resolvedId);
+    const thread = this.threads.get(threadId);
     // Orchestrator mode drives its own playbooks from the profile; a message there carries none.
     if (!thread || thread.orchestratorProfile) return PASSES;
 
@@ -664,21 +688,17 @@ export class AppCore {
   }
 
   private persistTurn(threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage): void {
-    const resolvedAtStart = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
-    this.sessionTouchedThreads.add(resolvedAtStart);
+    this.sessionTouchedThreads.add(threadId);
     // Resolved before anything is written, so the local log, the search index and the sync payload
     // all carry the same attachments. `sendMessage` started this alongside the turn, so by now it
     // is almost always settled; `describeImages` caps its own wait either way.
     const pending = userMessage.images ? this.pendingDescriptions.get(userMessage.images) : undefined;
-    this.chainPersist(resolvedAtStart, async () => {
+    this.chainPersist(threadId, async () => {
       const images = pending ? await this.awaitDescriptions(pending, userMessage.images) : userMessage.images;
       // Never write through to the caller's message: `AgentService` still holds it as the session's
       // pendingUser, and the renderer is already showing it.
       const user = images === userMessage.images ? userMessage : { ...userMessage, images };
-      const targetId = this.isValidThreadId(resolvedAtStart)
-        ? this.resolveThreadId(resolvedAtStart)
-        : resolvedAtStart;
-      this.writeTurn(targetId, user, assistantMessage);
+      this.writeTurn(threadId, user, assistantMessage);
     });
   }
 
@@ -734,14 +754,13 @@ export class AppCore {
         // a later turn is already queued behind.
         if (this.persistTails.get(threadId) === next) {
           this.persistTails.delete(threadId);
-          const resolvedId = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
           if (
             !this.disposed &&
-            this.deferredMissingMigrationThreads.has(resolvedId) &&
-            !this.agent.isBusy(resolvedId)
+            this.deferredMissingRecreationThreads.has(threadId) &&
+            !this.agent.isBusy(threadId)
           ) {
             queueMicrotask(() => {
-              void this.onAgentTurnSettled(resolvedId);
+              void this.onAgentTurnSettled(threadId);
             });
           }
         }
@@ -751,27 +770,28 @@ export class AppCore {
 
   /** The write itself: local log, search index, sync queue, orchestrator trace. */
   private writeTurn(threadId: string, userMessage: ChatMessage, assistantMessage: ChatMessage): void {
-    const resolvedId = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
-    const thread = this.threads.get(resolvedId);
+    const thread = this.threads.get(threadId);
     const isOrchestrator = !!thread?.orchestratorProfile;
 
-    this.sessionTouchedThreads.add(resolvedId);
-    this.threadsWithLocalMessages.add(resolvedId);
-    this.threadsWithUnsyncedMessages.add(resolvedId);
+    this.sessionEnqueuedLocalIds.add(userMessage.localId);
+    this.sessionEnqueuedLocalIds.add(assistantMessage.localId);
+    this.sessionTouchedThreads.add(threadId);
+    this.threadsWithLocalMessages.add(threadId);
+    this.threadsWithUnsyncedMessages.add(threadId);
 
     // Best-effort local cache write (the server is the system of record); don't block the turn on it.
     void this.threads
-      .appendMessages(resolvedId, [userMessage, assistantMessage])
+      .appendMessages(threadId, [userMessage, assistantMessage])
       .catch((err) => logError('store', `appendMessages failed: ${err instanceof Error ? err.message : String(err)}`));
     // Keep search current within the session — no need to wait for the next startup sweep.
-    this.searchIndex.addMessages(resolvedId, [userMessage, assistantMessage]);
+    this.searchIndex.addMessages(threadId, [userMessage, assistantMessage]);
 
     if (isOrchestrator && thread) {
       void this.stashOrchestratorRun(thread, userMessage, assistantMessage);
     }
 
     this.syncQueue.enqueue({
-      threadId: resolvedId,
+      threadId,
       localIds: [userMessage.localId, assistantMessage.localId],
       messages: [
         toNewMessagePayload(userMessage, isOrchestrator),
@@ -818,7 +838,7 @@ export class AppCore {
         ]);
 
         return buildRunTrace({
-          conversationId: this.resolveThreadId(thread.id),
+          conversationId: thread.id,
           userText: userMessage.content,
           assistant: assistantMessage,
           profileName,
@@ -846,7 +866,7 @@ export class AppCore {
         payload &&
         !this.disposed &&
         !this.sessionDroppedLocalIds.has(assistantMessage.localId) &&
-        !this.deletingOrDeletedThreads.has(this.resolveThreadId(payload.conversationId))
+        !this.deletingOrDeletedThreads.has(payload.conversationId)
       ) {
         this.pendingRuns.set(assistantMessage.localId, payload);
       } else {
@@ -889,7 +909,7 @@ export class AppCore {
       if (this.disposed) return;
 
       const run = buildRunTrace({
-        conversationId: this.resolveThreadId(deferredTrace.conversationId),
+        conversationId: deferredTrace.conversationId,
         userText: deferredTrace.userText,
         assistant: deferredTrace.assistant as ChatMessage,
         profileName: deferredTrace.profileName,
@@ -952,28 +972,21 @@ export class AppCore {
     }
   }
 
-  private pruneThreadSideEffects(resolvedId: string): void {
+  private pruneThreadSideEffects(threadId: string): void {
     for (const [lid, fb] of this.pendingFeedback.entries()) {
-      if (fb.conversationId === resolvedId || this.resolveThreadId(fb.conversationId) === resolvedId) {
+      if (fb.conversationId === threadId) {
         this.pendingFeedback.delete(lid);
       }
     }
     for (const [lid, trace] of this.deferredRecoveryTraces.entries()) {
-      if (
-        trace.conversationId === resolvedId ||
-        this.resolveThreadId(trace.conversationId) === resolvedId
-      ) {
+      if (trace.conversationId === threadId) {
         this.deferredRecoveryTraces.delete(lid);
       }
     }
     for (const [lid, entry] of this.pendingRuns.entries()) {
       if (entry instanceof Promise) {
         const filtered = entry.then((r) => {
-          if (
-            !r ||
-            r.conversationId === resolvedId ||
-            this.resolveThreadId(r.conversationId) === resolvedId
-          ) {
+          if (!r || r.conversationId === threadId) {
             if (this.pendingRuns.get(lid) === filtered) {
               this.pendingRuns.delete(lid);
             }
@@ -985,16 +998,12 @@ export class AppCore {
           return r;
         });
         this.pendingRuns.set(lid, filtered);
-      } else if (
-        entry.conversationId === resolvedId ||
-        this.resolveThreadId(entry.conversationId) === resolvedId
-      ) {
+      } else if (entry.conversationId === threadId) {
         this.pendingRuns.delete(lid);
       }
     }
     for (let i = this.failedRuns.length - 1; i >= 0; i -= 1) {
-      const cid = this.failedRuns[i].run.conversationId;
-      if (cid === resolvedId || this.resolveThreadId(cid) === resolvedId) {
+      if (this.failedRuns[i].run.conversationId === threadId) {
         this.failedRuns.splice(i, 1);
       }
     }
@@ -1002,13 +1011,12 @@ export class AppCore {
 
   /** Persist localId→serverId mapping, then POST any pending feedback & run traces now that we can link them. */
   private handleServerIds(threadId: string, mapping: Record<string, string>): void {
-    const resolvedId = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
-    if (this.isValidThreadId(resolvedId)) {
+    if (isValidThreadId(threadId)) {
       void this.threads
-        .applyServerIds(resolvedId, mapping)
+        .applyServerIds(threadId, mapping)
         .then(({ hasUnsynced }) => {
-          if (!hasUnsynced && this.syncQueue.pendingCount(resolvedId) === 0) {
-            this.threadsWithUnsyncedMessages.delete(resolvedId);
+          if (!hasUnsynced && this.syncQueue.pendingCount(threadId) === 0) {
+            this.threadsWithUnsyncedMessages.delete(threadId);
           }
         })
         .catch((err) => logError('store', `applyServerIds failed: ${err instanceof Error ? err.message : String(err)}`));
@@ -1036,12 +1044,10 @@ export class AppCore {
         if (entry instanceof Promise) {
           void entry.then((run) => {
             if (!run || this.disposed) return;
-            run.conversationId = this.resolveThreadId(run.conversationId);
             run.messageId = serverId;
             this.postOrchestratorRun(run);
           });
         } else if (!this.disposed) {
-          entry.conversationId = this.resolveThreadId(entry.conversationId);
           entry.messageId = serverId;
           this.postOrchestratorRun(entry);
         }
@@ -1070,19 +1076,24 @@ export class AppCore {
       }
     }
     for (const entry of ready) {
-      entry.run.conversationId = this.resolveThreadId(entry.run.conversationId);
       this.postOrchestratorRun(entry.run, entry.attempts);
     }
   }
 
   private postOrchestratorRun(run: OrchestratorRunPayload, attempts = 0): void {
     if (this.disposed) return;
+    const outboundRun: OrchestratorRunPayload = {
+      ...run,
+      conversationId: isValidThreadId(run.conversationId)
+        ? this.remoteIdFor(run.conversationId)
+        : run.conversationId,
+    };
     void this.syncClient
-      .recordOrchestratorRun(run)
+      .recordOrchestratorRun(outboundRun)
       .then((res) =>
         log(
           'sync',
-          `Recorded orchestrator run ${res.id} (${run.steps.length} steps) → message ${run.messageId ?? 'unknown'}`,
+          `Recorded orchestrator run ${res.id} (${outboundRun.steps.length} steps) → message ${outboundRun.messageId ?? 'unknown'}`,
         ),
       )
       .catch((err) => {
@@ -1152,17 +1163,24 @@ export class AppCore {
     await this.ensureLocalThreadScan();
     if (this.disposed) return 'deferred';
     const outcome = await this.reconcileSingleThread(threadId);
-    if (outcome === 'ready' || outcome === 'migrated' || outcome === 'pruned') {
+    if (outcome === 'ready' || outcome === 'recreated' || outcome === 'pruned') {
       return 'ready';
     }
     return 'deferred';
   }
 
   private async handleMissingOnAppend(threadId: string): Promise<MissingConversationResolution> {
+    const attemptedRemoteId = this.lastAttemptedRemoteByThread.get(threadId);
+    if (attemptedRemoteId && this.remoteIdFor(threadId) !== attemptedRemoteId) {
+      return 'recreated';
+    }
     await this.ensureLocalThreadScan();
     if (this.disposed) return 'deferred';
+    if (attemptedRemoteId && this.remoteIdFor(threadId) !== attemptedRemoteId) {
+      return 'recreated';
+    }
     const outcome = await this.reconcileSingleThread(threadId, { knownMissing: true });
-    if (outcome === 'migrated') return 'migrated';
+    if (outcome === 'recreated') return 'recreated';
     if (outcome === 'pruned') return 'drop';
     if (outcome === 'deferred') return 'deferred';
     return 'retry';
@@ -1172,7 +1190,7 @@ export class AppCore {
     threadId: string,
     opts?: { knownMissing?: boolean; serverListed?: boolean },
   ): Promise<ReconcileOutcome> {
-    if (!this.isValidThreadId(threadId)) {
+    if (!isValidThreadId(threadId)) {
       return Promise.resolve('pruned');
     }
     const existing = this.reconcileInFlight.get(threadId);
@@ -1193,21 +1211,56 @@ export class AppCore {
     threadId: string,
     opts?: { knownMissing?: boolean; serverListed?: boolean },
   ): Promise<ReconcileOutcome> {
-    if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+    if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+      this.startupDirtyThreads.delete(threadId);
       return 'pruned';
     }
-    if (this.migratedThreadMap.has(threadId)) {
-      return 'migrated';
-    }
 
+    const remoteId = this.remoteIdFor(threadId);
     let isMissingOnServer = Boolean(opts?.knownMissing);
     let remoteResult: { messages: MessageDto[]; truncated: boolean } | undefined;
 
+    if (!isMissingOnServer && !opts?.serverListed && !this.startupDirtyThreads.has(threadId)) {
+      try {
+        await this.syncClient.getMessages(remoteId, 1, 0);
+        if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+          this.startupDirtyThreads.delete(threadId);
+          return 'pruned';
+        }
+        this.syncQueue.unholdThread(threadId);
+        this.verifiedOffPageThreads.add(threadId);
+        return 'ready';
+      } catch (err) {
+        if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+          this.startupDirtyThreads.delete(threadId);
+          return 'pruned';
+        }
+        if (err instanceof SyncApiError && err.status === 404) {
+          isMissingOnServer = true;
+        } else if (err instanceof SyncApiError && err.status === 401) {
+          return 'halt';
+        } else if (err instanceof SyncApiError) {
+          logError(
+            'sync',
+            `lightweight off-page probe failed for ${threadId} (HTTP ${err.status}): ${err.message}`,
+          );
+          return 'error';
+        } else {
+          logError(
+            'sync',
+            `lightweight off-page probe halted on ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return 'halt';
+        }
+      }
+    }
+
     if (!isMissingOnServer) {
       try {
-        remoteResult = await this.syncClient.getAllMessages(threadId);
+        remoteResult = await this.syncClient.getAllMessages(remoteId);
       } catch (err) {
-        if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+        if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+          this.startupDirtyThreads.delete(threadId);
           return 'pruned';
         }
         if (err instanceof SyncApiError && err.status === 404) {
@@ -1230,7 +1283,8 @@ export class AppCore {
       }
     }
 
-    if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+    if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+      this.startupDirtyThreads.delete(threadId);
       return 'pruned';
     }
 
@@ -1240,7 +1294,8 @@ export class AppCore {
         this.verifiedOffPageThreads.add(threadId);
       }
       const localMessages = await this.threads.readRawMessages(threadId);
-      if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+      if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+        this.startupDirtyThreads.delete(threadId);
         return 'pruned';
       }
       if (localMessages.length > 0) {
@@ -1250,6 +1305,10 @@ export class AppCore {
       const existingMeta = this.threads.get(threadId);
       const isOrchestrator = Boolean(existingMeta?.orchestratorProfile);
       const queuedTurns = this.syncQueue.getQueuedTurns(threadId);
+      const inspectedLocalIds = new Set<string>([
+        ...localMessages.map((m) => m.localId),
+        ...queuedTurns.flatMap((t) => t.localIds),
+      ]);
       const hadPendingBefore =
         (this.unqueuedStartupTurnsByThread.get(threadId) ?? 0) > 0 ||
         queuedTurns.length > 0 ||
@@ -1267,7 +1326,8 @@ export class AppCore {
 
       if (Object.keys(reconciled.adoptedServerIds).length > 0) {
         await this.threads.applyServerIds(threadId, reconciled.adoptedServerIds);
-        if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+        if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+          this.startupDirtyThreads.delete(threadId);
           return 'pruned';
         }
         if (!this.disposed) {
@@ -1287,10 +1347,13 @@ export class AppCore {
       );
 
       this.unqueuedStartupTurnsByThread.delete(threadId);
-      this.syncQueue.replaceThreadTurns(threadId, reconciled.turnsToQueue);
+      this.startupDirtyThreads.delete(threadId);
+      this.syncQueue.reconcileThreadTurns(threadId, reconciled.turnsToQueue, inspectedLocalIds, {
+        resetAttempts: false,
+      });
       this.syncQueue.unholdThread(threadId);
 
-      if (reconciled.turnsToQueue.length > 0) {
+      if (this.syncQueue.pendingCount(threadId) > 0) {
         this.threadsWithUnsyncedMessages.add(threadId);
         this.threads.setSyncState(threadId, 'pending');
       } else {
@@ -1317,23 +1380,30 @@ export class AppCore {
 
     // --- 404 Not Found: conversation missing on server -----------------------
     if (this.agent.isBusy(threadId) || this.persistTails.has(threadId)) {
-      this.deferredMissingMigrationThreads.add(threadId);
+      this.deferredMissingRecreationThreads.add(threadId);
       return 'deferred';
     }
 
     const localMessages = await this.threads.readRawMessages(threadId);
-    if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+    if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+      this.startupDirtyThreads.delete(threadId);
       return 'pruned';
     }
     if (this.agent.isBusy(threadId) || this.persistTails.has(threadId)) {
-      this.deferredMissingMigrationThreads.add(threadId);
+      this.deferredMissingRecreationThreads.add(threadId);
       return 'deferred';
     }
 
     const queuedTurns = this.syncQueue.getQueuedTurns(threadId);
+    const inspectedLocalIds = new Set<string>([
+      ...localMessages.map((m) => m.localId),
+      ...queuedTurns.flatMap((t) => t.localIds),
+    ]);
     if (localMessages.length === 0 && queuedTurns.length === 0) {
-      this.deferredMissingMigrationThreads.delete(threadId);
+      this.deferredMissingRecreationThreads.delete(threadId);
       this.unqueuedStartupTurnsByThread.delete(threadId);
+      this.startupDirtyThreads.delete(threadId);
+      this.lastAttemptedRemoteByThread.delete(threadId);
       this.threadsWithLocalMessages.delete(threadId);
       this.threadsWithUnsyncedMessages.delete(threadId);
       this.verifiedOffPageThreads.delete(threadId);
@@ -1341,7 +1411,7 @@ export class AppCore {
       this.playbookBackfillChecked.delete(threadId);
       this.pruneThreadSideEffects(threadId);
       this.syncQueue.removeThread(threadId);
-      this.threads.delete(threadId);
+      void this.threads.delete(threadId);
       this.searchIndex.remove(threadId);
       if (!this.disposed) {
         this.deps.emitSyncEvent({ kind: 'thread-deleted', threadId });
@@ -1349,15 +1419,32 @@ export class AppCore {
       return 'pruned';
     }
 
+    const existingMeta = this.threads.get(threadId);
+    const localIdSet = new Set(localMessages.map((m) => m.localId));
+    const extraMessages: StoredChatMessage[] = [];
+    for (const qt of queuedTurns) {
+      const fallbackCreatedAt =
+        qt.enqueuedAt || existingMeta?.updatedAt || existingMeta?.createdAt || new Date().toISOString();
+      for (let idx = 0; idx < qt.messages.length; idx += 1) {
+        const lid = qt.localIds[idx] || randomUUID();
+        if (localIdSet.has(lid)) continue;
+        localIdSet.add(lid);
+        extraMessages.push(decodeQueuedMessagePayload(qt.messages[idx], lid, fallbackCreatedAt));
+      }
+    }
+
     const defaults = this.settings.get();
+    const reconstructedOrphan = !existingMeta
+      ? reconstructOrphanThreadMeta({
+          threadId,
+          messages: [...localMessages, ...extraMessages],
+          defaultModel: defaults.defaultModel,
+          defaultThinkingLevel: defaults.defaultThinkingLevel,
+        })
+      : undefined;
     const oldMeta: ThreadMeta =
-      this.threads.get(threadId) ??
-      reconstructOrphanThreadMeta({
-        threadId,
-        messages: localMessages,
-        defaultModel: defaults.defaultModel,
-        defaultThinkingLevel: defaults.defaultThinkingLevel,
-      }) ?? {
+      existingMeta ??
+      reconstructedOrphan ?? {
         id: threadId,
         title: 'New Conversation',
         model: defaults.defaultModel,
@@ -1376,7 +1463,8 @@ export class AppCore {
     try {
       createdConv = await this.syncClient.createConversation(createTitle, recreationSettings);
     } catch (err) {
-      if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+      if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
+        this.startupDirtyThreads.delete(threadId);
         return 'pruned';
       }
       if (err instanceof SyncApiError && err.status === 401) {
@@ -1389,42 +1477,20 @@ export class AppCore {
       return err instanceof SyncApiError ? 'error' : 'halt';
     }
 
-    if (this.disposed || this.deletingOrDeletedThreads.has(threadId)) {
+    if (this.disposed || this.deletingOrDeletedThreads.has(threadId) || this.threads.isDeleted(threadId)) {
       void this.syncClient.deleteConversation(createdConv.id).catch(() => undefined);
+      this.startupDirtyThreads.delete(threadId);
       return 'pruned';
     }
     if (this.agent.isBusy(threadId) || this.persistTails.has(threadId)) {
       void this.syncClient.deleteConversation(createdConv.id).catch(() => undefined);
-      this.deferredMissingMigrationThreads.add(threadId);
+      this.deferredMissingRecreationThreads.add(threadId);
       return 'deferred';
     }
 
-    // Close idle AgentService subprocess on oldId while preserving warm sessionId on newMeta.
-    this.agent.closeThread(threadId);
-
-    const localIdSet = new Set(localMessages.map((m) => m.localId));
-    const extraMessages: StoredChatMessage[] = [];
-    for (const qt of queuedTurns) {
-      for (let idx = 0; idx < qt.messages.length; idx += 1) {
-        const lid = qt.localIds[idx] || randomUUID();
-        if (localIdSet.has(lid)) continue;
-        localIdSet.add(lid);
-        const qm = qt.messages[idx];
-        extraMessages.push({
-          localId: lid,
-          role: qm.role,
-          content: qm.content,
-          ...(qm.playbook ? { playbook: qm.playbook } : {}),
-          ...(qm.playbookVersion ? { playbookVersion: qm.playbookVersion } : {}),
-          createdAt: qt.enqueuedAt || oldMeta.updatedAt || oldMeta.createdAt,
-        });
-      }
-    }
-
-    const newId = createdConv.id;
     const isOrchestrator = Boolean(oldMeta.orchestratorProfile);
     const replacementTurns = buildAllTurnsForRecreation({
-      newThreadId: newId,
+      threadId,
       localMessages,
       queuedTurns,
       isOrchestrator,
@@ -1437,85 +1503,80 @@ export class AppCore {
       delete newRemoteSettings.desktopVersion;
     }
 
-    const newMeta: ThreadMeta = {
-      ...oldMeta,
-      id: newId,
+    const metaPatch: Partial<Omit<ThreadMeta, 'id'>> = {
+      remoteConversationId: createdConv.id,
       title: isPlaceholderTitle(oldMeta.title) ? (createdConv.title || oldMeta.title) : oldMeta.title,
       syncState: replacementTurns.length > 0 ? 'pending' : 'synced',
       remoteSettings: newRemoteSettings,
     };
 
-    await this.threads.migrateThread(threadId, newMeta, extraMessages);
-    this.searchIndex.migrateThread(threadId, newId);
-    if (extraMessages.length > 0) {
-      this.searchIndex.addMessages(newId, extraMessages as ChatMessage[]);
-    }
-
-    for (const [origId, mappedId] of this.migratedThreadMap.entries()) {
-      if (mappedId === threadId) {
-        this.migratedThreadMap.set(origId, newId);
+    let updatedMeta: ThreadMeta;
+    try {
+      updatedMeta = await this.threads.prepareForRecreation(
+        threadId,
+        oldMeta,
+        metaPatch,
+        extraMessages,
+      );
+      if (extraMessages.length > 0) {
+        this.searchIndex.addMessages(threadId, extraMessages as ChatMessage[]);
       }
-    }
-    this.migratedThreadMap.set(threadId, newId);
 
-    this.deferredMissingMigrationThreads.delete(threadId);
-    this.unqueuedStartupTurnsByThread.delete(threadId);
-    this.threadsWithLocalMessages.delete(threadId);
-    this.threadsWithUnsyncedMessages.delete(threadId);
-    this.verifiedOffPageThreads.delete(threadId);
-    this.sweepSparedThreads.delete(threadId);
-    if (this.playbookBackfillChecked.delete(threadId)) {
-      this.playbookBackfillChecked.add(newId);
-    }
-    if (this.sessionTouchedThreads.has(threadId)) {
-      this.sessionTouchedThreads.add(newId);
-    }
-    if (localMessages.length > 0 || extraMessages.length > 0) {
-      this.threadsWithLocalMessages.add(newId);
-    }
-    if (replacementTurns.length > 0) {
-      this.threadsWithUnsyncedMessages.add(newId);
-    }
+      this.syncQueue.reconcileThreadTurns(threadId, replacementTurns, inspectedLocalIds, {
+        resetAttempts: true,
+      });
 
-    for (const [lid, entry] of this.pendingRuns.entries()) {
-      if (entry instanceof Promise) {
-        this.pendingRuns.set(
-          lid,
-          entry.then((r) => (r && r.conversationId === threadId ? { ...r, conversationId: newId } : r)),
-        );
-      } else if (entry.conversationId === threadId) {
-        entry.conversationId = newId;
+      const hasPendingAfter = this.syncQueue.pendingCount(threadId) > 0;
+      if (hasPendingAfter) {
+        this.threads.setSyncState(threadId, 'pending');
+        updatedMeta = this.threads.get(threadId) ?? { ...updatedMeta, syncState: 'pending' };
       }
-    }
-    for (const failed of this.failedRuns) {
-      if (failed.run.conversationId === threadId) {
-        failed.run.conversationId = newId;
-      }
-    }
-    for (const defTrace of this.deferredRecoveryTraces.values()) {
-      if (defTrace.conversationId === threadId) {
-        defTrace.conversationId = newId;
-      }
-    }
-    for (const fb of this.pendingFeedback.values()) {
-      if (fb.conversationId === threadId) {
-        fb.conversationId = newId;
-      }
-    }
 
-    this.registerRecoveredSideEffects(
-      newId,
-      newMeta,
-      [...localMessages, ...extraMessages],
-      replacementTurns,
-    );
+      for (let i = this.failedRuns.length - 1; i >= 0; i -= 1) {
+        if (this.failedRuns[i].run.conversationId === threadId) {
+          this.failedRuns.splice(i, 1);
+        }
+      }
 
-    this.syncQueue.migrateThread(threadId, newId, replacementTurns);
+      this.registerRecoveredSideEffects(
+        threadId,
+        updatedMeta,
+        [...localMessages, ...extraMessages],
+        replacementTurns,
+      );
+
+      this.deferredMissingRecreationThreads.delete(threadId);
+      this.unqueuedStartupTurnsByThread.delete(threadId);
+      this.startupDirtyThreads.delete(threadId);
+      if (!opts?.serverListed) {
+        this.verifiedOffPageThreads.add(threadId);
+      } else {
+        this.verifiedOffPageThreads.delete(threadId);
+      }
+      this.sweepSparedThreads.delete(threadId);
+      if (localMessages.length > 0 || extraMessages.length > 0) {
+        this.threadsWithLocalMessages.add(threadId);
+      }
+      if (hasPendingAfter) {
+        this.threadsWithUnsyncedMessages.add(threadId);
+      } else {
+        this.threadsWithUnsyncedMessages.delete(threadId);
+      }
+      this.syncQueue.unholdThread(threadId);
+    } catch (commitErr) {
+      logError(
+        'sync',
+        `Local commit failed after recreating ${threadId} -> ${createdConv.id}: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+      );
+      await this.syncClient.deleteConversation(createdConv.id).catch(() => undefined);
+      return 'error';
+    }
 
     if (!this.disposed) {
-      this.deps.emitSyncEvent({ kind: 'thread-migrated', oldThreadId: threadId, thread: newMeta });
+      this.notifiedScanOrphans.add(threadId);
+      this.deps.emitSyncEvent({ kind: 'thread-recreated', thread: updatedMeta });
     }
-    return 'migrated';
+    return 'recreated';
   }
 
   private triggerStartupRecovery(serverIds: ReadonlySet<string>): void {
@@ -1554,28 +1615,27 @@ export class AppCore {
 
     for (const local of this.threads.list()) {
       seen.add(local.id);
-      if (this.deletingOrDeletedThreads.has(local.id) || this.migratedThreadMap.has(local.id)) {
+      if (this.deletingOrDeletedThreads.has(local.id) || this.threads.isDeleted(local.id)) {
         continue;
       }
       if (serverIds.has(local.id)) {
-        if (
-          this.threadsWithUnsyncedMessages.has(local.id) ||
-          this.syncQueue.pendingCount(local.id) > 0 ||
-          this.syncQueue.isHeld(local.id)
-        ) {
+        if (this.startupDirtyThreads.has(local.id) || this.syncQueue.isHeld(local.id)) {
           candidateIds.push(local.id);
         }
       } else if (
         !this.verifiedOffPageThreads.has(local.id) &&
-        (this.threadsWithLocalMessages.has(local.id) || this.syncQueue.pendingCount(local.id) > 0)
+        (this.threadsWithLocalMessages.has(local.id) ||
+          this.syncQueue.pendingCount(local.id) > 0 ||
+          this.startupDirtyThreads.has(local.id) ||
+          Boolean(local.hasStarted))
       ) {
         candidateIds.push(local.id);
       }
     }
 
     for (const qid of this.syncQueue.queuedThreadIds()) {
-      if (seen.has(qid) || !this.isValidThreadId(qid)) continue;
-      if (this.deletingOrDeletedThreads.has(qid) || this.migratedThreadMap.has(qid)) continue;
+      if (seen.has(qid) || !isValidThreadId(qid)) continue;
+      if (this.deletingOrDeletedThreads.has(qid) || this.threads.isDeleted(qid)) continue;
       candidateIds.push(qid);
     }
 
@@ -1585,14 +1645,28 @@ export class AppCore {
         halted = true;
         break;
       }
-      const outcome = await this.reconcileSingleThread(id, { serverListed: serverIds.has(id) });
+      let outcome: ReconcileOutcome;
+      try {
+        outcome = await this.reconcileSingleThread(id, { serverListed: serverIds.has(id) });
+      } catch (err) {
+        if (this.disposed) {
+          halted = true;
+          break;
+        }
+        logError(
+          'sync',
+          `Unexpected startup recovery error on ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
       if (this.disposed || outcome === 'halt') {
         halted = true;
         break;
       }
-      if (outcome === 'migrated' && this.syncQueue.pendingCount() > 0) {
+      if (outcome === 'recreated' && this.syncQueue.pendingCount() > 0) {
         this.flushHitBackoff = false;
         await this.syncQueue.flush();
+        await this.threads.drain();
         if (this.disposed || this.flushHitBackoff) {
           halted = true;
           break;
@@ -1600,32 +1674,36 @@ export class AppCore {
       }
     }
 
-    if (!this.disposed && !halted && this.syncQueue.pendingCount() > 0) {
+    if (!this.disposed && !halted && candidateIds.length > 0 && this.syncQueue.pendingCount() > 0) {
       this.flushHitBackoff = false;
       await this.syncQueue.flush();
+      await this.threads.drain();
     }
   }
 
   private collectEmptySweepCandidates(
     conversations: readonly ConversationDto[],
     preFetchDesktopIds: ReadonlySet<string>,
+    nonEmptyIds: ReadonlySet<string>,
   ): string[] {
     const now = Date.now();
-    const serverById = new Map<string, ConversationDto>();
+    const serverByLocalId = new Map<string, ConversationDto>();
     for (const c of conversations) {
-      if (this.isValidThreadId(c.id)) {
-        serverById.set(c.id, c);
+      if (isValidThreadId(c.id)) {
+        const localId = this.threads.findByRemoteId(c.id)?.id ?? c.id;
+        serverByLocalId.set(localId, c);
       }
     }
 
-    const unionIds = new Set<string>(serverById.keys());
+    const unionIds = new Set<string>(serverByLocalId.keys());
     for (const local of this.threads.list()) {
       unionIds.add(local.id);
     }
 
     const candidates: string[] = [];
     for (const id of unionIds) {
-      const srv = serverById.get(id);
+      if (nonEmptyIds.has(id)) continue;
+      const srv = serverByLocalId.get(id);
       const local = this.threads.get(id);
 
       const explicitSrvClient = srv?.settings?.client;
@@ -1661,13 +1739,15 @@ export class AppCore {
     return candidates;
   }
 
-  private isStillEligibleForEmptySweep(id: string): boolean {
+  private isStillEligibleForEmptySweep(
+    id: string,
+    opts?: { ignoreDeleting?: boolean },
+  ): boolean {
     if (this.disposed) return false;
-    if (
-      this.sessionTouchedThreads.has(id) ||
-      this.deletingOrDeletedThreads.has(id) ||
-      this.migratedThreadMap.has(id)
-    ) {
+    if (this.sessionTouchedThreads.has(id) || this.threads.isDeleted(id)) {
+      return false;
+    }
+    if (!opts?.ignoreDeleting && this.deletingOrDeletedThreads.has(id)) {
       return false;
     }
     if (
@@ -1695,9 +1775,10 @@ export class AppCore {
         if (this.disposed) break;
         if (!this.isStillEligibleForEmptySweep(id)) continue;
 
+        const remoteId = this.remoteIdFor(id);
         let serverAlreadyGone = false;
         try {
-          const msgs = await this.syncClient.getMessages(id, 1, 0);
+          const msgs = await this.syncClient.getMessages(remoteId, 1, 0);
           if (this.disposed) break;
           if (msgs.length > 0) {
             continue;
@@ -1718,31 +1799,42 @@ export class AppCore {
           continue;
         }
 
+        const currentRemoteId = this.remoteIdFor(id);
         if (!serverAlreadyGone) {
           this.deletingOrDeletedThreads.add(id);
+          this.deletingOrDeletedThreads.add(currentRemoteId);
           try {
-            await this.syncClient.deleteConversation(id);
+            await this.syncClient.deleteConversation(currentRemoteId);
           } catch (err) {
             if (!(err instanceof SyncApiError && err.status === 404)) {
               this.deletingOrDeletedThreads.delete(id);
+              if (currentRemoteId !== id) {
+                this.deletingOrDeletedThreads.delete(currentRemoteId);
+              }
               continue;
             }
           }
-          if (!this.isStillEligibleForEmptySweepForPostDelete(id)) {
+          if (!this.isStillEligibleForEmptySweep(id, { ignoreDeleting: true })) {
             this.deletingOrDeletedThreads.delete(id);
+            if (currentRemoteId !== id) {
+              this.deletingOrDeletedThreads.delete(currentRemoteId);
+            }
             this.sweepSparedThreads.add(id);
             continue;
           }
         } else {
           this.deletingOrDeletedThreads.add(id);
+          this.deletingOrDeletedThreads.add(currentRemoteId);
         }
 
         this.sweepSparedThreads.delete(id);
         this.pruneThreadSideEffects(id);
         this.syncQueue.removeThread(id);
         this.unqueuedStartupTurnsByThread.delete(id);
+        this.startupDirtyThreads.delete(id);
+        this.lastAttemptedRemoteByThread.delete(id);
         this.playbookBackfillChecked.delete(id);
-        this.threads.delete(id);
+        void this.threads.delete(id);
         this.searchIndex.remove(id);
         if (!this.disposed) {
           this.deps.emitSyncEvent({ kind: 'thread-deleted', threadId: id });
@@ -1762,55 +1854,45 @@ export class AppCore {
       });
   }
 
-  private isStillEligibleForEmptySweepForPostDelete(id: string): boolean {
-    if (this.disposed) return false;
-    if (this.sessionTouchedThreads.has(id) || this.migratedThreadMap.has(id)) {
-      return false;
-    }
-    if (
-      this.threadsWithLocalMessages.has(id) ||
-      (this.unqueuedStartupTurnsByThread.get(id) ?? 0) > 0 ||
-      this.syncQueue.pendingCount(id) > 0
-    ) {
-      return false;
-    }
-    if (this.agent.isBusy(id) || this.persistTails.has(id) || this.reconcileInFlight.has(id)) {
-      return false;
-    }
-    const local = this.threads.get(id);
-    if (local && (!isPlaceholderTitle(local.title) || isThreadStarted(local))) {
-      return false;
-    }
-    return true;
-  }
-
   // --- threads ---------------------------------------------------------------
 
   async listThreads(): Promise<ThreadsListResult> {
-    await this.ensureLocalThreadScan();
-    const preFetchLocalList = this.threads.list();
-    const preFetchLocalIds = new Set(preFetchLocalList.map((t) => t.id));
+    const scanPromise = this.ensureLocalThreadScan();
+    const remotePromise = this.syncClient.listConversations();
+
+    const initialList = this.threads.list();
+    const preFetchLocalIds = new Set(initialList.map((t) => t.id));
     const preFetchDesktopIds = new Set(
-      preFetchLocalList
+      initialList
         .filter((t) => t.remoteSettings?.client === 'desktop')
         .map((t) => t.id),
     );
 
     try {
-      const conversations = await this.syncClient.listConversations();
+      const conversations = await remotePromise;
       this.drainFailedRuns();
 
-      const serverIds = new Set<string>();
+      const { nonEmptyIds } = this.threads.inspectLogsSync();
+      for (const id of nonEmptyIds) {
+        this.threadsWithLocalMessages.add(id);
+      }
+
+      const serverMatchedLocalIds = new Set<string>();
       for (const c of conversations) {
-        if (!this.isValidThreadId(c.id)) continue;
-        if (this.deletingOrDeletedThreads.has(c.id) || this.migratedThreadMap.has(c.id)) {
+        if (!isValidThreadId(c.id)) continue;
+        if (this.deletingOrDeletedThreads.has(c.id) || this.threads.isDeleted(c.id)) {
           continue;
         }
-        serverIds.add(c.id);
-        this.verifiedOffPageThreads.delete(c.id);
-        this.sweepSparedThreads.delete(c.id);
+        const existing = this.threads.findByRemoteId(c.id);
+        const localId = existing?.id ?? c.id;
+        if (this.deletingOrDeletedThreads.has(localId) || this.threads.isDeleted(localId)) {
+          continue;
+        }
 
-        const existing = this.threads.get(c.id);
+        serverMatchedLocalIds.add(localId);
+        this.verifiedOffPageThreads.delete(localId);
+        this.sweepSparedThreads.delete(localId);
+
         const settings = this.settings.get();
         const rawRemoteProfile = c.settings?.['orchestrator-profile'];
         const remoteProfile =
@@ -1818,7 +1900,7 @@ export class AppCore {
             ? rawRemoteProfile.trim()
             : undefined;
         const isStarted = existing ? isThreadStarted(existing) : false;
-        const isBusy = existing ? this.agent.isBusy(c.id) : false;
+        const isBusy = existing ? this.agent.isBusy(localId) : false;
         const canAdoptRemoteProfile = !isStarted && !isBusy;
         const orchestratorProfile = canAdoptRemoteProfile
           ? (remoteProfile ?? existing?.orchestratorProfile)
@@ -1830,13 +1912,14 @@ export class AppCore {
           existing && !isBusy && (existing.orchestratorProfile !== orchestratorProfile || !modeMatches),
         );
         if (shouldResetSession) {
-          this.agent.closeThread(c.id);
+          this.agent.closeThread(localId);
         }
         const remoteSettings = c.settings
           ? { ...c.settings }
           : existing?.remoteSettings;
         const upserted: ThreadMeta = {
-          id: c.id,
+          id: localId,
+          ...(localId !== c.id ? { remoteConversationId: c.id } : {}),
           sessionId: shouldResetSession ? undefined : existing?.sessionId,
           sessionProfile: shouldResetSession ? undefined : existing?.sessionProfile,
           title: c.title,
@@ -1857,58 +1940,129 @@ export class AppCore {
             .updateConversation(c.id, undefined, this.buildThreadSettings(upserted))
             .catch(() => undefined);
         }
-
-        // Steady-state clean fast path: unhold immediately with 0 GET /messages calls.
-        if (!this.threadsWithUnsyncedMessages.has(c.id) && this.syncQueue.pendingCount(c.id) === 0) {
-          this.syncQueue.unholdThread(c.id);
-          this.unqueuedStartupTurnsByThread.delete(c.id);
-        }
       }
 
       let sweepCandidates: string[] = [];
       const sweepCandidateSet = new Set<string>();
       if (!this.emptySweepCompleted && !this.disposed) {
         this.emptySweepCompleted = true;
-        sweepCandidates = this.collectEmptySweepCandidates(conversations, preFetchDesktopIds);
+        sweepCandidates = this.collectEmptySweepCandidates(
+          conversations,
+          preFetchDesktopIds,
+          nonEmptyIds,
+        );
         for (const id of sweepCandidates) {
           sweepCandidateSet.add(id);
         }
       }
 
-      // Prune ONLY empty/header-only local entries absent from serverIds (never local transcripts!).
+      // Prune ONLY unopened header-only #201+ entries absent from serverMatchedLocalIds (never local transcripts!).
       for (const local of this.threads.list()) {
         if (
-          !serverIds.has(local.id) &&
+          !serverMatchedLocalIds.has(local.id) &&
           preFetchLocalIds.has(local.id) &&
+          !this.sessionTouchedThreads.has(local.id) &&
           !sweepCandidateSet.has(local.id) &&
           !this.sweepSparedThreads.has(local.id) &&
+          !nonEmptyIds.has(local.id) &&
           !this.threadsWithLocalMessages.has(local.id) &&
           this.syncQueue.pendingCount(local.id) === 0 &&
           !this.agent.isBusy(local.id) &&
           !this.persistTails.has(local.id) &&
-          !this.reconcileInFlight.has(local.id)
+          !this.reconcileInFlight.has(local.id) &&
+          !local.hasStarted
         ) {
           this.syncQueue.removeThread(local.id);
-          this.threads.delete(local.id);
+          void this.threads.delete(local.id);
           this.playbookBackfillChecked.delete(local.id);
           this.searchIndex.remove(local.id);
         }
       }
 
-      this.triggerStartupRecovery(serverIds);
-      if (sweepCandidates.length > 0) {
-        this.triggerEmptyConversationSweep(sweepCandidates);
-      }
+      const pendingAtReturn = this.totalPendingSyncCount();
+      const threads = this.threads
+        .list()
+        .filter((t) => !this.deletingOrDeletedThreads.has(t.id) && !this.threads.isDeleted(t.id));
+
+      const continuation = scanPromise
+        .then(() => {
+          if (this.disposed) return;
+
+          for (const localId of serverMatchedLocalIds) {
+            if (
+              !this.deletingOrDeletedThreads.has(localId) &&
+              !this.threads.isDeleted(localId) &&
+              !this.startupDirtyThreads.has(localId) &&
+              this.syncQueue.pendingCount(localId) === 0
+            ) {
+              this.syncQueue.unholdThread(localId);
+              this.unqueuedStartupTurnsByThread.delete(localId);
+            }
+          }
+
+          for (const orphanId of [...this.newlyInsertedOrphans, ...this.enrichedOrphans]) {
+            if (
+              this.notifiedScanOrphans.has(orphanId) ||
+              this.deletingOrDeletedThreads.has(orphanId) ||
+              this.threads.isDeleted(orphanId)
+            ) {
+              continue;
+            }
+            const currentMeta = this.threads.get(orphanId);
+            if (!currentMeta) continue;
+            this.notifiedScanOrphans.add(orphanId);
+            this.deps.emitSyncEvent({ kind: 'thread-recreated', thread: currentMeta });
+          }
+
+          const pendingAfterScan = this.totalPendingSyncCount();
+          if (pendingAfterScan !== pendingAtReturn) {
+            const dirtyId =
+              Array.from(this.unqueuedStartupTurnsByThread.keys())[0] ??
+              Array.from(this.startupDirtyThreads)[0];
+            if (
+              dirtyId &&
+              !this.deletingOrDeletedThreads.has(dirtyId) &&
+              !this.threads.isDeleted(dirtyId)
+            ) {
+              this.deps.emitSyncEvent({
+                kind: 'sync-state',
+                threadId: dirtyId,
+                state: 'pending',
+                pendingCount: pendingAfterScan,
+              });
+            }
+          }
+
+          this.triggerStartupRecovery(serverMatchedLocalIds);
+          if (sweepCandidates.length > 0) {
+            this.triggerEmptyConversationSweep(sweepCandidates);
+          }
+        })
+        .catch((scanErr) => {
+          if (!this.disposed) {
+            logError(
+              'sync',
+              `post-listThreads scan continuation failed: ${scanErr instanceof Error ? scanErr.message : String(scanErr)}`,
+            );
+          }
+        })
+        .finally(() => {
+          this.postListContinuations.delete(continuation);
+        });
+      this.postListContinuations.add(continuation);
 
       return {
-        threads: this.threads.list().filter((t) => !this.deletingOrDeletedThreads.has(t.id)),
+        threads,
         serverReachable: true,
-        pendingSyncCount: this.totalPendingSyncCount(),
+        pendingSyncCount: pendingAtReturn,
       };
     } catch (err) {
       logError('sync', 'listThreads failed:', err instanceof Error ? err.message : String(err));
+      await scanPromise;
       return {
-        threads: this.threads.list().filter((t) => !this.deletingOrDeletedThreads.has(t.id)),
+        threads: this.threads
+          .list()
+          .filter((t) => !this.deletingOrDeletedThreads.has(t.id) && !this.threads.isDeleted(t.id)),
         serverReachable: false,
         pendingSyncCount: this.totalPendingSyncCount(),
       };
@@ -1946,53 +2100,62 @@ export class AppCore {
   }
 
   async deleteThread(threadId: string): Promise<void> {
-    this.assertValidThreadId(threadId);
-    const resolvedId = this.resolveThreadId(threadId);
-    this.deletingOrDeletedThreads.add(resolvedId);
+    assertValidThreadId(threadId);
+    const remoteId = this.remoteIdFor(threadId);
+    this.deletingOrDeletedThreads.add(threadId);
+    this.deletingOrDeletedThreads.add(remoteId);
     try {
-      await this.syncClient.deleteConversation(resolvedId);
+      await this.syncClient.deleteConversation(remoteId);
     } catch (err) {
       if (!(err instanceof SyncApiError && err.status === 404)) {
-        this.deletingOrDeletedThreads.delete(resolvedId);
+        this.deletingOrDeletedThreads.delete(threadId);
+        if (remoteId !== threadId) {
+          this.deletingOrDeletedThreads.delete(remoteId);
+        }
         throw err;
       }
     }
-    this.agent.closeThread(resolvedId);
-    this.deferredMissingMigrationThreads.delete(resolvedId);
-    this.unqueuedStartupTurnsByThread.delete(resolvedId);
-    this.threadsWithLocalMessages.delete(resolvedId);
-    this.threadsWithUnsyncedMessages.delete(resolvedId);
-    this.verifiedOffPageThreads.delete(resolvedId);
-    this.sweepSparedThreads.delete(resolvedId);
-    this.playbookBackfillChecked.delete(resolvedId);
-    this.pruneThreadSideEffects(resolvedId);
-    this.syncQueue.removeThread(resolvedId);
-    this.threads.delete(resolvedId);
-    this.searchIndex.remove(resolvedId);
+    this.agent.closeThread(threadId);
+    this.deferredMissingRecreationThreads.delete(threadId);
+    this.unqueuedStartupTurnsByThread.delete(threadId);
+    this.startupDirtyThreads.delete(threadId);
+    this.lastAttemptedRemoteByThread.delete(threadId);
+    this.threadsWithLocalMessages.delete(threadId);
+    this.threadsWithUnsyncedMessages.delete(threadId);
+    this.verifiedOffPageThreads.delete(threadId);
+    this.sweepSparedThreads.delete(threadId);
+    this.playbookBackfillChecked.delete(threadId);
+    this.newlyInsertedOrphans.delete(threadId);
+    this.enrichedOrphans.delete(threadId);
+    this.pruneThreadSideEffects(threadId);
+    this.syncQueue.removeThread(threadId);
+    void this.threads.delete(threadId);
+    this.searchIndex.remove(threadId);
   }
 
   patchThread(threadId: string, update: Partial<Pick<ThreadMeta, 'model' | 'thinkingLevel' | 'title' | 'orchestratorProfile'>>): ThreadMeta | undefined {
-    this.assertValidThreadId(threadId);
-    const resolvedId = this.resolveThreadId(threadId);
-    this.sessionTouchedThreads.add(resolvedId);
+    assertValidThreadId(threadId);
+    this.sessionTouchedThreads.add(threadId);
 
-    // Whitelist the mutable keys so a malicious/buggy renderer can't inject
-    // arbitrary fields (e.g. id, sessionId, totals) into the stored meta.
+    const safeUpdate: Partial<Pick<ThreadMeta, 'model' | 'thinkingLevel' | 'title' | 'orchestratorProfile'>> =
+      typeof update === 'object' && update !== null && !Array.isArray(update) ? update : {};
+
+    // Whitelist strictly mutable keys so a malicious/buggy renderer can't inject
+    // arbitrary fields (e.g. id, remoteConversationId, sessionId, totals, syncState).
     const sanitized: Partial<Pick<ThreadMeta, 'model' | 'thinkingLevel' | 'title' | 'orchestratorProfile'>> = {};
-    if (update.model !== undefined) sanitized.model = update.model;
-    if (update.thinkingLevel !== undefined) sanitized.thinkingLevel = update.thinkingLevel;
-    if (update.title !== undefined) sanitized.title = update.title;
-    if ('orchestratorProfile' in update) {
-      sanitized.orchestratorProfile = update.orchestratorProfile || undefined;
+    if (safeUpdate.model !== undefined) sanitized.model = safeUpdate.model;
+    if (safeUpdate.thinkingLevel !== undefined) sanitized.thinkingLevel = safeUpdate.thinkingLevel;
+    if (safeUpdate.title !== undefined) sanitized.title = safeUpdate.title;
+    if ('orchestratorProfile' in safeUpdate) {
+      sanitized.orchestratorProfile = safeUpdate.orchestratorProfile || undefined;
     }
-    update = sanitized;
 
-    const existing = this.threads.get(resolvedId);
+    const existing = this.threads.get(threadId);
     if (!existing) {
-      throw new Error(`Thread not found: ${resolvedId}`);
+      throw new Error(`Thread not found: ${threadId}`);
     }
     const modeChanged =
-      'orchestratorProfile' in update &&
+      'orchestratorProfile' in safeUpdate &&
       (sanitized.orchestratorProfile || undefined) !== (existing.orchestratorProfile || undefined);
 
     if (modeChanged && isThreadStarted(existing)) {
@@ -2000,10 +2163,10 @@ export class AppCore {
     }
 
     if (modeChanged) {
-      if (this.agent.isBusy(resolvedId)) {
+      if (this.agent.isBusy(threadId)) {
         throw new Error('Cannot change agent mode while a turn is in progress');
       }
-      this.agent.closeThread(resolvedId);
+      this.agent.closeThread(threadId);
     }
 
     const patchPayload: Partial<ThreadMeta> = { ...sanitized };
@@ -2014,12 +2177,12 @@ export class AppCore {
     const fullSettings = this.buildThreadSettings({ ...existing, ...patchPayload });
     patchPayload.remoteSettings = fullSettings;
 
-    const patched = this.threads.patch(resolvedId, patchPayload);
+    const patched = this.threads.patch(threadId, patchPayload);
     if (patched) {
       // Undefined means "this patch is not about the title" — see updateConversation.
-      const title = update.title;
+      const title = sanitized.title;
       void this.syncClient
-        .updateConversation(resolvedId, title, fullSettings)
+        .updateConversation(this.remoteIdFor(threadId), title, fullSettings)
         .catch(() => undefined);
     }
     return patched;
@@ -2039,25 +2202,24 @@ export class AppCore {
 
   /** Local log first; falls back to server rehydration (reinstall / second device). */
   async getMessages(threadId: string): Promise<ChatMessage[]> {
-    this.assertValidThreadId(threadId);
-    const resolvedId = this.resolveThreadId(threadId);
-    this.sessionTouchedThreads.add(resolvedId);
+    assertValidThreadId(threadId);
+    this.sessionTouchedThreads.add(threadId);
 
-    const local = await this.threads.readMessages(resolvedId);
+    const local = await this.threads.readMessages(threadId);
     if (local.length > 0) {
-      this.threadsWithLocalMessages.add(resolvedId);
-      this.backfillInitialPlaybook(resolvedId, local);
+      this.threadsWithLocalMessages.add(threadId);
+      this.backfillInitialPlaybook(threadId, local);
       return local;
     }
     try {
-      const remote = await this.syncClient.getMessages(resolvedId);
+      const remote = await this.syncClient.getMessages(this.remoteIdFor(threadId));
       const rehydrated = remote.map((m) => this.fromDto(m));
       if (rehydrated.length > 0) {
-        this.threadsWithLocalMessages.add(resolvedId);
-        await this.threads.replaceMessages(resolvedId, rehydrated);
+        this.threadsWithLocalMessages.add(threadId);
+        await this.threads.replaceMessages(threadId, rehydrated);
         // A thread pulled back from the server has no local log until now, so this is the
         // moment its content becomes searchable.
-        this.searchIndex.replaceMessages(resolvedId, rehydrated);
+        this.searchIndex.replaceMessages(threadId, rehydrated);
         // appendMessages accrues totals per turn; a rehydrated log bypasses that,
         // so recompute the thread totals from the synced per-message usage.
         const totals = rehydrated.reduce<UsageTotals>((acc, m) => {
@@ -2069,8 +2231,8 @@ export class AppCore {
           }
           return acc;
         }, ThreadStore.emptyTotals());
-        this.threads.patch(resolvedId, { totals });
-        this.backfillInitialPlaybook(resolvedId, rehydrated);
+        this.threads.patch(threadId, { totals });
+        this.backfillInitialPlaybook(threadId, rehydrated);
       }
       return rehydrated;
     } catch {
@@ -2127,24 +2289,23 @@ export class AppCore {
   // --- chat -------------------------------------------------------------------
 
   async interrupt(threadId: string): Promise<void> {
-    if (!this.isValidThreadId(threadId)) {
+    if (!isValidThreadId(threadId)) {
       return;
     }
-    const resolvedId = this.resolveThreadId(threadId);
-    await this.agent.interrupt(resolvedId);
+    await this.agent.interrupt(threadId);
   }
 
   async sendMessage(request: SendMessageRequest): Promise<void> {
     if (!request) {
       throw new Error('Invalid SendMessageRequest');
     }
-    this.assertValidThreadId(request.threadId);
-    const resolvedId = this.resolveThreadId(request.threadId);
-    this.sessionTouchedThreads.add(resolvedId);
+    assertValidThreadId(request.threadId);
+    const threadId = request.threadId;
+    this.sessionTouchedThreads.add(threadId);
 
-    const thread = this.threads.get(resolvedId);
+    const thread = this.threads.get(threadId);
     if (!thread) {
-      throw new Error(`Unknown thread: ${resolvedId}`);
+      throw new Error(`Unknown thread: ${threadId}`);
     }
     if (this.agent.isBusy(thread.id)) {
       throw new Error('A turn is already running for this conversation.');
@@ -2227,14 +2388,14 @@ export class AppCore {
     if (!request) {
       throw new Error('Invalid FeedbackRequest');
     }
-    this.assertValidThreadId(request.threadId);
-    const resolvedId = this.resolveThreadId(request.threadId);
-    this.sessionTouchedThreads.add(resolvedId);
+    assertValidThreadId(request.threadId);
+    const threadId = request.threadId;
+    this.sessionTouchedThreads.add(threadId);
 
     if (request.rating === -1 && (!request.comment || request.comment.trim().length === 0)) {
       throw new Error('A comment is required for negative feedback.');
     }
-    const message = (await this.threads.readMessages(resolvedId)).find((m) => m.localId === request.messageLocalId);
+    const message = (await this.threads.readMessages(threadId)).find((m) => m.localId === request.messageLocalId);
     if (!message) {
       throw new Error('Message not found.');
     }
@@ -2242,7 +2403,7 @@ export class AppCore {
       throw new Error('This message is still syncing to the server — try again in a moment.');
     }
     await this.syncClient.submitFeedback(message.serverId, request.rating, request.comment?.trim() || undefined);
-    await this.threads.setFeedback(resolvedId, request.messageLocalId, request.rating, request.comment?.trim() || undefined);
+    await this.threads.setFeedback(threadId, request.messageLocalId, request.rating, request.comment?.trim() || undefined);
   }
 
   // --- auth ---------------------------------------------------------------------
@@ -2316,9 +2477,8 @@ export class AppCore {
    */
   async drain(threadId?: string): Promise<void> {
     if (threadId !== undefined) {
-      const resolvedId = this.isValidThreadId(threadId) ? this.resolveThreadId(threadId) : threadId;
-      await this.persistTails.get(resolvedId);
-      await this.threads.drain(resolvedId);
+      await this.persistTails.get(threadId);
+      await this.threads.drain(threadId);
       return;
     }
     while (this.persistTails.size > 0) {

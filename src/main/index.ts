@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
-import { DEFAULT_APPEARANCE } from '../shared/types';
+import { assertValidThreadId, DEFAULT_APPEARANCE } from '../shared/types';
 import type {
   FeedbackRequest,
   PlaybookValidationRequest,
@@ -238,9 +238,7 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   handle(IpcChannels.citationGet, (_e, ref) => appCore.getCitation(ref));
 
   const requireThreadId = (value: unknown): string => {
-    if (typeof value !== 'string' || value.length === 0 || !/^[a-zA-Z0-9\-_]+$/.test(value)) {
-      throw new Error(`Invalid threadId: ${String(value)}`);
-    }
+    assertValidThreadId(value);
     return value;
   };
 

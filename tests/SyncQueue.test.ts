@@ -268,7 +268,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
       queue.dispose();
     });
 
-    it('emits totalPendingCount across all threads while keeping per-thread state, and supports getQueuedTurns / replaceThreadTurns / migrateThread / removeThread', async () => {
+    it('emits totalPendingCount across all threads while keeping per-thread state, and supports getQueuedTurns / reconcileThreadTurns / removeThread', async () => {
       const queue: SyncQueue = new SyncQueue(
         customDeps(
           fakeClient(async (threadId) => ({ ids: [`${threadId}-s1`, `${threadId}-s2`] })),
@@ -279,12 +279,13 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
       );
 
       queue.holdThreads(['t1', 't2']);
-      queue.enqueue(turn('t1', 1));
+      const originalTurn = turn('t1', 1);
+      queue.enqueue(originalTurn);
       queue.enqueue(turn('t2', 2));
 
       expect(queue.getQueuedTurns('t1')).toHaveLength(1);
 
-      // Replace t1 turns and migrate t1 -> t1-new
+      // Reconcile t1 turns in place and unhold t1
       const replacement: QueuedTurn = {
         threadId: 't1',
         localIds: ['u-rep', 'a-rep'],
@@ -295,21 +296,23 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
         enqueuedAt: '2026-06-10T10:00:00Z',
         attempts: 0,
       };
-      queue.replaceThreadTurns('t1', [replacement]);
-      queue.migrateThread('t1', 't1-new');
+      queue.reconcileThreadTurns('t1', [replacement], new Set(originalTurn.localIds), {
+        resetAttempts: true,
+      });
+      queue.unholdThread('t1');
       expect(queue.isHeld('t1')).toBe(false);
-      expect(queue.getQueuedTurns('t1-new')[0].localIds).toEqual(['u-rep', 'a-rep']);
+      expect(queue.getQueuedTurns('t1')[0].localIds).toEqual(['u-rep', 'a-rep']);
 
       events.length = 0;
-      await queue.flush(); // t1-new flushes; t2 stays held!
+      await queue.flush(); // t1 flushes; t2 stays held!
 
       const syncedT1Event = events.find(
         (e): e is Extract<SyncEvent, { kind: 'sync-state' }> =>
-          e.kind === 'sync-state' && e.threadId === 't1-new',
+          e.kind === 'sync-state' && e.threadId === 't1',
       );
       expect(syncedT1Event).toMatchObject({
         kind: 'sync-state',
-        threadId: 't1-new',
+        threadId: 't1',
         state: 'synced',
         pendingCount: 4, // 1 remaining in queue (t2) + 3 unqueued startup turns
       });
@@ -319,30 +322,38 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
       queue.dispose();
     });
 
-    it('routes appendMessages SyncApiError(404) through all 4 onMissingConversation outcomes (migrated, deferred, retry, drop)', async () => {
-      // 1. 'migrated': migrates old -> new and flushes under newId immediately
-      let migratedQueue!: SyncQueue;
+    it('routes appendMessages SyncApiError(404) through all 4 onMissingConversation outcomes (recreated, deferred, retry, drop)', async () => {
+      // 1. 'recreated': keeps threadId immutable while client adapter routes to new remote conversation immediately
+      let recreatedRemote = 'old-404';
+      let recreatedQueue!: SyncQueue;
       const calls1: string[] = [];
-      migratedQueue = new SyncQueue(
+      recreatedQueue = new SyncQueue(
         customDeps(
-          fakeClient(async (threadId) => {
-            calls1.push(threadId);
-            if (threadId === 'old-404') throw new SyncApiError(404, 'Not found');
+          fakeClient(async () => {
+            calls1.push(recreatedRemote);
+            if (recreatedRemote === 'old-404') throw new SyncApiError(404, 'Not found');
             return { ids: ['s-u', 's-a'] };
           }),
           {
             onMissingConversation: async (threadId) => {
-              migratedQueue.migrateThread(threadId, 'new-200');
-              return 'migrated';
+              const existing = recreatedQueue.getQueuedTurns(threadId);
+              recreatedQueue.reconcileThreadTurns(
+                threadId,
+                existing,
+                new Set(existing.flatMap((t) => t.localIds)),
+                { resetAttempts: true },
+              );
+              recreatedRemote = 'new-200';
+              return 'recreated';
             },
           },
         ),
       );
-      migratedQueue.enqueue(turn('old-404', 1));
-      await migratedQueue.flush();
+      recreatedQueue.enqueue(turn('old-404', 1));
+      await recreatedQueue.flush();
       expect(calls1).toEqual(['old-404', 'new-200']);
-      expect(migratedQueue.pendingCount()).toBe(0);
-      migratedQueue.dispose();
+      expect(recreatedQueue.pendingCount()).toBe(0);
+      recreatedQueue.dispose();
 
       // 2. 'deferred': skips busy thread without incrementing attempts or head-of-line blocking sibling t2
       const calls2: string[] = [];
@@ -425,7 +436,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
           {
             onMissingConversation: async () => {
               missingCalled = true;
-              return 'migrated';
+              return 'recreated';
             },
             onTurnDropped: (t) => droppedIds.push(t.localIds),
             setTimeoutFn: noopTimeout,
@@ -450,7 +461,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
           {
             onMissingConversation: async () => {
               missingCalled = true;
-              return 'migrated';
+              return 'recreated';
             },
             onTurnDropped: (t) => droppedIds.push(t.localIds),
             setTimeoutFn: noopTimeout,
@@ -581,7 +592,7 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
             {
               onMissingConversation: async () => {
                 missingHookCalls += 1;
-                return 'migrated';
+                return 'recreated';
               },
               setTimeoutFn: (() => {
                 scheduledTimers += 1;

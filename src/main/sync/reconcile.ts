@@ -654,15 +654,12 @@ function findContiguousQueuedMatch(
   return -1;
 }
 
-interface BuildRecreationTurnsBase {
+export interface BuildRecreationTurnsInput {
+  threadId: string;
   localMessages: readonly (StoredChatMessage | ChatMessage)[];
   queuedTurns?: readonly QueuedTurn[];
   isOrchestrator: boolean;
 }
-
-export type BuildRecreationTurnsInput =
-  | (BuildRecreationTurnsBase & { threadId: string })
-  | (BuildRecreationTurnsBase & { newThreadId: string });
 
 /**
  * Groups ALL messages in a conversation (whether they previously carried `serverId` or not)
@@ -670,7 +667,7 @@ export type BuildRecreationTurnsInput =
  * reusing existing `QueuedTurn` payloads where `localIds` match and appending any `queueOnlyTurns`.
  */
 export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): QueuedTurn[] {
-  const targetThreadId = 'threadId' in input ? input.threadId : input.newThreadId;
+  const targetThreadId = input.threadId;
   const { queuedTurns = [], isOrchestrator } = input;
   const localMessages = input.localMessages.filter(isValidStoredMessage);
   const queuedByKey = new Map<string, QueuedTurn>();
