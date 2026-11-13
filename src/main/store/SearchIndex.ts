@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import type { ChatMessage, ThreadSearchHit } from '../../shared/types';
+import { assertValidThreadId, isValidThreadId, type ChatMessage, type ThreadSearchHit } from '../../shared/types';
 
 /**
  * Local full-text index over the cached thread logs, so the sidebar can search what was
@@ -134,7 +134,7 @@ export class SearchIndex {
     for (const file of files) {
       if (!file.endsWith('.jsonl')) continue;
       const threadId = file.slice(0, -'.jsonl'.length);
-      if (!/^[a-zA-Z0-9\-_]+$/.test(threadId)) continue;
+      if (!isValidThreadId(threadId)) continue;
       seen.add(threadId);
 
       const full = path.join(this.threadsDir, file);
@@ -223,9 +223,7 @@ export class SearchIndex {
   }
 
   private validateThreadId(threadId: unknown): asserts threadId is string {
-    if (typeof threadId !== 'string' || threadId.length === 0 || !/^[a-zA-Z0-9\-_]+$/.test(threadId)) {
-      throw new Error(`Invalid threadId: ${String(threadId)}`);
-    }
+    assertValidThreadId(threadId);
   }
 
   /**

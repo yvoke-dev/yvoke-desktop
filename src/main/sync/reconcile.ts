@@ -6,7 +6,7 @@ import {
   type UsageTotals,
 } from '../../shared/types';
 import { serializeAssistantContent } from '../store/messageCodec';
-import type { StoredChatMessage } from '../store/ThreadStore';
+import { isValidStoredMessage, type StoredChatMessage } from '../store/ThreadStore';
 import type { MessageDto, NewMessagePayload } from './SyncClient';
 import type { QueuedTurn } from './SyncQueue';
 
@@ -104,32 +104,59 @@ interface UnmatchedLocalTurn {
   queuedTurn?: QueuedTurn;
 }
 
-interface PartialQueuedOverlap {
+export interface PartialQueuedOverlap {
   qt: QueuedTurn;
+  firstIdx: number;
   lastIdx: number;
   presentIndices: number[];
 }
 
-function isValidLocalMessage(msg: unknown): msg is StoredChatMessage | ChatMessage {
-  if (typeof msg !== 'object' || msg === null || Array.isArray(msg)) return false;
-  const rec = msg as Record<string, unknown>;
-  return (
-    typeof rec.localId === 'string' &&
-    rec.localId.length > 0 &&
-    (rec.role === 'user' || rec.role === 'assistant') &&
-    typeof rec.content === 'string'
-  );
+export interface PartialOverlapOptions {
+  partialQueuedByFirstIndex?: ReadonlyMap<number, PartialQueuedOverlap>;
+  consumedByPartialQueue?: ReadonlySet<number>;
+  ignoreServerIds?: boolean;
 }
+
+export type LocalTurnGroup =
+  | {
+      kind: 'synced';
+      startIndex: number;
+      endIndex: number;
+      messages: readonly [StoredChatMessage | ChatMessage];
+    }
+  | {
+      kind: 'partial-queued';
+      startIndex: number;
+      endIndex: number;
+      messages: readonly (StoredChatMessage | ChatMessage)[];
+      queuedTurn: QueuedTurn;
+      presentIndices: readonly number[];
+    }
+  | {
+      kind: 'pair';
+      startIndex: number;
+      endIndex: number;
+      messages: readonly [StoredChatMessage | ChatMessage, StoredChatMessage | ChatMessage];
+    }
+  | {
+      kind: 'singleton';
+      startIndex: number;
+      endIndex: number;
+      messages: readonly [StoredChatMessage | ChatMessage];
+    };
 
 function collectPartialQueuedOverlaps(
   localMessages: readonly (StoredChatMessage | ChatMessage)[],
   queuedTurns: readonly QueuedTurn[],
+  opts?: { ignoreServerIds?: boolean },
 ): {
   localIndexById: Map<string, number>;
   partialQueuedByFirstIndex: Map<number, PartialQueuedOverlap>;
   consumedByPartialQueue: Set<number>;
   handledPartialTurns: Set<QueuedTurn>;
+  ignoreServerIds: boolean;
 } {
+  const ignoreServerIds = Boolean(opts?.ignoreServerIds);
   const localIndexById = new Map<string, number>();
   for (let idx = 0; idx < localMessages.length; idx += 1) {
     if (!localIndexById.has(localMessages[idx].localId)) {
@@ -149,7 +176,7 @@ function collectPartialQueuedOverlaps(
     if (presentIndices.length === 0 || presentIndices.length === qt.localIds.length) {
       continue;
     }
-    if (presentIndices.some((idx) => Boolean(localMessages[idx].serverId))) {
+    if (!ignoreServerIds && presentIndices.some((idx) => Boolean(localMessages[idx].serverId))) {
       continue;
     }
     const firstIdx = Math.min(...presentIndices);
@@ -157,7 +184,7 @@ function collectPartialQueuedOverlaps(
     if (partialQueuedByFirstIndex.has(firstIdx) || presentIndices.some((idx) => consumedByPartialQueue.has(idx))) {
       continue;
     }
-    partialQueuedByFirstIndex.set(firstIdx, { qt, lastIdx, presentIndices });
+    partialQueuedByFirstIndex.set(firstIdx, { qt, firstIdx, lastIdx, presentIndices });
     handledPartialTurns.add(qt);
     for (const idx of presentIndices) {
       if (idx !== firstIdx) {
@@ -171,7 +198,120 @@ function collectPartialQueuedOverlaps(
     partialQueuedByFirstIndex,
     consumedByPartialQueue,
     handledPartialTurns,
+    ignoreServerIds,
   };
+}
+
+/**
+ * Canonical `[user, assistant]` turn-grouping primitive shared across `reconcileWithRemote`,
+ * `buildAllTurnsForRecreation`, and `countUnqueuedLocalTurns`.
+ */
+export function groupLocalTurns(
+  rawMessages: readonly (StoredChatMessage | ChatMessage)[],
+  partialOverlaps?: PartialOverlapOptions,
+): LocalTurnGroup[] {
+  const messages = rawMessages.filter(isValidStoredMessage);
+  const partialByFirst = partialOverlaps?.partialQueuedByFirstIndex;
+  const consumed = partialOverlaps?.consumedByPartialQueue;
+  const ignoreServerIds = Boolean(partialOverlaps?.ignoreServerIds);
+
+  const groups: LocalTurnGroup[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    if (consumed?.has(i)) {
+      i += 1;
+      continue;
+    }
+
+    const partial = partialByFirst?.get(i);
+    if (partial) {
+      groups.push({
+        kind: 'partial-queued',
+        startIndex: i,
+        endIndex: partial.lastIdx,
+        messages: partial.presentIndices.map((idx) => messages[idx]),
+        queuedTurn: partial.qt,
+        presentIndices: partial.presentIndices,
+      });
+      i += 1;
+      continue;
+    }
+
+    const current = messages[i];
+    if (!ignoreServerIds && current.serverId) {
+      groups.push({
+        kind: 'synced',
+        startIndex: i,
+        endIndex: i,
+        messages: [current],
+      });
+      i += 1;
+      continue;
+    }
+
+    if (
+      i + 1 < messages.length &&
+      !consumed?.has(i + 1) &&
+      !partialByFirst?.has(i + 1) &&
+      current.role === 'user' &&
+      messages[i + 1].role === 'assistant' &&
+      (ignoreServerIds || !messages[i + 1].serverId)
+    ) {
+      groups.push({
+        kind: 'pair',
+        startIndex: i,
+        endIndex: i + 1,
+        messages: [current, messages[i + 1]],
+      });
+      i += 2;
+      continue;
+    }
+
+    groups.push({
+      kind: 'singleton',
+      startIndex: i,
+      endIndex: i,
+      messages: [current],
+    });
+    i += 1;
+  }
+
+  return groups;
+}
+
+/**
+ * Counts trailing unsynced turns in `rawMessages` that are not already covered by `queuedTurns`
+ * or `excludedLocalIds` (live session turns / dropped turns).
+ */
+export function countUnqueuedLocalTurns(
+  rawMessages: readonly (StoredChatMessage | ChatMessage)[],
+  queuedTurns: readonly QueuedTurn[] = [],
+  excludedLocalIds?: ReadonlySet<string>,
+): number {
+  const localMessages = rawMessages.filter(isValidStoredMessage);
+  if (localMessages.length === 0) return 0;
+
+  let lastSyncedIdx = -1;
+  for (let i = 0; i < localMessages.length; i += 1) {
+    if (localMessages[i].serverId) {
+      lastSyncedIdx = i;
+    }
+  }
+
+  const partialOverlaps = collectPartialQueuedOverlaps(localMessages, queuedTurns);
+  const groups = groupLocalTurns(localMessages, partialOverlaps);
+  const queuedIds = new Set(queuedTurns.flatMap((t) => t.localIds));
+
+  let unqueuedCount = 0;
+  for (const group of groups) {
+    if (group.kind === 'synced' || group.kind === 'partial-queued') continue;
+    if (group.startIndex <= lastSyncedIdx) continue;
+    const turnIds = group.messages.map((m) => m.localId);
+    if (!turnIds.some((id) => queuedIds.has(id) || excludedLocalIds?.has(id))) {
+      unqueuedCount += 1;
+    }
+  }
+  return unqueuedCount;
 }
 
 function normalizeContent(value: string): string {
@@ -211,7 +351,7 @@ export function reconcileWithRemote(input: ReconcileInput): ReconcileResult {
     truncated = false,
     droppedLocalIds,
   } = input;
-  const localMessages = input.localMessages.filter(isValidLocalMessage);
+  const localMessages = input.localMessages.filter(isValidStoredMessage);
 
   const adoptedServerIds: Record<string, string> = {};
   const remoteIndexById = new Map<string, number>();
@@ -288,26 +428,17 @@ export function reconcileWithRemote(input: ReconcileInput): ReconcileResult {
     }
   }
 
-  const {
-    partialQueuedByFirstIndex,
-    consumedByPartialQueue,
-    handledPartialTurns,
-  } = collectPartialQueuedOverlaps(localMessages, queuedTurns);
+  const partialOverlaps = collectPartialQueuedOverlaps(localMessages, queuedTurns);
+  const { handledPartialTurns } = partialOverlaps;
+  const groups = groupLocalTurns(localMessages, partialOverlaps);
 
   const syncedLocalIndices = new Set<number>();
   const unmatchedLocalTurns: UnmatchedLocalTurn[] = [];
 
-  let i = 0;
-  while (i < localMessages.length) {
-    if (consumedByPartialQueue.has(i)) {
-      i += 1;
-      continue;
-    }
-
-    const partialOverlap = partialQueuedByFirstIndex.get(i);
-    if (partialOverlap) {
-      const { qt, lastIdx, presentIndices } = partialOverlap;
-      const upperBound = nextAnchorAfter[lastIdx];
+  for (const group of groups) {
+    if (group.kind === 'partial-queued') {
+      const { queuedTurn: qt, startIndex, endIndex, presentIndices } = group;
+      const upperBound = nextAnchorAfter[endIndex];
       const matchedAt = findContiguousQueuedMatch(qt, remoteMessages, remoteCursor, claimedRemoteIds, upperBound);
       if (matchedAt >= 0) {
         for (let j = 0; j < qt.messages.length; j += 1) {
@@ -323,41 +454,31 @@ export function reconcileWithRemote(input: ReconcileInput): ReconcileResult {
         remoteCursor = matchedAt + qt.messages.length;
       } else {
         unmatchedLocalTurns.push({
-          startIndex: i,
-          endIndex: lastIdx,
-          messages: presentIndices.map((idx) => localMessages[idx]),
+          startIndex,
+          endIndex,
+          messages: group.messages,
           queuedTurn: qt,
         });
       }
-      i += 1;
       continue;
     }
 
-    const current = localMessages[i];
-    if (current.serverId) {
-      syncedLocalIndices.add(i);
-      if (remoteIndexById.has(current.serverId)) {
+    if (group.kind === 'synced') {
+      const current = group.messages[0];
+      syncedLocalIndices.add(group.startIndex);
+      if (current.serverId && remoteIndexById.has(current.serverId)) {
         remoteCursor = Math.max(remoteCursor, remoteIndexById.get(current.serverId)! + 1);
       }
-      i += 1;
       continue;
     }
 
-    // Adjacent unsynced [user, assistant] pair: match atomically and ALWAYS advance i += 2.
-    if (
-      i + 1 < localMessages.length &&
-      !consumedByPartialQueue.has(i + 1) &&
-      !partialQueuedByFirstIndex.has(i + 1) &&
-      current.role === 'user' &&
-      localMessages[i + 1].role === 'assistant' &&
-      !localMessages[i + 1].serverId
-    ) {
-      const next = localMessages[i + 1];
+    if (group.kind === 'pair') {
+      const [current, next] = group.messages;
       const uPrimary = toNewMessagePayload(current, isOrchestrator).content;
       const aPrimary = toNewMessagePayload(next, isOrchestrator).content;
       const uQueued = queuedContentByLocalId.get(current.localId);
       const aQueued = queuedContentByLocalId.get(next.localId);
-      const upperBound = nextAnchorAfter[i + 1];
+      const upperBound = nextAnchorAfter[group.endIndex];
 
       let matchedPos = -1;
       for (let k = remoteCursor; k + 1 < upperBound; k += 1) {
@@ -380,25 +501,24 @@ export function reconcileWithRemote(input: ReconcileInput): ReconcileResult {
         claimedRemoteIds.add(rAsstId);
         adoptedServerIds[current.localId] = rUserId;
         adoptedServerIds[next.localId] = rAsstId;
-        syncedLocalIndices.add(i);
-        syncedLocalIndices.add(i + 1);
+        syncedLocalIndices.add(group.startIndex);
+        syncedLocalIndices.add(group.endIndex);
         remoteCursor = matchedPos + 2;
       } else {
         unmatchedLocalTurns.push({
-          startIndex: i,
-          endIndex: i + 1,
+          startIndex: group.startIndex,
+          endIndex: group.endIndex,
           messages: [current, next],
         });
       }
-
-      i += 2;
       continue;
     }
 
     // Standalone unpaired singleton message
+    const current = group.messages[0];
     const sPrimary = toNewMessagePayload(current, isOrchestrator).content;
     const sQueued = queuedContentByLocalId.get(current.localId);
-    const upperBound = nextAnchorAfter[i];
+    const upperBound = nextAnchorAfter[group.startIndex];
 
     let matchedSingleton = -1;
     for (let k = remoteCursor; k < upperBound; k += 1) {
@@ -414,17 +534,15 @@ export function reconcileWithRemote(input: ReconcileInput): ReconcileResult {
       const rId = remoteMessages[matchedSingleton].id;
       claimedRemoteIds.add(rId);
       adoptedServerIds[current.localId] = rId;
-      syncedLocalIndices.add(i);
+      syncedLocalIndices.add(group.startIndex);
       remoteCursor = matchedSingleton + 1;
     } else {
       unmatchedLocalTurns.push({
-        startIndex: i,
-        endIndex: i,
+        startIndex: group.startIndex,
+        endIndex: group.endIndex,
         messages: [current],
       });
     }
-
-    i += 1;
   }
 
   let lastSyncedLocalIndex = -1;
@@ -536,21 +654,25 @@ function findContiguousQueuedMatch(
   return -1;
 }
 
-export interface BuildRecreationTurnsInput {
-  newThreadId: string;
+interface BuildRecreationTurnsBase {
   localMessages: readonly (StoredChatMessage | ChatMessage)[];
   queuedTurns?: readonly QueuedTurn[];
   isOrchestrator: boolean;
 }
 
+export type BuildRecreationTurnsInput =
+  | (BuildRecreationTurnsBase & { threadId: string })
+  | (BuildRecreationTurnsBase & { newThreadId: string });
+
 /**
  * Groups ALL messages in a conversation (whether they previously carried `serverId` or not)
- * into chronological `[user, assistant]` pairs and standalone singletons under `newThreadId`,
+ * into chronological `[user, assistant]` pairs and standalone singletons under `threadId`,
  * reusing existing `QueuedTurn` payloads where `localIds` match and appending any `queueOnlyTurns`.
  */
 export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): QueuedTurn[] {
-  const { newThreadId, queuedTurns = [], isOrchestrator } = input;
-  const localMessages = input.localMessages.filter(isValidLocalMessage);
+  const targetThreadId = 'threadId' in input ? input.threadId : input.newThreadId;
+  const { queuedTurns = [], isOrchestrator } = input;
+  const localMessages = input.localMessages.filter(isValidStoredMessage);
   const queuedByKey = new Map<string, QueuedTurn>();
   for (const qt of queuedTurns) {
     queuedByKey.set(qt.localIds.join('\0'), qt);
@@ -558,69 +680,32 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
 
   // For recreation, ALL turns (even if an overlapping local line carried a stale serverId from the
   // deleted conversation) must preserve the complete SyncQueue turn if .jsonl crashed mid-write.
-  const localIndexById = new Map<string, number>();
-  for (let idx = 0; idx < localMessages.length; idx += 1) {
-    if (!localIndexById.has(localMessages[idx].localId)) {
-      localIndexById.set(localMessages[idx].localId, idx);
-    }
-  }
-  const partialQueuedByFirstIndex = new Map<number, QueuedTurn>();
-  const consumedByPartialQueue = new Set<number>();
-  for (const qt of queuedTurns) {
-    if (qt.messages.length === 0 || qt.localIds.length !== qt.messages.length) continue;
-    const presentIndices = qt.localIds
-      .map((id) => localIndexById.get(id))
-      .filter((idx): idx is number => idx !== undefined);
-    if (presentIndices.length === 0 || presentIndices.length === qt.localIds.length) {
-      continue;
-    }
-    const firstIdx = Math.min(...presentIndices);
-    if (partialQueuedByFirstIndex.has(firstIdx) || presentIndices.some((idx) => consumedByPartialQueue.has(idx))) {
-      continue;
-    }
-    partialQueuedByFirstIndex.set(firstIdx, qt);
-    for (const idx of presentIndices) {
-      if (idx !== firstIdx) {
-        consumedByPartialQueue.add(idx);
-      }
-    }
-  }
+  const partialOverlaps = collectPartialQueuedOverlaps(localMessages, queuedTurns, {
+    ignoreServerIds: true,
+  });
+  const groups = groupLocalTurns(localMessages, partialOverlaps);
 
   const turns: QueuedTurn[] = [];
   const coveredLocalIds = new Set<string>();
 
-  let i = 0;
-  while (i < localMessages.length) {
-    if (consumedByPartialQueue.has(i)) {
-      i += 1;
-      continue;
-    }
-
-    const partialQt = partialQueuedByFirstIndex.get(i);
-    if (partialQt) {
+  for (const group of groups) {
+    if (group.kind === 'partial-queued') {
+      const partialQt = group.queuedTurn;
       for (const id of partialQt.localIds) {
         coveredLocalIds.add(id);
       }
       turns.push({
-        threadId: newThreadId,
+        threadId: targetThreadId,
         localIds: [...partialQt.localIds],
         messages: partialQt.messages,
         enqueuedAt: partialQt.enqueuedAt,
         attempts: 0,
       });
-      i += 1;
       continue;
     }
 
-    const current = localMessages[i];
-    if (
-      i + 1 < localMessages.length &&
-      !consumedByPartialQueue.has(i + 1) &&
-      !partialQueuedByFirstIndex.has(i + 1) &&
-      current.role === 'user' &&
-      localMessages[i + 1].role === 'assistant'
-    ) {
-      const next = localMessages[i + 1];
+    if (group.kind === 'pair') {
+      const [current, next] = group.messages;
       const pairIds = [current.localId, next.localId];
       coveredLocalIds.add(current.localId);
       coveredLocalIds.add(next.localId);
@@ -628,7 +713,7 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
       const existing = queuedByKey.get(pairIds.join('\0'));
       if (existing) {
         turns.push({
-          threadId: newThreadId,
+          threadId: targetThreadId,
           localIds: pairIds,
           messages: existing.messages,
           enqueuedAt: existing.enqueuedAt,
@@ -636,7 +721,7 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
         });
       } else {
         turns.push({
-          threadId: newThreadId,
+          threadId: targetThreadId,
           localIds: pairIds,
           messages: [
             toNewMessagePayload(current, isOrchestrator),
@@ -646,16 +731,16 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
           attempts: 0,
         });
       }
-      i += 2;
       continue;
     }
 
+    const current = group.messages[0];
     const singleIds = [current.localId];
     coveredLocalIds.add(current.localId);
     const existing = queuedByKey.get(singleIds.join('\0'));
     if (existing) {
       turns.push({
-        threadId: newThreadId,
+        threadId: targetThreadId,
         localIds: singleIds,
         messages: existing.messages,
         enqueuedAt: existing.enqueuedAt,
@@ -663,14 +748,13 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
       });
     } else {
       turns.push({
-        threadId: newThreadId,
+        threadId: targetThreadId,
         localIds: singleIds,
         messages: [toNewMessagePayload(current, isOrchestrator)],
         enqueuedAt: current.createdAt || '1970-01-01T00:00:00.000Z',
         attempts: 0,
       });
     }
-    i += 1;
   }
 
   for (const qt of queuedTurns) {
@@ -680,7 +764,7 @@ export function buildAllTurnsForRecreation(input: BuildRecreationTurnsInput): Qu
       coveredLocalIds.add(id);
     }
     turns.push({
-      threadId: newThreadId,
+      threadId: targetThreadId,
       localIds: [...qt.localIds],
       messages: qt.messages,
       enqueuedAt: qt.enqueuedAt,
@@ -704,7 +788,7 @@ export interface ReconstructOrphanMetaInput {
  * Returns `undefined` when `messages` contains zero valid message records.
  */
 export function reconstructOrphanThreadMeta(input: ReconstructOrphanMetaInput): ThreadMeta | undefined {
-  const valid = input.messages.filter(isValidLocalMessage);
+  const valid = input.messages.filter(isValidStoredMessage);
   if (valid.length === 0) {
     return undefined;
   }

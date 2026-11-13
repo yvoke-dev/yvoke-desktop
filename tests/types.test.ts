@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertValidThreadId,
   CLARIFICATION_ANSWER_PREFIX,
   CLARIFICATION_WEB_SUCCESS_MESSAGE,
   DEFAULT_KB_TOOLS,
   isClarificationTool,
+  isValidThreadId,
   MCP_PREFIX_RE,
   normalizeClarifyingInput,
   qualifyTool,
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
   clarificationAnswer,
   clarificationState,
+  type SyncEvent,
+  type ThreadMeta,
   type ToolCallInfo,
 } from '../src/shared/types';
 
@@ -356,4 +360,69 @@ describe('Task 1.1: Shared Contracts & Fail-Safe Normalization', () => {
     });
   });
 
+  describe('Wave 1 Remediation: isValidThreadId, assertValidThreadId & recreation contracts', () => {
+    it('isValidThreadId accepts [a-zA-Z0-9\\-_]+ and rejects empty, traversal, whitespace, and non-strings', () => {
+      expect(isValidThreadId('t1')).toBe(true);
+      expect(isValidThreadId('thread_ABC-123')).toBe(true);
+      expect(isValidThreadId('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
+
+      const invalidInputs: unknown[] = [
+        '',
+        '   ',
+        '../etc',
+        '../malicious',
+        'a/b',
+        'a\\b',
+        'id with space',
+        'thread.jsonl',
+        'id$1',
+        null,
+        undefined,
+        0,
+        42,
+        true,
+        {},
+        ['t1'],
+      ];
+      for (const bad of invalidInputs) {
+        expect(isValidThreadId(bad)).toBe(false);
+      }
+    });
+
+    it('assertValidThreadId passes valid IDs and throws Invalid threadId on invalid inputs', () => {
+      expect(() => assertValidThreadId('valid-thread_01')).not.toThrow();
+
+      const invalidInputs: unknown[] = [
+        '',
+        '../etc',
+        'a/b',
+        'a\\b',
+        'id with space',
+        null,
+        undefined,
+        42,
+        {},
+      ];
+      for (const bad of invalidInputs) {
+        expect(() => assertValidThreadId(bad)).toThrow(/Invalid threadId/);
+      }
+    });
+
+    it('supports remoteConversationId on ThreadMeta and thread-recreated on SyncEvent', () => {
+      const recreatedMeta: ThreadMeta = {
+        id: 'local-immutable-id',
+        remoteConversationId: 'remote-conv-uuid',
+        title: 'Recreated Chat',
+        model: 'sonnet',
+        thinkingLevel: 'medium',
+        createdAt: '2026-06-10T10:00:00Z',
+        updatedAt: '2026-06-10T10:05:00Z',
+        totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        syncState: 'pending',
+      };
+      const evt: SyncEvent = { kind: 'thread-recreated', thread: recreatedMeta };
+      expect(evt.kind).toBe('thread-recreated');
+      expect(evt.thread.remoteConversationId).toBe('remote-conv-uuid');
+    });
+  });
 });

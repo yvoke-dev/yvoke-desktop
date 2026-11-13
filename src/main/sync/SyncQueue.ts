@@ -14,7 +14,7 @@ export interface QueuedTurn {
 }
 
 export type HeldThreadResolution = 'ready' | 'deferred';
-export type MissingConversationResolution = 'migrated' | 'deferred' | 'retry' | 'drop';
+export type MissingConversationResolution = 'migrated' | 'recreated' | 'deferred' | 'retry' | 'drop';
 
 export interface SyncQueueDeps {
   client: SyncClient;
@@ -261,6 +261,76 @@ export class SyncQueue {
     this.persist();
   }
 
+  /**
+   * Reconciles queued turns for `threadId` safely against in-flight `this.flushing` and any
+   * `postSnapshot` turns enqueued concurrently after `inspectedLocalIds` was snapshotted.
+   */
+  reconcileThreadTurns(
+    threadId: string,
+    turnsToQueue: readonly QueuedTurn[],
+    inspectedLocalIds: ReadonlySet<string>,
+    opts?: { resetAttempts?: boolean },
+  ): void {
+    const resetAttempts = Boolean(opts?.resetAttempts);
+    const supersedeFlushing =
+      resetAttempts &&
+      this.flushing !== null &&
+      this.flushing.threadId === threadId;
+
+    if (supersedeFlushing) {
+      this.flushing = null;
+    }
+
+    let firstIdx = this.queue.findIndex((t) => t.threadId === threadId && t !== this.flushing);
+
+    const flushingIds =
+      this.flushing && this.flushing.threadId === threadId ? new Set(this.flushing.localIds) : null;
+
+    const filteredReplacementTurns: QueuedTurn[] = turnsToQueue
+      .filter((t) => !flushingIds || !t.localIds.some((id) => flushingIds.has(id)))
+      .map((t) => ({
+        threadId,
+        localIds: [...t.localIds],
+        messages: [...t.messages],
+        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
+        attempts: resetAttempts ? 0 : (t.attempts ?? 0),
+      }));
+
+    const replacementIds = new Set(filteredReplacementTurns.flatMap((t) => t.localIds));
+
+    const postSnapshot: QueuedTurn[] = this.queue
+      .filter(
+        (t) =>
+          t.threadId === threadId &&
+          t !== this.flushing &&
+          t.localIds.length > 0 &&
+          !t.localIds.some((id) => inspectedLocalIds.has(id) || replacementIds.has(id)),
+      )
+      .map((t) => ({
+        threadId,
+        localIds: [...t.localIds],
+        messages: [...t.messages],
+        enqueuedAt: t.enqueuedAt || new Date().toISOString(),
+        attempts: resetAttempts ? 0 : t.attempts,
+      }));
+
+    this.queue = this.queue.filter((t) => t.threadId !== threadId || t === this.flushing);
+
+    const toInsert = [...filteredReplacementTurns, ...postSnapshot];
+    if (toInsert.length > 0) {
+      if (firstIdx < 0 || firstIdx > this.queue.length) {
+        firstIdx = this.queue.length;
+      }
+      this.queue.splice(firstIdx, 0, ...toInsert);
+      this.enforceQueueCap();
+    }
+
+    this.persist();
+    if (this.flushPromise && this.pendingCount(threadId) > 0 && !this.heldThreads.has(threadId)) {
+      this.flushRequested = true;
+    }
+  }
+
   migrateThread(oldId: string, newId: string, replacementTurns?: readonly QueuedTurn[]): void {
     this.heldThreads.delete(oldId);
     if (oldId === newId && !replacementTurns) return;
@@ -377,7 +447,12 @@ export class SyncQueue {
       this.flushing = turn;
       try {
         const { ids } = await this.deps.client.appendMessages(turn.threadId, turn.messages);
-        this.flushing = null;
+        if (this.flushing === turn) {
+          this.flushing = null;
+        }
+        if (!this.queue.includes(turn)) {
+          continue;
+        }
         const mapping: Record<string, string> = {};
         turn.localIds.forEach((localId, i) => {
           if (ids[i]) mapping[localId] = ids[i];
@@ -395,9 +470,14 @@ export class SyncQueue {
           });
         }
       } catch (error) {
-        this.flushing = null;
+        if (this.flushing === turn) {
+          this.flushing = null;
+        }
         if (this.disposed) {
           return 'completed';
+        }
+        if (!this.queue.includes(turn)) {
+          continue;
         }
 
         if (error instanceof SyncApiError && error.status === 404 && this.deps.onMissingConversation) {
@@ -414,7 +494,7 @@ export class SyncQueue {
           if (this.disposed) {
             return 'completed';
           }
-          if (outcome === 'migrated') {
+          if (outcome === 'migrated' || outcome === 'recreated') {
             continue;
           }
           if (outcome === 'deferred') {

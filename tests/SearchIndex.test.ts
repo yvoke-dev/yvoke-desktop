@@ -289,5 +289,24 @@ describe('SearchIndex', () => {
         expect(() => index.migrateThread('valid-id', bad as string)).toThrow(/Invalid threadId/);
       }
     });
+
+    it('refresh() ignores .jsonl files with invalid threadId filenames while indexing valid logs', async () => {
+      writeLog('valid-thread_1', [message('m1', 'user', 'searchable token alpha')]);
+      fs.writeFileSync(
+        path.join(threadsDir, 'bad name.jsonl'),
+        JSON.stringify(message('m2', 'user', 'searchable token alpha')) + '\n',
+      );
+      fs.writeFileSync(
+        path.join(threadsDir, '.jsonl'),
+        JSON.stringify(message('m3', 'user', 'searchable token alpha')) + '\n',
+      );
+
+      const index = newIndex();
+      const sweep = await index.start();
+      expect(sweep).toEqual({ indexed: 1, skipped: 0, removed: 0 });
+      expect((await index.search('searchable token alpha')).map((h) => h.threadId)).toEqual([
+        'valid-thread_1',
+      ]);
+    });
   });
 });

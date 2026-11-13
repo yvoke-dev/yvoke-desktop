@@ -5,6 +5,8 @@ import type { MessageDto } from '../src/main/sync/SyncClient';
 import type { QueuedTurn } from '../src/main/sync/SyncQueue';
 import {
   buildAllTurnsForRecreation,
+  countUnqueuedLocalTurns,
+  groupLocalTurns,
   reconcileWithRemote,
   reconstructOrphanThreadMeta,
   toNewMessagePayload,
@@ -462,7 +464,7 @@ describe('reconcile module (Wave 1)', () => {
       expect(reconciled.turnsToQueue.map((t) => t.localIds)).toEqual([['u-good', 'a-good']]);
 
       const recreated = buildAllTurnsForRecreation({
-        newThreadId: 'new-malformed',
+        threadId: 'new-malformed',
         localMessages: [malformed, validUser, missingContent, validAsst],
         queuedTurns: [],
         isOrchestrator: false,
@@ -492,7 +494,7 @@ describe('reconcile module (Wave 1)', () => {
       ];
 
       const turns = buildAllTurnsForRecreation({
-        newThreadId: 'new-id',
+        threadId: 'new-id',
         localMessages,
         queuedTurns,
         isOrchestrator: false,
@@ -542,7 +544,7 @@ describe('reconcile module (Wave 1)', () => {
       ];
 
       const turns = buildAllTurnsForRecreation({
-        newThreadId: 'new-thread',
+        threadId: 'new-thread',
         localMessages,
         queuedTurns,
         isOrchestrator: false,
@@ -639,6 +641,84 @@ describe('reconcile module (Wave 1)', () => {
           defaultThinkingLevel: 'medium',
         }),
       ).toBeUndefined();
+    });
+  });
+
+  describe('groupLocalTurns & countUnqueuedLocalTurns (Wave 1 Remediation)', () => {
+    it('groupLocalTurns groups synced anchors, unsynced [user, assistant] pairs, singletons, and ignoreServerIds mode', () => {
+      const msgs: StoredChatMessage[] = [
+        { localId: 'u1', serverId: 's1', role: 'user', content: 'Q1', createdAt: '2026-06-10T10:00:00Z' },
+        { localId: 'a1', serverId: 's2', role: 'assistant', content: 'A1', createdAt: '2026-06-10T10:00:01Z' },
+        { localId: 'u2', role: 'user', content: 'Q2', createdAt: '2026-06-10T10:01:00Z' },
+        { localId: 'a2', role: 'assistant', content: 'A2', createdAt: '2026-06-10T10:01:01Z' },
+        { localId: 'u3', role: 'user', content: 'Solo Q3', createdAt: '2026-06-10T10:02:00Z' },
+      ];
+
+      const defaultGroups = groupLocalTurns(msgs);
+      expect(defaultGroups.map((g) => ({ kind: g.kind, ids: g.messages.map((m) => m.localId) }))).toEqual([
+        { kind: 'synced', ids: ['u1'] },
+        { kind: 'synced', ids: ['a1'] },
+        { kind: 'pair', ids: ['u2', 'a2'] },
+        { kind: 'singleton', ids: ['u3'] },
+      ]);
+
+      const recreationGroups = groupLocalTurns(msgs, { ignoreServerIds: true });
+      expect(recreationGroups.map((g) => ({ kind: g.kind, ids: g.messages.map((m) => m.localId) }))).toEqual([
+        { kind: 'pair', ids: ['u1', 'a1'] },
+        { kind: 'pair', ids: ['u2', 'a2'] },
+        { kind: 'singleton', ids: ['u3'] },
+      ]);
+    });
+
+    it('countUnqueuedLocalTurns counts trailing unqueued turns, skips mid-thread gaps, handles partial queue overlaps, and excludes excludedLocalIds', () => {
+      const msgs: StoredChatMessage[] = [
+        // Mid-thread gap before synced anchor -> skipped (0)
+        { localId: 'u-gap', role: 'user', content: 'Gap Q', createdAt: '2026-06-10T09:59:00Z' },
+        { localId: 'a-gap', role: 'assistant', content: 'Gap A', createdAt: '2026-06-10T09:59:01Z' },
+        // Synced anchor
+        { localId: 'u-sync', serverId: 's1', role: 'user', content: 'Q1', createdAt: '2026-06-10T10:00:00Z' },
+        { localId: 'a-sync', serverId: 's2', role: 'assistant', content: 'A1', createdAt: '2026-06-10T10:00:01Z' },
+        // Standalone unsynced user message BEFORE a partial queue overlap [u-part, a-part] where only a-part is in .jsonl
+        { localId: 'u-unq-solo', role: 'user', content: 'Solo before partial', createdAt: '2026-06-10T10:01:00Z' },
+        { localId: 'a-part', role: 'assistant', content: 'Partial assistant in log', createdAt: '2026-06-10T10:01:05Z' },
+        // Unqueued [user, assistant] pair -> counted (+1)
+        { localId: 'u-unq', role: 'user', content: 'Unqueued Q', createdAt: '2026-06-10T10:02:00Z' },
+        { localId: 'a-unq', role: 'assistant', content: 'Unqueued A', createdAt: '2026-06-10T10:02:01Z' },
+        // Already queued pair -> excluded by queuedTurns
+        { localId: 'u-queued', role: 'user', content: 'Queued Q', createdAt: '2026-06-10T10:03:00Z' },
+        { localId: 'a-queued', role: 'assistant', content: 'Queued A', createdAt: '2026-06-10T10:03:01Z' },
+        // Live session turn -> excluded by excludedLocalIds
+        { localId: 'u-live', role: 'user', content: 'Live Q', createdAt: '2026-06-10T10:04:00Z' },
+        { localId: 'a-live', role: 'assistant', content: 'Live A', createdAt: '2026-06-10T10:04:01Z' },
+      ];
+
+      const queuedTurns: QueuedTurn[] = [
+        {
+          threadId: 't1',
+          localIds: ['u-part', 'a-part'],
+          messages: [
+            { role: 'user', content: 'Partial Q' },
+            { role: 'assistant', content: 'Partial assistant in log' },
+          ],
+          enqueuedAt: '2026-06-10T10:01:05Z',
+          attempts: 0,
+        },
+        {
+          threadId: 't1',
+          localIds: ['u-queued', 'a-queued'],
+          messages: [
+            { role: 'user', content: 'Queued Q' },
+            { role: 'assistant', content: 'Queued A' },
+          ],
+          enqueuedAt: '2026-06-10T10:03:01Z',
+          attempts: 0,
+        },
+      ];
+
+      // Expect 2 unqueued turns: ['u-unq-solo'] (NOT falsely paired with 'a-part'!) + ['u-unq', 'a-unq']
+      expect(
+        countUnqueuedLocalTurns(msgs, queuedTurns, new Set(['u-live', 'a-live'])),
+      ).toBe(2);
     });
   });
 });

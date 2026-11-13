@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { MessageBlock, ToolCallInfo } from '../../shared/types';
+import type { MessageBlock, ToolCallInfo, UsageTotals } from '../../shared/types';
 import { REHYDRATED_TOOL_RESULT_PLACEHOLDER } from '../../shared/types';
+import type { NewMessagePayload } from '../sync/SyncClient';
+import type { StoredChatMessage } from './ThreadStore';
 
 /**
  * Encode/decode for the marker format used to round-trip an assistant turn's thinking and
@@ -192,4 +194,89 @@ export function findArgsCloseParen(s: string, start: number): number {
     }
   }
   return -1;
+}
+
+function sanitizeTokenCount(val: unknown): number | undefined {
+  if (typeof val !== 'number' || !Number.isFinite(val) || val < 0) {
+    return undefined;
+  }
+  return val;
+}
+
+function stripSyncedUserAttachments(rawContent: string): string {
+  const idx = rawContent.lastIndexOf('\n\n[Attached Image 1 (');
+  if (idx > 0) {
+    const suffix = rawContent.slice(idx + 2);
+    if (suffix.endsWith(']') && (suffix.includes(')]') || suffix.includes('): '))) {
+      return rawContent.slice(0, idx);
+    }
+  }
+  return rawContent;
+}
+
+/**
+ * Decodes a queued wire `NewMessagePayload` back into a clean `StoredChatMessage` when recovering
+ * queue-only turns that never reached `<threadId>.jsonl`.
+ */
+export function decodeQueuedMessagePayload(
+  qm: NewMessagePayload,
+  localId: string,
+  createdAt: string,
+): StoredChatMessage {
+  const rawContent = typeof qm.content === 'string' ? qm.content : '';
+  const playbook =
+    typeof qm.playbook === 'string' && qm.playbook.trim().length > 0
+      ? qm.playbook.trim()
+      : undefined;
+  const playbookVersion =
+    playbook !== undefined &&
+    typeof qm.playbookVersion === 'number' &&
+    Number.isInteger(qm.playbookVersion) &&
+    qm.playbookVersion >= 1
+      ? qm.playbookVersion
+      : undefined;
+
+  if (qm.role === 'user') {
+    return {
+      localId,
+      role: 'user',
+      content: stripSyncedUserAttachments(rawContent),
+      ...(playbook !== undefined ? { playbook } : {}),
+      ...(playbookVersion !== undefined ? { playbookVersion } : {}),
+      createdAt,
+    };
+  }
+
+  const parsed = parseStoredContent(rawContent);
+  const promptTokens = sanitizeTokenCount(qm.promptTokens);
+  const completionTokens = sanitizeTokenCount(qm.completionTokens);
+  const cachedTokens = sanitizeTokenCount(qm.cachedTokens);
+  const thoughtTokens = sanitizeTokenCount(qm.thoughtTokens);
+  const hasUsage =
+    promptTokens !== undefined ||
+    completionTokens !== undefined ||
+    cachedTokens !== undefined ||
+    thoughtTokens !== undefined;
+  const usage: UsageTotals | undefined = hasUsage
+    ? {
+        inputTokens: promptTokens ?? 0,
+        outputTokens: completionTokens ?? 0,
+        cacheReadTokens: cachedTokens ?? 0,
+        cacheWriteTokens: 0,
+        ...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
+      }
+    : undefined;
+
+  return {
+    localId,
+    role: 'assistant',
+    content: parsed.content,
+    ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+    ...(parsed.toolCalls !== undefined ? { toolCalls: parsed.toolCalls } : {}),
+    ...(parsed.blocks !== undefined ? { blocks: parsed.blocks } : {}),
+    ...(playbook !== undefined ? { playbook } : {}),
+    ...(playbookVersion !== undefined ? { playbookVersion } : {}),
+    ...(usage !== undefined ? { usage } : {}),
+    createdAt,
+  };
 }

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
 import { ThreadStore } from '../src/main/store/ThreadStore';
 import {
+  decodeQueuedMessagePayload,
   findArgsCloseParen,
   parseStoredContent,
   serializeAssistantContent,
@@ -145,6 +146,191 @@ describe('serialize/parse round-trip', () => {
       appCore.dispose();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('decodeQueuedMessagePayload (Wave 1)', () => {
+  it('decodes assistant <think>, tool-call wire markers, playbook, playbookVersion, and usage', () => {
+    const wire = serializeAssistantContent(
+      {
+        content: 'Here is the verified answer.',
+        blocks: [
+          { thinking: 'Checking schema metadata' },
+          {
+            toolCalls: [
+              {
+                id: 'orig-id',
+                name: qualifyTool('search_corpus'),
+                input: { query: 'ADSAccount (active)' },
+              },
+            ],
+          },
+          { text: 'Here is the verified answer.' },
+        ],
+      },
+      false,
+    );
+
+    const decoded = decodeQueuedMessagePayload(
+      {
+        role: 'assistant',
+        content: wire,
+        playbook: '  oim-schema  ',
+        playbookVersion: 4,
+        promptTokens: 250,
+        completionTokens: 90,
+        totalTokens: 340,
+        cachedTokens: 40,
+        thoughtTokens: 15,
+      },
+      'local-asst-1',
+      '2026-06-10T10:02:00.000Z',
+    );
+
+    expect(decoded.localId).toBe('local-asst-1');
+    expect(decoded.role).toBe('assistant');
+    expect(decoded.content).toBe('Here is the verified answer.');
+    expect(decoded.thinking).toBe('Checking schema metadata');
+    expect(decoded.toolCalls).toHaveLength(1);
+    expect(decoded.toolCalls?.[0]).toMatchObject({
+      name: qualifyTool('search_corpus'),
+      input: { query: 'ADSAccount (active)' },
+      result: REHYDRATED_TOOL_RESULT_PLACEHOLDER,
+    });
+    expect(decoded.blocks).toHaveLength(3);
+    expect(decoded.playbook).toBe('oim-schema');
+    expect(decoded.playbookVersion).toBe(4);
+    expect(decoded.usage).toEqual({
+      inputTokens: 250,
+      outputTokens: 90,
+      cacheReadTokens: 40,
+      cacheWriteTokens: 0,
+      thoughtTokens: 15,
+    });
+    expect(decoded.createdAt).toBe('2026-06-10T10:02:00.000Z');
+  });
+
+  it('strips multi-line trailing [Attached Image 1 (...)] suffix when user text precedes it, preserves image-only user messages, and leaves [Attached Image 2 ( prose intact', () => {
+    const withPrecedingProse = decodeQueuedMessagePayload(
+      {
+        role: 'user',
+        content:
+          'Please inspect these screenshots\n\n[Attached Image 1 (diagram (final).png): line 1\nline 2 (foo) [bar]]\n[Attached Image 2 (second.png)]',
+        playbook: 'oim-schema',
+        playbookVersion: 2,
+      },
+      'u-with-prose',
+      '2026-06-10T10:00:00Z',
+    );
+    expect(withPrecedingProse).toEqual({
+      localId: 'u-with-prose',
+      role: 'user',
+      content: 'Please inspect these screenshots',
+      playbook: 'oim-schema',
+      playbookVersion: 2,
+      createdAt: '2026-06-10T10:00:00Z',
+    });
+
+    // Image-only user prompt (no preceding text) must NOT become blank
+    const imageOnly = decodeQueuedMessagePayload(
+      {
+        role: 'user',
+        content: '[Attached Image 1 (screenshot.png): Login error dialog]',
+      },
+      'u-img-only',
+      '2026-06-10T10:01:00Z',
+    );
+    expect(imageOnly.content).toBe('[Attached Image 1 (screenshot.png): Login error dialog]');
+
+    // User prose mentioning [Attached Image 2 (...)] without a trailing block starting at 1 is untouched
+    const proseMentioningImage2 =
+      'Why did the log say:\n\n[Attached Image 2 (missing-one.png): something]';
+    const preserved = decodeQueuedMessagePayload(
+      {
+        role: 'user',
+        content: proseMentioningImage2,
+      },
+      'u-img2-prose',
+      '2026-06-10T10:01:30Z',
+    );
+    expect(preserved.content).toBe(proseMentioningImage2);
+
+    // Unclosed bracket tail is not stripped
+    const unclosed = 'Hello\n\n[Attached Image 1 (broken.png): missing closing bracket';
+    expect(
+      decodeQueuedMessagePayload({ role: 'user', content: unclosed }, 'u-unclosed', '2026-06-10T10:01:45Z')
+        .content,
+    ).toBe(unclosed);
+  });
+
+  it('never parses <think> or tool-call markers on user messages and strips/clamps invalid playbook, playbookVersion, and negative/NaN token counts', () => {
+    const literalUserMarkup =
+      '<think>secret user text</think>\n\n🔧 *Calling tool:* bash({"cmd":"ls"})\n\nWhy does this appear?';
+    const userDecoded = decodeQueuedMessagePayload(
+      {
+        role: 'user',
+        content: literalUserMarkup,
+        playbook: '   ',
+        playbookVersion: 3,
+      },
+      'u-literal',
+      '2026-06-10T10:03:00Z',
+    );
+    expect(userDecoded.content).toBe(literalUserMarkup);
+    expect(userDecoded.thinking).toBeUndefined();
+    expect(userDecoded.toolCalls).toBeUndefined();
+    expect(userDecoded.blocks).toBeUndefined();
+    expect(userDecoded.playbook).toBeUndefined();
+    expect(userDecoded.playbookVersion).toBeUndefined();
+    expect('playbook' in userDecoded).toBe(false);
+    expect('playbookVersion' in userDecoded).toBe(false);
+
+    // Orphaned playbookVersion (no playbook) and non-integer/non-positive versions (0, -1, 1.5)
+    for (const badVersion of [0, -1, 1.5, Number.NaN]) {
+      const msg = decodeQueuedMessagePayload(
+        {
+          role: 'assistant',
+          content: 'Plain reply',
+          playbook: 'oim-schema',
+          playbookVersion: badVersion,
+          promptTokens: -10,
+          completionTokens: Number.NaN,
+          cachedTokens: -1,
+          thoughtTokens: Number.POSITIVE_INFINITY,
+        },
+        `a-bad-${String(badVersion)}`,
+        '2026-06-10T10:04:00Z',
+      );
+      expect(msg.playbook).toBe('oim-schema');
+      expect(msg.playbookVersion).toBeUndefined();
+      expect('playbookVersion' in msg).toBe(false);
+      // All token counts were negative / NaN / non-finite -> usage omitted cleanly
+      expect(msg.usage).toBeUndefined();
+      expect('usage' in msg).toBe(false);
+    }
+
+    // Partial valid + negative/NaN token counts clamp missing/invalid required fields to 0 and strip invalid thoughtTokens
+    const partialUsage = decodeQueuedMessagePayload(
+      {
+        role: 'assistant',
+        content: 'Partial usage reply',
+        playbookVersion: 2, // orphaned without playbook
+        promptTokens: 120,
+        completionTokens: -5,
+        cachedTokens: Number.NaN,
+        thoughtTokens: -3,
+      },
+      'a-partial-usage',
+      '2026-06-10T10:05:00Z',
+    );
+    expect(partialUsage.playbook).toBeUndefined();
+    expect(partialUsage.playbookVersion).toBeUndefined();
+    expect(partialUsage.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
   });
 });
 

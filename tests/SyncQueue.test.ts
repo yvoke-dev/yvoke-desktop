@@ -679,5 +679,270 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
       expect((errEvt?.detail ?? '').length).toBeLessThanOrEqual(305);
       q.dispose();
     });
+
+    it('reconcileThreadTurns deduplicates turns overlapping this.flushing on 200 OK so an in-flight turn is uploaded once', async () => {
+      const uploadedBatches: string[][] = [];
+      let resolveInFlight!: (res: { ids: string[] }) => void;
+
+      const q = new SyncQueue(
+        customDeps(
+          fakeClient((_threadId, messages) => {
+            const batch = (messages as Array<{ content: string }>).map((m) => m.content);
+            uploadedBatches.push(batch);
+            if (uploadedBatches.length === 1) {
+              return new Promise<{ ids: string[] }>((res) => {
+                resolveInFlight = res;
+              });
+            }
+            return Promise.resolve({ ids: ['s-u2', 's-a2'] });
+          }),
+        ),
+      );
+
+      // Enqueue turn 1; it immediately starts flushing
+      q.enqueue(turn('t1', 1));
+      await Promise.resolve();
+      expect(uploadedBatches).toEqual([['q1', 'a1']]);
+
+      // Reconcile on 200 OK while turn 1 is mid-flight, passing [turn 1, turn 2] in turnsToQueue
+      const replacement1: QueuedTurn = {
+        ...turn('t1', 1),
+        enqueuedAt: '2026-06-10T10:00:00Z',
+        attempts: 0,
+      };
+      const replacement2: QueuedTurn = {
+        ...turn('t1', 2),
+        enqueuedAt: '2026-06-10T10:01:00Z',
+        attempts: 0,
+      };
+      q.reconcileThreadTurns('t1', [replacement1, replacement2], new Set(['u1', 'a1', 'u2', 'a2']));
+
+      resolveInFlight({ ids: ['s-u1', 's-a1'] });
+      await q.flush();
+
+      // Turn 1 uploaded ONCE (not duplicated), followed by Turn 2!
+      expect(uploadedBatches).toEqual([
+        ['q1', 'a1'],
+        ['q2', 'a2'],
+      ]);
+      expect(q.pendingCount()).toBe(0);
+      q.dispose();
+    });
+
+    it('reconcileThreadTurns with resetAttempts: true (404 recreation) supersedes in-flight this.flushing (turn3) so flush uploads [turn1, turn2, turn3] in strict chronological order', async () => {
+      const uploadedCalls: Array<{ remoteId: string; contents: string[] }> = [];
+      let currentRemoteId = 'r0-dead';
+      let rejectStaleTurn3!: (err: Error) => void;
+
+      const q = new SyncQueue(
+        customDeps(
+          fakeClient((_threadId, messages) => {
+            const contents = (messages as Array<{ content: string }>).map((m) => m.content);
+            const targetRemote = currentRemoteId;
+            uploadedCalls.push({ remoteId: targetRemote, contents });
+            if (targetRemote === 'r0-dead') {
+              return new Promise<{ ids: string[] }>((_res, rej) => {
+                rejectStaleTurn3 = rej;
+              });
+            }
+            return Promise.resolve({ ids: [`${targetRemote}-u`, `${targetRemote}-a`] });
+          }),
+          {
+            onMissingConversation: async () => {
+              throw new Error('onMissingConversation must NOT fire for superseded stale turn3');
+            },
+          },
+        ),
+      );
+
+      // Live turn3 starts flushing against dead r0 while startup recovery is recreating r0 -> r1
+      q.enqueue(turn('t1', 3));
+      await Promise.resolve();
+      expect(uploadedCalls).toEqual([{ remoteId: 'r0-dead', contents: ['q3', 'a3'] }]);
+
+      // Startup 404 recreation creates r1 and calls reconcileThreadTurns with full [turn1, turn2, turn3] + resetAttempts: true
+      currentRemoteId = 'r1-recreated';
+      const recreatedTurns: QueuedTurn[] = [1, 2, 3].map((n) => ({
+        ...turn('t1', n),
+        enqueuedAt: `2026-06-10T10:0${n}:00Z`,
+        attempts: 2,
+      }));
+      q.reconcileThreadTurns(
+        't1',
+        recreatedTurns,
+        new Set(['u1', 'a1', 'u2', 'a2', 'u3', 'a3']),
+        { resetAttempts: true },
+      );
+
+      // Now stale turn3 against r0-dead rejects with 404; doFlush must ignore the superseded turn and upload [turn1, turn2, turn3] to r1!
+      rejectStaleTurn3(new SyncApiError(404, 'Conversation r0-dead not found'));
+      await q.flush();
+
+      expect(uploadedCalls).toEqual([
+        { remoteId: 'r0-dead', contents: ['q3', 'a3'] },
+        { remoteId: 'r1-recreated', contents: ['q1', 'a1'] },
+        { remoteId: 'r1-recreated', contents: ['q2', 'a2'] },
+        { remoteId: 'r1-recreated', contents: ['q3', 'a3'] },
+      ]);
+      expect(q.pendingCount()).toBe(0);
+      q.dispose();
+    });
+
+    it('reconcileThreadTurns preserves postSnapshot turns enqueued mid-reconciliation AFTER historical turnsToQueue even when snapshot queue was empty, and resets postSnapshot attempts on resetAttempts: true', async () => {
+      const uploadedBatches: string[][] = [];
+      const q = new SyncQueue(
+        customDeps(
+          fakeClient(async (_threadId, messages) => {
+            uploadedBatches.push((messages as Array<{ content: string }>).map((m) => m.content));
+            return { ids: ['s-u', 's-a'] };
+          }),
+        ),
+      );
+
+      // Hold t1 as at startup; at snapshot time t1 has 0 queued turns, only historical turn1 in .jsonl
+      q.holdThreads(['t1']);
+      const inspectedLocalIds = new Set(['u1', 'a1']);
+
+      // Mid-reconciliation (while awaiting getAllMessages / createConversation), user finishes live turn2!
+      q.enqueue(turn('t1', 2));
+      // Simulate non-zero attempts on postSnapshot turn before resetAttempts: true
+      (q as unknown as { queue: QueuedTurn[] }).queue[0].attempts = 3;
+
+      const historicalTurn1: QueuedTurn = {
+        ...turn('t1', 1),
+        enqueuedAt: '2026-06-10T10:00:00Z',
+        attempts: 1,
+      };
+
+      // 1. Without resetAttempts (200 OK): historicalTurn1 is placed BEFORE postSnapshot turn2, preserving attempts
+      q.reconcileThreadTurns('t1', [historicalTurn1], inspectedLocalIds);
+      expect(q.getQueuedTurns('t1').map((t) => t.localIds)).toEqual([
+        ['u1', 'a1'],
+        ['u2', 'a2'],
+      ]);
+      expect(q.getQueuedTurns('t1')[1].attempts).toBe(3);
+
+      // 2. With resetAttempts: true (404 recreation): resets attempts = 0 on BOTH replacement and postSnapshot turns
+      q.reconcileThreadTurns('t1', [historicalTurn1], inspectedLocalIds, { resetAttempts: true });
+      expect(q.getQueuedTurns('t1').map((t) => ({ ids: t.localIds, attempts: t.attempts }))).toEqual([
+        { ids: ['u1', 'a1'], attempts: 0 },
+        { ids: ['u2', 'a2'], attempts: 0 },
+      ]);
+
+      q.unholdThread('t1');
+      await q.flush();
+      expect(uploadedBatches).toEqual([
+        ['q1', 'a1'],
+        ['q2', 'a2'],
+      ]);
+      q.dispose();
+    });
+
+    it('routes SyncApiError(404) through onMissingConversation outcome === recreated without dropping or incrementing attempts', async () => {
+      let currentRemote = 'r0';
+      const calls: Array<{ remote: string; localThreadId: string }> = [];
+      let q!: SyncQueue;
+
+      q = new SyncQueue(
+        customDeps(
+          fakeClient(async (threadId) => {
+            calls.push({ remote: currentRemote, localThreadId: threadId });
+            if (currentRemote === 'r0') {
+              throw new SyncApiError(404, 'Not found');
+            }
+            return { ids: ['s-u1', 's-a1'] };
+          }),
+          {
+            onMissingConversation: async (threadId) => {
+              currentRemote = 'r1';
+              q.reconcileThreadTurns(
+                threadId,
+                [{ ...turn(threadId, 1), enqueuedAt: '2026-06-10T10:00:00Z', attempts: 0 }],
+                new Set(['u1', 'a1']),
+                { resetAttempts: true },
+              );
+              return 'recreated';
+            },
+          },
+        ),
+      );
+
+      q.enqueue(turn('local-fixed-id', 1));
+      await q.flush();
+
+      expect(calls).toEqual([
+        { remote: 'r0', localThreadId: 'local-fixed-id' },
+        { remote: 'r1', localThreadId: 'local-fixed-id' },
+      ]);
+      expect(q.pendingCount()).toBe(0);
+      q.dispose();
+    });
+
+    it('Gate 3 High #2: reconcileThreadTurns with resetAttempts: true supersedes postSnapshot this.flushing (turn3 absent from inspectedLocalIds) so r1 receives [turn1, turn2, turn3] in chronological order', async () => {
+      for (const staleOutcome of ['reject', 'resolve'] as const) {
+        const uploadedCalls: Array<{ remoteId: string; contents: string[] }> = [];
+        let currentRemoteId = 'r0-dead';
+        let settleStaleTurn3!: () => void;
+
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient((_threadId, messages) => {
+              const contents = (messages as Array<{ content: string }>).map((m) => m.content);
+              const targetRemote = currentRemoteId;
+              uploadedCalls.push({ remoteId: targetRemote, contents });
+              if (targetRemote === 'r0-dead') {
+                return new Promise<{ ids: string[] }>((res, rej) => {
+                  settleStaleTurn3 = () => {
+                    if (staleOutcome === 'reject') {
+                      rej(new SyncApiError(404, 'Conversation r0-dead not found'));
+                    } else {
+                      res({ ids: ['stale-u3', 'stale-a3'] });
+                    }
+                  };
+                });
+              }
+              return Promise.resolve({ ids: [`${targetRemote}-u`, `${targetRemote}-a`] });
+            }),
+            {
+              onMissingConversation: async () => {
+                throw new Error('onMissingConversation must NOT fire for superseded postSnapshot turn3');
+              },
+            },
+          ),
+        );
+
+        // Enqueue post-snapshot turn3 (['u3', 'a3'], NOT in inspectedLocalIds!) which immediately enters this.flushing against r0-dead
+        q.enqueue(turn('t1', 3));
+        await Promise.resolve();
+        expect(uploadedCalls).toEqual([{ remoteId: 'r0-dead', contents: ['q3', 'a3'] }]);
+
+        // Reconcile on 404 recreation with historical [turn1, turn2] and inspectedLocalIds = {u1, a1, u2, a2} (turn3 absent!)
+        currentRemoteId = 'r1-recreated';
+        const historicalTurns: QueuedTurn[] = [1, 2].map((n) => ({
+          ...turn('t1', n),
+          enqueuedAt: `2026-06-10T10:0${n}:00Z`,
+          attempts: 2,
+        }));
+        q.reconcileThreadTurns(
+          't1',
+          historicalTurns,
+          new Set(['u1', 'a1', 'u2', 'a2']),
+          { resetAttempts: true },
+        );
+
+        settleStaleTurn3();
+        await q.flush();
+
+        // r1-recreated MUST receive [turn1, turn2, turn3] in chronological order — never [turn3, turn1, turn2] or dropping turn3!
+        expect(uploadedCalls).toEqual([
+          { remoteId: 'r0-dead', contents: ['q3', 'a3'] },
+          { remoteId: 'r1-recreated', contents: ['q1', 'a1'] },
+          { remoteId: 'r1-recreated', contents: ['q2', 'a2'] },
+          { remoteId: 'r1-recreated', contents: ['q3', 'a3'] },
+        ]);
+        expect(q.pendingCount()).toBe(0);
+        q.dispose();
+      }
+    });
   });
 });

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import {
+  assertValidThreadId,
   EMPTY_USAGE,
+  isValidThreadId,
   type ChatMessage,
   type ImageAttachment,
   type SyncState,
@@ -43,13 +45,106 @@ export interface StoredChatMessage extends Omit<ChatMessage, 'images'> {
  */
 export class ThreadStore {
   private readonly indexFile: string;
+  private readonly deletedFile: string;
   private index: Record<string, ThreadMeta>;
+  private readonly deletedIds: Set<string>;
+  private readonly remoteToLocalId = new Map<string, string>();
+  private readonly lifecycleEpoch = new Map<string, number>();
   /** Per-thread promise chain serializing message-log mutations (see runExclusive). */
   private readonly opChain = new Map<string, Promise<void>>();
 
   constructor(private readonly dir: string) {
     this.indexFile = path.join(dir, 'index.json');
+    this.deletedFile = path.join(dir, 'deleted.json');
+    this.deletedIds = this.loadDeleted();
     this.index = this.loadIndex();
+    for (const tombId of Array.from(this.deletedIds)) {
+      const epoch = this.lifecycleEpoch.get(tombId) ?? 0;
+      void this.scheduleTombstoneCleanup(tombId, epoch);
+    }
+  }
+
+  private bumpEpoch(threadId: string): number {
+    const next = (this.lifecycleEpoch.get(threadId) ?? 0) + 1;
+    this.lifecycleEpoch.set(threadId, next);
+    return next;
+  }
+
+  private isStaleOrDeleted(threadId: string, expectedEpoch: number): boolean {
+    return this.deletedIds.has(threadId) || (this.lifecycleEpoch.get(threadId) ?? 0) !== expectedEpoch;
+  }
+
+  private async cleanupAbortedWriteIfReupserted(threadId: string): Promise<void> {
+    if (!this.deletedIds.has(threadId)) {
+      await fsp.rm(this.messagesFile(threadId), { force: true }).catch(() => undefined);
+      await fsp.rm(this.imageDir(threadId), { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private loadDeleted(): Set<string> {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.deletedFile, 'utf8');
+    } catch {
+      return new Set<string>();
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      preserveCorrupt(this.deletedFile);
+      return new Set<string>();
+    }
+    if (!Array.isArray(parsed)) {
+      preserveCorrupt(this.deletedFile);
+      return new Set<string>();
+    }
+
+    const valid = new Set<string>();
+    let hadInvalid = false;
+    for (const item of parsed) {
+      if (isValidThreadId(item)) {
+        valid.add(item);
+      } else {
+        hadInvalid = true;
+      }
+    }
+
+    if (hadInvalid) {
+      if (valid.size === 0) {
+        preserveCorrupt(this.deletedFile);
+        return valid;
+      }
+      preserveCorruptCopy(this.deletedFile);
+      this.persistDeletedSet(valid);
+      return valid;
+    }
+
+    if (valid.size === 0) {
+      try {
+        fs.rmSync(this.deletedFile, { force: true });
+      } catch {
+        // Ignore best-effort unlink of empty deleted.json.
+      }
+    }
+    return valid;
+  }
+
+  private persistDeletedSet(ids: ReadonlySet<string>): void {
+    if (ids.size === 0) {
+      try {
+        fs.rmSync(this.deletedFile, { force: true });
+      } catch {
+        // Best-effort unlink when no tombstones remain.
+      }
+      return;
+    }
+    fs.mkdirSync(this.dir, { recursive: true });
+    atomicWriteFileSync(this.deletedFile, JSON.stringify(Array.from(ids), null, 2));
+  }
+
+  private persistDeletedSync(): void {
+    this.persistDeletedSet(this.deletedIds);
   }
 
   private loadIndex(): Record<string, ThreadMeta> {
@@ -76,21 +171,67 @@ export class ThreadStore {
 
     const valid: Record<string, ThreadMeta> = {};
     let hadInvalid = false;
+    let skippedDeleted = false;
     for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
       if (
-        key.length > 0 &&
-        /^[a-zA-Z0-9\-_]+$/.test(key) &&
+        isValidThreadId(key) &&
         typeof val === 'object' &&
         val !== null &&
         !Array.isArray(val) &&
-        typeof (val as { id?: unknown }).id === 'string' &&
-        /^[a-zA-Z0-9\-_]+$/.test((val as { id: string }).id)
+        (val as { id?: unknown }).id === key
       ) {
-        valid[key] = val as ThreadMeta;
+        if (this.deletedIds.has(key)) {
+          skippedDeleted = true;
+          continue;
+        }
+        const entry: ThreadMeta = { ...(val as ThreadMeta) };
+        if ('remoteConversationId' in entry) {
+          if (entry.remoteConversationId === undefined) {
+            delete entry.remoteConversationId;
+          } else if (!isValidThreadId(entry.remoteConversationId)) {
+            delete entry.remoteConversationId;
+            hadInvalid = true;
+          } else if (entry.remoteConversationId === key) {
+            delete entry.remoteConversationId;
+          }
+        }
+        valid[key] = entry;
       } else {
         hadInvalid = true;
       }
     }
+
+    // Deterministically resolve any duplicate effective remoteConversationId collisions:
+    // prefer native `id === remoteId` over recreated `remoteConversationId`, else newer `updatedAt`.
+    let resolvedCollision = true;
+    while (resolvedCollision) {
+      resolvedCollision = false;
+      const byRemote = new Map<string, ThreadMeta>();
+      for (const entry of Object.values(valid)) {
+        const remote = entry.remoteConversationId ?? entry.id;
+        const prev = byRemote.get(remote);
+        if (!prev) {
+          byRemote.set(remote, entry);
+          continue;
+        }
+        hadInvalid = true;
+        resolvedCollision = true;
+        const entryWins =
+          prev.id === remote
+            ? false
+            : entry.id === remote
+              ? true
+              : (entry.updatedAt ?? '').localeCompare(prev.updatedAt ?? '') > 0 ||
+                ((entry.updatedAt ?? '') === (prev.updatedAt ?? '') && entry.id < prev.id);
+        if (entryWins) {
+          delete prev.remoteConversationId;
+          byRemote.set(remote, entry);
+        } else {
+          delete entry.remoteConversationId;
+        }
+      }
+    }
+
     if (hadInvalid) {
       if (Object.keys(valid).length === 0) {
         preserveCorrupt(this.indexFile);
@@ -98,7 +239,56 @@ export class ThreadStore {
       }
       preserveCorruptCopy(this.indexFile);
     }
+
+    if (skippedDeleted) {
+      try {
+        fs.mkdirSync(this.dir, { recursive: true });
+        atomicWriteFileSync(this.indexFile, JSON.stringify(valid, null, 2));
+      } catch {
+        // Best-effort cleanup of stale index entries superseded by deleted.json tombstones.
+      }
+    }
+
+    this.remoteToLocalId.clear();
+    for (const entry of Object.values(valid)) {
+      this.remoteToLocalId.set(entry.remoteConversationId ?? entry.id, entry.id);
+    }
     return valid;
+  }
+
+  private syncRemoteMapping(
+    localId: string,
+    prevMeta: ThreadMeta | undefined,
+    nextMeta: ThreadMeta | undefined,
+  ): void {
+    if (prevMeta) {
+      const prevRemote = prevMeta.remoteConversationId ?? prevMeta.id;
+      if (this.remoteToLocalId.get(prevRemote) === localId) {
+        this.remoteToLocalId.delete(prevRemote);
+      }
+    }
+    if (nextMeta) {
+      const nextRemote = nextMeta.remoteConversationId ?? nextMeta.id;
+      const existingOwnerId = this.remoteToLocalId.get(nextRemote);
+      if (existingOwnerId && existingOwnerId !== localId) {
+        const existingOwner = this.index[existingOwnerId];
+        if (existingOwner && existingOwner.remoteConversationId === nextRemote) {
+          delete existingOwner.remoteConversationId;
+          if (!this.remoteToLocalId.has(existingOwner.id)) {
+            this.remoteToLocalId.set(existingOwner.id, existingOwner.id);
+          }
+        } else if (existingOwner && existingOwner.id === nextRemote) {
+          // Native `id === nextRemote` always wins over a recreated `remoteConversationId` claim
+          // (matching `loadIndex()` collision resolution).
+          delete nextMeta.remoteConversationId;
+          if (!this.remoteToLocalId.has(localId)) {
+            this.remoteToLocalId.set(localId, localId);
+          }
+          return;
+        }
+      }
+      this.remoteToLocalId.set(nextRemote, localId);
+    }
   }
 
   private persistIndex(): void {
@@ -107,14 +297,22 @@ export class ThreadStore {
   }
 
   private validateThreadId(threadId: unknown): asserts threadId is string {
-    if (typeof threadId !== 'string' || threadId.length === 0 || !/^[a-zA-Z0-9\-_]+$/.test(threadId)) {
-      throw new Error(`Invalid threadId: ${String(threadId)}`);
-    }
+    assertValidThreadId(threadId);
   }
 
   private messagesFile(threadId: string): string {
     this.validateThreadId(threadId);
     return path.join(this.dir, `${threadId}.jsonl`);
+  }
+
+  isDeleted(threadId: string): boolean {
+    return this.deletedIds.has(threadId);
+  }
+
+  findByRemoteId(remoteId: string): ThreadMeta | undefined {
+    if (!isValidThreadId(remoteId)) return undefined;
+    const localId = this.remoteToLocalId.get(remoteId);
+    return localId ? this.index[localId] : undefined;
   }
 
   list(): ThreadMeta[] {
@@ -134,13 +332,28 @@ export class ThreadStore {
     if (!cleaned.initialPlaybook || cleaned.orchestratorProfile) delete cleaned.initialPlaybook;
     if (cleaned.hasStarted === undefined) delete cleaned.hasStarted;
     if (cleaned.remoteSettings === undefined) delete cleaned.remoteSettings;
+    if (cleaned.remoteConversationId === undefined || cleaned.remoteConversationId === cleaned.id) {
+      delete cleaned.remoteConversationId;
+    } else {
+      assertValidThreadId(cleaned.remoteConversationId);
+    }
     return cleaned;
   }
 
   upsert(meta: ThreadMeta): void {
     this.validateThreadId(meta.id);
-    this.index[meta.id] = this.cleanMeta(meta);
+    const wasDeleted = this.deletedIds.delete(meta.id);
+    if (wasDeleted) {
+      this.bumpEpoch(meta.id);
+    }
+    const prev = this.index[meta.id];
+    const cleaned = this.cleanMeta(meta);
+    this.index[meta.id] = cleaned;
+    this.syncRemoteMapping(meta.id, prev, cleaned);
     this.persistIndex();
+    if (wasDeleted) {
+      this.persistDeletedSync();
+    }
   }
 
   patch(threadId: string, update: Partial<ThreadMeta>): ThreadMeta | undefined {
@@ -149,7 +362,7 @@ export class ThreadStore {
     if (!existing) {
       return undefined;
     }
-    const updated = { ...existing, ...update };
+    const updated = { ...existing, ...update, id: threadId };
     if ('sessionId' in update && update.sessionId === undefined) {
       delete updated.sessionId;
     }
@@ -171,7 +384,15 @@ export class ThreadStore {
     if ('remoteSettings' in update && update.remoteSettings === undefined) {
       delete updated.remoteSettings;
     }
+    if ('remoteConversationId' in update) {
+      if (update.remoteConversationId === undefined || update.remoteConversationId === threadId) {
+        delete updated.remoteConversationId;
+      } else {
+        assertValidThreadId(update.remoteConversationId);
+      }
+    }
     this.index[threadId] = updated;
+    this.syncRemoteMapping(threadId, existing, updated);
     this.persistIndex();
     return this.index[threadId];
   }
@@ -187,18 +408,72 @@ export class ThreadStore {
     this.patch(threadId, { syncState });
   }
 
-  delete(threadId: string): void {
+  delete(threadId: string): Promise<void> {
     this.validateThreadId(threadId);
+    const epoch = this.bumpEpoch(threadId);
+    const prev = this.index[threadId];
     delete this.index[threadId];
+    this.syncRemoteMapping(threadId, prev, undefined);
     this.persistIndex();
-    // Remove the log through the per-thread chain so it runs AFTER any in-flight append —
-    // otherwise a fire-and-forget write could recreate the file post-delete and orphan it.
-    void this.runExclusive(threadId, async () => {
-      await fsp.rm(this.messagesFile(threadId), { force: true });
-      await fsp.rm(this.imageDir(threadId), { recursive: true, force: true });
-    }).catch(
-      (err) => console.warn(`ThreadStore: failed to remove log for ${threadId}: ${err instanceof Error ? err.message : String(err)}`),
-    );
+
+    const msgFile = this.messagesFile(threadId);
+    const imgDir = this.imageDir(threadId);
+    if (!fs.existsSync(msgFile) && !fs.existsSync(imgDir) && !this.opChain.has(threadId)) {
+      if (this.deletedIds.delete(threadId)) {
+        this.persistDeletedSync();
+      }
+      return Promise.resolve();
+    }
+
+    this.deletedIds.add(threadId);
+    this.persistDeletedSync();
+    return this.scheduleTombstoneCleanup(threadId, epoch);
+  }
+
+  private scheduleTombstoneCleanup(threadId: string, expectedEpoch: number): Promise<void> {
+    const isStillTargetTombstone = (): boolean =>
+      this.deletedIds.has(threadId) && (this.lifecycleEpoch.get(threadId) ?? 0) === expectedEpoch;
+
+    // Run through the per-thread chain AFTER any already-running op, swallowing fsp.rm and disk
+    // errors internally so un-awaited delete() callers never emit unhandled rejections while
+    // retaining the tombstone in deleted.json whenever removal could not complete.
+    return this.runExclusive(threadId, async () => {
+      if (!isStillTargetTombstone()) {
+        return;
+      }
+      const msgFile = this.messagesFile(threadId);
+      const imgDir = this.imageDir(threadId);
+      try {
+        await fsp.rm(msgFile, { force: true });
+      } catch (err) {
+        console.warn(
+          `ThreadStore: failed to remove log for ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (!isStillTargetTombstone()) {
+        return;
+      }
+      try {
+        await fsp.rm(imgDir, { recursive: true, force: true });
+      } catch (err) {
+        console.warn(
+          `ThreadStore: failed to remove images for ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (!isStillTargetTombstone()) {
+        return;
+      }
+      if (!fs.existsSync(msgFile) && !fs.existsSync(imgDir)) {
+        this.deletedIds.delete(threadId);
+        try {
+          this.persistDeletedSync();
+        } catch (err) {
+          console.warn(
+            `ThreadStore: failed to update tombstones for ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    });
   }
 
   /**
@@ -357,6 +632,38 @@ export class ThreadStore {
     );
   }
 
+  /**
+   * Synchronously inspects `<threadId>.jsonl` files via `readdirSync` + `statSync` without
+   * reading file contents or running `JSON.parse`, skipping tombstoned IDs.
+   */
+  inspectLogsSync(): { nonEmptyIds: Set<string>; allLogIds: string[] } {
+    const nonEmptyIds = new Set<string>();
+    const allLogIds: string[] = [];
+    let files: string[];
+    try {
+      files = fs.readdirSync(this.dir);
+    } catch {
+      return { nonEmptyIds, allLogIds };
+    }
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue;
+      const threadId = file.slice(0, -'.jsonl'.length);
+      if (!isValidThreadId(threadId) || this.deletedIds.has(threadId)) continue;
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(path.join(this.dir, file));
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      allLogIds.push(threadId);
+      if (stat.size > 0) {
+        nonEmptyIds.add(threadId);
+      }
+    }
+    return { nonEmptyIds, allLogIds };
+  }
+
   async listLogThreadIds(): Promise<string[]> {
     let files: string[];
     try {
@@ -368,7 +675,7 @@ export class ThreadStore {
     for (const file of files) {
       if (!file.endsWith('.jsonl')) continue;
       const threadId = file.slice(0, -'.jsonl'.length);
-      if (threadId.length > 0 && /^[a-zA-Z0-9\-_]+$/.test(threadId)) {
+      if (isValidThreadId(threadId) && !this.deletedIds.has(threadId)) {
         ids.push(threadId);
       }
     }
@@ -378,25 +685,50 @@ export class ThreadStore {
   /** Reads stored JSONL messages under per-thread lock without hydrating base64 image blobs. */
   async readRawMessages(threadId: string): Promise<StoredChatMessage[]> {
     this.validateThreadId(threadId);
-    return this.runExclusive(threadId, () => this.readRaw(threadId));
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
+    return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      const raw = await this.readRaw(threadId);
+      if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      return raw;
+    });
   }
 
   async readMessages(threadId: string): Promise<ChatMessage[]> {
     this.validateThreadId(threadId);
-    return this.runExclusive(threadId, async () => this.hydrateImages(threadId, await this.readRaw(threadId)));
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
+    return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      const raw = await this.readRaw(threadId);
+      if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      const hydrated = await this.hydrateImages(threadId, raw);
+      if (this.isStaleOrDeleted(threadId, epoch)) return [];
+      return hydrated;
+    });
   }
 
   async appendMessages(threadId: string, messages: ChatMessage[]): Promise<void> {
     this.validateThreadId(threadId);
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
     return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return;
       await fsp.mkdir(this.dir, { recursive: true });
+      if (this.isStaleOrDeleted(threadId, epoch)) return;
       const stored = await this.dehydrateImages(threadId, messages);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        await this.cleanupAbortedWriteIfReupserted(threadId);
+        return;
+      }
       const lines = stored.map((m) => JSON.stringify(m)).join('\n') + '\n';
       await fsp.appendFile(this.messagesFile(threadId), lines);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        await this.cleanupAbortedWriteIfReupserted(threadId);
+        return;
+      }
 
       const assistantUsage = messages.find((m) => m.role === 'assistant')?.usage;
       const meta = this.index[threadId];
-      if (meta) {
+      if (meta && !this.isStaleOrDeleted(threadId, epoch)) {
         const totals: UsageTotals = assistantUsage
           ? {
               inputTokens: meta.totals.inputTokens + assistantUsage.inputTokens,
@@ -413,9 +745,19 @@ export class ThreadStore {
   /** Replaces the whole log (rehydration from the server). */
   async replaceMessages(threadId: string, messages: ChatMessage[]): Promise<void> {
     this.validateThreadId(threadId);
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
     return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return;
       const stored = await this.dehydrateImages(threadId, messages);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        await this.cleanupAbortedWriteIfReupserted(threadId);
+        return;
+      }
       await this.writeRaw(threadId, stored);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        await this.cleanupAbortedWriteIfReupserted(threadId);
+        return;
+      }
       await this.collectImageGarbage(threadId, stored);
     });
   }
@@ -423,8 +765,11 @@ export class ThreadStore {
   /** Writes server ids back onto locally-logged messages after a sync ack (atomic read-modify-write). */
   async applyServerIds(threadId: string, mapping: Record<string, string>): Promise<{ hasUnsynced: boolean }> {
     this.validateThreadId(threadId);
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
     return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return { hasUnsynced: false };
       const messages = await this.readRaw(threadId);
+      if (this.isStaleOrDeleted(threadId, epoch)) return { hasUnsynced: false };
       let changed = false;
       for (const message of messages) {
         const serverId = Object.hasOwn(mapping, message.localId) ? mapping[message.localId] : undefined;
@@ -435,8 +780,88 @@ export class ThreadStore {
       }
       if (changed) {
         await this.writeRaw(threadId, messages);
+        if (this.isStaleOrDeleted(threadId, epoch)) {
+          await this.cleanupAbortedWriteIfReupserted(threadId);
+          return { hasUnsynced: false };
+        }
       }
       return { hasUnsynced: messages.some((m) => !m.serverId) };
+    });
+  }
+
+  /**
+   * Prepares a local conversation in place for 404 server recreation without moving `.jsonl` or
+   * image directories: strips stale `serverId`s, merges deduplicated `extraMessages`, and updates
+   * `ThreadMeta` (`remoteConversationId`, `remoteSettings`, `syncState`, `title`) atomically.
+   */
+  async prepareForRecreation(
+    threadId: string,
+    fallbackMeta: ThreadMeta,
+    metaPatch: Partial<Omit<ThreadMeta, 'id'>>,
+    extraMessages: StoredChatMessage[] = [],
+  ): Promise<ThreadMeta> {
+    this.validateThreadId(threadId);
+    if (
+      'remoteConversationId' in metaPatch &&
+      metaPatch.remoteConversationId !== undefined &&
+      metaPatch.remoteConversationId !== threadId
+    ) {
+      assertValidThreadId(metaPatch.remoteConversationId);
+    }
+
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
+    return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        return this.cleanMeta({ ...fallbackMeta, ...metaPatch, id: threadId });
+      }
+
+      const rawExisting = await this.readRaw(threadId);
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        return this.cleanMeta({ ...fallbackMeta, ...metaPatch, id: threadId });
+      }
+
+      const seenLocalIds = new Set(rawExisting.map((m) => m.localId));
+      const merged: StoredChatMessage[] = [...rawExisting];
+      for (const extra of extraMessages) {
+        if (isValidStoredMessage(extra) && !seenLocalIds.has(extra.localId)) {
+          seenLocalIds.add(extra.localId);
+          merged.push(extra);
+        }
+      }
+
+      const cleanedMessages: StoredChatMessage[] = merged.map((msg) => {
+        const copy: StoredChatMessage = {
+          ...msg,
+          ...(msg.images ? { images: msg.images.map((img) => ({ ...img })) } : {}),
+          ...(msg.feedback ? { feedback: { ...msg.feedback } } : {}),
+        };
+        delete copy.serverId;
+        return copy;
+      });
+
+      if (cleanedMessages.length > 0 || fs.existsSync(this.messagesFile(threadId))) {
+        await this.writeRaw(threadId, cleanedMessages);
+        if (this.isStaleOrDeleted(threadId, epoch)) {
+          await this.cleanupAbortedWriteIfReupserted(threadId);
+          return this.cleanMeta({ ...fallbackMeta, ...metaPatch, id: threadId });
+        }
+      }
+
+      if (this.isStaleOrDeleted(threadId, epoch)) {
+        return this.cleanMeta({ ...fallbackMeta, ...metaPatch, id: threadId });
+      }
+
+      const prevMeta = this.index[threadId];
+      const base = prevMeta ?? fallbackMeta;
+      const mergedMeta = this.cleanMeta({
+        ...base,
+        ...metaPatch,
+        id: threadId,
+      });
+      this.index[threadId] = mergedMeta;
+      this.syncRemoteMapping(threadId, prevMeta, mergedMeta);
+      this.persistIndex();
+      return this.index[threadId];
     });
   }
 
@@ -488,9 +913,22 @@ export class ThreadStore {
         await this.moveImageDir(oldId, newMeta.id);
 
         // 3. Swap index.json entry atomically
+        this.bumpEpoch(oldId);
+        const wasNewDeleted = this.deletedIds.delete(newMeta.id);
+        if (wasNewDeleted) {
+          this.bumpEpoch(newMeta.id);
+        }
+        const prevOld = this.index[oldId];
+        const prevNew = this.index[newMeta.id];
         delete this.index[oldId];
-        this.index[newMeta.id] = this.cleanMeta(newMeta);
+        this.syncRemoteMapping(oldId, prevOld, undefined);
+        const cleanedNew = this.cleanMeta(newMeta);
+        this.index[newMeta.id] = cleanedNew;
+        this.syncRemoteMapping(newMeta.id, prevNew, cleanedNew);
         this.persistIndex();
+        if (wasNewDeleted) {
+          this.persistDeletedSync();
+        }
 
         // 4. Delete <oldId>.jsonl only after <newId>.jsonl and index.json are safely committed
         await fsp.rm(this.messagesFile(oldId), { force: true });
@@ -527,12 +965,18 @@ export class ThreadStore {
 
   async setFeedback(threadId: string, messageLocalId: string, rating: 1 | -1, comment?: string): Promise<void> {
     this.validateThreadId(threadId);
+    const epoch = this.lifecycleEpoch.get(threadId) ?? 0;
     return this.runExclusive(threadId, async () => {
+      if (this.isStaleOrDeleted(threadId, epoch)) return;
       const messages = await this.readRaw(threadId);
+      if (this.isStaleOrDeleted(threadId, epoch)) return;
       const message = messages.find((m) => m.localId === messageLocalId);
       if (message) {
         message.feedback = { rating, comment };
         await this.writeRaw(threadId, messages);
+        if (this.isStaleOrDeleted(threadId, epoch)) {
+          await this.cleanupAbortedWriteIfReupserted(threadId);
+        }
       }
     });
   }
@@ -542,7 +986,7 @@ export class ThreadStore {
   }
 }
 
-function isValidStoredMessage(val: unknown): val is StoredChatMessage {
+export function isValidStoredMessage(val: unknown): val is StoredChatMessage {
   if (typeof val !== 'object' || val === null || Array.isArray(val)) return false;
   const rec = val as Record<string, unknown>;
   return (

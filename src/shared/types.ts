@@ -243,9 +243,28 @@ export const EMPTY_USAGE: UsageTotals = {
 
 export type SyncState = 'synced' | 'pending' | 'error';
 
+const VALID_THREAD_ID_RE = /^[a-zA-Z0-9\-_]+$/;
+
+/**
+ * Pure validator for safe thread / conversation IDs across IPC and file-system boundaries.
+ * Zero Node/Electron imports so both main and renderer targets share one canonical check.
+ */
+export function isValidThreadId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && VALID_THREAD_ID_RE.test(value);
+}
+
+/** Asserts `value` is a non-empty alphanumeric/hyphen/underscore thread ID. */
+export function assertValidThreadId(value: unknown): asserts value is string {
+  if (!isValidThreadId(value)) {
+    throw new Error(`Invalid threadId: ${String(value)}`);
+  }
+}
+
 export interface ThreadMeta {
-  /** Server conversation id (UUID); generated server-side at creation. */
+  /** Immutable local thread id (originally the server conversation UUID at creation). */
   id: string;
+  /** Replacement server conversation id after 404 recreation; omitted when equal to `id`. */
+  remoteConversationId?: string;
   /** Agent SDK session id — local only, used for model-context resume. */
   sessionId?: string;
   /** Orchestrator profile name under which sessionId was established (undefined = single agent). */
@@ -634,6 +653,7 @@ export type SyncEvent =
   | { kind: 'sync-state'; threadId: string; state: SyncState; pendingCount: number; detail?: string; dropped?: boolean }
   | { kind: 'server-ids'; threadId: string; mapping: Record<string, string> }
   | { kind: 'thread-migrated'; oldThreadId: string; thread: ThreadMeta }
+  | { kind: 'thread-recreated'; thread: ThreadMeta }
   | { kind: 'thread-deleted'; threadId: string };
 
 export interface SendMessageRequest {
