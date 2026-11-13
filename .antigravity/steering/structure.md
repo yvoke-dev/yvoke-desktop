@@ -64,8 +64,10 @@ yvoke-desktop/
 │   │   │   └── ServerAuth.ts
 │   │   ├── settings/       # Settings manager and store
 │   │   │   └── Settings.ts
-│   │   ├── store/          # Local JSON database for thread metadata and logs
-│   │   │   └── ThreadStore.ts
+│   │   ├── store/          # Local JSON database, search index, and message codecs
+│   │   │   ├── SearchIndex.ts
+│   │   │   ├── ThreadStore.ts
+│   │   │   └── messageCodec.ts
 │   │   ├── sync/           # Remote sync client, startup reconciliation, and queue managers
 │   │   │   ├── SyncClient.ts
 │   │   │   ├── SyncQueue.ts
@@ -101,21 +103,24 @@ yvoke-desktop/
 │   └── app.spec.ts         # Application launch, composer, settings, and containment specs
 ├── tests/                  # Vitest unit and integration test suites
 │   ├── AgentRuleFilesParity.test.ts # Enforces parity between CLAUDE.md and AGENTS.md
+│   ├── SearchIndex.test.ts
+│   ├── SyncClient.test.ts
+│   ├── SyncQueue.test.ts
+│   ├── ThreadStore.test.ts
 │   ├── bootstrap.test.ts   # Unit tests for bootstrap path & headless resolution
 │   ├── chunkBlocks.test.ts
 │   ├── evidenceDigest.test.ts
+│   ├── messageCodec.test.ts
 │   ├── orchestration.test.ts
+│   ├── policy.test.ts
 │   ├── reconcile.test.ts
 │   ├── review.test.ts
 │   ├── reviewTools.test.ts
 │   ├── runTrace.test.ts
 │   ├── spec.test.ts        # Enforces modular spec/ structure and sections
-│   ├── SyncClient.test.ts
-│   ├── SyncQueue.test.ts
-│   ├── ThreadStore.test.ts
-│   ├── policy.test.ts
 │   ├── thinking.test.ts
 │   ├── translate.test.ts
+│   ├── types.test.ts
 │   └── webCommunicationContract.test.ts # Stateful end-to-end web sync & run trace contract suite
 ├── scripts/                # Headless spike and automation scripts
 │   └── spike.ts
