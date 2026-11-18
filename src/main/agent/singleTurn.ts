@@ -51,6 +51,34 @@ export function isResultFailure(message: SDKResultMessage): boolean {
 }
 
 /**
+ * Converts a failed SDK result message (`!isResultSuccess(message)`) into a typed `ResultError`,
+ * preserving any numeric `api_error_status` across all failure subtypes and joining `errors[]` / `result`.
+ */
+export function toResultError(message: SDKResultMessage): ResultError {
+  const raw = message as SDKResultMessage & {
+    result?: unknown;
+    errors?: unknown;
+    api_error_status?: unknown;
+  };
+  const joinedErrors = Array.isArray(raw.errors)
+    ? raw.errors
+        .filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
+        .map((e) => e.trim())
+        .join('; ')
+    : '';
+  const resultText = typeof raw.result === 'string' ? raw.result.trim() : '';
+  const errDetail =
+    message.subtype === 'success'
+      ? (resultText || joinedErrors || 'Claude Code returned an error result')
+      : (joinedErrors || resultText || message.subtype);
+  const status =
+    typeof raw.api_error_status === 'number' && Number.isFinite(raw.api_error_status)
+      ? raw.api_error_status
+      : undefined;
+  return new ResultError(errDetail, message.subtype, status);
+}
+
+/**
  * The model's reply text from a one-shot `query()` — shared by local single-turn checks
  * (`verifyClaudeCredentials`, `PlaybookValidator`, `ImageDescriptor`), which differ in what
  * they ask and agree on how they read the answer.
@@ -67,15 +95,7 @@ export async function readSingleReply(q: Query, what: string): Promise<string> {
   for await (const message of q) {
     if (message.type !== 'result') continue;
     if (!isResultSuccess(message)) {
-      const errDetail =
-        message.subtype === 'success'
-          ? (message.result?.trim() || 'Claude Code returned an error result')
-          : (message.errors?.filter(Boolean).join('; ') || message.subtype);
-      const status =
-        message.subtype === 'success' && typeof message.api_error_status === 'number'
-          ? message.api_error_status
-          : undefined;
-      throw new ResultError(errDetail, message.subtype, status);
+      throw toResultError(message);
     }
     return message.result;
   }

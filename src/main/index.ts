@@ -13,6 +13,8 @@ import type {
   ThreadMeta,
 } from '../shared/types';
 import { AppCore } from './AppCore';
+import { sandboxDirFor } from './agent/AgentService';
+import { ClaudeAuthManager, registerClaudeAuthIpc } from './agent/ClaudeAuth';
 import { fileTokenCache } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
@@ -278,6 +280,12 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
   handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
   handle(IpcChannels.authVerify, () => appCore.verifyAuth());
+  registerClaudeAuthIpc({
+    ipcMain,
+    trustedOrigin: origin,
+    appCore,
+    writeClipboardText: (text) => clipboard.writeText(text),
+  });
   handle(IpcChannels.logsOpenFolder, async () => {
     const logsDir = path.join(userDataDir, 'logs');
     fs.mkdirSync(logsDir, { recursive: true });
@@ -335,6 +343,7 @@ if (!gotLock) {
         `mcp-sdk ${packageVersion('@modelcontextprotocol/sdk/client/index.js')} | ` +
         `debug=${!!process.env.ELECTRON_RENDERER_URL || process.env.CLAUDE_DEBUG === '1'} | userData=${userDataDir} | encryptedStore=${canEncrypt}`,
     );
+    const claudeAuth = new ClaudeAuthManager({ sandboxDir: sandboxDirFor(userDataDir) });
     core = new AppCore({
       userDataDir,
       appVersion: app.getVersion(),
@@ -348,6 +357,7 @@ if (!gotLock) {
             (cipher) => safeStorage.decryptString(cipher),
           )
         : null,
+      claudeAuth,
     });
     registerIpc(core, userDataDir);
     // Resolve the theme BEFORE the window is constructed so its backgroundColor is already

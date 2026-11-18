@@ -106,8 +106,9 @@ export function tagAttributedError(source: ErrorSource, error: unknown): string 
 }
 
 /**
- * Sanitizes sensitive credentials and tokens (Bearer JWTs, Anthropic API keys)
- * from text before it is written to disk logs or telemetry.
+ * Sanitizes sensitive credentials, tokens (Bearer JWTs, Anthropic API keys), and
+ * URL-delimited OAuth PKCE parameters from text before it is written to disk logs or
+ * returned in diagnostic messages.
  */
 export function sanitizeLogContent(text: string): string {
   if (typeof text !== 'string') {
@@ -116,7 +117,11 @@ export function sanitizeLogContent(text: string): string {
 
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[REDACTED]');
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[REDACTED]')
+    .replace(
+      /([?&#](?:code|state|code_challenge|code_verifier|access_token|refresh_token|id_token)=)[^&#\s"']+/gi,
+      '$1[REDACTED]',
+    );
 }
 
 /**

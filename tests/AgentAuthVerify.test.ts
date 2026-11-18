@@ -148,7 +148,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude session expired or not signed in. Sign in to Claude to continue.',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -171,7 +171,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude session expired or not signed in. Sign in to Claude to continue.',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -241,7 +241,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude session expired or not signed in. Sign in to Claude to continue.',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -265,7 +265,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'expired',
-      message: 'Claude denied access for this account. Try claude /login, or check your subscription.',
+      message: 'Claude denied access for this account. Sign in to Claude again, or check your subscription.',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -525,7 +525,7 @@ describe('classifyClaudeFailure', () => {
     const err401 = new ResultError('Unauthorized', 'success', 401);
     expect(classifyClaudeFailure(err401)).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude session expired or not signed in. Sign in to Claude to continue.',
     });
   });
 
@@ -533,7 +533,7 @@ describe('classifyClaudeFailure', () => {
     const err403 = new ResultError('Forbidden', 'success', 403);
     expect(classifyClaudeFailure(err403)).toEqual({
       status: 'expired',
-      message: 'Claude denied access for this account. Try claude /login, or check your subscription.',
+      message: 'Claude denied access for this account. Sign in to Claude again, or check your subscription.',
     });
   });
 
@@ -552,13 +552,66 @@ describe('classifyClaudeFailure', () => {
     const authErr = new ResultError('Not logged in · Please run /login', 'success');
     expect(classifyClaudeFailure(authErr)).toEqual({
       status: 'expired',
-      message: 'Session expired or not logged in. Run claude /login in a terminal.',
+      message: 'Claude session expired or not signed in. Sign in to Claude to continue.',
     });
   });
 
-  it('returns undefined for non-auth non-rate-limit errors', () => {
+  it('returns undefined for non-auth non-rate-limit errors and NoReplyError', () => {
     const err = new ResultError('API Error: 500 Internal Server Error', 'success', 500);
     expect(classifyClaudeFailure(err)).toBeUndefined();
     expect(classifyClaudeFailure(new Error('Network disconnected'))).toBeUndefined();
+    expect(classifyClaudeFailure(new NoReplyError('credential check'))).toBeUndefined();
+  });
+});
+
+describe('AgentService.verifyClaudeCredentials with injected isClaudeMissing / getClaudeAccount', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns missing immediately without spawning query when isClaudeMissing resolves true even if disk check is unknown', async () => {
+    mockDetectCredentials.mockReturnValue('unknown');
+    const svc = new AgentService({
+      getSettings: () => ({ defaultModel: 'sonnet' }) as any,
+      mcpAuthProvider: { headers: async () => ({}) },
+      emit: vi.fn(),
+      onSessionId: vi.fn(),
+      onTurnPersist: vi.fn(),
+      sandboxDir: '/tmp/test-sandbox',
+      mcpPrompts: {} as any,
+      getOrchestratorProfile: vi.fn(),
+      isClaudeMissing: async () => true,
+      getClaudeAccount: async () => undefined,
+    });
+
+    const res = await svc.verifyClaudeCredentials('/tmp/test-sandbox');
+    expect(res).toEqual({ status: 'missing', message: LOGIN_INSTRUCTIONS });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('uses getClaudeAccount when verification probe succeeds', async () => {
+    mockDetectCredentials.mockReturnValue('unknown');
+    mockDetectAccount.mockReturnValue(undefined);
+    const { iterator, close } = createFakeQuery({
+      messages: [{ type: 'result', subtype: 'success', is_error: false, result: 'pong' }],
+    });
+    mockQuery.mockReturnValue(iterator);
+
+    const svc = new AgentService({
+      getSettings: () => ({ defaultModel: 'sonnet' }) as any,
+      mcpAuthProvider: { headers: async () => ({}) },
+      emit: vi.fn(),
+      onSessionId: vi.fn(),
+      onTurnPersist: vi.fn(),
+      sandboxDir: '/tmp/test-sandbox',
+      mcpPrompts: {} as any,
+      getOrchestratorProfile: vi.fn(),
+      isClaudeMissing: async () => false,
+      getClaudeAccount: async () => 'keychain@yvoke.ai',
+    });
+
+    const res = await svc.verifyClaudeCredentials('/tmp/test-sandbox');
+    expect(res).toEqual({ status: 'ok', account: 'keychain@yvoke.ai' });
+    expect(close).toHaveBeenCalled();
   });
 });

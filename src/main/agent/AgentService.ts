@@ -27,8 +27,14 @@ import type {
 } from '../../shared/types';
 import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, parseVerdict, resolveCanonicalModel } from '../../shared/types';
 import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
-import { classifyClaudeFailure, detectClaudeAccount, detectClaudeCredentials, isAuthError, LOGIN_INSTRUCTIONS, sanitizedEnv } from './ClaudeAuth';
-import { isResultFailure, NoReplyError, readSingleReply } from './singleTurn';
+import {
+  classifyClaudeFailure,
+  detectClaudeAccount,
+  detectClaudeCredentials,
+  LOGIN_INSTRUCTIONS,
+  sanitizedEnv,
+} from './ClaudeAuth';
+import { isResultFailure, NoReplyError, readSingleReply, toResultError } from './singleTurn';
 import { VALIDATION_TIMEOUT_MS } from './playbookValidation';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
@@ -103,12 +109,11 @@ export function claudeBinaryPath(): string | null {
 }
 
 /**
- * Decides how a thrown turn failure reaches the user.
+ * Decides how a turn failure reaches the user.
  *
  * An Entra or Yvoke Backend message was already attributed by the layer that raised it and
  * passes through untouched — re-tagging it would blame the wrong subsystem. Anything else is
- * attributed to `fallbackSource`, except a Claude auth failure, which is replaced by the
- * login instructions.
+ * classified via `classifyClaudeFailure` (rate-limit before auth) and attributed to `fallbackSource`.
  */
 function attributeTurnFailure(
   error: unknown,
@@ -117,17 +122,29 @@ function attributeTurnFailure(
   const messageText = error instanceof Error ? error.message : String(error);
   const preAttributed =
     hasErrorSourcePrefix(messageText, 'Entra') || hasErrorSourcePrefix(messageText, 'Yvoke Backend');
-  const authRequired = !preAttributed && isAuthError(messageText);
-
-  if (authRequired) {
-    return { messageText, message: tagAttributedError('Claude', LOGIN_INSTRUCTIONS), authRequired };
-  }
   if (preAttributed) {
-    return { messageText, message: messageText, authRequired };
+    return { messageText, message: messageText, authRequired: false };
   }
+
+  const claudeFailure = classifyClaudeFailure(error);
+  if (claudeFailure?.status === 'expired') {
+    return {
+      messageText,
+      message: tagAttributedError('Claude', claudeFailure.message),
+      authRequired: true,
+    };
+  }
+  if (claudeFailure?.status === 'rate_limited') {
+    return {
+      messageText,
+      message: tagAttributedError('Claude', claudeFailure.message),
+      authRequired: false,
+    };
+  }
+
   // `error`, not `messageText`: a thrown non-Error stringifies to '[object Object]' here but
   // still serializes usefully inside tagAttributedError.
-  return { messageText, message: tagAttributedError(fallbackSource, error), authRequired };
+  return { messageText, message: tagAttributedError(fallbackSource, error), authRequired: false };
 }
 
 /** Simple push-based async iterable used as the streaming-input prompt. */
@@ -192,7 +209,7 @@ type ReviewPassOutcome =
   | { kind: 'approved'; content: string }
   | { kind: 'revise'; revisionPrompt: string }
   | { kind: 'flagged'; content: string }
-  | { kind: 'unreviewed'; content: string; errorMessage: string }
+  | { kind: 'unreviewed'; content: string; errorMessage: string; error: unknown }
   | { kind: 'aborted'; content: string };
 
 interface ThreadSession {
@@ -201,6 +218,10 @@ interface ThreadSession {
   model: string;
   thinkingLevel: ThinkingLevel;
   busy: boolean;
+  /** True while a newly spawned or warm session is configuring model/thinking before `busy` is latched. */
+  starting: boolean;
+  /** True once `consume()` has been launched for this session's `query` stream. */
+  consuming: boolean;
   /** Set when the user presses Stop, so the resulting error reads as a clean stop. */
   interrupted: boolean;
   turn: TurnContext;
@@ -235,6 +256,12 @@ export interface AgentServiceDeps {
   mcpPrompts: McpPrompts;
   /** Resolve a multi-agent profile by name (orchestrator mode); undefined if unknown/unavailable. */
   getOrchestratorProfile: (name: string) => Promise<OrchestratorProfile | undefined>;
+  /** Keychain-aware check for whether Claude credentials are missing before running verification probe. */
+  isClaudeMissing?: () => Promise<boolean> | boolean;
+  /** Keychain-aware lookup for the signed-in Claude account email. */
+  getClaudeAccount?: () => Promise<string | undefined> | string | undefined;
+  /** Invoked synchronously before emitting an `authRequired: true` event so caches invalidate immediately. */
+  onAuthFailure?: () => void;
 }
 
 /**
@@ -283,7 +310,8 @@ export class AgentService {
   constructor(private readonly deps: AgentServiceDeps) {}
 
   isBusy(threadId: string): boolean {
-    return Boolean(this.sessions.get(threadId)?.busy);
+    const session = this.sessions.get(threadId);
+    return Boolean(session?.busy || session?.starting);
   }
 
   async sendMessage(thread: ThreadMeta, text: string, opts: SendOptions = {}): Promise<void> {
@@ -296,30 +324,62 @@ export class AgentService {
       session = await this.ensureSession(thread, opts.playbook);
     } catch (error) {
       const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
+      if (authRequired) {
+        this.deps.onAuthFailure?.();
+      }
       logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
       this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
       throw error;
     }
 
-    if (session.busy) {
+    if (session.busy || session.starting) {
       throw new Error('A turn is already running for this conversation.');
     }
+    session.starting = true;
 
     // In orchestrator mode the per-role models/thinking are fixed by the profile + settings; the
     // thread-level model/thinking selectors (and per-message thinking override) do not apply.
     if (!thread.orchestratorProfile) {
-      if (session.model !== thread.model) {
-        await session.query.setModel(resolveCanonicalModel(thread.model));
-        session.model = thread.model;
-      }
-      const effectiveThinking = opts.thinkingOverride ?? thread.thinkingLevel;
-      if (session.thinkingLevel !== effectiveThinking) {
-        await session.query.setMaxThinkingTokens(thinkingBudget(effectiveThinking));
-        session.thinkingLevel = effectiveThinking;
+      try {
+        if (session.model !== thread.model) {
+          await session.query.setModel(resolveCanonicalModel(thread.model));
+          session.model = thread.model;
+        }
+        const effectiveThinking = opts.thinkingOverride ?? thread.thinkingLevel;
+        if (session.thinkingLevel !== effectiveThinking) {
+          await session.query.setMaxThinkingTokens(thinkingBudget(effectiveThinking));
+          session.thinkingLevel = effectiveThinking;
+        }
+      } catch (err) {
+        session.starting = false;
+        if (this.sessions.get(thread.id) === session) {
+          this.closeThread(thread.id);
+        }
+        const { messageText, message, authRequired } = attributeTurnFailure(err, 'Claude');
+        if (authRequired) {
+          this.deps.onAuthFailure?.();
+        }
+        logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
+        this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
+        throw err;
       }
     }
 
+    if (this.sessions.get(thread.id) !== session) {
+      session.starting = false;
+      const closedErr = new Error('Conversation session closed before turn could start.');
+      logError('agent', `turn failed before start thread=${thread.id}:`, closedErr.message);
+      this.deps.emit({
+        kind: 'error',
+        threadId: thread.id,
+        message: tagAttributedError('Claude', closedErr),
+        authRequired: false,
+      });
+      throw closedErr;
+    }
+
     session.busy = true;
+    session.starting = false;
     session.interrupted = false;
     session.lastActiveAt = Date.now();
     session.turn = newTurnContext(thread.id, Boolean(thread.orchestratorProfile));
@@ -374,6 +434,11 @@ export class AgentService {
         parent_tool_use_id: null,
       });
     }
+
+    if (!session.consuming) {
+      session.consuming = true;
+      void this.consume(thread.id, session);
+    }
   }
 
   async interrupt(threadId: string): Promise<void> {
@@ -404,7 +469,10 @@ export class AgentService {
     sandboxDir: string = this.deps.sandboxDir,
     model?: string,
   ): Promise<LoginVerificationResult> {
-    if (detectClaudeCredentials() === 'missing') {
+    const isMissing = this.deps.isClaudeMissing
+      ? await this.deps.isClaudeMissing()
+      : detectClaudeCredentials() === 'missing';
+    if (isMissing) {
       return { status: 'missing', message: LOGIN_INSTRUCTIONS };
     }
 
@@ -451,7 +519,10 @@ export class AgentService {
           message: `Claude verification failed: unexpected reply: ${preview}`,
         };
       }
-      return { status: 'ok', account: detectClaudeAccount() };
+      const account = this.deps.getClaudeAccount
+        ? await this.deps.getClaudeAccount()
+        : detectClaudeAccount();
+      return { status: 'ok', account };
     } catch (err) {
       if (abortController.signal.aborted || err instanceof AbortError) {
         return { status: 'unreachable', message: 'Claude verification timed out' };
@@ -476,6 +547,18 @@ export class AgentService {
         } catch {
           // ignore
         }
+      }
+    }
+  }
+
+  /**
+   * Closes all non-busy warm CLI sessions without touching persisted `ThreadMeta.sessionId`,
+   * so subsequent turns spawn fresh subprocesses with newly stored credentials while resuming context.
+   */
+  closeIdleSessions(): void {
+    for (const [threadId, session] of [...this.sessions.entries()]) {
+      if (!session.busy && !session.starting) {
+        this.closeThread(threadId);
       }
     }
   }
@@ -562,7 +645,7 @@ export class AgentService {
             ) {
               return current;
             }
-            if (current.busy) {
+            if (current.busy || current.starting) {
               return current;
             }
             // Configuration mismatch on an idle session; close it before creating a replacement
@@ -570,7 +653,7 @@ export class AgentService {
           }
           // Session was closed or replaced with different config; fall through to recreate below
         } else if (updateFailed) {
-          if (existing.busy) {
+          if (existing.busy || existing.starting) {
             return existing;
           }
           log(
@@ -606,7 +689,7 @@ export class AgentService {
       let oldestId: string | null = null;
       let oldestTime = Infinity;
       for (const [id, s] of this.sessions.entries()) {
-        if (!s.busy && s.lastActiveAt < oldestTime) {
+        if (!s.busy && !s.starting && s.lastActiveAt < oldestTime) {
           oldestTime = s.lastActiveAt;
           oldestId = id;
         }
@@ -786,6 +869,8 @@ export class AgentService {
       model: effectiveModel,
       thinkingLevel: effectiveThinking,
       busy: false,
+      starting: false,
+      consuming: false,
       interrupted: false,
       turn: newTurnContext(thread.id, Boolean(thread.orchestratorProfile)),
       lastActiveAt: Date.now(),
@@ -798,7 +883,6 @@ export class AgentService {
     };
     sessionRef.current = session;
     this.sessions.set(thread.id, session);
-    void this.consume(thread.id, session);
     return session;
   }
 
@@ -888,15 +972,30 @@ export class AgentService {
         }
         if (message.type === 'result') {
           await this.completeTurn(threadId, session, message, startedAt);
+          if (this.sessions.get(threadId) !== session) {
+            break;
+          }
         }
       }
     } catch (error) {
-      this.cancelClarifications(threadId);
-      const { messageText, message, authRequired } = attributeTurnFailure(error, 'Claude');
-      logError('agent', `turn failed thread=${threadId}:`, messageText);
-      this.deps.emit({ kind: 'error', threadId, message, authRequired });
+      const wasBusy = session.busy || session.starting;
       session.busy = false;
-      this.sessions.delete(threadId);
+      session.starting = false;
+      if (this.sessions.get(threadId) === session) {
+        this.closeThread(threadId);
+      } else {
+        session.queue.close();
+        session.query.close();
+        session.activeReviewerQuery?.close();
+      }
+      if (wasBusy && !session.interrupted) {
+        const { messageText, message, authRequired } = attributeTurnFailure(error, 'Claude');
+        if (authRequired) {
+          this.deps.onAuthFailure?.();
+        }
+        logError('agent', `turn failed thread=${threadId}:`, messageText);
+        this.deps.emit({ kind: 'error', threadId, message, authRequired });
+      }
     }
   }
 
@@ -917,6 +1016,7 @@ export class AgentService {
     costUsd?: number;
     failed: boolean;
     errorMessage?: string;
+    failureError?: unknown;
   }> {
     const reviewerCfg = session.orchestrator!.reviewer;
     const settings = this.deps.getSettings();
@@ -926,6 +1026,7 @@ export class AgentService {
     let resultText = '';
     let failed = false;
     let errorMessage: string | undefined;
+    let failureError: unknown;
 
     let revQuery: Query | undefined;
     try {
@@ -1038,7 +1139,9 @@ export class AgentService {
           costUsd = (msg as { total_cost_usd?: number }).total_cost_usd;
           if (isResultFailure(msg)) {
             failed = true;
-            errorMessage = String((msg as { result?: string }).result ?? msg.subtype);
+            const resErr = toResultError(msg);
+            failureError = resErr;
+            errorMessage = resErr.message;
           } else if (!resultText && typeof (msg as { result?: string }).result === 'string') {
             resultText = (msg as { result?: string }).result!;
           }
@@ -1047,6 +1150,7 @@ export class AgentService {
       }
     } catch (err) {
       failed = true;
+      failureError = err;
       errorMessage = err instanceof Error ? err.message : String(err);
     } finally {
       if (session.activeReviewerQuery === revQuery) {
@@ -1068,6 +1172,7 @@ export class AgentService {
       costUsd,
       failed,
       errorMessage,
+      failureError,
     };
   }
 
@@ -1185,7 +1290,12 @@ export class AgentService {
       logError('orch', `⚖ reviewer pass failed on round ${round}: ${errText}`);
 
       const unreviewedContent = draftAnswer.trim().length > 0 ? draftAnswer + unreviewedNote() : '';
-      return { kind: 'unreviewed', content: unreviewedContent, errorMessage: errText };
+      return {
+        kind: 'unreviewed',
+        content: unreviewedContent,
+        errorMessage: errText,
+        error: revOutcome.failureError ?? errText,
+      };
     }
 
     const verdict =
@@ -1281,7 +1391,13 @@ export class AgentService {
     resultCostUsd: number | undefined,
   ): Promise<
     | { status: 'continue' }
-    | { status: 'finalize'; isError: boolean; aborted: boolean; errorMessage?: string }
+    | {
+        status: 'finalize';
+        isError: boolean;
+        aborted: boolean;
+        errorMessage?: string;
+        authRequired?: boolean;
+      }
   > {
     session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
     if (resultCostUsd != null) {
@@ -1309,11 +1425,13 @@ export class AgentService {
       return { status: 'finalize', isError: false, aborted: true };
     }
     if (outcome.kind === 'unreviewed' && outcome.content.length === 0) {
+      const attributed = attributeTurnFailure(outcome.error, 'Claude');
       return {
         status: 'finalize',
         isError: true,
         aborted: false,
-        errorMessage: tagAttributedError('Claude', outcome.errorMessage),
+        errorMessage: attributed.message,
+        authRequired: attributed.authRequired,
       };
     }
     return { status: 'finalize', isError: false, aborted: false };
@@ -1415,6 +1533,7 @@ export class AgentService {
     let usageOverride: UsageTotals | undefined;
     let costOverride: number | undefined;
     let errorOverride: string | undefined;
+    let authRequiredOverride: boolean | undefined;
 
     if (session.orchestratorProfile && session.orchestrator) {
       if (session.reviewState?.submittedAnswer !== undefined) {
@@ -1442,6 +1561,7 @@ export class AgentService {
           isError = outcome.isError;
           aborted = outcome.aborted;
           errorOverride = outcome.errorMessage;
+          authRequiredOverride = outcome.authRequired;
           usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
           costOverride = session.turn.carriedCostUsd;
         } else {
@@ -1481,9 +1601,21 @@ export class AgentService {
         : session.turn.carriedCostUsd != null
           ? session.turn.carriedCostUsd + (resultCostUsd ?? 0)
           : resultCostUsd;
-    const rawErrorMessage = isError ? String((result as { result?: string }).result ?? result.subtype) : undefined;
-    const errorMessage =
-      errorOverride ?? (isError && rawErrorMessage ? tagAttributedError('Claude', rawErrorMessage) : undefined);
+
+    let errorMessage: string | undefined;
+    let authRequired: boolean | undefined;
+    if (errorOverride !== undefined) {
+      errorMessage = errorOverride;
+      authRequired = authRequiredOverride ?? false;
+    } else if (isError && !aborted) {
+      const resultErr = toResultError(result);
+      const attributed = attributeTurnFailure(resultErr, 'Claude');
+      errorMessage = attributed.message;
+      authRequired = attributed.authRequired;
+    } else if (isError) {
+      authRequired = false;
+    }
+
     log(
       'agent',
       `turn ${aborted ? 'stopped' : isError ? 'error' : 'complete'} thread=${threadId} ` +
@@ -1501,6 +1633,10 @@ export class AgentService {
       this.deps.onTurnPersist(threadId, pendingUser, assistantMessage);
     }
 
+    if (authRequired) {
+      this.deps.onAuthFailure?.();
+    }
+
     this.deps.emit({
       kind: 'turn-complete',
       threadId,
@@ -1511,13 +1647,19 @@ export class AgentService {
       isError,
       aborted,
       errorMessage,
+      ...(authRequired !== undefined ? { authRequired } : {}),
     });
 
     session.busy = false;
+    session.starting = false;
     session.interrupted = false;
     session.reviewState = undefined;
     session.lastActiveAt = Date.now();
     session.turn = newTurnContext(threadId, Boolean(session.orchestratorProfile));
+
+    if (authRequired && this.sessions.get(threadId) === session) {
+      this.closeThread(threadId);
+    }
   }
 }
 

@@ -222,6 +222,29 @@ describe('errorAttribution', () => {
       expect(sanitizeLogContent(null as unknown as string)).toBe('');
       expect(sanitizeLogContent(undefined as unknown as string)).toBe('');
     });
+
+    it('redacts back-to-back OAuth query and fragment parameters while preserving diagnostic key=value pairs', () => {
+      const oauthLine =
+        'Redirect https://claude.ai/oauth/authorize?response_type=code&code=AUTH_CODE_1&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE&code_verifier=SECRET_VERIFIER#code=FRAG_CODE&state=FRAG_STATE&access_token=ACC_TOK&refresh_token=REF_TOK&id_token=ID_TOK failed: code=ENOENT state=pending syncState=error';
+      const sanitized = sanitizeLogContent(oauthLine);
+
+      expect(sanitized).toBe(
+        'Redirect https://claude.ai/oauth/authorize?response_type=code&code=[REDACTED]&state=[REDACTED]&code_challenge=[REDACTED]&code_verifier=[REDACTED]#code=[REDACTED]&state=[REDACTED]&access_token=[REDACTED]&refresh_token=[REDACTED]&id_token=[REDACTED] failed: code=ENOENT state=pending syncState=error',
+      );
+      expect(sanitized).not.toContain('AUTH_CODE_1');
+      expect(sanitized).not.toContain('SECRET_NONCE');
+      expect(sanitized).not.toContain('SECRET_CHALLENGE');
+      expect(sanitized).not.toContain('SECRET_VERIFIER');
+      expect(sanitized).not.toContain('FRAG_CODE');
+      expect(sanitized).not.toContain('FRAG_STATE');
+      expect(sanitized).not.toContain('ACC_TOK');
+      expect(sanitized).not.toContain('REF_TOK');
+      expect(sanitized).not.toContain('ID_TOK');
+      expect(sanitized).toContain('response_type=code');
+      expect(sanitized).toContain('code=ENOENT');
+      expect(sanitized).toContain('state=pending');
+      expect(sanitized).toContain('syncState=error');
+    });
   });
 
   describe('isNotFoundError', () => {

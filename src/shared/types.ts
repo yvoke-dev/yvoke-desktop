@@ -633,6 +633,7 @@ export type AgentEvent =
       durationMs: number;
       isError: boolean;
       errorMessage?: string;
+      authRequired?: boolean;
       /** The turn ended because the user pressed Stop, not because of a failure. */
       aborted?: boolean;
     }
@@ -679,6 +680,15 @@ export interface AuthStatus {
   claudeAccount?: string;
   server: { mode: 'dev' | 'entra'; signedIn: boolean; account?: string };
 }
+
+export type ClaudeSignInResult =
+  | { status: 'signed_in'; account?: string }
+  | { status: 'cancelled' }
+  | { status: 'error'; message: string };
+
+export type ClaudeCodeSubmitResult =
+  | { accepted: true }
+  | { accepted: false; message: string };
 
 export type AuthVerificationFailureReason =
   | 'expired'

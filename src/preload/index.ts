@@ -7,6 +7,8 @@ import type {
   AuthVerificationResponse,
   ChatMessage,
   CitationRef,
+  ClaudeCodeSubmitResult,
+  ClaudeSignInResult,
   FeedbackRequest,
   McpPromptInfo,
   OrchestratorProfile,
@@ -51,6 +53,10 @@ export interface DesktopApi {
   verifyAuth(): Promise<AuthVerificationResponse>;
   serverSignIn(): Promise<string | undefined>;
   serverSignOut(): Promise<void>;
+  claudeSignIn(): Promise<ClaudeSignInResult>;
+  cancelClaudeSignIn(): Promise<boolean>;
+  copyClaudeSignInUrl(): Promise<boolean>;
+  submitClaudeAuthCode(code: string): Promise<ClaudeCodeSubmitResult>;
   writeClipboardImage(dataUrl: string): Promise<void>;
   openLogsFolder(): Promise<void>;
   onAgentEvent(listener: (event: AgentEvent) => void): () => void;
@@ -82,6 +88,10 @@ const api: DesktopApi = {
   verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
   serverSignOut: () => ipcRenderer.invoke(IpcChannels.authSignout),
+  claudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeSignin),
+  cancelClaudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeCancel),
+  copyClaudeSignInUrl: () => ipcRenderer.invoke(IpcChannels.authClaudeCopyUrl),
+  submitClaudeAuthCode: (code: string) => ipcRenderer.invoke(IpcChannels.authClaudeSubmitCode, code),
   writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke(IpcChannels.clipboardWriteImage, dataUrl),
   openLogsFolder: () => ipcRenderer.invoke(IpcChannels.logsOpenFolder),
   onAgentEvent: (listener) => {

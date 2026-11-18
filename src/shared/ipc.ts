@@ -26,6 +26,10 @@ export const IpcChannels = {
   authSignin: 'auth:signin',
   authSignout: 'auth:signout',
   authVerify: 'auth:verify',
+  authClaudeSignin: 'auth:claude-signin',
+  authClaudeCancel: 'auth:claude-cancel',
+  authClaudeCopyUrl: 'auth:claude-copy-url',
+  authClaudeSubmitCode: 'auth:claude-submit-code',
   clipboardWriteImage: 'clipboard:write-image',
   logsOpenFolder: 'logs:open-folder',
 
