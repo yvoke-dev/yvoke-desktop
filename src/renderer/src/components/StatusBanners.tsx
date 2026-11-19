@@ -1,43 +1,51 @@
 import React from 'react';
 import type { AuthStatus } from '../../../shared/types';
+import {
+  ClaudeSignInControls,
+  useClaudeSignIn,
+  type ClaudeSignInController,
+} from './ClaudeSignInControls';
 import { AlertIcon, InfoIcon } from './icons';
 
 export function StatusBanners(props: {
   auth: AuthStatus | null;
+  claudeSignIn?: ClaudeSignInController;
   serverReachable: boolean;
   pendingSync: number;
   syncError: string | null;
   droppedSyncError?: string | null;
   onDismissDroppedSyncError?: () => void;
   onServerSignIn: () => void;
-  onRetryAuth: () => void;
   onRetryServer: () => void;
 }): React.JSX.Element | null {
   const {
     auth,
+    claudeSignIn,
     serverReachable,
     pendingSync,
     syncError,
     droppedSyncError,
     onDismissDroppedSyncError,
     onServerSignIn,
-    onRetryAuth,
     onRetryServer,
   } = props;
+  const fallbackClaudeSignIn = useClaudeSignIn();
+  const effectiveClaudeSignIn = claudeSignIn ?? fallbackClaudeSignIn;
+  const showClaudeBanner =
+    auth?.claude === 'missing' || Boolean(effectiveClaudeSignIn.signingIn);
+
   return (
     <div className="banners">
-      {auth?.claude === 'missing' && (
+      {showClaudeBanner && (
         <div className="banner warn">
           <span className="banner-icon">
             <AlertIcon size={14} />
           </span>
-          <span>
-            <strong>Connect Claude:</strong> no Claude Code credentials found. Run <code>claude /login</code> in a
-            terminal (your Claude Pro/Max account — the same login as Claude Desktop), then retry.
+          <span className="banner-text">
+            <strong>Connect Claude:</strong> sign in with your Claude Pro or Max account in your
+            browser to ask questions.
           </span>
-          <button className="small banner-action" onClick={onRetryAuth}>
-            Retry sign-in
-          </button>
+          <ClaudeSignInControls controller={effectiveClaudeSignIn} variant="banner" />
         </div>
       )}
       {auth?.server.mode === 'entra' && !auth.server.signedIn && (

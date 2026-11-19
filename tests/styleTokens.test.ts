@@ -92,6 +92,22 @@ describe('button variant selectors', () => {
   it('styles open-logs-btn with the same compact secondary button size as check-credentials-btn', () => {
     expect(CSS).toMatch(/\.button\.check-credentials-btn,\s*\.button\.open-logs-btn/);
   });
+
+  it('excludes .claude-alt-toggle from the default button chrome and uses no !important on Claude sign-in styles', () => {
+    const defaultChrome = CSS.match(/^button:not\([^{]*\{/m)?.[0];
+    expect(defaultChrome).toBeDefined();
+    expect(defaultChrome).toContain(':not(.claude-alt-toggle)');
+
+    for (const selector of [
+      /\.claude-alt-toggle\s*\{[^}]*\}/,
+      /\.claude-signin-controls\s*\{[^}]*\}/,
+      /\.claude-alt-panel\s*\{[^}]*\}/,
+    ]) {
+      const block = CSS.match(selector)?.[0];
+      expect(block).toBeDefined();
+      expect(block).not.toContain('!important');
+    }
+  });
 });
 
 describe('clarifying question card styles', () => {

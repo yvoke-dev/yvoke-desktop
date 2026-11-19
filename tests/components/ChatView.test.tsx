@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
+import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
 import type { LiveTurn } from '../../src/renderer/src/App';
 import {
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
@@ -74,6 +75,7 @@ interface ChatOpts {
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
   liveTurn?: LiveTurn;
+  claudeSignIn?: ClaudeSignInController;
   onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
@@ -87,6 +89,7 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
+      claudeSignIn={opts.claudeSignIn}
       onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
@@ -129,7 +132,13 @@ beforeEach(() => {
   validatePlaybook = vi.fn(async () => ({ plausible: true }) as PlaybookValidation);
   onSend = vi.fn<(text: string, promptName?: string) => void>();
   onInterrupt = vi.fn<() => void>();
-  (window as unknown as { api: unknown }).api = { validatePlaybook };
+  (window as unknown as { api: unknown }).api = {
+    validatePlaybook,
+    claudeSignIn: vi.fn(async () => ({ status: 'signed_in' as const })),
+    cancelClaudeSignIn: vi.fn(async () => true),
+    copyClaudeSignInUrl: vi.fn(async () => true),
+    submitClaudeAuthCode: vi.fn(async () => ({ accepted: true as const })),
+  };
 
   // Stubbed per test and restored below: a leaked always-succeeding clipboard would stop a later
   // test from ever reaching CopyButton's execCommand fallback.
@@ -3351,6 +3360,61 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
         promptName: 'oim-getting-started',
       },
     ]);
+  });
+
+  describe('Claude auth-required turn error banner', () => {
+    it('renders inline Sign in to Claude inside .chat-notices .banner.error ONLY when liveTurn.authRequired is true', () => {
+      const startSignIn = vi.fn(async () => undefined);
+      const mockCtrl: ClaudeSignInController = {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn,
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+      };
+
+      const { container, rerender } = renderChat({
+        liveTurn: {
+          ...IDLE,
+          error: 'Claude: Rate limit reached — wait a moment and try again.',
+          authRequired: false,
+        },
+        claudeSignIn: mockCtrl,
+      });
+
+      expect(screen.getByText(/Rate limit reached/)).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+            authRequired: true,
+          },
+          claudeSignIn: mockCtrl,
+        }),
+      );
+
+      const errorBanner = container.querySelector('.chat-notices .banner.error');
+      expect(errorBanner).not.toBeNull();
+      const signInBtn = screen.getByRole('button', { name: 'Sign in to Claude' });
+      expect(errorBanner?.contains(signInBtn)).toBe(true);
+      expect(errorBanner?.querySelectorAll('[style]')).toHaveLength(0);
+
+      fireEvent.click(signInBtn);
+      expect(startSignIn).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

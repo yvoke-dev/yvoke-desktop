@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DEFAULT_APPEARANCE, DEFAULT_ORCHESTRATOR_SETTINGS, formatModelDisplayName } from '../../../shared/types';
 import type {
   AppearanceSettings,
@@ -12,6 +12,11 @@ import type {
   ThinkingLevel,
   UpdateCheckResult,
 } from '../../../shared/types';
+import {
+  ClaudeSignInControls,
+  useClaudeSignIn,
+  type ClaudeSignInController,
+} from './ClaudeSignInControls';
 import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
@@ -288,6 +293,7 @@ export interface SettingsViewProps {
   settings: AppSettings;
   appVersion?: string;
   auth?: AuthStatus | null;
+  claudeSignIn?: ClaudeSignInController;
   onAuthChange?: () => void;
   onSave: (update: Partial<AppSettings>) => Promise<void>;
   onClose: () => void;
@@ -303,7 +309,16 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const [signingIn, setSigningIn] = useState(false);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const isMounted = React.useRef(true);
+  const isMounted = useRef(true);
+  const fallbackClaudeSignIn = useClaudeSignIn();
+  const effectiveClaudeSignIn = props.claudeSignIn ?? fallbackClaudeSignIn;
+  const verificationRef = useRef(verification);
+  verificationRef.current = verification;
+  const onAuthChangeRef = useRef(props.onAuthChange);
+  onAuthChangeRef.current = props.onAuthChange;
+  const clearClaudeErrorRef = useRef(effectiveClaudeSignIn.clearError);
+  clearClaudeErrorRef.current = effectiveClaudeSignIn.clearError;
+  const prevSuccessCountRef = useRef(effectiveClaudeSignIn.successCount);
 
   useEffect(() => {
     isMounted.current = true;
@@ -311,6 +326,31 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
       isMounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (effectiveClaudeSignIn.successCount === prevSuccessCountRef.current) return;
+    prevSuccessCountRef.current = effectiveClaudeSignIn.successCount;
+    onAuthChangeRef.current?.();
+    if (verificationRef.current === null) return;
+    setVerification(null);
+    setVerifying(true);
+    setError(null);
+    void window.api
+      .verifyAuth()
+      .then((res) => {
+        if (!isMounted.current) return;
+        setVerification(res);
+        if (res.claude.status === 'ok') {
+          clearClaudeErrorRef.current?.();
+        }
+      })
+      .catch((e: unknown) => {
+        if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (isMounted.current) setVerifying(false);
+      });
+  }, [effectiveClaudeSignIn.successCount]);
 
   /**
    * A verdict describes the settings that were on disk when it was taken — main reads the *saved*
@@ -341,30 +381,42 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     });
 
   const handleCheckCredentials = async (): Promise<void> => {
-    if (verifying || signingIn) return;
+    if (verifying || signingIn || effectiveClaudeSignIn.signingIn) return;
     setVerifying(true);
     setError(null);
     try {
-      setVerification(await window.api.verifyAuth());
+      const res = await window.api.verifyAuth();
+      if (isMounted.current) {
+        setVerification(res);
+        if (res.claude.status === 'ok') {
+          effectiveClaudeSignIn.clearError?.();
+        }
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setVerifying(false);
+      if (isMounted.current) setVerifying(false);
     }
   };
 
   const handleInlineSignIn = async (): Promise<void> => {
-    if (signingIn || verifying) return;
+    if (signingIn || verifying || effectiveClaudeSignIn.signingIn) return;
     setSigningIn(true);
     setError(null);
     try {
       await window.api.serverSignIn();
       props.onAuthChange?.();
-      setVerification(await window.api.verifyAuth());
+      const res = await window.api.verifyAuth();
+      if (isMounted.current) {
+        setVerification(res);
+        if (res.claude.status === 'ok') {
+          effectiveClaudeSignIn.clearError?.();
+        }
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSigningIn(false);
+      if (isMounted.current) setSigningIn(false);
     }
   };
 
@@ -1002,7 +1054,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                               type="button"
                               className="button secondary cred-inline-btn"
                               onClick={handleInlineSignIn}
-                              disabled={signingIn || verifying}
+                              disabled={signingIn || verifying || effectiveClaudeSignIn.signingIn}
                             >
                               {signingIn ? 'Signing in…' : 'Sign in'}
                             </button>
@@ -1040,6 +1092,17 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                       ? 'No Claude Code credentials found'
                       : 'Detected from Claude Code')
                   )}
+                  {(Boolean(effectiveClaudeSignIn.signingIn) ||
+                    (verification
+                      ? verification.claude.status === 'missing' ||
+                        verification.claude.status === 'expired'
+                      : props.auth?.claude === 'missing')) && (
+                    <ClaudeSignInControls
+                      controller={effectiveClaudeSignIn}
+                      variant="inline"
+                      disabled={verifying || signingIn}
+                    />
+                  )}
                 </dd>
                 <dt>Credentials</dt>
                 <dd>
@@ -1047,7 +1110,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                     type="button"
                     className="button secondary check-credentials-btn"
                     onClick={handleCheckCredentials}
-                    disabled={verifying || signingIn}
+                    disabled={verifying || signingIn || effectiveClaudeSignIn.signingIn}
                   >
                     {verifying ? 'Verifying credentials…' : 'Check Credentials'}
                   </button>

@@ -14,6 +14,7 @@ import type {
   ToolCallInfo,
 } from '../../shared/types';
 import { ChatView } from './components/ChatView';
+import { useClaudeSignIn } from './components/ClaudeSignInControls';
 import { SettingsView } from './components/SettingsView';
 import { StatusBanners } from './components/StatusBanners';
 import { ThreadList } from './components/ThreadList';
@@ -27,6 +28,7 @@ export interface LiveTurn {
   liveThinking: string;
   blocks: { text: string; thinking?: string; toolCalls: ToolCallInfo[] }[];
   error?: string;
+  authRequired?: boolean;
   /** Neutral status note (e.g. after the user stops a turn). */
   notice?: string;
   /**
@@ -149,6 +151,26 @@ export default function App(): React.JSX.Element {
     return result.serverReachable;
   }, []);
 
+  const clearClaudeErrorRef = useRef<(() => void) | undefined>(undefined);
+
+  const clearAuthTurnErrors = useCallback(() => {
+    setLiveTurnsByThread((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [id, turn] of Object.entries(prev)) {
+        if (!turn.running && turn.authRequired) {
+          next[id] = {
+            ...EMPTY_TURN,
+            notice: 'Signed in to Claude — send your question again.',
+            seen: id === activeThreadIdRef.current,
+          };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   /**
    * The list plus the catalogues only the server can supply — skipped when it is not answering.
    *
@@ -160,7 +182,11 @@ export default function App(): React.JSX.Element {
     void window.api
       .authStatus()
       .then((status) => {
-        if (mountedRef.current) setAuth(status);
+        if (!mountedRef.current) return;
+        setAuth(status);
+        if (status.claude === 'ok') {
+          clearClaudeErrorRef.current?.();
+        }
       })
       .catch(() => undefined);
     const shouldFetchCatalogues = !initialPromptsLoadedRef.current || promptsCountRef.current > 0;
@@ -223,6 +249,51 @@ export default function App(): React.JSX.Element {
       .catch(() => undefined);
     void refreshThreads();
   }, [refreshThreads]);
+
+  const claudeSignIn = useClaudeSignIn({
+    onSignedIn: (account) => {
+      if (!mountedRef.current) return;
+      setAuth((prev) =>
+        prev
+          ? {
+              ...prev,
+              claude: 'ok',
+              claudeAccount: account,
+            }
+          : prev,
+      );
+      clearAuthTurnErrors();
+      void refreshServer();
+    },
+  });
+  clearClaudeErrorRef.current = claudeSignIn.clearError;
+
+  // Re-check Claude credentials on window focus only while signed out and not already running an
+  // in-app sign-in, throttled at 2s so rapid focus bounces do not spawn back-to-back checks.
+  const lastFocusAuthCheckRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (auth?.claude !== 'missing' || claudeSignIn.signingIn) return;
+    const onFocus = (): void => {
+      const now = Date.now();
+      if (lastFocusAuthCheckRef.current !== null && now - lastFocusAuthCheckRef.current < 2_000) {
+        return;
+      }
+      lastFocusAuthCheckRef.current = now;
+      void window.api
+        .authStatus()
+        .then((status) => {
+          if (!mountedRef.current) return;
+          setAuth(status);
+          if (status.claude === 'ok') {
+            clearClaudeErrorRef.current?.();
+            clearAuthTurnErrors();
+          }
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [auth?.claude, claudeSignIn.signingIn, clearAuthTurnErrors]);
 
   // When the server is unreachable or the playbook catalogue is still empty, periodically poll
   // so the banner clears and playbooks load automatically once the backend service answers.
@@ -437,13 +508,25 @@ export default function App(): React.JSX.Element {
               ? EMPTY_TURN
               : event.aborted
                 ? { ...EMPTY_TURN, notice: 'Processing stopped.', seen: onScreen }
-                : { ...EMPTY_TURN, error: event.errorMessage ?? 'The turn failed.', seen: onScreen },
+                : {
+                    ...EMPTY_TURN,
+                    error: event.errorMessage ?? 'The turn failed.',
+                    authRequired: Boolean(event.authRequired),
+                    seen: onScreen,
+                  },
           }));
           if (!event.isError) {
             setMessagesByThread((prev) => ({
               ...prev,
               [threadId]: [...(prev[threadId] ?? []), event.message],
             }));
+          } else if (!event.aborted && event.authRequired) {
+            void window.api
+              .authStatus()
+              .then((status) => {
+                if (mountedRef.current) setAuth(status);
+              })
+              .catch(() => undefined);
           }
           void refreshThreads();
           break;
@@ -453,7 +536,12 @@ export default function App(): React.JSX.Element {
           const onScreen = threadId === activeThreadIdRef.current;
           setLiveTurnsByThread((prev) => ({
             ...prev,
-            [threadId]: { ...EMPTY_TURN, error: event.message, seen: onScreen },
+            [threadId]: {
+              ...EMPTY_TURN,
+              error: event.message,
+              authRequired: Boolean(event.authRequired),
+              seen: onScreen,
+            },
           }));
           void window.api
             .authStatus()
@@ -725,10 +813,23 @@ export default function App(): React.JSX.Element {
           ...prev,
           [threadId]: (prev[threadId] ?? []).filter((m) => m.localId !== userMessage.localId),
         }));
-        setLiveTurnsByThread((prev) => ({
-          ...prev,
-          [threadId]: { ...EMPTY_TURN, error: error instanceof Error ? error.message : String(error), seen: true },
-        }));
+        setLiveTurnsByThread((prev) => {
+          const existing = prev[threadId];
+          if (existing && !existing.running && existing.error) {
+            return {
+              ...prev,
+              [threadId]: { ...existing, seen: threadId === activeThreadIdRef.current },
+            };
+          }
+          return {
+            ...prev,
+            [threadId]: {
+              ...EMPTY_TURN,
+              error: error instanceof Error ? error.message : String(error),
+              seen: threadId === activeThreadIdRef.current,
+            },
+          };
+        });
         await refreshThreads();
       }
     },
@@ -809,6 +910,7 @@ export default function App(): React.JSX.Element {
       <main className="main-pane">
         <StatusBanners
           auth={auth}
+          claudeSignIn={claudeSignIn}
           serverReachable={serverReachable}
           pendingSync={pendingSync}
           syncError={syncError}
@@ -822,16 +924,6 @@ export default function App(): React.JSX.Element {
               })
               .catch(() => undefined);
           }}
-          onRetryAuth={() => {
-            void window.api
-              .authStatus()
-              .then((status) => {
-                if (!mountedRef.current) return;
-                setAuth(status);
-                void refreshServer();
-              })
-              .catch(() => undefined);
-          }}
           onRetryServer={() => {
             void refreshServer();
           }}
@@ -841,6 +933,7 @@ export default function App(): React.JSX.Element {
             settings={settings}
             appVersion={appVersion}
             auth={auth}
+            claudeSignIn={claudeSignIn}
             onAuthChange={() => void refreshServer()}
             onSave={async (update) => {
               const saved = await window.api.setSettings(update);
@@ -861,6 +954,7 @@ export default function App(): React.JSX.Element {
             prompts={visiblePrompts}
             profiles={profiles}
             liveTurn={liveTurn}
+            claudeSignIn={claudeSignIn}
             onSend={sendMessage}
             onInterrupt={() => {
               if (activeThreadId) {

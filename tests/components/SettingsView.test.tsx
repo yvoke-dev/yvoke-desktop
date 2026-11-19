@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { SettingsView } from '../../src/renderer/src/components/SettingsView';
+import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
 import type { AppSettings, AuthVerificationResponse } from '../../src/shared/types';
 
 const settings: AppSettings = {
@@ -566,8 +567,9 @@ describe('SettingsView', () => {
       expect(claudeBadge.className).toContain('cred-badge');
       expect(claudeBadge.className).toContain('error');
 
-      // In Dev token mode, inline "Sign in" button is NOT rendered
+      // In Dev token mode, Server inline "Sign in" button is NOT rendered while Claude account offers "Sign in to Claude"
       expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
     });
 
     it('does not render .settings-connection card', () => {
@@ -899,6 +901,274 @@ describe('SettingsView', () => {
       await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
       const payload = onSave.mock.calls[0][0];
       expect('playbookValidationExcludedPlaybooks' in payload).toBe(false);
+    });
+  });
+
+  describe('Wave 2: Claude account inline sign-in & prevSuccessCountRef guard', () => {
+    function makeClaudeController(
+      overrides: Partial<ClaudeSignInController> = {},
+    ): ClaudeSignInController {
+      return {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+        ...overrides,
+      };
+    }
+
+    it('renders Sign in to Claude strictly when missing or expired, never on ok/rate_limited/unreachable/error, and never renders a Claude sign-out button', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'expired', message: 'Claude token expired' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'rate_limited', message: 'Rate limited' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'unreachable', message: 'Offline' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'error', message: 'Unexpected CLI error' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+
+      const { rerender } = render(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+
+      // Pre-verification with auth.claude === 'missing' offers Sign in to Claude
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+
+      // Pre-verification with auth.claude === 'ok' hides Sign in to Claude
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+
+      // 1. verification.claude.status === 'expired' -> shows Sign in to Claude
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Claude token expired/)).toBeTruthy());
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+
+      // 2. verification.claude.status === 'rate_limited' -> NO Sign in to Claude
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Rate limited/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      // 3. verification.claude.status === 'unreachable' -> NO Sign in to Claude
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Offline/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      // 4. verification.claude.status === 'error' -> NO Sign in to Claude
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Unexpected CLI error/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      // 5. verification.claude.status === 'ok' -> NO Sign in to Claude and NO Sign out
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+    });
+
+    it('disambiguates Entra Sign in / Settings Cancel from Sign in to Claude / Cancel sign-in and disables sibling credential actions while signingIn is active', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'expired', message: 'Entra token expired' },
+        claude: { status: 'expired', message: 'Claude session expired' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn: vi.fn() };
+      const onClose = vi.fn();
+      const cancelSignIn = vi.fn(async () => undefined);
+
+      const { rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+          claudeSignIn={makeClaudeController()}
+          onSave={vi.fn()}
+          onClose={onClose}
+        />,
+      );
+      openPane('About');
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Claude session expired/)).toBeTruthy());
+
+      // Both Sign in (Entra) and Sign in to Claude coexist with distinct accessible names
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+
+      // While Claude signingIn is true: Check Credentials and Entra Sign in are disabled, and Cancel vs Cancel sign-in are distinct
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+          claudeSignIn={makeClaudeController({ signingIn: true, cancelSignIn })}
+          onSave={vi.fn()}
+          onClose={onClose}
+        />,
+      );
+
+      expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
+      expect(cancelSignIn).toHaveBeenCalledTimes(1);
+      expect(onClose).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('prevSuccessCountRef guard: calls verifyAuth and onAuthChange 0 times on mount when successCount >= 1, 0 verifyAuth calls when verification is null, and 1 verifyAuth call when verification is non-null', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'expired', message: 'Claude expired' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'ok', account: 'fresh@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onAuthChange = vi.fn();
+
+      // 1. Mount when successCount is ALREADY 2 -> 0 verifyAuth calls and 0 onAuthChange calls!
+      const { rerender } = render(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController({ successCount: 2 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+      expect(onAuthChange).toHaveBeenCalledTimes(0);
+
+      // 2. Increment successCount (2 -> 3) while mounted with verification === null -> calls onAuthChange 1x, verifyAuth 0x
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'fresh@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController({ successCount: 3 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onAuthChange).toHaveBeenCalledTimes(1);
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+
+      // 3. Run Check Credentials so verification !== null (shows 'Claude expired')
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Claude expired/)).toBeTruthy());
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+
+      // 4. Increment successCount (3 -> 4) while mounted with verification !== null -> clears stale badge, calls onAuthChange (+1) & verifyAuth (+1)
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'fresh@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController({ successCount: 4 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onAuthChange).toHaveBeenCalledTimes(2);
+      await waitFor(() => {
+        expect(verifyAuth).toHaveBeenCalledTimes(2);
+        expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
+      });
+      expect(screen.queryByText(/Claude expired/)).toBeNull();
+    });
+
+    it('hides ClaudeSignInControls when a stale claudeSignIn.error exists alongside ok/rate_limited/unreachable/error verdicts, and calls clearError() when verifyAuth confirms claude ok', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'rate_limited', message: 'Rate limited' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'srv@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const clearError = vi.fn();
+      const staleErrorCtrl = makeClaudeController({
+        error: 'Stale error from earlier login attempt',
+        clearError,
+      });
+
+      render(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={staleErrorCtrl}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+
+      // Pre-verification with auth.claude === 'ok': neither Sign in to Claude nor stale error is shown
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(screen.queryByText('Stale error from earlier login attempt')).toBeNull();
+
+      // 1st Check Credentials -> rate_limited: still hides Sign in to Claude and stale error
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Rate limited/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(screen.queryByText('Stale error from earlier login attempt')).toBeNull();
+      expect(clearError).not.toHaveBeenCalled();
+
+      // 2nd Check Credentials -> claude ok: hides Sign in to Claude AND invokes clearError()
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(screen.queryByText('Stale error from earlier login attempt')).toBeNull();
+      expect(clearError).toHaveBeenCalledTimes(1);
     });
   });
 });

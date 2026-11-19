@@ -29,6 +29,11 @@ import {
 } from '../../../shared/types';
 import type { LiveTurn } from '../App';
 import { CitationModal, type CitationState } from './CitationModal';
+import {
+  ClaudeSignInControls,
+  useClaudeSignIn,
+  type ClaudeSignInController,
+} from './ClaudeSignInControls';
 import { CopyButton } from './CopyButton';
 import { FeedbackControls } from './FeedbackControls';
 import { Markdown } from './Markdown';
@@ -230,6 +235,7 @@ export function ChatView(props: {
   prompts: McpPromptInfo[];
   profiles: OrchestratorProfile[];
   liveTurn: LiveTurn;
+  claudeSignIn?: ClaudeSignInController;
   onSend: (text: string, promptName?: string, images?: ImageAttachment[]) => void;
   onInterrupt: () => void;
   onPatchThread: (update: Partial<ThreadMeta>) => void;
@@ -242,11 +248,14 @@ export function ChatView(props: {
     prompts,
     profiles,
     liveTurn,
+    claudeSignIn,
     onSend,
     onInterrupt,
     onPatchThread,
     onFeedback,
   } = props;
+  const fallbackClaudeSignIn = useClaudeSignIn();
+  const effectiveClaudeSignIn = claudeSignIn ?? fallbackClaudeSignIn;
   // Orchestrator mode replaces the single-playbook + model/thinking controls with a profile.
   const orchestratorActive = !!thread.orchestratorProfile;
   // Prototype profiles are hidden under the same setting as prototype playbooks. `profiles` stays
@@ -893,7 +902,10 @@ export function ChatView(props: {
               <span className="banner-icon">
                 <AlertIcon size={14} />
               </span>
-              {liveTurn.error}
+              <span className="banner-text">{liveTurn.error}</span>
+              {liveTurn.authRequired && (
+                <ClaudeSignInControls controller={effectiveClaudeSignIn} variant="inline" />
+              )}
             </div>
           )}
           {liveTurn.notice && <div className="banner notice">{liveTurn.notice}</div>}

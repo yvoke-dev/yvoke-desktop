@@ -699,6 +699,11 @@ h6 {
   margin-left: auto;
 }
 
+.banner .banner-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    Chat header
    ══════════════════════════════════════════════════════════════════════════ */
@@ -2705,7 +2710,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.option-button) {
+button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.option-button):not(.claude-alt-toggle) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;
@@ -2714,6 +2719,146 @@ button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citatio
   font-weight: 600;
   font-size: 13px;
   color: inherit;
+}
+
+/* ── Claude in-app browser sign-in & alternate-browser disclosure ── */
+.claude-signin-controls {
+  word-break: normal;
+}
+
+.claude-signin-controls.is-banner {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.claude-signin-controls.is-banner.is-open {
+  flex: 1 1 100%;
+  align-items: stretch;
+  margin-left: 0;
+}
+
+.claude-signin-controls.is-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.claude-signin-controls.is-inline.is-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.claude-signin-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.claude-signin-controls.is-banner.is-open .claude-signin-waiting {
+  justify-content: flex-end;
+}
+
+.claude-signin-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.claude-alt-toggle {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.claude-alt-toggle:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.claude-alt-toggle:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.claude-alt-panel {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--pane);
+  color: var(--text);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.claude-alt-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.claude-alt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.button.claude-copy-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 3px;
+}
+
+.claude-code-row {
+  display: flex;
+  flex: 1 1 280px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.claude-code-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+}
+
+.claude-code-input:focus {
+  outline: none;
+  border-color: var(--accent-ink);
+}
+
+.claude-code-input[aria-invalid='true'] {
+  border-color: var(--danger-line);
+}
+
+.claude-signin-error {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--danger-ink);
+  line-height: 1.4;
 }
 
 .option-button {

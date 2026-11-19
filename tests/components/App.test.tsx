@@ -146,6 +146,10 @@ describe('App conversation switching with in-progress turn', () => {
       submitFeedback: vi.fn().mockResolvedValue(undefined),
       serverSignIn: vi.fn().mockResolvedValue(''),
       serverSignOut: vi.fn().mockResolvedValue(undefined),
+      claudeSignIn: vi.fn().mockResolvedValue({ status: 'signed_in', account: 'claude@yvoke.dev' }),
+      cancelClaudeSignIn: vi.fn().mockResolvedValue(true),
+      copyClaudeSignInUrl: vi.fn().mockResolvedValue(true),
+      submitClaudeAuthCode: vi.fn().mockResolvedValue({ accepted: true }),
       onAgentEvent: vi.fn().mockImplementation((listener: (event: AgentEvent) => void) => {
         agentListeners.push(listener);
         return () => {
@@ -1079,6 +1083,7 @@ describe('App conversation switching with in-progress turn', () => {
     fireEvent.click(screen.getByText('Second Conversation'));
     await waitFor(() => expect(screen.getByText('Existing answer in thread 2')).toBeTruthy());
     expect(Object.keys(latestChatViewProps ?? {}).sort()).toEqual([
+      'claudeSignIn',
       'liveTurn',
       'messages',
       'onFeedback',
@@ -2224,6 +2229,300 @@ describe('App conversation switching with in-progress turn', () => {
     } finally {
       confirmSpy.mockRestore();
     }
+  });
+
+  describe('Wave 2: Claude sign-in propagation, sendMessage catch guard & focus throttle', () => {
+    it('preserves clean attributed error AND authRequired: true across sendMessage catch when AgentService emitted kind: error before throwing, and replaces only authRequired errors on sign-in', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      api.sendMessage = vi.fn().mockImplementation(async () => {
+        emitAgent({
+          kind: 'error',
+          threadId: 'thread-1',
+          message: 'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+          authRequired: true,
+        });
+        throw new Error("Error invoking remote method 'chat:send': Error: Not logged in");
+      });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Seed a non-auth error on background thread-2 to prove sign-in leaves non-auth errors untouched
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Yvoke Backend: Knowledge base timeout',
+        authRequired: false,
+      });
+
+      // Open thread-1 and send a question that fails with Claude auth error + rejected invoke
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+      fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
+
+      const textarea = await screen.findByPlaceholderText(/Add your question/);
+      fireEvent.change(textarea, { target: { value: 'Why did login expire?' } });
+      fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+
+      // Optimistic message removed, clean attributed message preserved (no Electron IPC wrapper), and Sign in to Claude shown!
+      await waitFor(() => {
+        expect(screen.queryByText('Why did login expire?')).toBeNull();
+        expect(
+          screen.getByText(
+            'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+          ),
+        ).toBeTruthy();
+      });
+      expect(container.textContent).not.toContain("Error invoking remote method 'chat:send'");
+      const inlineSignInBtn = screen.getByRole('button', { name: 'Sign in to Claude' });
+      expect(container.querySelector('.chat-notices .banner.error')?.contains(inlineSignInBtn)).toBe(
+        true,
+      );
+
+      // Click Sign in to Claude -> replaces authRequired error with notice, leaves thread-2's non-auth error intact
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'ok',
+        claudeAccount: 'claude@yvoke.dev',
+        server: { mode: 'dev', signedIn: true },
+      });
+      fireEvent.click(inlineSignInBtn);
+
+      await waitFor(() => {
+        expect(
+          screen.getByText('Signed in to Claude — send your question again.'),
+        ).toBeTruthy();
+      });
+      expect(
+        screen.queryByText(
+          'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+        ),
+      ).toBeNull();
+
+      // Switch to thread-2 -> non-auth error was NOT cleared by Claude sign-in!
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => {
+        expect(screen.getByText('Yvoke Backend: Knowledge base timeout')).toBeTruthy();
+      });
+    });
+
+    it('propagates authRequired: true and refreshes authStatus() when turn-complete arrives with isError: true and authRequired: true', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+      const initialAuthCalls = api.authStatus.mock.calls.length;
+      api.authStatus.mockResolvedValue({
+        claude: 'missing',
+        server: { mode: 'dev', signedIn: true },
+      });
+
+      emitAgent({ kind: 'turn-start', threadId: 'thread-1' });
+      emitAgent({
+        kind: 'turn-complete',
+        threadId: 'thread-1',
+        message: { localId: 't1-err', role: 'assistant', content: '', createdAt: '' },
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        durationMs: 120,
+        isError: true,
+        errorMessage: 'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+        authRequired: true,
+      });
+
+      await waitFor(() => {
+        expect(api.authStatus.mock.calls.length).toBeGreaterThan(initialAuthCalls);
+        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+        expect(screen.getAllByRole('button', { name: 'Sign in to Claude' }).length).toBe(2);
+      });
+    });
+
+    it('polls authStatus on window focus ONLY when auth.claude === "missing" && !signingIn, throttles at 2000ms, and removes listener on unmount', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+        api.authStatus = vi.fn().mockResolvedValue({
+          claude: 'missing',
+          server: { mode: 'dev', signedIn: true },
+        });
+        let resolveSignIn!: (res: { status: 'signed_in'; account?: string }) => void;
+        api.claudeSignIn = vi.fn().mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolveSignIn = resolve;
+            }),
+        );
+
+        const removeSpy = vi.spyOn(window, 'removeEventListener');
+        const { unmount } = render(<App />);
+
+        await waitFor(() => expect(screen.getByText(/Connect Claude:/i)).toBeTruthy());
+        const afterMountCalls = api.authStatus.mock.calls.length;
+
+        // 1st focus event fires immediately (+1)
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        expect(api.authStatus).toHaveBeenCalledTimes(afterMountCalls + 1);
+
+        // Focus within 2000ms (e.g. +1000ms) is throttled (+0)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_000);
+        });
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        expect(api.authStatus).toHaveBeenCalledTimes(afterMountCalls + 1);
+
+        // Focus after >= 2000ms fires again (+1)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_100);
+        });
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        expect(api.authStatus).toHaveBeenCalledTimes(afterMountCalls + 2);
+
+        // Start in-app sign-in -> signingIn === true detaches focus listener so browser focus bounce makes +0 calls
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_500);
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+        expect(screen.getByRole('button', { name: 'Cancel sign-in' })).toBeTruthy();
+
+        const duringSignInCalls = api.authStatus.mock.calls.length;
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        expect(api.authStatus).toHaveBeenCalledTimes(duringSignInCalls);
+
+        // Complete sign-in -> auth.claude becomes 'ok', focus events remain inactive
+        api.authStatus.mockResolvedValue({
+          claude: 'ok',
+          claudeAccount: 'claude@yvoke.dev',
+          server: { mode: 'dev', signedIn: true },
+        });
+        await act(async () => {
+          resolveSignIn({ status: 'signed_in', account: 'claude@yvoke.dev' });
+        });
+        await waitFor(() => expect(screen.queryByText(/Connect Claude:/i)).toBeNull());
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2_500);
+        });
+        const afterOkCalls = api.authStatus.mock.calls.length;
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        expect(api.authStatus).toHaveBeenCalledTimes(afterOkCalls);
+
+        unmount();
+        expect(removeSpy).toHaveBeenCalledWith('focus', expect.any(Function));
+        removeSpy.mockRestore();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reconciles external login on window focus by clearing authRequired turn errors (preserving non-auth errors) and stale claudeSignIn.error, and overwrites stale claudeAccount when signed_in account is undefined', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'missing',
+        claudeAccount: 'stale-expired@old.com',
+        server: { mode: 'dev', signedIn: true },
+      });
+
+      render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+      // 1. Seed a failed in-app sign-in error on claudeSignIn controller
+      api.claudeSignIn = vi.fn().mockResolvedValueOnce({
+        status: 'error',
+        message: 'Temporary browser launch failure',
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() =>
+        expect(screen.getByRole('alert').textContent).toBe('Temporary browser launch failure'),
+      );
+
+      // 2. Seed an authRequired turn error on thread-1 and a non-auth turn error on thread-2
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-1',
+        message: 'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+        authRequired: true,
+      });
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Yvoke Backend: Corpus index offline',
+        authRequired: false,
+      });
+      await waitFor(() =>
+        expect(
+          screen.getByText(
+            'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+          ),
+        ).toBeTruthy(),
+      );
+
+      // 3. User signs in externally via terminal and alt-tabs back -> window 'focus' observes claude === 'ok'
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'ok',
+        claudeAccount: 'terminal@yvoke.dev',
+        server: { mode: 'dev', signedIn: true },
+      });
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByText(/Connect Claude:/i)).toBeNull();
+        expect(
+          screen.getByText('Signed in to Claude — send your question again.'),
+        ).toBeTruthy();
+      });
+      expect(screen.queryByText('Temporary browser launch failure')).toBeNull();
+
+      // Non-auth error on thread-2 remains intact!
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => {
+        expect(screen.getByText('Yvoke Backend: Corpus index offline')).toBeTruthy();
+      });
+
+      // 4. Verify onSignedIn({ account: undefined }) clears stale claudeAccount instead of retaining old email
+      api.authStatus = vi.fn().mockResolvedValueOnce({
+        claude: 'missing',
+        claudeAccount: 'stale-expired@old.com',
+        server: { mode: 'dev', signedIn: true },
+      });
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Claude: Login expired.',
+        authRequired: true,
+      });
+      await waitFor(() => expect(screen.getByText(/Connect Claude:/i)).toBeTruthy());
+
+      // Hold post-signin authStatus pending so we inspect the optimistic setAuth state from onSignedIn(undefined)
+      const neverAuth = new Promise<AuthStatus>(() => undefined);
+      api.authStatus = vi.fn().mockReturnValue(neverAuth);
+      api.claudeSignIn = vi.fn().mockResolvedValueOnce({
+        status: 'signed_in',
+        account: undefined,
+      });
+
+      fireEvent.click(screen.getAllByRole('button', { name: 'Sign in to Claude' })[0]);
+      await waitFor(() => expect(screen.queryByText(/Connect Claude:/i)).toBeNull());
+
+      // Open Settings -> About and verify 'stale-expired@old.com' was cleared to 'Detected from Claude Code'
+      fireEvent.click(document.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
+      fireEvent.click(screen.getByRole('button', { name: 'About' }));
+      expect(document.body.textContent).not.toContain('stale-expired@old.com');
+      expect(screen.getByText('Detected from Claude Code')).toBeTruthy();
+    });
   });
 });
 
