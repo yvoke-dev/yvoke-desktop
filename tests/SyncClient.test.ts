@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ServerAuthRequiredError } from '../src/main/auth/ServerAuth';
 import { SyncApiError, SyncClient } from '../src/main/sync/SyncClient';
 import type { OrchestratorRunPayload } from '../src/shared/types';
 
@@ -564,6 +565,43 @@ describe('SyncClient full 9-endpoint contract & error handling', () => {
 
     await expect(genericTokenErrClient.listConversations()).rejects.toThrow('Yvoke Backend: keychain locked');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves ServerAuthRequiredError prototype verbatim on initial token failure and on 401 forced silent refresh failure without re-wrapping as Yvoke Backend', async () => {
+    const fetchMock = vi.fn();
+    const initialAuthErrClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => {
+        throw new ServerAuthRequiredError();
+      },
+      fetchFn: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(initialAuthErrClient.listConversations()).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof ServerAuthRequiredError &&
+        err.message.startsWith('Entra: ') &&
+        !err.message.startsWith('Yvoke Backend:')
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // 401 triggers exactly one getToken(true) forced silent refresh; if that throws ServerAuthRequiredError, preserve it verbatim
+    const getToken = vi
+      .fn<(forceRefresh?: boolean) => Promise<string>>()
+      .mockResolvedValueOnce('stale-token')
+      .mockRejectedValueOnce(new ServerAuthRequiredError());
+    const fetch401 = vi.fn().mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
+    const retryClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken,
+      fetchFn: fetch401 as unknown as typeof fetch,
+    });
+
+    await expect(retryClient.listConversations()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(getToken).toHaveBeenNthCalledWith(1, false);
+    expect(getToken).toHaveBeenNthCalledWith(2, true);
+    expect(fetch401).toHaveBeenCalledTimes(1);
   });
 });
 

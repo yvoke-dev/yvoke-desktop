@@ -24,6 +24,7 @@ export const IpcChannels = {
   feedbackSubmit: 'feedback:submit',
   authStatus: 'auth:status',
   authSignin: 'auth:signin',
+  authCancelSignin: 'auth:cancel-signin',
   authSignout: 'auth:signout',
   authVerify: 'auth:verify',
   authClaudeSignin: 'auth:claude-signin',

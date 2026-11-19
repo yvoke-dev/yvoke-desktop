@@ -15,6 +15,7 @@ import type {
   PlaybookValidation,
   PlaybookValidationRequest,
   SendMessageRequest,
+  ServerSignInResult,
   SyncEvent,
   ThreadMeta,
   ThreadSearchHit,
@@ -51,7 +52,8 @@ export interface DesktopApi {
   submitFeedback(request: FeedbackRequest): Promise<void>;
   authStatus(): Promise<AuthStatus>;
   verifyAuth(): Promise<AuthVerificationResponse>;
-  serverSignIn(): Promise<string | undefined>;
+  serverSignIn(): Promise<ServerSignInResult>;
+  cancelServerSignIn(): Promise<boolean>;
   serverSignOut(): Promise<void>;
   claudeSignIn(): Promise<ClaudeSignInResult>;
   cancelClaudeSignIn(): Promise<boolean>;
@@ -87,6 +89,7 @@ const api: DesktopApi = {
   authStatus: () => ipcRenderer.invoke(IpcChannels.authStatus),
   verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
+  cancelServerSignIn: () => ipcRenderer.invoke(IpcChannels.authCancelSignin),
   serverSignOut: () => ipcRenderer.invoke(IpcChannels.authSignout),
   claudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeSignin),
   cancelClaudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeCancel),

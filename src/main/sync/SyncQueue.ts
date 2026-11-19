@@ -1,7 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
-import { isAttributedError, sanitizeLogContent, tagAttributedError } from '../../shared/error';
+import {
+  hasErrorSourcePrefix,
+  isAttributedError,
+  isNetworkError,
+  sanitizeLogContent,
+  tagAttributedError,
+} from '../../shared/error';
+import { ServerAuthRequiredError } from '../auth/ServerAuth';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -50,6 +57,17 @@ const MAX_DETAIL_LENGTH = 300;
 function sanitizeDetail(raw: string): string {
   const safe = sanitizeLogContent(raw).trim();
   return safe.length > MAX_DETAIL_LENGTH ? `${safe.slice(0, MAX_DETAIL_LENGTH)}…` : safe;
+}
+
+function isServerAuthPauseError(error: unknown): boolean {
+  if (error instanceof ServerAuthRequiredError) {
+    return true;
+  }
+  if (error instanceof SyncApiError && error.status === 401) {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+  return hasErrorSourcePrefix(msg, 'Entra') && !isNetworkError(error);
 }
 
 function isValidQueuedTurn(item: unknown): item is QueuedTurn {
@@ -486,6 +504,23 @@ export class SyncQueue {
             dropped: true,
           });
           continue;
+        }
+
+        if (isServerAuthPauseError(error)) {
+          // Pause retries until explicit serverSignIn() or settings update nudges flush().
+          if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+          }
+          this.persist();
+          this.deps.emit({
+            kind: 'sync-state',
+            threadId: turn.threadId,
+            state: 'error',
+            pendingCount: this.reportedPendingCount(),
+            detail,
+          });
+          return 'backoff';
         }
 
         turn.attempts += 1;

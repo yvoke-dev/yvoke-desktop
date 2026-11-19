@@ -19,6 +19,7 @@ import type {
   PlaybookValidation,
   PlaybookValidationRequest,
   SendMessageRequest,
+  ServerSignInResult,
   SyncEvent,
   ThreadMeta,
   ThreadsListResult,
@@ -40,6 +41,7 @@ import {
   MAX_TOTAL_IMAGE_BYTES,
   normalizeImageDescription,
 } from '../shared/types';
+import { hasErrorSourcePrefix, isNetworkError } from '../shared/error';
 import { log, logError } from './log';
 import { webAccessDiagnostics } from './agent/policy';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
@@ -53,7 +55,7 @@ import {
   detectClaudeAccount,
   detectClaudeCredentials,
 } from './agent/ClaudeAuth';
-import { ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
+import { ServerAuth, ServerAuthRequiredError, type TokenCachePersistence } from './auth/ServerAuth';
 import { SettingsStore } from './settings/Settings';
 import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore, type StoredChatMessage } from './store/ThreadStore';
@@ -2308,10 +2310,18 @@ export class AppCore {
       return {
         threads,
         serverReachable: true,
+        serverAuthRequired: false,
         pendingSyncCount: pendingAtReturn,
       };
     } catch (err) {
-      logError('sync', 'listThreads failed:', err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      logError('sync', 'listThreads failed:', msg);
+      const isAuthFailure =
+        !this.serverAuth.isDevMode() &&
+        !isNetworkError(err) &&
+        (err instanceof ServerAuthRequiredError ||
+          hasErrorSourcePrefix(msg, 'Entra') ||
+          (err instanceof SyncApiError && err.status === 401));
       const pendingAtReturn = this.totalPendingSyncCount();
       const threads = this.threads
         .list()
@@ -2337,7 +2347,8 @@ export class AppCore {
 
       return {
         threads,
-        serverReachable: false,
+        serverReachable: isAuthFailure ? true : false,
+        serverAuthRequired: isAuthFailure,
         pendingSyncCount: pendingAtReturn,
       };
     }
@@ -2675,7 +2686,43 @@ export class AppCore {
     await this.threads.setFeedback(threadId, request.messageLocalId, request.rating, request.comment?.trim() || undefined);
   }
 
-  // --- auth ---------------------------------------------------------------------
+  // --- settings & auth ----------------------------------------------------------
+
+  updateSettings(update: Partial<AppSettings>): AppSettings {
+    const next = this.settings.set(update);
+    this.mcpPrompts.reset();
+    this.promptsCache = null;
+    this.profilesCache = null;
+    if (this.syncQueue.pendingCount() > 0) {
+      void this.syncQueue.flush();
+    }
+    return next;
+  }
+
+  async serverSignIn(): Promise<ServerSignInResult> {
+    const result = await this.serverAuth.signIn();
+    if (result.status === 'signed_in') {
+      this.mcpPrompts.reset();
+      this.promptsCache = null;
+      this.profilesCache = null;
+      if (this.syncQueue.pendingCount() > 0) {
+        void this.syncQueue.flush();
+      }
+    }
+    return result;
+  }
+
+  cancelServerSignIn(): boolean {
+    return this.serverAuth.cancelSignIn();
+  }
+
+  async serverSignOut(): Promise<void> {
+    await this.serverAuth.signOut();
+    this.mcpPrompts.reset();
+    this.promptsCache = null;
+    this.profilesCache = null;
+    this.agent.closeIdleSessions();
+  }
 
   async authStatus(): Promise<AuthStatus> {
     const [claudeState, server] = await Promise.all([
@@ -2804,6 +2851,7 @@ export class AppCore {
     this.pendingRuns.clear();
     this.failedRuns.length = 0;
     this.agent.closeAll();
+    this.serverAuth.cancelSignIn();
     this.claudeAuth?.dispose();
     this.syncQueue.dispose();
     this.searchIndex.dispose();

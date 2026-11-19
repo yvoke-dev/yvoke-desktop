@@ -148,6 +148,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
 });
 
 const { AgentService } = await import('../src/main/agent/AgentService');
+const { ServerAuthRequiredError } = await import('../src/main/auth/ServerAuth');
 
 const PLAYBOOKS: McpPromptInfo[] = [
   {
@@ -814,6 +815,232 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
       message: 'Claude: Conversation session closed before turn could start.',
       authRequired: false,
     });
+
+    svc.closeAll();
+  });
+
+  it('sets serverAuthRequired: true strictly in entra mode for ServerAuthRequiredError / non-network Entra errors, omitting it in dev mode, for Entra network errors, and for Yvoke Backend errors', async () => {
+    const entraSettings = (): AppSettings => ({ ...settings(), serverAuthMode: 'entra' });
+    const devSettings = (): AppSettings => ({ ...settings(), serverAuthMode: 'dev' });
+
+    // 1. Entra mode + ServerAuthRequiredError -> serverAuthRequired: true, authRequired: false
+    events = [];
+    const svcEntra = createService(makeThread({ id: 't-sa-entra' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+    });
+    await expect(
+      svcEntra.sendMessage(makeThread({ id: 't-sa-entra' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: 't-sa-entra',
+        message: 'Entra: Authentication session expired or invalid. Please sign in again.',
+        authRequired: false,
+        serverAuthRequired: true,
+      },
+    ]);
+    svcEntra.closeAll();
+
+    // 2. Dev mode + ServerAuthRequiredError -> serverAuthRequired MUST be omitted
+    events = [];
+    const svcDev = createService(makeThread({ id: 't-sa-dev' }), {
+      getSettings: devSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+    });
+    await expect(
+      svcDev.sendMessage(makeThread({ id: 't-sa-dev' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: 't-sa-dev',
+        message: 'Entra: Authentication session expired or invalid. Please sign in again.',
+        authRequired: false,
+      },
+    ]);
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svcDev.closeAll();
+
+    // 3. Entra mode + Entra network error -> serverAuthRequired MUST be omitted
+    events = [];
+    const svcNet = createService(makeThread({ id: 't-sa-net' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new Error('Entra: fetch failed');
+        },
+      } as never,
+    });
+    await expect(
+      svcNet.sendMessage(makeThread({ id: 't-sa-net' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toThrow('Entra: fetch failed');
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: 't-sa-net',
+        message: 'Entra: fetch failed',
+        authRequired: false,
+      },
+    ]);
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svcNet.closeAll();
+
+    // 4. Entra mode + Yvoke Backend error -> serverAuthRequired MUST be omitted
+    events = [];
+    const svcBackend = createService(makeThread({ id: 't-sa-be' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new Error('Yvoke Backend: 503 Service Unavailable');
+        },
+      } as never,
+    });
+    await expect(
+      svcBackend.sendMessage(makeThread({ id: 't-sa-be' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toThrow('Yvoke Backend: 503 Service Unavailable');
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svcBackend.closeAll();
+  });
+
+  it('fetches mcpAuthProvider.headers() AFTER missing/locked playbook guards and BEFORE single-agent mcpPrompts loading and orchestrator profile lookup', async () => {
+    const entraSettings = (): AppSettings => ({ ...settings(), serverAuthMode: 'entra' });
+
+    // 1. Missing playbook guard runs BEFORE headers()
+    const headersSpy1 = vi.fn().mockRejectedValue(new ServerAuthRequiredError());
+    const svcMissing = createService(makeThread({ id: 't-guard-missing' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: { headers: headersSpy1 } as never,
+    });
+    await expect(
+      svcMissing.sendMessage(makeThread({ id: 't-guard-missing' }), 'Q', { playbook: undefined }),
+    ).rejects.toThrow(/A playbook must be selected/);
+    expect(headersSpy1).not.toHaveBeenCalled();
+    svcMissing.closeAll();
+
+    // 2. Locked playbook guard runs BEFORE headers()
+    const headersSpy2 = vi.fn().mockRejectedValue(new ServerAuthRequiredError());
+    const svcLocked = createService(makeThread({ id: 't-guard-locked', initialPlaybook: 'oim-full' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: { headers: headersSpy2 } as never,
+    });
+    await expect(
+      svcLocked.sendMessage(makeThread({ id: 't-guard-locked', initialPlaybook: 'oim-full' }), 'Q', {
+        playbook: 'oim-unversioned',
+      }),
+    ).rejects.toThrow(/Cannot switch playbook/);
+    expect(headersSpy2).not.toHaveBeenCalled();
+    svcLocked.closeAll();
+
+    // 3. Single-agent: headers() runs BEFORE mcpPrompts.list()
+    events = [];
+    const mcpListSpy = vi.fn().mockResolvedValue(PLAYBOOKS);
+    const svcSingleOrder = createService(makeThread({ id: 't-order-single' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+      mcpPrompts: {
+        list: mcpListSpy,
+        getText: vi.fn(),
+      } as never,
+    });
+    await expect(
+      svcSingleOrder.sendMessage(makeThread({ id: 't-order-single' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(mcpListSpy).not.toHaveBeenCalled();
+    expect(events[0]).toMatchObject({ kind: 'error', serverAuthRequired: true });
+    svcSingleOrder.closeAll();
+
+    // 4. Orchestrator: headers() runs BEFORE getOrchestratorProfile() so auth failure is never masked as "profile unavailable"
+    events = [];
+    const getProfileSpy = vi.fn().mockResolvedValue(undefined);
+    const svcOrchOrder = createService(makeThread({ id: 't-order-orch', orchestratorProfile: 'OIM' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+      getOrchestratorProfile: getProfileSpy,
+    });
+    await expect(
+      svcOrchOrder.sendMessage(makeThread({ id: 't-order-orch', orchestratorProfile: 'OIM' }), 'Q', {}),
+    ).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(getProfileSpy).not.toHaveBeenCalled();
+    expect(events[0]).toMatchObject({ kind: 'error', serverAuthRequired: true });
+    svcOrchOrder.closeAll();
+  });
+
+  it('propagates serverAuthRequired: true when code-driven Reviewer fails with ServerAuthRequiredError on a blank draft in entra mode', async () => {
+    const meta = makeThread({ id: 'thread-rev-server-auth', orchestratorProfile: 'OIM' });
+    let headerCalls = 0;
+    const svc = createService(meta, {
+      getSettings: () => ({ ...settings(), serverAuthMode: 'entra' }),
+      mcpAuthProvider: {
+        headers: async () => {
+          headerCalls += 1;
+          if (headerCalls === 1) {
+            return { Authorization: 'Bearer ok-for-orchestrator' };
+          }
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+    });
+
+    h.turnHandler = (session, _text, emit) => {
+      if (session.options.agent) {
+        emit({
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'spec-call-sa-1',
+                name: 'Agent',
+                input: { subagent_type: 'oim-full', prompt: 'search' },
+              },
+            ],
+          },
+        });
+        emit({
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'spec-call-sa-1',
+                content: '[11111111-1111-1111-1111-111111111111] Evidence chunk',
+              },
+            ],
+          },
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: '   ', usage: {} });
+      }
+    };
+
+    await svc.sendMessage(meta, 'Orchestrated question', {});
+    await waitForEvent('turn-complete', 1);
+
+    const complete = events.find((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >;
+    expect(complete.isError).toBe(true);
+    expect(complete.authRequired).toBe(false);
+    expect(complete.serverAuthRequired).toBe(true);
+    expect(complete.errorMessage).toMatch(/^Entra: /);
 
     svc.closeAll();
   });

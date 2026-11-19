@@ -15,7 +15,7 @@ import type {
 import { AppCore } from './AppCore';
 import { sandboxDirFor } from './agent/AgentService';
 import { ClaudeAuthManager, registerClaudeAuthIpc } from './agent/ClaudeAuth';
-import { fileTokenCache } from './auth/ServerAuth';
+import { fileTokenCache, registerServerAuthIpc } from './auth/ServerAuth';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
 import { UpdateService } from './UpdateService';
@@ -220,8 +220,7 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
 
   handle(IpcChannels.settingsGet, () => appCore.settings.get());
   handle(IpcChannels.settingsSet, (_e, update) => {
-    const next = appCore.settings.set(update);
-    appCore.mcpPrompts.reset(); // server URL / auth may have changed
+    const next = appCore.updateSettings(update);
     applyTheme(next.appearance?.theme ?? DEFAULT_APPEARANCE.theme);
     syncWindowChrome();
     return next;
@@ -277,8 +276,11 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   });
 
   handle(IpcChannels.authStatus, () => appCore.authStatus());
-  handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
-  handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
+  registerServerAuthIpc({
+    ipcMain,
+    trustedOrigin: origin,
+    appCore,
+  });
   handle(IpcChannels.authVerify, () => appCore.verifyAuth());
   registerClaudeAuthIpc({
     ipcMain,

@@ -11,6 +11,7 @@ import {
   sanitizeLogContent,
   tagAttributedError,
 } from '../../shared/error';
+import { ServerAuthRequiredError } from '../auth/ServerAuth';
 
 
 /** How long the connection probe waits before calling the server unreachable. */
@@ -77,7 +78,7 @@ export class SyncApiError extends Error {
 
 export interface SyncClientDeps {
   getBaseUrl: () => string;
-  getToken: (forceInteractive?: boolean) => Promise<string>;
+  getToken: (forceRefresh?: boolean) => Promise<string>;
   fetchFn?: typeof fetch;
 }
 
@@ -92,7 +93,7 @@ export class SyncClient {
     return `${this.deps.getBaseUrl().replace(/\/+$/, '')}/api/chat/v1${p}`;
   }
 
-  /** One automatic retry with a fresh (interactive if needed) token on 401. */
+  /** One automatic retry with a forced silent token refresh on 401. */
   private async request<T>(
     method: string,
     p: string,
@@ -104,6 +105,9 @@ export class SyncClient {
     try {
       token = await this.deps.getToken(retried);
     } catch (err) {
+      if (err instanceof ServerAuthRequiredError) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;

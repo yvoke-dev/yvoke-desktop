@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppCore as AppCoreInstance } from '../src/main/AppCore';
 import type { LoginVerificationResult } from '../src/shared/types';
-import type { ServerTokenVerification } from '../src/main/auth/ServerAuth';
+import { ServerAuthRequiredError, type ServerTokenVerification } from '../src/main/auth/ServerAuth';
+import { SyncApiError } from '../src/main/sync/SyncClient';
 
 const mockSdkQuery = vi.fn(() => ({
   async *[Symbol.asyncIterator]() {
@@ -298,5 +299,169 @@ describe('AppCore integration with ClaudeAuthManager', () => {
     } finally {
       core.dispose();
     }
+  });
+});
+
+describe('AppCore server auth lifecycle, listThreads 4-way matrix & updateSettings', () => {
+  let tmpDir: string;
+  let core: AppCoreInstance;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcore-server-auth-'));
+    core = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+  });
+
+  afterEach(() => {
+    core.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('listThreads() satisfies the 4-way matrix for serverReachable vs serverAuthRequired', async () => {
+    core.settings.set({ serverAuthMode: 'entra' });
+
+    // 1. Success -> serverReachable: true, serverAuthRequired: false
+    const listSpy = vi.spyOn(core.syncClient, 'listConversations').mockResolvedValueOnce([]);
+    const okRes = await core.listThreads();
+    expect(okRes.serverReachable).toBe(true);
+    expect(okRes.serverAuthRequired).toBe(false);
+
+    // 2a. Entra mode + ServerAuthRequiredError -> serverReachable: true, serverAuthRequired: true
+    listSpy.mockRejectedValueOnce(new ServerAuthRequiredError());
+    const authRes1 = await core.listThreads();
+    expect(authRes1.serverReachable).toBe(true);
+    expect(authRes1.serverAuthRequired).toBe(true);
+
+    // 2b. Entra mode + SyncApiError(401) -> serverReachable: true, serverAuthRequired: true
+    listSpy.mockRejectedValueOnce(new SyncApiError(401, 'Yvoke Backend: Unauthorized'));
+    const authRes2 = await core.listThreads();
+    expect(authRes2.serverReachable).toBe(true);
+    expect(authRes2.serverAuthRequired).toBe(true);
+
+    // 2c. Entra mode + non-network Entra: error -> serverReachable: true, serverAuthRequired: true
+    listSpy.mockRejectedValueOnce(new Error('Entra: Session expired'));
+    const authRes3 = await core.listThreads();
+    expect(authRes3.serverReachable).toBe(true);
+    expect(authRes3.serverAuthRequired).toBe(true);
+
+    // 3. Entra mode + network error (including Entra: fetch failed) -> serverReachable: false, serverAuthRequired: false
+    listSpy.mockRejectedValueOnce(new Error('Entra: fetch failed'));
+    const netRes1 = await core.listThreads();
+    expect(netRes1.serverReachable).toBe(false);
+    expect(netRes1.serverAuthRequired).toBe(false);
+
+    listSpy.mockRejectedValueOnce(new Error('Yvoke Backend: connect ECONNREFUSED 127.0.0.1:8080'));
+    const netRes2 = await core.listThreads();
+    expect(netRes2.serverReachable).toBe(false);
+    expect(netRes2.serverAuthRequired).toBe(false);
+
+    // 4a. Entra mode + 500 -> serverReachable: false, serverAuthRequired: false
+    listSpy.mockRejectedValueOnce(new SyncApiError(500, 'Yvoke Backend: 500'));
+    const err500 = await core.listThreads();
+    expect(err500.serverReachable).toBe(false);
+    expect(err500.serverAuthRequired).toBe(false);
+
+    // 4b. Dev mode + SyncApiError(401) or ServerAuthRequiredError -> serverReachable: false, serverAuthRequired: false
+    core.settings.set({ serverAuthMode: 'dev' });
+    listSpy.mockRejectedValueOnce(new SyncApiError(401, 'Yvoke Backend: Unauthorized'));
+    const devRes = await core.listThreads();
+    expect(devRes.serverReachable).toBe(false);
+    expect(devRes.serverAuthRequired).toBe(false);
+
+    await core.waitForStartupTasks();
+  });
+
+  it('serverSignIn() resets mcpPrompts, clears caches, and flushes pending syncQueue ONLY on signed_in', async () => {
+    const resetSpy = vi.spyOn(core.mcpPrompts, 'reset');
+    const flushSpy = vi.spyOn(core.syncQueue, 'flush').mockResolvedValue(undefined);
+    vi.spyOn(core.syncQueue, 'pendingCount').mockReturnValue(2);
+
+    // Seed caches
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).promptsCache = {
+      at: Date.now(),
+      prompts: [],
+    };
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).profilesCache = {
+      at: Date.now(),
+      profiles: [],
+    };
+
+    // Cancelled -> must NOT reset, clear caches, or flush
+    const signInSpy = vi
+      .spyOn(core.serverAuth, 'signIn')
+      .mockResolvedValueOnce({ status: 'cancelled' });
+    expect(await core.serverSignIn()).toEqual({ status: 'cancelled' });
+    expect(resetSpy).not.toHaveBeenCalled();
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect((core as unknown as { promptsCache: unknown }).promptsCache).not.toBeNull();
+    expect((core as unknown as { profilesCache: unknown }).profilesCache).not.toBeNull();
+
+    // Signed in -> resets mcpPrompts, clears caches, flushes syncQueue
+    signInSpy.mockResolvedValueOnce({ status: 'signed_in', account: 'corp@yvoke.ai' });
+    expect(await core.serverSignIn()).toEqual({ status: 'signed_in', account: 'corp@yvoke.ai' });
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect((core as unknown as { promptsCache: unknown }).promptsCache).toBeNull();
+    expect((core as unknown as { profilesCache: unknown }).profilesCache).toBeNull();
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancelServerSignIn(), serverSignOut(), updateSettings(), and dispose() delegate and clean up state', async () => {
+    const cancelSpy = vi.spyOn(core.serverAuth, 'cancelSignIn').mockReturnValue(true);
+    expect(core.cancelServerSignIn()).toBe(true);
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+
+    // serverSignOut()
+    const signOutSpy = vi.spyOn(core.serverAuth, 'signOut').mockResolvedValue(undefined);
+    const resetSpy = vi.spyOn(core.mcpPrompts, 'reset');
+    const closeIdleSpy = vi.spyOn(core.agent, 'closeIdleSessions');
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).promptsCache = {
+      at: Date.now(),
+      prompts: [],
+    };
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).profilesCache = {
+      at: Date.now(),
+      profiles: [],
+    };
+
+    await core.serverSignOut();
+    expect(signOutSpy).toHaveBeenCalledTimes(1);
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+    expect((core as unknown as { promptsCache: unknown }).promptsCache).toBeNull();
+    expect((core as unknown as { profilesCache: unknown }).profilesCache).toBeNull();
+    expect(closeIdleSpy).toHaveBeenCalledTimes(1);
+
+    // updateSettings()
+    const flushSpy = vi.spyOn(core.syncQueue, 'flush').mockResolvedValue(undefined);
+    const pendingSpy = vi.spyOn(core.syncQueue, 'pendingCount').mockReturnValue(1);
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).promptsCache = {
+      at: Date.now(),
+      prompts: [],
+    };
+    (core as unknown as { promptsCache: unknown; profilesCache: unknown }).profilesCache = {
+      at: Date.now(),
+      profiles: [],
+    };
+
+    const next = core.updateSettings({ serverBaseUrl: 'https://updated.example' });
+    expect(next.serverBaseUrl).toBe('https://updated.example');
+    expect(resetSpy).toHaveBeenCalledTimes(2);
+    expect((core as unknown as { promptsCache: unknown }).promptsCache).toBeNull();
+    expect((core as unknown as { profilesCache: unknown }).profilesCache).toBeNull();
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+
+    // updateSettings() with 0 pending turns does not flush
+    pendingSpy.mockReturnValue(0);
+    core.updateSettings({ serverBaseUrl: 'https://updated-2.example' });
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+
+    // dispose() cancels active server sign-in
+    cancelSpy.mockClear();
+    core.dispose();
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
   });
 });

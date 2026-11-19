@@ -26,7 +26,13 @@ import type {
   UsageTotals,
 } from '../../shared/types';
 import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, parseVerdict, resolveCanonicalModel } from '../../shared/types';
-import { hasErrorSourcePrefix, tagAttributedError, type ErrorSource } from '../../shared/error';
+import {
+  hasErrorSourcePrefix,
+  isNetworkError,
+  tagAttributedError,
+  type ErrorSource,
+} from '../../shared/error';
+import { ServerAuthRequiredError } from '../auth/ServerAuth';
 import {
   classifyClaudeFailure,
   detectClaudeAccount,
@@ -118,12 +124,19 @@ export function claudeBinaryPath(): string | null {
 function attributeTurnFailure(
   error: unknown,
   fallbackSource: ErrorSource,
-): { messageText: string; message: string; authRequired: boolean } {
+  isEntraMode: boolean,
+): { messageText: string; message: string; authRequired: boolean; serverAuthRequired: boolean } {
   const messageText = error instanceof Error ? error.message : String(error);
   const preAttributed =
-    hasErrorSourcePrefix(messageText, 'Entra') || hasErrorSourcePrefix(messageText, 'Yvoke Backend');
+    error instanceof ServerAuthRequiredError ||
+    hasErrorSourcePrefix(messageText, 'Entra') ||
+    hasErrorSourcePrefix(messageText, 'Yvoke Backend');
   if (preAttributed) {
-    return { messageText, message: messageText, authRequired: false };
+    const serverAuthRequired =
+      isEntraMode &&
+      (error instanceof ServerAuthRequiredError ||
+        (hasErrorSourcePrefix(messageText, 'Entra') && !isNetworkError(error)));
+    return { messageText, message: messageText, authRequired: false, serverAuthRequired };
   }
 
   const claudeFailure = classifyClaudeFailure(error);
@@ -132,6 +145,7 @@ function attributeTurnFailure(
       messageText,
       message: tagAttributedError('Claude', claudeFailure.message),
       authRequired: true,
+      serverAuthRequired: false,
     };
   }
   if (claudeFailure?.status === 'rate_limited') {
@@ -139,12 +153,18 @@ function attributeTurnFailure(
       messageText,
       message: tagAttributedError('Claude', claudeFailure.message),
       authRequired: false,
+      serverAuthRequired: false,
     };
   }
 
   // `error`, not `messageText`: a thrown non-Error stringifies to '[object Object]' here but
   // still serializes usefully inside tagAttributedError.
-  return { messageText, message: tagAttributedError(fallbackSource, error), authRequired: false };
+  return {
+    messageText,
+    message: tagAttributedError(fallbackSource, error),
+    authRequired: false,
+    serverAuthRequired: false,
+  };
 }
 
 /** Simple push-based async iterable used as the streaming-input prompt. */
@@ -323,12 +343,23 @@ export class AgentService {
     try {
       session = await this.ensureSession(thread, opts.playbook);
     } catch (error) {
-      const { messageText, message, authRequired } = attributeTurnFailure(error, 'Yvoke Backend');
+      const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+      const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
+        error,
+        'Yvoke Backend',
+        isEntraMode,
+      );
       if (authRequired) {
         this.deps.onAuthFailure?.();
       }
       logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-      this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
+      this.deps.emit({
+        kind: 'error',
+        threadId: thread.id,
+        message,
+        authRequired,
+        ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
+      });
       throw error;
     }
 
@@ -355,12 +386,23 @@ export class AgentService {
         if (this.sessions.get(thread.id) === session) {
           this.closeThread(thread.id);
         }
-        const { messageText, message, authRequired } = attributeTurnFailure(err, 'Claude');
+        const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+        const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
+          err,
+          'Claude',
+          isEntraMode,
+        );
         if (authRequired) {
           this.deps.onAuthFailure?.();
         }
         logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-        this.deps.emit({ kind: 'error', threadId: thread.id, message, authRequired });
+        this.deps.emit({
+          kind: 'error',
+          threadId: thread.id,
+          message,
+          authRequired,
+          ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
+        });
         throw err;
       }
     }
@@ -703,6 +745,13 @@ export class AgentService {
     const settings = this.deps.getSettings();
     fs.mkdirSync(this.deps.sandboxDir, { recursive: true });
 
+    // Acquire corporate auth headers before loading playbooks or orchestrator profiles so an
+    // expired Entra session surfaces directly as `ServerAuthRequiredError` instead of being
+    // masked by profile-lookup fallbacks.
+    if (!resolvedHeaders) {
+      resolvedHeaders = await this.deps.mcpAuthProvider.headers();
+    }
+
     let playbookTools: string[] | undefined;
     // undefined = no playbook metadata resolved, which buildAllowedTools reads as "not declared".
     let playbookCodeExecution: boolean | undefined;
@@ -808,10 +857,6 @@ export class AgentService {
       thread.sessionId = undefined;
       thread.sessionProfile = undefined;
       this.deps.onSessionId(thread.id, '', undefined);
-    }
-
-    if (!resolvedHeaders) {
-      resolvedHeaders = await this.deps.mcpAuthProvider.headers();
     }
 
     const sessionRef: { current?: ThreadSession } = {};
@@ -989,12 +1034,23 @@ export class AgentService {
         session.activeReviewerQuery?.close();
       }
       if (wasBusy && !session.interrupted) {
-        const { messageText, message, authRequired } = attributeTurnFailure(error, 'Claude');
+        const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+        const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
+          error,
+          'Claude',
+          isEntraMode,
+        );
         if (authRequired) {
           this.deps.onAuthFailure?.();
         }
         logError('agent', `turn failed thread=${threadId}:`, messageText);
-        this.deps.emit({ kind: 'error', threadId, message, authRequired });
+        this.deps.emit({
+          kind: 'error',
+          threadId,
+          message,
+          authRequired,
+          ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
+        });
       }
     }
   }
@@ -1397,6 +1453,7 @@ export class AgentService {
         aborted: boolean;
         errorMessage?: string;
         authRequired?: boolean;
+        serverAuthRequired?: boolean;
       }
   > {
     session.turn.carriedUsage = addUsage(session.turn.carriedUsage ?? EMPTY_USAGE, resultUsage);
@@ -1425,13 +1482,15 @@ export class AgentService {
       return { status: 'finalize', isError: false, aborted: true };
     }
     if (outcome.kind === 'unreviewed' && outcome.content.length === 0) {
-      const attributed = attributeTurnFailure(outcome.error, 'Claude');
+      const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+      const attributed = attributeTurnFailure(outcome.error, 'Claude', isEntraMode);
       return {
         status: 'finalize',
         isError: true,
         aborted: false,
         errorMessage: attributed.message,
         authRequired: attributed.authRequired,
+        ...(attributed.serverAuthRequired ? { serverAuthRequired: true } : {}),
       };
     }
     return { status: 'finalize', isError: false, aborted: false };
@@ -1534,6 +1593,7 @@ export class AgentService {
     let costOverride: number | undefined;
     let errorOverride: string | undefined;
     let authRequiredOverride: boolean | undefined;
+    let serverAuthRequiredOverride: boolean | undefined;
 
     if (session.orchestratorProfile && session.orchestrator) {
       if (session.reviewState?.submittedAnswer !== undefined) {
@@ -1562,6 +1622,7 @@ export class AgentService {
           aborted = outcome.aborted;
           errorOverride = outcome.errorMessage;
           authRequiredOverride = outcome.authRequired;
+          serverAuthRequiredOverride = outcome.serverAuthRequired;
           usageOverride = session.turn.carriedUsage ?? EMPTY_USAGE;
           costOverride = session.turn.carriedCostUsd;
         } else {
@@ -1604,14 +1665,18 @@ export class AgentService {
 
     let errorMessage: string | undefined;
     let authRequired: boolean | undefined;
+    let serverAuthRequired: boolean | undefined;
     if (errorOverride !== undefined) {
       errorMessage = errorOverride;
       authRequired = authRequiredOverride ?? false;
+      serverAuthRequired = serverAuthRequiredOverride;
     } else if (isError && !aborted) {
       const resultErr = toResultError(result);
-      const attributed = attributeTurnFailure(resultErr, 'Claude');
+      const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+      const attributed = attributeTurnFailure(resultErr, 'Claude', isEntraMode);
       errorMessage = attributed.message;
       authRequired = attributed.authRequired;
+      serverAuthRequired = attributed.serverAuthRequired;
     } else if (isError) {
       authRequired = false;
     }
@@ -1648,6 +1713,7 @@ export class AgentService {
       aborted,
       errorMessage,
       ...(authRequired !== undefined ? { authRequired } : {}),
+      ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
     });
 
     session.busy = false;

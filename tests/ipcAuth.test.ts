@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IpcChannels } from '../src/shared/ipc';
 import { registerClaudeAuthIpc } from '../src/main/agent/ClaudeAuth';
+import { registerServerAuthIpc } from '../src/main/auth/ServerAuth';
 import type { DesktopApi } from '../src/preload/index';
 
 describe('registerClaudeAuthIpc boundary validation', () => {
@@ -185,9 +186,116 @@ describe('preload DesktopApi Claude auth methods', () => {
       invokeMock.mockResolvedValueOnce({ accepted: true });
       await expect(exposedApi!.submitClaudeAuthCode('abc#xyz')).resolves.toEqual({ accepted: true });
       expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authClaudeSubmitCode, 'abc#xyz');
+
+      invokeMock.mockResolvedValueOnce({ status: 'signed_in', account: 'corp@yvoke.ai' });
+      await expect(exposedApi!.serverSignIn()).resolves.toEqual({
+        status: 'signed_in',
+        account: 'corp@yvoke.ai',
+      });
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authSignin);
+
+      invokeMock.mockResolvedValueOnce(true);
+      await expect(exposedApi!.cancelServerSignIn()).resolves.toBe(true);
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authCancelSignin);
     } finally {
       vi.doUnmock('electron');
       vi.resetModules();
     }
+  });
+});
+
+describe('registerServerAuthIpc boundary validation', () => {
+  const TRUSTED_ORIGIN = 'http://localhost:5173';
+
+  function setup(trustedOrigin = TRUSTED_ORIGIN) {
+    const handlers = new Map<
+      string,
+      (event: { senderFrame?: { url?: string } | null }, ...args: unknown[]) => Promise<unknown>
+    >();
+
+    const appCore = {
+      serverSignIn: vi.fn().mockResolvedValue({ status: 'signed_in', account: 'corp@yvoke.ai' }),
+      cancelServerSignIn: vi.fn().mockReturnValue(true),
+      serverSignOut: vi.fn().mockResolvedValue(undefined),
+    };
+
+    registerServerAuthIpc({
+      ipcMain: {
+        handle: (channel, listener) => {
+          handlers.set(channel, async (event, ...args) => listener(event, ...args));
+        },
+      },
+      trustedOrigin,
+      appCore,
+    });
+
+    const invoke = (
+      channel: string,
+      senderFrame: { url?: string } | null | undefined,
+      ...args: unknown[]
+    ) => {
+      const handler = handlers.get(channel);
+      if (!handler) {
+        throw new Error(`Missing handler for ${channel}`);
+      }
+      return handler({ senderFrame }, ...args);
+    };
+
+    return { handlers, appCore, invoke };
+  }
+
+  it('registers authSignin, authCancelSignin, and authSignout and serves trusted invocations', async () => {
+    const { appCore, invoke } = setup();
+    const trustedFrame = { url: 'http://localhost:5173/index.html' };
+
+    expect(await invoke(IpcChannels.authSignin, trustedFrame)).toEqual({
+      status: 'signed_in',
+      account: 'corp@yvoke.ai',
+    });
+    expect(appCore.serverSignIn).toHaveBeenCalledTimes(1);
+
+    expect(await invoke(IpcChannels.authCancelSignin, trustedFrame)).toBe(true);
+    expect(appCore.cancelServerSignIn).toHaveBeenCalledTimes(1);
+
+    await expect(invoke(IpcChannels.authSignout, trustedFrame)).resolves.toBeUndefined();
+    expect(appCore.serverSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects foreign, empty, undefined, and malformed senderFrame.url across all 3 channels before touching appCore', async () => {
+    const { appCore, invoke } = setup();
+    const channels = [
+      IpcChannels.authSignin,
+      IpcChannels.authCancelSignin,
+      IpcChannels.authSignout,
+    ];
+    const untrustedFrames: Array<{ url?: string } | null | undefined> = [
+      { url: 'https://attacker.example/phish.html' },
+      { url: '' },
+      { url: undefined },
+      { url: ':::not-a-valid-url:::' },
+      undefined,
+      null,
+    ];
+
+    for (const channel of channels) {
+      for (const frame of untrustedFrames) {
+        await expect(invoke(channel, frame)).rejects.toThrow(
+          `IPC ${channel} rejected: untrusted sender origin`,
+        );
+      }
+    }
+
+    expect(appCore.serverSignIn).not.toHaveBeenCalled();
+    expect(appCore.cancelServerSignIn).not.toHaveBeenCalled();
+    expect(appCore.serverSignOut).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when trustedOrigin itself is empty', async () => {
+    const { appCore, invoke } = setup('');
+
+    await expect(invoke(IpcChannels.authSignin, { url: '' })).rejects.toThrow(
+      `IPC ${IpcChannels.authSignin} rejected: untrusted sender origin`,
+    );
+    expect(appCore.serverSignIn).not.toHaveBeenCalled();
   });
 });
