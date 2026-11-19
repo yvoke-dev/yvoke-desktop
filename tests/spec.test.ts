@@ -455,5 +455,86 @@ describe('spec/ modular structure', () => {
       );
     }
   });
+
+  it('documents in-app Claude browser sign-in, alternate-browser fallback, Keychain-aware startup checks, and sign-in-only scope without contradictions or implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+    const howAnswer = norm(readFileSync(resolve(SPEC_DIR, '02_how_an_answer_is_produced.md'), 'utf8'));
+    const signingIn = norm(readFileSync(resolve(SPEC_DIR, '05_signing_in.md'), 'utf8'));
+    const settings = norm(readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8'));
+
+    // 05_signing_in.md: in-app Claude browser sign-in capabilities, behavior, limits, and non-features
+    expect(signingIn).toContain('Sign in to Claude');
+    expect(signingIn).toContain('startup banner');
+    expect(signingIn).toContain('About pane');
+    expect(signingIn).toContain('conversation sign-in errors');
+    expect(signingIn).toContain('Cancel sign-in');
+    expect(signingIn).toContain('Use another browser');
+    expect(signingIn).toContain('Copy sign-in link');
+    expect(signingIn).toContain('authorization code');
+    expect(signingIn).toContain('returning to the window');
+    expect(signingIn).toContain('without losing conversation memory');
+    expect(signingIn).toContain('Keychain');
+    expect(signingIn).toContain('revoked on the provider side');
+    expect(signingIn).toContain('external helper scripts');
+    expect(signingIn).toContain('organization or subscription-tier details');
+    expect(signingIn).toContain('5 minutes');
+    expect(signingIn).toContain('15 seconds');
+    expect(signingIn).toContain('Signing out of the server clears the cached server account and nothing else.');
+    expect(signingIn).toContain('Signing out of Claude or switching an active Claude account from inside the app.');
+    expect(signingIn).toContain(
+      "checks the bundled Claude tooling's keychain-aware credential status before probing",
+    );
+    expect(signingIn).toContain(
+      'missing or signed-out profiles (including previously used ones) report no credentials without probing',
+    );
+    expect(signingIn).toContain(
+      'Both a failed conversation turn and the on-demand *Check Credentials* action report it as a distinct allowance or rate-limit failure rather than a sign-in error, without offering an inline *Sign in to Claude* control.',
+    );
+
+    // 02_how_an_answer_is_produced.md: bundled tooling manages sign-in while raw tokens stay outside the app
+    expect(howAnswer).toContain('bundled Claude tooling');
+    expect(howAnswer).toContain('raw subscription tokens');
+
+    // 06_settings_and_what_they_change.md: inline Sign in to Claude in About pane
+    expect(settings).toContain('Sign in to Claude');
+    expect(settings).toContain('missing or expired');
+    expect(settings).toContain('re-verifies');
+
+    // 01_asking_questions.md: inline Sign in to Claude in conversation error strip
+    expect(askingQuestions).toContain('Sign in to Claude');
+    expect(askingQuestions).toContain('missing or expired Claude sign-in');
+
+    // Negative contradiction guards
+    expect(signingIn).not.toContain('Not in this app.');
+    expect(signingIn).not.toContain('The app cannot sign anybody into Claude');
+    expect(signingIn).not.toContain('A stored credential file is enough for the passive startup status');
+    expect(signingIn).not.toContain(
+      'Where the Claude tooling has been used before but its credential file is absent',
+    );
+    expect(signingIn).not.toContain(
+      'If the tooling has never been used on the machine at all, the check reports no credentials without probing.',
+    );
+    expect(signingIn).not.toContain(
+      'only the on-demand *Check Credentials* action reports it as a distinct',
+    );
+    expect(howAnswer).not.toContain('The app cannot sign in for you; it can only tell you to.');
+    expect(howAnswer).not.toContain('A turn that crashes leaves its runtime process behind.');
+
+    // Spec-purity regex guard: zero internal identifiers, IPC channels, CLI flags, OAuth fields, or filenames
+    const bannedSpecIdentifiers =
+      /\b(ClaudeAuthManager|useClaudeSignIn|ClaudeSignInControls|authRequired|settingSources|api_key_helper|code_challenge|code_verifier|orgId|subscriptionType|ipcMain)\b|claude auth login|claude auth status|--claudeai|auth:claude-|oauth\/authorize|clipboard\.writeText|app\.asar/;
+    for (const [name, doc] of [
+      ['01_asking_questions.md', askingQuestions],
+      ['02_how_an_answer_is_produced.md', howAnswer],
+      ['05_signing_in.md', signingIn],
+      ['06_settings_and_what_they_change.md', settings],
+    ] as const) {
+      expect(
+        doc,
+        `${name} must remain pure functional specification prose without Claude sign-in implementation identifiers`,
+      ).not.toMatch(bannedSpecIdentifiers);
+    }
+  });
 });
 

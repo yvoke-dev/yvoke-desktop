@@ -9,7 +9,7 @@ other, and the app is useless without both.
 
 | Capability | What happens |
 | --- | --- |
-| **Sign in to Claude** | Not in this app. The app picks up whatever the Claude tooling on the machine has already signed in. When nothing is found, a banner explains how to sign in from a terminal and offers a *Retry*. |
+| **Sign in to Claude** | *Sign in to Claude* opens Anthropic's browser sign-in flow and completes automatically when the browser finishes. Offered whenever Claude credentials are missing or expired — from the startup banner, the About pane, and inline on conversation sign-in errors. While waiting, you can choose *Cancel sign-in* or open *Use another browser* to *Copy sign-in link* into another browser or profile and paste back the authorization code. The app also picks up an existing Claude sign-in already present on the machine. |
 | **Sign in to the server** | *Sign in* opens the corporate sign-in in the system browser and returns to the app when it completes. The browser page says so and can be closed. |
 | **See who is signed in** | The sidebar footer shows the Claude account when the tooling has recorded one, otherwise the corporate account, and always which mode the server sign-in is in. The About pane spells out both. |
 | **Sign out of the server** | Only shown when actually signed in with a corporate account. |
@@ -20,9 +20,20 @@ other, and the app is useless without both.
 
 | Sign-in | What it pays for or grants | How it works |
 | --- | --- | --- |
-| **Claude** (Pro/Max subscription) | The model — every answer, every specialist, every review. Drawn from the subscription's agent allowance, separate from other Claude apps. | Picked up from the machine's existing Claude credentials. The app never sees, stores or transmits them. |
+| **Claude** (Pro/Max subscription) | The model — every answer, every specialist, every review. Drawn from the subscription's agent allowance, separate from other Claude apps. | Managed by the bundled Claude tooling via in-app browser sign-in or picked up from existing Claude credentials on the machine. The app itself never sees, stores, or transmits raw subscription tokens. |
 | **Server** (corporate account) | The knowledge base, the playbooks, the profiles, and conversation storage. | Corporate sign-in in the system browser; the resulting token authenticates both the knowledge-base connection and the conversation API. |
 
+- **Signing in to Claude works in the default browser or any other browser.** Starting *Sign in to Claude*
+  opens the system's default browser and waits for completion, offering *Cancel sign-in* to abort cleanly.
+  If your personal Claude subscription lives in a different browser or profile, expanding *Use another
+  browser* lets you click *Copy sign-in link* to copy the sign-in address to the clipboard and submit the
+  resulting authorization code to complete sign-in.
+- **Sign-ins completed outside the app are picked up automatically on focus.** While Claude credentials are
+  missing, returning to the window re-checks credential status automatically so a login finished in
+  another window or tool clears the startup banner without restarting.
+- **Completing Claude sign-in refreshes idle warm conversations without losing conversation memory.** Idle
+  conversation sessions are cycled onto the fresh credentials while preserving each conversation's session
+  history, so follow-up questions pick up right where they left off.
 - **A pay-per-token API key in the environment is removed** before the model runs, so an inherited one
   cannot silently move billing off the subscription.
 - **An unconfigured build defaults to corporate sign-in**, never to the development token — the
@@ -41,7 +52,7 @@ other, and the app is useless without both.
   with plain `http` allowed only for a local address.
 - **Verifying logins tests the server token silently without launching the browser.** If the session is expired or invalid, an inline *Sign in* button is offered directly in the About pane rather than opening a browser window automatically.
 - **Claude verification performs an isolated, single-turn live probe.** It runs with thinking disabled, low effort, and no tools, confirming that credentials are valid and subscription quota is available without leaving a session on disk or affecting active conversations. A probe turn that fails during execution reports the failure, distinguishing session expiration, subscription allowance depletion, and unexpected errors, while a completed probe must return the expected verification token (*pong*).
-- **On macOS, Claude verification reaches keychain credentials.** Where the Claude tooling has been used before but its credential file is absent, the live probe still confirms whether the machine's keychain holds an active session. If the tooling has never been used on the machine at all, the check reports no credentials without probing.
+- **On macOS, Claude verification reaches keychain credentials.** Verification checks the bundled Claude tooling's keychain-aware credential status before probing: active keychain sessions proceed to the live probe even without a credential file on disk, while missing or signed-out profiles (including previously used ones) report no credentials without probing.
 - **Dev server mode is verified against the server endpoint** using the fixed development token.
 
 ## Limits
@@ -51,7 +62,14 @@ other, and the app is useless without both.
 - **"Signed in" only means an account was found in the cache.** This applies to the passive status shown upon startup; no token is tried until the first server call, so a session whose refresh expired months ago still shows the account name as signed in until something fails. By contrast, the on-demand *Check Credentials* action actively validates token acceptance against the server.
 - **Not being signed in is reported as "Server unreachable — showing cached conversations."** The
   banner names the wrong cause, and the fix it implies is the wrong fix.
-- **"Claude is connected" is not a credential check on startup.** A stored credential file is enough for the passive startup status, and its validity is not tested passively; on macOS, where the credentials may be in the keychain, the app treats *inconclusive* as *fine*, saying "Detected from Claude Code" whenever the check was not conclusively negative. By contrast, the on-demand *Check Credentials* action in About actively tests functional generation against the model.
+- **"Claude is connected" on startup checks local credential status, not live model access.** Startup queries
+  the bundled Claude tooling's Keychain-aware credential status (falling back to local credential detection
+  if needed), so missing or signed-out profiles surface the startup banner immediately rather than waiting
+  for the first failed question. Even so, startup does not run a live model call: a session revoked on the
+  provider side or out of subscription allowance is still caught when a question runs or via the on-demand
+  *Check Credentials* action in About. Credentials configured via external helper scripts are ignored
+  because personal tooling settings are excluded, and organization or subscription-tier details are not
+  displayed.
 - **A corporate sign-in that fails or is cancelled in the browser produces no message.**
 - **Where the operating system offers no keystore, there is no token cache at all.** The corporate
   sign-in then has to be repeated on every launch, and the only record of why is a startup line the
@@ -60,8 +78,9 @@ other, and the app is useless without both.
   changed or regenerated code-signing identity produces — but it is no longer silent: *Check
   Credentials* names it as an unreadable cache rather than reporting no account at all.
 - **One account at a time, of each kind.** No account switcher, no second profile.
-- **Signing out clears the cached account and nothing else.** Nothing is revoked on the server, no
-  browser session is cleared, and every cached conversation stays readable on the machine.
+- **Signing out of the server clears the cached server account and nothing else.** Nothing is revoked on
+  the server, no browser session is cleared, Claude credentials are untouched, and every cached
+  conversation stays readable on the machine.
 - **Changing the identity registration drops the in-memory account but leaves the encrypted cache on
   disk**, and the sign-in indicator does not refresh until something asks for a token.
 - **The development token is an ordinary setting, not a build flag.** Any user can switch to it. It
@@ -70,10 +89,15 @@ other, and the app is useless without both.
   signed in.
 - **There is no app lock and no re-authentication on wake.** Anyone with the unlocked machine has the
   app.
-- **The app cannot sign anybody into Claude.** It can only detect, and explain.
-- **Nothing warns in advance when the subscription's allowance runs out.** During a conversation it
-  surfaces as a failed turn carrying the provider's own message; only the on-demand *Check
-  Credentials* action reports it as a distinct "allowance or rate limit reached" result.
+- **Claude sign-in gives up after 5 minutes, and authorization-code verification gives up after 15 seconds.**
+  If the browser flow is abandoned or a pasted authorization code cannot be confirmed in time, sign-in ends
+  with an error so you can try again.
+- **Claude sign-in is offered only when credentials are missing or expired.** Once Claude is connected, the
+  app intentionally offers no Claude sign-out or account-switching control so shared Claude tooling on the
+  machine is never logged out unexpectedly.
+- **Nothing warns in advance when the subscription's allowance runs out.** Both a failed conversation turn
+  and the on-demand *Check Credentials* action report it as a distinct allowance or rate-limit failure
+  rather than a sign-in error, without offering an inline *Sign in to Claude* control.
 - **Verifying Claude gives up after 45 seconds** and reports the check as timed out. The budget has
   to cover starting the Claude tooling from cold as well as a reply, so a slow link or a first run
   after an update can report a working login as unverified. Nothing is changed by a timeout; the
@@ -82,6 +106,7 @@ other, and the app is useless without both.
 ## Not supported
 
 - Signing in to Claude with an API key or a token pasted into the app.
+- Signing out of Claude or switching an active Claude account from inside the app.
 - Any role or permission inside the app. Everyone who can sign in has the same access, and the
   server's administrator screens are not reachable from here.
 - Per-conversation identity, or asking as somebody else.

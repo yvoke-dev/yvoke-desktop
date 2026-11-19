@@ -49,6 +49,11 @@ configuration: whatever ships as the build's defaults, the user can change.
   it.
 - **Reduced motion follows the system**, with no control of its own.
 - **Verifying credentials in the About pane is on-demand.** Clicking *Check Credentials* tests whether the corporate or development token is accepted and whether the Claude credentials generate a live reply. It runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
+- **Missing or expired Claude credentials can be fixed inline from the About pane.** Whenever the About
+  pane shows missing Claude credentials — or *Check Credentials* reports them as missing or expired — an
+  inline *Sign in to Claude* control appears directly on the *Claude account* row. Completing sign-in
+  clears the stale failure state and, if a verification result was already shown, automatically
+  re-verifies credentials so the checkmark updates in place.
 - **A verification result describes the settings as they were saved.** Editing the server address, the sign-in mode or the default model clears the result rather than relabelling it, so a checkmark never appears beside a configuration that was not the one tested.
 - **Checking for updates in the About pane is on-demand.** Clicking *Check for Updates* queries GitHub releases via IPC through the main process. If the build is up to date, an indicator appears in green; if a newer version exists, the latest version tag appears in orange with a link to the release on GitHub. Network failures and rate limits are surfaced inline without interrupting settings navigation or ongoing chat turns.
 

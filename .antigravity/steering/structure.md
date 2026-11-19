@@ -84,6 +84,7 @@ yvoke-desktop/
 │   │       ├── components/ # React UI components
 │   │       │   ├── ChatView.tsx
 │   │       │   ├── CitationModal.tsx
+│   │       │   ├── ClaudeSignInControls.tsx
 │   │       │   ├── FeedbackControls.tsx
 │   │       │   ├── Markdown.tsx
 │   │       │   ├── SettingsView.tsx
@@ -103,6 +104,7 @@ yvoke-desktop/
 │   └── app.spec.ts         # Application launch, composer, settings, and containment specs
 ├── tests/                  # Vitest unit and integration test suites
 │   ├── AgentRuleFilesParity.test.ts # Enforces parity between CLAUDE.md and AGENTS.md
+│   ├── ClaudeAuth.test.ts
 │   ├── SearchIndex.test.ts
 │   ├── SyncClient.test.ts
 │   ├── SyncQueue.test.ts
@@ -110,6 +112,7 @@ yvoke-desktop/
 │   ├── bootstrap.test.ts   # Unit tests for bootstrap path & headless resolution
 │   ├── chunkBlocks.test.ts
 │   ├── evidenceDigest.test.ts
+│   ├── ipcAuth.test.ts
 │   ├── messageCodec.test.ts
 │   ├── orchestration.test.ts
 │   ├── policy.test.ts
