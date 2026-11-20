@@ -1360,5 +1360,64 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
     expect(isServerAuthFailure({ status: 404, message: 'Not found' }, true)).toBe(false);
     expect(isServerAuthFailure(new Error('Yvoke Backend: 500 Internal Server Error'), true)).toBe(false);
   });
+
+  it('signOut() restores account and resets hydration when cache.removeAccount fails so status() truthfully reports signedIn: true', async () => {
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    // Hydrate signed-in state first (sets this.account and this.hydratedKey = key)
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+
+    // Disk cache write fails during removeAccount -> account still exists on disk
+    mockRemoveAccount.mockRejectedValueOnce(new Error('Disk full'));
+    await expect(auth.signOut()).rejects.toThrow('Entra: Disk full');
+
+    // Subsequent status() must truthfully reflect that the account is still signed in on disk
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+  });
+
+  it('signOut() failure where cache was already emptied before throwing reports signedIn: false on subsequent status()', async () => {
+    const secondAccount = {
+      ...cachedAccount,
+      homeAccountId: 'home-2',
+      username: 'second-user@corp.example',
+      localAccountId: 'local-2',
+    };
+    let diskAccounts = [cachedAccount, secondAccount];
+    mockGetAllAccounts.mockImplementation(async () => [...diskAccounts]);
+
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+
+    // Both accounts are emptied from disk before the final write throws
+    mockRemoveAccount.mockImplementationOnce(async () => {
+      diskAccounts = [secondAccount];
+    });
+    mockRemoveAccount.mockImplementationOnce(async () => {
+      diskAccounts = [];
+      throw new Error('Disk full');
+    });
+
+    await expect(auth.signOut()).rejects.toThrow('Entra: Disk full');
+
+    // Subsequent status() re-hydrates from disk, sees 0 accounts, and truthfully reports signedIn: false
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: false,
+      account: undefined,
+    });
+  });
 });
 

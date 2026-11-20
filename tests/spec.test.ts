@@ -537,7 +537,7 @@ describe('spec/ modular structure', () => {
 
     // Spec-purity regex guard: zero internal identifiers, IPC channels, CLI flags, OAuth fields, or filenames
     const bannedSpecIdentifiers =
-      /\b(ClaudeAuthManager|useClaudeSignIn|ClaudeSignInControls|authRequired|settingSources|api_key_helper|code_challenge|code_verifier|orgId|subscriptionType|ipcMain|ClaudeSignOutResult|claudeSigningOut|claudeSignOutError|CLAUDE_LOGOUT_TIMEOUT_MS)\b|claude auth login|claude auth status|claude auth logout|--claudeai|auth:claude-|oauth\/authorize|clipboard\.writeText|app\.asar/;
+      /\b(ClaudeAuthManager|useClaudeSignIn|ClaudeSignInControls|authRequired|settingSources|api_key_helper|code_challenge|code_verifier|orgId|subscriptionType|ipcMain|ClaudeSignOutResult|claudeSigningOut|claudeSignOutError|CLAUDE_LOGOUT_TIMEOUT_MS|CLAUDE_MISSING_CACHE_TTL_MS)\b|claude auth login|claude auth status|claude auth logout|--claudeai|auth:claude-|oauth\/authorize|clipboard\.writeText|app\.asar/;
     for (const [name, doc] of [
       ['01_asking_questions.md', askingQuestions],
       ['02_how_an_answer_is_produced.md', howAnswer],
@@ -591,6 +591,16 @@ describe('spec/ modular structure', () => {
     );
     expect(signingIn).toContain('Server unreachable');
     expect(signingIn).toContain('suppressed while corporate sign-in is required');
+    expect(signingIn).toContain(
+      'Silent refresh clears the cached corporate account only when credentials are missing, expired, or require interactive sign-in',
+    );
+    expect(signingIn).toContain(
+      'Transient network errors or identity-provider server errors keep the cached corporate account intact rather than signing you out',
+    );
+    expect(signingIn).toContain('If signing out of Yvoke fails');
+    expect(signingIn).toContain(
+      'an inline error is shown on the Yvoke account row in *Settings → Accounts*, matching Claude sign-out',
+    );
 
     // 06_settings_and_what_they_change.md: top-level Accounts pane, navigation behavior, focused About pane, read-only footer behavior
     expect(settings).toContain('| **Accounts** |');
@@ -645,12 +655,16 @@ describe('spec/ modular structure', () => {
       expect(text, `stale sidebar footer sign-out statement in ${chapter.filename}`).not.toContain(
         'Available from the sidebar footer',
       );
+      expect(
+        text,
+        `stale non-network silent refresh clear statement in ${chapter.filename}`,
+      ).not.toContain('for any reason other than a network error');
     }
     expect(signingIn).not.toContain('About pane');
 
     // Spec-purity regex guard: zero internal code, IPC, or CSS identifiers (MSAL and 401 remain allowed)
     const bannedCorporateAuthIdentifiers =
-      /\b(ServerAuth|ServerAuthRequiredError|CancellableLoopbackClient|useServerSignIn|ServerSignInControls|serverAuthRequired|acquireTokenInteractive|acquireTokenSilent|waitForRedirectUri|areSettingsEqual|paneRequest)\b|auth:cancel-signin|auth:signin|auth:signout|footer-account-btn|about-url/;
+      /\b(ServerAuth|ServerAuthRequiredError|ServerAuthTransientError|CancellableLoopbackClient|useServerSignIn|ServerSignInControls|serverAuthRequired|serverSignOutError|isServerAuthFailure|acquireTokenInteractive|acquireTokenSilent|waitForRedirectUri|areSettingsEqual|paneRequest|createOriginGuardedHandle|registerAuthIpc)\b|auth:cancel-signin|auth:signin|auth:signout|footer-account-btn|about-url/;
     for (const [name, doc] of [
       ['01_asking_questions.md', askingQuestions],
       ['04_where_conversations_live.md', whereConversationsLive],

@@ -75,6 +75,7 @@ yvoke-desktop/
 │   │   ├── AppCore.ts      # Core orchestrator wiring main-process modules
 │   │   ├── bootstrap.ts    # Headless mode, userData path resolution, and settings recovery
 │   │   ├── index.ts        # Electron entry point (window setup, IPC registry)
+│   │   ├── ipcOrigin.ts    # Shared IPC sender-origin guard and auth IPC channel registration
 │   │   └── log.ts          # Main process logger
 │   ├── preload/            # Preload script (context bridge to expose secure APIs)
 │   │   └── index.ts

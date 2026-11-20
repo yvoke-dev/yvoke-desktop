@@ -573,9 +573,7 @@ export class ServerAuth implements McpAuthProvider {
         if (!this.cacheCorrupted) {
           this.hydratedKey = key;
         }
-        if (accounts.length > 0) {
-          this.account = accounts[0];
-        }
+        this.account = accounts.length > 0 ? accounts[0] : null;
       } catch {
         // Leave `hydratedKey` unset so a later call retries rather than caching the failure.
       }
@@ -887,8 +885,11 @@ export class ServerAuth implements McpAuthProvider {
   }
 
   async signOut(): Promise<void> {
-    this.signOutGeneration += 1;
+    const prevAccount = this.account;
+    const prevKey = this.pcaKey;
+    const mySignOutGen = ++this.signOutGeneration;
     this.cancelSignIn();
+    const mySignInGen = this.signInGeneration;
     this.account = null;
     this.cachedToken = null;
     if (this.isDevMode()) {
@@ -909,6 +910,15 @@ export class ServerAuth implements McpAuthProvider {
       this.account = null;
       this.cachedToken = null;
     } catch (err) {
+      if (
+        this.signOutGeneration === mySignOutGen &&
+        this.signInGeneration === mySignInGen &&
+        this.pcaKey === prevKey &&
+        !this.activeSignIn
+      ) {
+        this.hydratedKey = null;
+        this.account = prevAccount;
+      }
       throw new Error(tagAttributedError('Entra', err));
     }
   }

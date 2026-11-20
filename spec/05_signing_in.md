@@ -44,13 +44,14 @@ other, and the app is useless without both.
 - **Corporate sign-in is explicit-click only — the app never opens a browser automatically.** Startup,
   background sync, server polling, and failed chat turns never launch a browser window on their own.
   Before each request, the app tries a silent token refresh; when the server rejects an expired token
-  with a 401, the app attempts one forced silent refresh and retries once. If silent refresh cannot renew
-  the session (for any reason other than a network error), the app clears the stale account and asks you
-  to click *Sign in to Yvoke* — offered in the top banner, in *Settings → Accounts*, and inline on a
-  failed chat turn. A network failure is reported as a network failure rather than being mistaken for an
-  expired session. Proactive silent re-authentication checks token validity before each turn on warm
-  conversations, refreshing credentials in-memory and updating MCP connection headers so idle sessions
-  resume without authentication errors.
+  with a 401, the app attempts one forced silent refresh and retries once. Silent refresh clears the
+  cached corporate account only when credentials are missing, expired, or require interactive sign-in,
+  then asks you to click *Sign in to Yvoke* — offered in the top banner, in *Settings → Accounts*, and
+  inline on a failed chat turn. Transient network errors or identity-provider server errors keep the
+  cached corporate account intact rather than signing you out, so later attempts can refresh silently
+  instead of mistaking a temporary outage for an expired session. Proactive silent re-authentication
+  checks token validity before each turn on warm conversations, refreshing credentials in-memory and
+  updating MCP connection headers so idle sessions resume without authentication errors.
 - **Corporate sign-in can be cancelled and reports errors inline.** While waiting for the browser sign-in
   flow to complete, *Cancel sign-in* aborts cleanly and resets the controls. If corporate sign-in fails or
   times out after 5 minutes, the app shows an inline error so you can try again.
@@ -66,7 +67,9 @@ other, and the app is useless without both.
   expired or missing corporate session, *Sign in to Yvoke* is offered inline in the Accounts pane rather
   than opening a browser window automatically. When signed in, *Settings → Accounts* shows *Signed in* and
   offers one-click *Sign out* for Yvoke in corporate mode and for Claude when connected, closing idle
-  sessions and returning to the signed-out state.
+  sessions and returning to the signed-out state. If signing out of Yvoke fails (for example, due to a
+  cache write error), an inline error is shown on the Yvoke account row in *Settings → Accounts*,
+  matching Claude sign-out.
 - **Claude verification performs an isolated, single-turn live probe.** It runs with thinking disabled, low effort, and no tools, confirming that credentials are valid and subscription quota is available without leaving a session on disk or affecting active conversations. A probe turn that fails during execution reports the failure, distinguishing session expiration, subscription allowance depletion, and unexpected errors, while a completed probe must return the expected verification token (*pong*).
 - **On macOS, Claude verification reaches keychain credentials.** Verification checks the bundled Claude tooling's keychain-aware credential status before probing: active keychain sessions proceed to the live probe even without a credential file on disk, while missing or signed-out profiles (including previously used ones) report no credentials without probing.
 - **Dev server mode is verified against the server endpoint** using the fixed development token.
@@ -74,7 +77,7 @@ other, and the app is useless without both.
 ## Limits
 
 - **Claude verification requires the model to return the probe token.** The verification probe asks the model to emit a single token (`pong`). If a working login returns an empty response, a refusal, or a paraphrased answer that omits the token, *Check Credentials* reports an "unexpected reply" failure even though credentials and quota are valid.
-- **Token refresh occurs at turn boundaries, not mid-turn.** Tokens are checked and proactively renewed before each user message starts. A failed silent refresh during network errors reuses an unexpired cached token even when within the 5-minute buffer, so an offline session can still lose knowledge-base access mid-turn. Likewise, if an individual turn or multi-round review execution outlives the token's remaining validity buffer (typically 5 minutes), knowledge-base calls later in that same turn can still encounter a 401 token-expired error.
+- **Token refresh occurs at turn boundaries, not mid-turn.** Tokens are checked and proactively renewed before each user message starts. A failed silent refresh during transient network or identity-provider server errors reuses an unexpired cached token even when within the 5-minute buffer, so an offline session can still lose knowledge-base access mid-turn. Likewise, if an individual turn or multi-round review execution outlives the token's remaining validity buffer (typically 5 minutes), knowledge-base calls later in that same turn can still encounter a 401 token-expired error.
 - **"Signed in" only means an account was found in the cache.** This applies to the passive status shown upon startup; no token is tried until the first server call, so a session whose refresh expired months ago still shows the account name as signed in until something fails. By contrast, the on-demand *Check Credentials* action actively validates token acceptance against the server.
 - **"Claude is connected" on startup checks local credential status, not live model access.** Startup queries
   the bundled Claude tooling's Keychain-aware credential status (falling back to local credential detection
