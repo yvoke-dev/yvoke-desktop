@@ -10,7 +10,7 @@ configuration: whatever ships as the build's defaults, the user can change.
 | Pane | What it sets |
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
-| **Accounts** | Yvoke account and Claude account sign-in status, *Sign in to Yvoke*, *Sign out* (Yvoke only), *Sign in to Claude*, and on-demand credential verification checkmarks via *Check Credentials*. |
+| **Accounts** | Yvoke account and Claude account sign-in status, *Sign in to Yvoke*, *Sign in to Claude*, *Sign out* (for Yvoke in corporate mode and Claude when signed in), and on-demand credential verification checkmarks via *Check Credentials*. |
 | **Models** | Which models the composer offers (rendered with friendly generation labels such as *Sonnet 5.5*), which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
 | **Agents** | Whether a playbook-carrying message is preflighted; which playbooks are excluded from validation by deployment configuration; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, and the per-agent turn ceilings. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
@@ -60,11 +60,12 @@ configuration: whatever ships as the build's defaults, the user can change.
   runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
 - **Missing or expired credentials can be fixed inline from the Accounts pane.** Whenever the Accounts
   pane shows missing Claude credentials — or *Check Credentials* reports them as missing or expired — an
-  inline *Sign in to Claude* control appears directly on the *Claude account* row. Likewise, when signed
-  out or expired in corporate mode, *Sign in to Yvoke* appears directly on the *Yvoke account* row (and
-  *Sign out* appears when signed in). Completing sign-in clears the stale failure state and, if a
-  verification result was already shown, automatically re-verifies credentials so the checkmark updates
-  in place.
+  inline *Sign in to Claude* control appears directly on the *Claude account* row (and when Claude is signed
+  in, an inline *Sign out* button appears with a tooltip noting it also signs out Claude Code on this
+  machine). Likewise, when signed out or expired in corporate mode, *Sign in to Yvoke* appears directly on
+  the *Yvoke account* row (and *Sign out* appears when signed in). Completing sign-in clears the stale
+  failure state and, if a verification result was already shown, automatically re-verifies credentials so
+  the checkmark updates in place.
 - **A verification result describes the settings as they were saved.** Signing out (or losing active credentials), as well as editing the server address, the sign-in mode, or the default model, clears any displayed verification result rather than relabelling it, so a checkmark never appears beside a signed-out account or an untested configuration.
 - **The *About* pane focuses on build version, *Check for Updates*, the server address, and *Open Logs Folder*.**
 - **Checking for updates in the About pane is on-demand.** Clicking *Check for Updates* queries GitHub releases via IPC through the main process. If the build is up to date, an indicator appears in green; if a newer version exists, the latest version tag appears in orange with a link to the release on GitHub. Network failures and rate limits are surfaced inline without interrupting settings navigation or ongoing chat turns.

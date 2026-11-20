@@ -940,7 +940,7 @@ describe('SettingsView', () => {
       };
     }
 
-    it('renders Sign in to Claude strictly when missing or expired, never on ok/rate_limited/unreachable/error, and never renders a Claude sign-out button', async () => {
+    it('renders Sign in to Claude strictly when missing or expired, never on ok/rate_limited/unreachable/error, and omits Claude sign-out when onClaudeSignOut is not provided', async () => {
       const verifyAuth = vi
         .fn()
         .mockResolvedValueOnce({
@@ -1328,13 +1328,13 @@ describe('SettingsView', () => {
       fireEvent.click(within(modeGroup).getByRole('button', { name: 'Entra ID' }));
 
       openPane('Accounts');
-      // Still shows Dev mode and NO Sign in to Yvoke button because saved auth.server.mode is 'dev'
+      // Still shows Dev mode and NO Sign in to Yvoke or Sign out of Yvoke button because saved auth.server.mode is 'dev'
       expect(screen.getByText('Dev mode')).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
     });
 
-    it('shows upfront Sign in to Yvoke when Entra signed out, hides on unreachable/rate_limited/error/ok, shows inline Entra Sign out only (never Claude), and uses plain Signed in / Not signed in copy', async () => {
+    it('shows upfront Sign in to Yvoke when Entra signed out, hides on unreachable/rate_limited/error/ok, shows inline Sign out of Yvoke (and omits Claude Sign out when onClaudeSignOut is absent), and uses plain Signed in / Not signed in copy', async () => {
       const verifyAuth = vi
         .fn()
         .mockResolvedValueOnce({
@@ -1373,7 +1373,7 @@ describe('SettingsView', () => {
       expect(screen.getAllByText('Not signed in')).toHaveLength(2);
       expect(document.body.textContent).not.toContain('Detected from Claude Code');
       expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
-      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
 
       // Verification: unreachable / rate_limited / error hide Sign in to Yvoke
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
@@ -1409,8 +1409,9 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      const signOutBtns = screen.getAllByRole('button', { name: 'Sign out' });
+      const signOutBtns = screen.getAllByRole('button', { name: 'Sign out of Yvoke' });
       expect(signOutBtns).toHaveLength(1);
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
       fireEvent.click(signOutBtns[0]);
       expect(onSignOut).toHaveBeenCalledTimes(1);
     });
@@ -1606,7 +1607,7 @@ describe('SettingsView', () => {
       );
     });
 
-    it('omits inline Sign out button in Accounts pane when onSignOut callback is not provided', () => {
+    it('omits inline Sign out buttons in Accounts pane when sign-out callbacks are not provided', () => {
       render(
         <SettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
@@ -1619,7 +1620,434 @@ describe('SettingsView', () => {
         />,
       );
       openPane('Accounts');
-      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
+    });
+  });
+
+  describe('Wave 10: One-click Claude sign-out in Accounts pane', () => {
+    function makeClaudeController(
+      overrides: Partial<ClaudeSignInController> = {},
+    ): ClaudeSignInController {
+      return {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+        clearError: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    function makeServerController(
+      overrides: Partial<ServerSignInController> = {},
+    ): ServerSignInController {
+      return {
+        signingIn: false,
+        cancelling: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        clearError: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    it('renders disambiguated Sign out of Claude and Sign out of Yvoke buttons with data-tip (zero native title, zero inline style), Signing out… state, click handler, and inline error alert', () => {
+      const onSignOut = vi.fn();
+      const onClaudeSignOut = vi.fn();
+      const { container, rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      const yvokeBtn = screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement;
+      const claudeBtn = screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement;
+
+      expect(yvokeBtn.textContent).toBe('Sign out');
+      expect(yvokeBtn.getAttribute('aria-label')).toBe('Sign out of Yvoke');
+      expect(yvokeBtn.getAttribute('data-tip')).toBe('Sign out of Yvoke');
+      expect(yvokeBtn.getAttribute('title')).toBeNull();
+
+      expect(claudeBtn.textContent).toBe('Sign out');
+      expect(claudeBtn.getAttribute('aria-label')).toBe('Sign out of Claude');
+      expect(claudeBtn.getAttribute('data-tip')).toBe('Also signs out Claude Code on this machine');
+      expect(claudeBtn.getAttribute('title')).toBeNull();
+
+      expect(container.querySelector('.settings-pane')?.querySelectorAll('[style]')).toHaveLength(0);
+
+      fireEvent.click(claudeBtn);
+      expect(onClaudeSignOut).toHaveBeenCalledTimes(1);
+      expect(onSignOut).not.toHaveBeenCalled();
+
+      // In-flight claudeSigningOut shows 'Signing out…' and renders claudeSignOutError in role="alert"
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          claudeSigningOut={true}
+          claudeSignOutError="Claude logout timed out after 10 seconds."
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+
+      const busyClaudeBtn = screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement;
+      expect(busyClaudeBtn.textContent).toBe('Signing out…');
+      expect(busyClaudeBtn.disabled).toBe(true);
+      const alert = screen.getByRole('alert');
+      expect(alert.className).toContain('claude-signin-error');
+      expect(alert.textContent).toBe('Claude logout timed out after 10 seconds.');
+      expect(container.querySelector('.settings-pane')?.querySelectorAll('[style]')).toHaveLength(0);
+    });
+
+    it('4-way negative visibility matrix: hides Sign out of Claude when onClaudeSignOut is omitted, auth.claude is missing, verification.claude is expired, or claudeSignIn.signingIn is true', async () => {
+      const verifyAuth = vi.fn().mockResolvedValue({
+        server: { status: 'ok', account: 'alice@corp.com' },
+        claude: { status: 'expired', message: 'Claude token expired' },
+      });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onClaudeSignOut = vi.fn();
+
+      // 1. Omitted onClaudeSignOut
+      const { rerender } = render(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
+
+      // 2. auth.claude === 'missing'
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
+
+      // 3. claudeSignIn.signingIn === true (even if auth.claude is still 'ok')
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController({ signingIn: true })}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
+
+      // 4. verification.claude.status === 'expired' -> shows Sign in to Claude, hides Sign out of Claude
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole('button', { name: 'Sign out of Claude' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Claude token expired/)).toBeTruthy());
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
+    });
+
+    it('mutually disables credential controls across claudeSigningOut, signingOut, verifying, claudeSignIn.signingIn, and serverSignIn.signingIn', async () => {
+      let resolveVerify!: (val: AuthVerificationResponse) => void;
+      const verifyAuth = vi.fn().mockImplementation(
+        () =>
+          new Promise<AuthVerificationResponse>((resolve) => {
+            resolveVerify = resolve;
+          }),
+      );
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onSignOut = vi.fn();
+      const onClaudeSignOut = vi.fn();
+
+      // A. claudeSigningOut=true disables Sign out of Claude, Sign out of Yvoke, Check Credentials, and SignInControls
+      const { rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          claudeSigningOut={true}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+      expect((screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect(verifyAuth).not.toHaveBeenCalled();
+
+      // B. claudeSigningOut=true also disables Sign in to Yvoke & Sign in to Claude when visible
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          claudeSigningOut={true}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
+
+      // C. signingOut=true disables Sign out of Claude, Sign in to Claude, and Check Credentials
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          signingOut={true}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect((screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(true);
+
+      // C2. signingOut=true also disables Sign in to Claude when auth.claude is 'missing'
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'missing',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          signingOut={true}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(true);
+
+      // D. serverSignIn.signingIn=true disables Sign out of Claude
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: false },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController({ signingIn: true })}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect((screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement).disabled).toBe(true);
+
+      // E. verifying=true disables Sign out of Claude and Sign out of Yvoke
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onClaudeSignOut={onClaudeSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect((screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
+
+      resolveVerify({
+        server: { status: 'ok', account: 'alice@corp.com' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      await waitFor(() =>
+        expect((screen.getByRole('button', { name: 'Sign out of Claude' }) as HTMLButtonElement).disabled).toBe(false),
+      );
+    });
+
+    it('clears verification verdict and discards late in-flight verifyAuth on claude ok -> missing transition, and calls onClearClaudeSignOutError on Check Credentials', async () => {
+      let resolveSecondVerify!: (val: AuthVerificationResponse) => void;
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise<AuthVerificationResponse>((resolve) => {
+              resolveSecondVerify = resolve;
+            }),
+        );
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onClaudeSignOut = vi.fn();
+      const onClearClaudeSignOutError = vi.fn();
+
+      const { rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onClearClaudeSignOutError={onClearClaudeSignOutError}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      // 1. Check Credentials invokes onClearClaudeSignOutError on start and on claude ok resolution
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect(onClearClaudeSignOutError).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(onClearClaudeSignOutError).toHaveBeenCalledTimes(2);
+
+      // 2. auth.claude transitions ok -> missing -> clears verification badges and shows Sign in to Claude
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'missing',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onClearClaudeSignOutError={onClearClaudeSignOutError}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
+
+      // 3. Back to ok, start in-flight verifyAuth, then flip ok -> missing before it resolves -> late verdict discarded
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onClearClaudeSignOutError={onClearClaudeSignOutError}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect(verifyAuth).toHaveBeenCalledTimes(2);
+
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'missing',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeController()}
+          serverSignIn={makeServerController()}
+          onClaudeSignOut={onClaudeSignOut}
+          onClearClaudeSignOutError={onClearClaudeSignOutError}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      resolveSecondVerify({
+        server: { status: 'ok', account: 'alice@corp.com' },
+        claude: { status: 'ok', account: 'stale-claude@corp.com' },
+      });
+      await new Promise((r) => setTimeout(r, 15));
+
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain('stale-claude@corp.com');
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
     });
   });
 });

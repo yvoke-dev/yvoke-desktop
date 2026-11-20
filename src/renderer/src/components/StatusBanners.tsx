@@ -18,6 +18,7 @@ export function StatusBanners(props: {
   serverSignIn?: ServerSignInController;
   serverAuthRequired?: boolean;
   signingOut?: boolean;
+  claudeSigningOut?: boolean;
   serverReachable: boolean;
   pendingSync: number;
   syncError: string | null;
@@ -31,6 +32,7 @@ export function StatusBanners(props: {
     serverSignIn,
     serverAuthRequired = false,
     signingOut = false,
+    claudeSigningOut = false,
     serverReachable,
     pendingSync,
     syncError,
@@ -62,7 +64,7 @@ export function StatusBanners(props: {
           <ClaudeSignInControls
             controller={effectiveClaudeSignIn}
             variant="banner"
-            disabled={effectiveServerSignIn.signingIn}
+            disabled={effectiveServerSignIn.signingIn || claudeSigningOut || signingOut}
           />
         </div>
       )}
@@ -78,7 +80,7 @@ export function StatusBanners(props: {
           <ServerSignInControls
             controller={effectiveServerSignIn}
             variant="banner"
-            disabled={effectiveClaudeSignIn.signingIn || signingOut}
+            disabled={effectiveClaudeSignIn.signingIn || signingOut || claudeSigningOut}
           />
         </div>
       )}

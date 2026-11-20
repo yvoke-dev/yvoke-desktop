@@ -125,7 +125,9 @@ export function ThreadList(props: {
   defaultModel: string;
   settingsOpen: boolean;
   signingOut?: boolean;
+  claudeSigningOut?: boolean;
   serverSigningIn?: boolean;
+  claudeSigningIn?: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
   onOpen: (threadId: string) => void;
@@ -143,7 +145,9 @@ export function ThreadList(props: {
     defaultModel,
     settingsOpen,
     signingOut = false,
+    claudeSigningOut = false,
     serverSigningIn = false,
+    claudeSigningIn = false,
     searchContent,
     onOpen,
     onCreate,
@@ -410,7 +414,7 @@ export function ThreadList(props: {
               className="icon-button"
               data-tip="Sign out of Yvoke"
               aria-label="Sign out of Yvoke"
-              disabled={signingOut || serverSigningIn}
+              disabled={signingOut || serverSigningIn || claudeSigningIn || claudeSigningOut}
               onClick={onSignOut}
             >
               <LogOutIcon size={16} />

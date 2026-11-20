@@ -343,5 +343,49 @@ describe('ThreadList account footer', () => {
     expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
       true,
     );
+
+    // Disabled when claudeSigningOut is true
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        claudeSigningOut={true}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    // Disabled when claudeSigningIn is true
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        claudeSigningIn={true}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 });

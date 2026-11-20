@@ -245,10 +245,11 @@ describe('StatusBanners', () => {
     expect(startSignIn).toHaveBeenCalledTimes(1);
   });
 
-  it('disables Sign in to Yvoke banner button while signingOut is true', () => {
+  it('disables both Sign in to Claude and Sign in to Yvoke banner buttons while signingOut is true', () => {
     render(
       <StatusBanners
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeController()}
         serverSignIn={makeServerController()}
         signingOut={true}
         serverReachable={true}
@@ -258,6 +259,31 @@ describe('StatusBanners', () => {
       />,
     );
 
+    expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
+  it('disables both Sign in to Claude and Sign in to Yvoke banner buttons while claudeSigningOut is true', () => {
+    render(
+      <StatusBanners
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeController()}
+        serverSignIn={makeServerController()}
+        claudeSigningOut={true}
+        serverReachable={true}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
       true,
     );

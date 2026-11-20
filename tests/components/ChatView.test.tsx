@@ -79,6 +79,7 @@ interface ChatOpts {
   claudeSignIn?: ClaudeSignInController;
   serverSignIn?: ServerSignInController;
   signingOut?: boolean;
+  claudeSigningOut?: boolean;
   onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
@@ -95,6 +96,7 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       claudeSignIn={opts.claudeSignIn}
       serverSignIn={opts.serverSignIn}
       signingOut={opts.signingOut}
+      claudeSigningOut={opts.claudeSigningOut}
       onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
@@ -3500,7 +3502,7 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
         true,
       );
 
-      // Disabled while signingOut is true
+      // Disabled while signingOut is true: disables BOTH Sign in to Yvoke and Sign in to Claude
       rerender(
         chat({
           liveTurn: {
@@ -3514,6 +3516,22 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
         }),
       );
       expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          signingOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
         true,
       );
 
@@ -3532,6 +3550,39 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
       );
       expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
       expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // Disabled while claudeSigningOut is true: disables BOTH Sign in to Claude and Sign in to Yvoke
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          claudeSigningOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          claudeSigningOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
         true,
       );
     });

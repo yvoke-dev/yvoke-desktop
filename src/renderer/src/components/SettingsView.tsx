@@ -394,6 +394,10 @@ export interface SettingsViewProps {
   onAuthChange?: () => void;
   onSignOut?: () => void | Promise<void>;
   signingOut?: boolean;
+  onClaudeSignOut?: () => void | Promise<void>;
+  claudeSigningOut?: boolean;
+  claudeSignOutError?: string | null;
+  onClearClaudeSignOutError?: () => void;
   onSave: (update: Partial<AppSettings>) => Promise<void>;
   onClose: () => void;
 }
@@ -425,6 +429,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   clearClaudeErrorRef.current = effectiveClaudeSignIn.clearError;
   const clearServerErrorRef = useRef(effectiveServerSignIn.clearError);
   clearServerErrorRef.current = effectiveServerSignIn.clearError;
+  const onClearClaudeSignOutErrorRef = useRef(props.onClearClaudeSignOutError);
+  onClearClaudeSignOutErrorRef.current = props.onClearClaudeSignOutError;
   const prevSuccessCountRef = useRef(effectiveClaudeSignIn.successCount);
   const prevServerSuccessCountRef = useRef(effectiveServerSignIn.successCount);
 
@@ -566,19 +572,24 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
       verifying ||
       effectiveServerSignIn.signingIn ||
       effectiveClaudeSignIn.signingIn ||
-      Boolean(props.signingOut)
+      Boolean(props.signingOut) ||
+      Boolean(props.claudeSigningOut)
     ) {
       return;
     }
     const seq = ++verifySeqRef.current;
     setVerifying(true);
     setError(null);
+    onClearClaudeSignOutErrorRef.current?.();
     try {
       const res = await window.api.verifyAuth();
       if (isMounted.current && verifySeqRef.current === seq) {
         setVerification(res);
         if (res.claude.status === 'ok') {
           effectiveClaudeSignIn.clearError?.();
+        }
+        if (res.claude.status === 'ok' || res.claude.status === 'missing') {
+          onClearClaudeSignOutErrorRef.current?.();
         }
         if (res.server.status === 'ok') {
           effectiveServerSignIn.clearError();
@@ -653,6 +664,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     (verification
       ? verification.claude.status === 'missing' || verification.claude.status === 'expired'
       : props.auth?.claude === 'missing');
+  const showClaudeSignOut =
+    props.auth?.claude === 'ok' &&
+    !showClaudeSignIn &&
+    !effectiveClaudeSignIn.signingIn &&
+    Boolean(props.onClaudeSignOut);
   const isReadOnlyPane = pane === 'Accounts' || pane === 'About';
   const isDirty = !areSettingsEqual(draft, props.settings);
 
@@ -1258,7 +1274,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                           disabled={
                             verifying ||
                             effectiveClaudeSignIn.signingIn ||
-                            Boolean(props.signingOut)
+                            Boolean(props.signingOut) ||
+                            Boolean(props.claudeSigningOut)
                           }
                         />
                       )}
@@ -1266,8 +1283,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                         <button
                           type="button"
                           className="button secondary cred-inline-btn"
+                          aria-label="Sign out of Yvoke"
+                          data-tip="Sign out of Yvoke"
                           disabled={
                             Boolean(props.signingOut) ||
+                            Boolean(props.claudeSigningOut) ||
                             verifying ||
                             effectiveServerSignIn.signingIn ||
                             effectiveClaudeSignIn.signingIn
@@ -1320,8 +1340,36 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                     <ClaudeSignInControls
                       controller={effectiveClaudeSignIn}
                       variant="inline"
-                      disabled={verifying || effectiveServerSignIn.signingIn}
+                      disabled={
+                        verifying ||
+                        effectiveServerSignIn.signingIn ||
+                        Boolean(props.claudeSigningOut) ||
+                        Boolean(props.signingOut)
+                      }
                     />
+                  )}
+                  {showClaudeSignOut && (
+                    <button
+                      type="button"
+                      className="button secondary cred-inline-btn"
+                      aria-label="Sign out of Claude"
+                      data-tip="Also signs out Claude Code on this machine"
+                      disabled={
+                        Boolean(props.claudeSigningOut) ||
+                        Boolean(props.signingOut) ||
+                        verifying ||
+                        effectiveClaudeSignIn.signingIn ||
+                        effectiveServerSignIn.signingIn
+                      }
+                      onClick={() => void props.onClaudeSignOut?.()}
+                    >
+                      {props.claudeSigningOut ? 'Signing out…' : 'Sign out'}
+                    </button>
+                  )}
+                  {props.claudeSignOutError && (
+                    <div role="alert" className="claude-signin-error">
+                      {props.claudeSignOutError}
+                    </div>
                   )}
                 </dd>
                 <dt>Credentials</dt>
@@ -1334,7 +1382,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                       verifying ||
                       effectiveServerSignIn.signingIn ||
                       effectiveClaudeSignIn.signingIn ||
-                      Boolean(props.signingOut)
+                      Boolean(props.signingOut) ||
+                      Boolean(props.claudeSigningOut)
                     }
                   >
                     {verifying ? 'Verifying credentials…' : 'Check Credentials'}

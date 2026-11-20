@@ -243,6 +243,7 @@ export function ChatView(props: {
   claudeSignIn?: ClaudeSignInController;
   serverSignIn?: ServerSignInController;
   signingOut?: boolean;
+  claudeSigningOut?: boolean;
   onSend: (text: string, promptName?: string, images?: ImageAttachment[]) => void;
   onInterrupt: () => void;
   onPatchThread: (update: Partial<ThreadMeta>) => void;
@@ -258,6 +259,7 @@ export function ChatView(props: {
     claudeSignIn,
     serverSignIn,
     signingOut = false,
+    claudeSigningOut = false,
     onSend,
     onInterrupt,
     onPatchThread,
@@ -918,14 +920,14 @@ export function ChatView(props: {
                 <ClaudeSignInControls
                   controller={effectiveClaudeSignIn}
                   variant="inline"
-                  disabled={effectiveServerSignIn.signingIn}
+                  disabled={effectiveServerSignIn.signingIn || claudeSigningOut || signingOut}
                 />
               )}
               {liveTurn.serverAuthRequired && !liveTurn.authRequired && (
                 <ServerSignInControls
                   controller={effectiveServerSignIn}
                   variant="inline"
-                  disabled={effectiveClaudeSignIn.signingIn || signingOut}
+                  disabled={effectiveClaudeSignIn.signingIn || signingOut || claudeSigningOut}
                 />
               )}
             </div>

@@ -13,6 +13,7 @@ other, and the app is useless without both.
 | **Sign in to the server** | *Sign in to Yvoke* opens the corporate sign-in in the system browser only when you explicitly click it — from the top banner, *Settings → Accounts*, or inline on a failed chat turn — and returns to the app when it completes. While waiting, you can choose *Cancel sign-in*, and any failure or timeout is reported as an inline error. The browser page confirms completion and can be closed. |
 | **See who is signed in** | The clickable sidebar footer shows both Yvoke and Claude status at a glance and jumps straight to *Settings → Accounts*, which spells out both accounts as *Signed in* or *Not signed in*. |
 | **Sign out of the server** | Available from the sidebar footer and *Settings → Accounts* when signed in with a corporate account. Clears the Yvoke corporate sign-in only; Claude credentials are untouched. |
+| **Sign out of Claude** | Available in *Settings → Accounts* when Claude is signed in. Clears the local Claude credentials so you can sign in again; your Yvoke corporate sign-in is untouched. |
 | **Use a development token instead** | A setting sends a fixed token rather than a corporate one, for use against a server running with mock security. |
 | **Verify logins** | In *Settings → Accounts* (the Accounts pane), click *Check Credentials* to test whether both logins actually work. Probes the server connection silently with the corporate or development token, and runs a live one-turn check against the Claude model. Shows active checkmarks or failure explanations. |
 
@@ -63,8 +64,9 @@ other, and the app is useless without both.
   lives in *Settings → Accounts* and runs on demand. When signed out in corporate mode, *Settings → Accounts*
   shows plain *Not signed in* status and offers *Sign in to Yvoke* upfront; if verification reports an
   expired or missing corporate session, *Sign in to Yvoke* is offered inline in the Accounts pane rather
-  than opening a browser window automatically. When signed in with a corporate account, *Settings → Accounts*
-  shows *Signed in* and offers *Sign out* for Yvoke only.
+  than opening a browser window automatically. When signed in, *Settings → Accounts* shows *Signed in* and
+  offers one-click *Sign out* for Yvoke in corporate mode and for Claude when connected, closing idle
+  sessions and returning to the signed-out state.
 - **Claude verification performs an isolated, single-turn live probe.** It runs with thinking disabled, low effort, and no tools, confirming that credentials are valid and subscription quota is available without leaving a session on disk or affecting active conversations. A probe turn that fails during execution reports the failure, distinguishing session expiration, subscription allowance depletion, and unexpected errors, while a completed probe must return the expected verification token (*pong*).
 - **On macOS, Claude verification reaches keychain credentials.** Verification checks the bundled Claude tooling's keychain-aware credential status before probing: active keychain sessions proceed to the live probe even without a credential file on disk, while missing or signed-out profiles (including previously used ones) report no credentials without probing.
 - **Dev server mode is verified against the server endpoint** using the fixed development token.
@@ -105,9 +107,9 @@ other, and the app is useless without both.
 - **Claude sign-in gives up after 5 minutes, and authorization-code verification gives up after 15 seconds.**
   If the browser flow is abandoned or a pasted authorization code cannot be confirmed in time, sign-in ends
   with an error so you can try again.
-- **Claude sign-in is offered only when credentials are missing or expired.** Once Claude is connected, the
-  app intentionally offers no Claude sign-out or account-switching control so shared Claude tooling on the
-  machine is never logged out unexpectedly.
+- **Signing out of Claude removes the shared Claude Code credentials on the machine.** Terminal or IDE
+  Claude Code sessions that share the same operating-system account are signed out as well, and logout gives
+  up after 10 seconds with an inline error if it cannot complete.
 - **Nothing warns in advance when the subscription's allowance runs out.** Both a failed conversation turn
   and the on-demand *Check Credentials* action report it as a distinct allowance or rate-limit failure
   rather than a sign-in error, without offering an inline *Sign in to Claude* control.
@@ -121,7 +123,7 @@ other, and the app is useless without both.
 - Automatically opening a browser window for corporate sign-in on startup, background sync, polling, or
   turn failure. Corporate sign-in always requires an explicit *Sign in to Yvoke* click.
 - Signing in to Claude with an API key or a token pasted into the app.
-- Signing out of Claude or switching an active Claude account from inside the app.
+- Switching directly between multiple Claude accounts or maintaining a second profile from inside the app.
 - Any role or permission inside the app. Everyone who can sign in has the same access, and the
   server's administrator screens are not reachable from here.
 - Per-conversation identity, or asking as somebody else.
