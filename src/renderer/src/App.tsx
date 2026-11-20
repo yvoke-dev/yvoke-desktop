@@ -91,7 +91,7 @@ export default function App(): React.JSX.Element {
   const promptsCountRef = useRef(0);
   promptsCountRef.current = prompts.length;
   const initialPromptsLoadedRef = useRef(false);
-  const initialCatalogueStartedRef = useRef(false);
+  const cataloguesEpochRef = useRef(0);
   const cataloguesInFlightRef = useRef<Promise<void> | null>(null);
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const recreationEpochByThreadRef = useRef<Map<string, number>>(new Map());
@@ -122,15 +122,16 @@ export default function App(): React.JSX.Element {
   // Stable identity so the sidebar's debounced search effect doesn't re-fire every render.
   const searchContent = useCallback((query: string) => window.api.searchThreads(query), []);
 
-  const fetchCatalogues = useCallback((): Promise<void> => {
-    if (cataloguesInFlightRef.current) {
+  const fetchCatalogues = useCallback((opts?: { force?: boolean }): Promise<void> => {
+    if (!opts?.force && cataloguesInFlightRef.current) {
       return cataloguesInFlightRef.current;
     }
+    const epoch = ++cataloguesEpochRef.current;
     const run = Promise.all([
       window.api
         .listPrompts()
         .then((list) => {
-          if (!mountedRef.current) return;
+          if (!mountedRef.current || epoch !== cataloguesEpochRef.current) return;
           promptsCountRef.current = list.length;
           setPrompts(list);
         })
@@ -138,7 +139,7 @@ export default function App(): React.JSX.Element {
       window.api
         .listOrchestratorProfiles()
         .then((list) => {
-          if (!mountedRef.current) return;
+          if (!mountedRef.current || epoch !== cataloguesEpochRef.current) return;
           setProfiles(list);
         })
         .catch(() => undefined),
@@ -197,9 +198,8 @@ export default function App(): React.JSX.Element {
         result.serverReachable &&
         !authReq &&
         promptsCountRef.current === 0 &&
-        (initialPromptsLoadedRef.current || !initialCatalogueStartedRef.current)
+        initialPromptsLoadedRef.current
       ) {
-        initialCatalogueStartedRef.current = true;
         void fetchCatalogues();
       }
       return { serverReachable: result.serverReachable, serverAuthRequired: authReq };
@@ -307,8 +307,7 @@ export default function App(): React.JSX.Element {
     });
     if (!mountedRef.current) return;
     if (!reachable || authReq) return;
-    initialCatalogueStartedRef.current = true;
-    void fetchCatalogues();
+    void fetchCatalogues({ force: true });
   }, [fetchAuthStatus, fetchCatalogues, refreshThreads]);
 
   useEffect(() => {
@@ -323,10 +322,6 @@ export default function App(): React.JSX.Element {
       .then((s) => {
         if (!mountedRef.current) return;
         setSettings(s);
-        if (s.serverAuthMode === 'dev' && !initialCatalogueStartedRef.current) {
-          initialCatalogueStartedRef.current = true;
-          void fetchCatalogues();
-        }
       })
       .catch(() => undefined);
     const initialAuthEpoch = authEpochRef.current;
@@ -340,15 +335,8 @@ export default function App(): React.JSX.Element {
         }
       })
       .catch(() => undefined);
-    void refreshThreads({ skipCatalogueRetry: true }).then(
-      ({ serverReachable: reachable, serverAuthRequired: authReq }) => {
-        if (!mountedRef.current) return;
-        if (reachable && !authReq && !initialCatalogueStartedRef.current) {
-          initialCatalogueStartedRef.current = true;
-          void fetchCatalogues();
-        }
-      },
-    );
+    void refreshThreads({ skipCatalogueRetry: true });
+    void fetchCatalogues();
   }, [applyAuthStatus, fetchCatalogues, refreshThreads]);
 
   const claudeSignIn = useClaudeSignIn({

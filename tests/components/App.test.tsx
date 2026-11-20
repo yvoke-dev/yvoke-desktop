@@ -2532,7 +2532,7 @@ describe('App conversation switching with in-progress turn', () => {
   });
 
   describe('Wave 6: Entra server sign-in, polling gating, cross-auth isolation, paneRequest & signingOut guard', () => {
-    it('pauses 10s reconnect poll and gates catalogue fetches while Entra is unauthenticated, then resumes after Sign in to Yvoke', async () => {
+    it('pauses 10s reconnect poll while Entra is unauthenticated after parallel mount fetch, then refreshes catalogues after Sign in to Yvoke', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
         const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
@@ -2551,7 +2551,8 @@ describe('App conversation switching with in-progress turn', () => {
           serverReachable: signedIn,
           serverAuthRequired: !signedIn,
         }));
-        api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+        // Reflect real signed-out AppCore behavior: [] while unauthenticated, PROMPTS after sign-in
+        api.listPrompts = vi.fn().mockImplementation(async () => (signedIn ? PROMPTS : []));
         api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
         api.serverSignIn = vi.fn().mockImplementation(async () => {
           signedIn = true;
@@ -2565,24 +2566,25 @@ describe('App conversation switching with in-progress turn', () => {
 
         // Red Server unreachable banner is suppressed while Entra sign-in banner is active
         expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
-        // Catalogues are gated while unauthenticated
-        expect(api.listPrompts).not.toHaveBeenCalled();
-        expect(api.listOrchestratorProfiles).not.toHaveBeenCalled();
+        // Mount fired catalogues once in parallel (returning [] while unauthenticated)
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
 
         const listThreadsCountBefore = api.listThreads.mock.calls.length;
-        // Advance 30s -> 10s poll must NOT fire while Entra is unauthenticated
+        // Advance 30s -> 10s poll must NOT fire while Entra is unauthenticated (0 additional catalogue calls)
         await act(async () => {
           await vi.advanceTimersByTimeAsync(30_000);
         });
         expect(api.listThreads).toHaveBeenCalledTimes(listThreadsCountBefore);
-        expect(api.listPrompts).not.toHaveBeenCalled();
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
 
-        // Click Sign in to Yvoke -> refreshes threads and catalogues immediately
+        // Click Sign in to Yvoke -> refreshes threads and catalogues immediately (2x)
         fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
         await waitFor(() => {
           expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
-          expect(api.listPrompts).toHaveBeenCalledTimes(1);
-          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+          expect(api.listPrompts).toHaveBeenCalledTimes(2);
+          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
         });
       } finally {
         vi.useRealTimers();
@@ -2833,33 +2835,34 @@ describe('App conversation switching with in-progress turn', () => {
         serverReachable: mode === 'dev',
         serverAuthRequired: mode === 'entra',
       }));
-      api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+      api.listPrompts = vi.fn().mockImplementation(async () => (mode === 'dev' ? PROMPTS : []));
       api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
 
       const { container } = render(<App />);
       await waitFor(() =>
         expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy(),
       );
-      expect(api.listPrompts).not.toHaveBeenCalled();
+      expect(api.listPrompts).toHaveBeenCalledTimes(1);
+      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
 
       // Open Settings -> Server, switch Server authentication to Dev token, and Save
       fireEvent.click(container.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
       fireEvent.click(screen.getByRole('button', { name: 'Dev token' }));
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-      // Wait until delayed authStatus is in-flight — catalogues MUST already be fetched while authStatus is STILL pending!
+      // Wait until delayed authStatus is in-flight — catalogues MUST already be re-fetched while authStatus is STILL pending!
       await waitFor(() => expect(resolveDelayedAuth).toBeTypeOf('function'));
       await waitFor(() => {
-        expect(api.listPrompts).toHaveBeenCalledTimes(1);
-        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+        expect(api.listPrompts).toHaveBeenCalledTimes(2);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
       });
 
       // Resolving authStatus afterwards updates auth without triggering duplicate catalogue fetches
       await act(async () => {
         resolveDelayedAuth({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
       });
-      expect(api.listPrompts).toHaveBeenCalledTimes(1);
-      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+      expect(api.listPrompts).toHaveBeenCalledTimes(2);
+      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -3557,7 +3560,7 @@ describe('App conversation switching with in-progress turn', () => {
         });
         second.unmount();
 
-        // Case C: entra signed-out (serverAuthRequired: true) with NEVER-RESOLVING authStatus() -> 0 catalogue calls!
+        // Case C: entra signed-out (serverAuthRequired: true) with NEVER-RESOLVING authStatus() -> 1x parallel mount fetch ([]), 0 retries over 30s!
         api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
         api.authStatus = vi.fn().mockReturnValue(neverAuth);
         api.listThreads = vi.fn().mockResolvedValue({
@@ -3565,13 +3568,18 @@ describe('App conversation switching with in-progress turn', () => {
           serverReachable: false,
           serverAuthRequired: true,
         });
-        api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+        api.listPrompts = vi.fn().mockResolvedValue([]);
         api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
 
         const third = render(<App />);
         await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
-        expect(api.listPrompts).toHaveBeenCalledTimes(0);
-        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(0);
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+        });
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
         third.unmount();
 
         // Case D: Deduplication when getSettings (dev) + refreshThreads + authStatus all resolve -> exactly 1 catalogue call
@@ -3663,14 +3671,15 @@ describe('App conversation switching with in-progress turn', () => {
             serverAuthRequired: mode === 'entra',
           };
         });
-        api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+        api.listPrompts = vi.fn().mockImplementation(async () => (mode === 'dev' ? PROMPTS : []));
         api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
 
         const { container } = render(<App />);
         await waitFor(() =>
           expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy(),
         );
-        expect(api.listPrompts).not.toHaveBeenCalled();
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
 
         // Switch Entra (signed out, serverAuthRequired: true) -> Dev token and Save while post-save listThreads() rejects
         fireEvent.click(container.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
@@ -3681,7 +3690,7 @@ describe('App conversation switching with in-progress turn', () => {
         // Wait for the throwing post-save refreshThreads() to settle
         await waitFor(() => expect(warnSpy).toHaveBeenCalled());
         const listCallsAfterSave = api.listThreads.mock.calls.length;
-        expect(api.listPrompts).not.toHaveBeenCalled();
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
 
         // Advance 10s -> 10s reconnect poll MUST fire in dev mode (not stalled by stale serverAuthRequired)
         await act(async () => {
@@ -3690,12 +3699,255 @@ describe('App conversation switching with in-progress turn', () => {
 
         await waitFor(() => {
           expect(api.listThreads.mock.calls.length).toBeGreaterThan(listCallsAfterSave);
-          expect(api.listPrompts).toHaveBeenCalledTimes(1);
-          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+          expect(api.listPrompts).toHaveBeenCalledTimes(2);
+          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
         });
       } finally {
         warnSpy.mockRestore();
         vi.useRealTimers();
+      }
+    });
+
+    it('fires mount catalogues in parallel while getSettings(), listThreads(), and authStatus() are all pending, with 0 duplicates on resolve', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let resolveSettings!: (s: AppSettings) => void;
+      let resolveThreads!: (r: {
+        threads: ThreadMeta[];
+        serverReachable: boolean;
+        serverAuthRequired: boolean;
+      }) => void;
+      let resolveAuth!: (a: AuthStatus) => void;
+
+      api.getSettings = vi.fn().mockReturnValue(
+        new Promise<AppSettings>((r) => {
+          resolveSettings = r;
+        }),
+      );
+      api.listThreads = vi.fn().mockReturnValue(
+        new Promise<{ threads: ThreadMeta[]; serverReachable: boolean; serverAuthRequired: boolean }>((r) => {
+          resolveThreads = r;
+        }),
+      );
+      api.authStatus = vi.fn().mockReturnValue(
+        new Promise<AuthStatus>((r) => {
+          resolveAuth = r;
+        }),
+      );
+      api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+      api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
+
+      render(<App />);
+
+      // Before ANY of getSettings, listThreads, or authStatus resolve, catalogues MUST already have fired 1x in parallel
+      expect(api.listPrompts).toHaveBeenCalledTimes(1);
+      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveSettings({ ...sampleSettings(), serverAuthMode: 'entra' });
+        resolveThreads({
+          threads: storedThreads.map((t) => ({ ...t })),
+          serverReachable: true,
+          serverAuthRequired: false,
+        });
+        resolveAuth({
+          claude: 'ok',
+          server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+        });
+      });
+
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      // Resolving all three triggers 0 duplicate catalogue fetches
+      expect(api.listPrompts).toHaveBeenCalledTimes(1);
+      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+    });
+
+    it('forces fresh catalogues in refreshServer() and prevents a slow stale mount fetch from clobbering post-auth prompts via cataloguesEpochRef', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let signedIn = false;
+      let resolveStalePrompts!: (list: typeof PROMPTS) => void;
+      let resolveStaleProfiles!: (list: unknown[]) => void;
+
+      api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+      api.authStatus = vi.fn().mockImplementation(async () => ({
+        claude: 'ok',
+        server: {
+          mode: 'entra',
+          signedIn,
+          ...(signedIn ? { account: 'alice@corp.com' } : {}),
+        },
+      }));
+      api.listThreads = vi.fn().mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: signedIn,
+        serverAuthRequired: !signedIn,
+      }));
+      let promptCalls = 0;
+      api.listPrompts = vi.fn().mockImplementation(() => {
+        promptCalls += 1;
+        if (promptCalls === 1) {
+          // Slow mount fetch held pending across sign-in
+          return new Promise<typeof PROMPTS>((r) => {
+            resolveStalePrompts = r;
+          });
+        }
+        return Promise.resolve(PROMPTS);
+      });
+      let profileCalls = 0;
+      api.listOrchestratorProfiles = vi.fn().mockImplementation(() => {
+        profileCalls += 1;
+        if (profileCalls === 1) {
+          return new Promise<unknown[]>((r) => {
+            resolveStaleProfiles = r;
+          });
+        }
+        return Promise.resolve([
+          {
+            name: 'OIM',
+            orchestratorPlaybook: 'oim-orchestrator',
+            reviewerPlaybook: 'oim-orchestrator-reviewer',
+            specialistPlaybooks: [],
+          },
+        ]);
+      });
+      api.serverSignIn = vi.fn().mockImplementation(async () => {
+        signedIn = true;
+        return { status: 'signed_in', account: 'alice@corp.com' };
+      });
+
+      render(<App />);
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy());
+      expect(api.listPrompts).toHaveBeenCalledTimes(1);
+      expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+
+      // Sign in while the slow mount catalogue fetch is STILL pending -> refreshServer() MUST force a new fetch
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+        expect(api.listPrompts).toHaveBeenCalledTimes(2);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
+      });
+
+      // Open First Conversation and confirm fresh PROMPTS loaded
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+      expect(screen.getByText('oim-getting-started')).toBeTruthy();
+
+      // Now resolve the stale mount fetch with [] -> MUST NOT clobber the fresh post-auth PROMPTS!
+      await act(async () => {
+        resolveStalePrompts([]);
+        resolveStaleProfiles([]);
+      });
+      expect(screen.getByText('oim-getting-started')).toBeTruthy();
+    });
+
+    it('swallows mount catalogue 401 rejections cleanly while serverAuthRequired is true, gates retries until auth clears, then recovers on sync-state', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+        let authRequired = true;
+
+        api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+        api.authStatus = vi.fn().mockImplementation(async () => ({
+          claude: 'ok',
+          server: { mode: 'entra', signedIn: !authRequired },
+        }));
+        api.listThreads = vi.fn().mockImplementation(async () => ({
+          threads: storedThreads.map((t) => ({ ...t })),
+          serverReachable: !authRequired,
+          serverAuthRequired: authRequired,
+        }));
+        api.listPrompts = vi.fn().mockImplementation(() =>
+          authRequired ? Promise.reject(new Error('401 Unauthorized')) : Promise.resolve(PROMPTS),
+        );
+        api.listOrchestratorProfiles = vi.fn().mockImplementation(() =>
+          authRequired ? Promise.reject(new Error('401 Unauthorized')) : Promise.resolve([]),
+        );
+
+        render(<App />);
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy());
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+
+        // Emit sync-state synced + advance 30s while serverAuthRequired is still true -> 0 retries
+        act(() => {
+          for (const l of syncListeners) {
+            l({ kind: 'sync-state', threadId: 'thread-1', state: 'synced', pendingCount: 0 });
+          }
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+        });
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).not.toHaveBeenCalled();
+
+        // Flip serverAuthRequired -> false and emit sync-state synced -> refreshThreads retries catalogues cleanly (2x)
+        authRequired = false;
+        act(() => {
+          for (const l of syncListeners) {
+            l({ kind: 'sync-state', threadId: 'thread-1', state: 'synced', pendingCount: 0 });
+          }
+        });
+        await waitFor(() => {
+          expect(api.listPrompts).toHaveBeenCalledTimes(2);
+          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
+        });
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+        errorSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('safely ignores mount parallel catalogue resolve and reject after unmount with zero console/React errors', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+        let resolvePrompts!: (list: typeof PROMPTS) => void;
+        let rejectProfiles!: (err: Error) => void;
+
+        api.listPrompts = vi.fn().mockReturnValue(
+          new Promise<typeof PROMPTS>((r) => {
+            resolvePrompts = r;
+          }),
+        );
+        api.listOrchestratorProfiles = vi.fn().mockReturnValue(
+          new Promise<unknown[]>((_r, rej) => {
+            rejectProfiles = rej;
+          }),
+        );
+
+        const { unmount } = render(<App />);
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+
+        // Unmount while both parallel mount catalogue calls are still pending
+        unmount();
+
+        await act(async () => {
+          resolvePrompts(PROMPTS);
+          rejectProfiles(new Error('401 after unmount'));
+        });
+
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+        errorSpy.mockRestore();
       }
     });
   });

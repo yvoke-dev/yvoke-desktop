@@ -32,6 +32,7 @@ const h = vi.hoisted(() => ({
       ) => Promise<void> | void)
     | null,
   setModelImpl: null as ((model: string) => Promise<void>) | null,
+  onQueryCreate: null as (() => void) | null,
 }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
@@ -59,6 +60,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
     };
     h.sessions.push(session);
     const id = h.sessions.length;
+    h.onQueryCreate?.();
 
     const outbox: Array<{ ok: true; value: unknown } | { ok: false; err: Error }> = [];
     let waiting: {
@@ -223,6 +225,7 @@ describe('AgentService playbookVersion stamping', () => {
     h.sessions.length = 0;
     h.turnHandler = null;
     h.setModelImpl = null;
+    h.onQueryCreate = null;
     events = [];
     persistedTurns = [];
     sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-ver-test-'));
@@ -356,6 +359,7 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     h.sessions.length = 0;
     h.turnHandler = null;
     h.setModelImpl = null;
+    h.onQueryCreate = null;
     events = [];
     sandboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-auth-turn-'));
   });
@@ -1545,5 +1549,120 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     await t1Turn2;
     await waitForEvent('turn-complete', 5);
     svc.closeAll();
+  });
+
+  it('attributes pre-start closeThread() errors (post-await and post-query) to Claude without serverAuthRequired while preserving Yvoke Backend attribution for real ensureSession() failures', async () => {
+    const entraSettings = (): AppSettings => ({ ...settings(), serverAuthMode: 'entra' });
+
+    // 1. L921 path: closeThread() during async ensureSession() in entra mode
+    events = [];
+    const meta1 = makeThread({ id: 'thread-close-post-await', initialPlaybook: 'oim-full' });
+    let releaseHeaders!: () => void;
+    let enteredHeaders!: () => void;
+    const headersEntered = new Promise<void>((r) => {
+      enteredHeaders = r;
+    });
+    const svc1 = createService(meta1, {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: () =>
+          new Promise<Record<string, string>>((resolve) => {
+            enteredHeaders();
+            releaseHeaders = () => resolve({});
+          }),
+      } as never,
+    });
+    const sessionsBefore1 = h.sessions.length;
+    const p1 = svc1.sendMessage(meta1, 'Close mid-await', { playbook: 'oim-full' });
+    await headersEntered;
+    svc1.closeThread(meta1.id);
+    releaseHeaders();
+
+    await expect(p1).rejects.toThrow('Conversation session closed before turn could start.');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: meta1.id,
+      message: 'Claude: Conversation session closed before turn could start.',
+      authRequired: false,
+    });
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    expect(svc1.isBusy(meta1.id)).toBe(false);
+    expect((svc1 as any).sessions.has(meta1.id)).toBe(false);
+    expect(h.sessions.length).toBe(sessionsBefore1);
+    svc1.closeAll();
+
+    // 2. L955 path: closeThread() synchronously during query() creation in entra mode
+    events = [];
+    const meta2 = makeThread({ id: 'thread-close-post-query', initialPlaybook: 'oim-full' });
+    const svc2 = createService(meta2, { getSettings: entraSettings });
+    h.onQueryCreate = () => {
+      h.onQueryCreate = null;
+      svc2.closeThread(meta2.id);
+    };
+
+    await expect(svc2.sendMessage(meta2, 'Close during query()', { playbook: 'oim-full' })).rejects.toThrow(
+      'Conversation session closed before turn could start.',
+    );
+    const createdQuery = h.sessions[h.sessions.length - 1];
+    expect(createdQuery.closeSpy).toHaveBeenCalledTimes(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: meta2.id,
+      message: 'Claude: Conversation session closed before turn could start.',
+      authRequired: false,
+    });
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    expect(svc2.isBusy(meta2.id)).toBe(false);
+    expect((svc2 as any).sessions.has(meta2.id)).toBe(false);
+    svc2.closeAll();
+
+    // 3. Negative non-shadowing: genuine ensureSession() ServerAuthRequiredError & Yvoke Backend errors in entra mode
+    events = [];
+    const meta3 = makeThread({ id: 'thread-genuine-server-auth', initialPlaybook: 'oim-full' });
+    const svc3 = createService(meta3, {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthRequiredError();
+        },
+      } as never,
+    });
+    await expect(svc3.sendMessage(meta3, 'Needs Entra sign-in', { playbook: 'oim-full' })).rejects.toBeInstanceOf(
+      ServerAuthRequiredError,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: meta3.id,
+      message: 'Entra: Authentication session expired or invalid. Please sign in again.',
+      authRequired: false,
+      serverAuthRequired: true,
+    });
+    svc3.closeAll();
+
+    events = [];
+    const meta4 = makeThread({ id: 'thread-genuine-backend-err', initialPlaybook: 'oim-full' });
+    const svc4 = createService(meta4, {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new Error('Gateway 502 Bad Gateway');
+        },
+      } as never,
+    });
+    await expect(svc4.sendMessage(meta4, 'Backend 502', { playbook: 'oim-full' })).rejects.toThrow(
+      'Gateway 502 Bad Gateway',
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: meta4.id,
+      message: 'Yvoke Backend: Gateway 502 Bad Gateway',
+      authRequired: false,
+    });
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svc4.closeAll();
   });
 });

@@ -88,6 +88,14 @@ export const MCP_UPDATE_TIMEOUT_MS = 10_000;
 /** Expected model response token during Claude credential verification. */
 const PROBE_TOKEN = 'pong';
 
+class SessionClosedBeforeStartError extends Error {
+  constructor() {
+    super('Conversation session closed before turn could start.');
+    this.name = 'SessionClosedBeforeStartError';
+    Object.setPrototypeOf(this, SessionClosedBeforeStartError.prototype);
+  }
+}
+
 let cachedClaudeBinary: string | null | undefined;
 
 /**
@@ -345,6 +353,16 @@ export class AgentService {
       try {
         session = await this.ensureSession(thread, opts.playbook);
       } catch (error) {
+        if (error instanceof SessionClosedBeforeStartError) {
+          logError('agent', `turn failed before start thread=${thread.id}:`, error.message);
+          this.deps.emit({
+            kind: 'error',
+            threadId: thread.id,
+            message: tagAttributedError('Claude', error),
+            authRequired: false,
+          });
+          throw error;
+        }
         const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
         const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
           error,
@@ -412,7 +430,7 @@ export class AgentService {
         session.queue.close();
         session.query.close();
         session.activeReviewerQuery?.close();
-        const closedErr = new Error('Conversation session closed before turn could start.');
+        const closedErr = new SessionClosedBeforeStartError();
         logError('agent', `turn failed before start thread=${thread.id}:`, closedErr.message);
         this.deps.emit({
           kind: 'error',
@@ -918,7 +936,7 @@ export class AgentService {
 
     if ((this.closeGenerations.get(thread.id) ?? 0) !== coldStartGen) {
       queue.close();
-      throw new Error('Conversation session closed before turn could start.');
+      throw new SessionClosedBeforeStartError();
     }
 
     log(
@@ -952,13 +970,7 @@ export class AgentService {
     if ((this.closeGenerations.get(thread.id) ?? 0) !== coldStartGen) {
       queue.close();
       q.close();
-      throw new Error('Conversation session closed before turn could start.');
-    }
-    const prev = this.sessions.get(thread.id);
-    if (prev && prev !== session) {
-      prev.queue.close();
-      prev.query.close();
-      prev.activeReviewerQuery?.close();
+      throw new SessionClosedBeforeStartError();
     }
     this.sessions.set(thread.id, session);
     return session;
