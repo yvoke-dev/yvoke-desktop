@@ -155,7 +155,7 @@ describe('clarifying question card styles', () => {
 });
 
 describe('thread list row styles', () => {
-  it('lays out .thread-header, .thread-title, .model-badge, .thread-delete, .thread-meta, and .sync-dot with single-line truncation and zero !important', () => {
+  it('lays out .thread-header, .thread-title, .thread-delete, .thread-meta, and .sync-dot with single-line truncation and zero !important, and omits .model-badge', () => {
     const threadItem = CSS.match(/\.thread-item\s*\{[^}]*\}/)?.[0];
     expect(threadItem).toBeDefined();
     expect(threadItem).not.toContain('gap: 8px');
@@ -174,14 +174,7 @@ describe('thread list row styles', () => {
     expect(threadTitle).toContain('text-overflow: ellipsis');
     expect(threadTitle).not.toContain('!important');
 
-    const modelBadge = CSS.match(/\.model-badge\s*\{[^}]*\}/)?.[0];
-    expect(modelBadge).toBeDefined();
-    expect(modelBadge).toMatch(/max-width:\s*\d+px/);
-    expect(modelBadge).toContain('white-space: nowrap');
-    expect(modelBadge).toContain('overflow: hidden');
-    expect(modelBadge).toContain('text-overflow: ellipsis');
-    expect(modelBadge).not.toContain('margin-top: 1px');
-    expect(modelBadge).not.toContain('!important');
+    expect(CSS).not.toMatch(/\.model-badge\b/);
 
     const threadDelete = CSS.match(/\.thread-item\s+\.thread-delete\s*\{[^}]*\}/)?.[0];
     expect(threadDelete).toBeDefined();

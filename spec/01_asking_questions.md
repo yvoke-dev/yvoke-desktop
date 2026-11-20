@@ -141,8 +141,10 @@ behind it, and the work that produced it can be opened and read.
   opens pre-filled with whatever was said last time.
 - **An answer cannot be rated until it has synced**, because feedback is stored against the server's
   id for that message. Until then it is refused with a message asking the user to try again shortly.
-- **The sidebar's model badge only appears when it differs** from the default model, and the
-  multi-agent marker only when a profile is selected — a row that matches the norm says nothing.
+- **Each sidebar conversation row shows only its title and last-activity timestamp** (plus a subtle
+  sync indicator when unsynced or failed, and a matching excerpt while searching). The
+  conversation's agent mode — and model in single-agent mode — remain visible in the composer once
+  opened.
 - **Creating and deleting both need the server, and a failure is silent.** *New conversation* pressed
   while signed out or offline does nothing at all: no row, no banner, no message. A delete whose
   server call fails behaves the same way, leaving the conversation in place.

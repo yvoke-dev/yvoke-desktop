@@ -120,8 +120,6 @@ export function ThreadList(props: {
   appVersion: string;
   activeThreadId: string | null;
   auth: AuthStatus | null;
-  /** Rows only show a model badge when they deviate from this. */
-  defaultModel: string;
   settingsOpen: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
@@ -136,7 +134,6 @@ export function ThreadList(props: {
     appVersion,
     activeThreadId,
     auth,
-    defaultModel,
     settingsOpen,
     searchContent,
     onOpen,
@@ -289,12 +286,6 @@ export function ThreadList(props: {
                         <div className="thread-title" data-tip={thread.title}>
                           {thread.title}
                         </div>
-                        {/* The model is the same on nearly every row — it only earns space when it isn't. */}
-                        {thread.model && thread.model !== defaultModel && (
-                          <span className="model-badge" data-tip={`Model: ${thread.model}`}>
-                            {thread.model}
-                          </span>
-                        )}
                         <button
                           type="button"
                           className="icon-button thread-delete"
@@ -318,7 +309,6 @@ export function ThreadList(props: {
                       )}
                       <div className="thread-meta">
                         <span>{time}</span>
-                        {thread.orchestratorProfile && <span>· multi-agent</span>}
                         {thread.syncState !== 'synced' && (
                           <span
                             className={`sync-dot ${thread.syncState}`}

@@ -1163,7 +1163,6 @@ export default function App(): React.JSX.Element {
         threads={threads}
         appVersion={appVersion}
         activeThreadId={activeThreadId}
-        defaultModel={settings.defaultModel}
         settingsOpen={showSettings}
         searchContent={searchContent}
         onOpen={(id) => {

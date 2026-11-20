@@ -33,7 +33,6 @@ function renderList(
       appVersion="1.0.1"
       activeThreadId={null}
       auth={null}
-      defaultModel="sonnet"
       settingsOpen={false}
       searchContent={searchContent}
       onOpen={() => undefined}
@@ -172,7 +171,6 @@ describe('ThreadList grouping', () => {
         appVersion="1.0.1"
         activeThreadId={null}
         auth={null}
-        defaultModel="sonnet"
         settingsOpen={false}
         onOpen={() => undefined}
         onCreate={() => undefined}
@@ -215,7 +213,6 @@ describe('ThreadList account footer', () => {
         appVersion="1.3.1"
         activeThreadId={null}
         auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
-        defaultModel="sonnet"
         settingsOpen={false}
         onOpen={() => undefined}
         onCreate={() => undefined}
@@ -259,7 +256,6 @@ describe('ThreadList account footer', () => {
         appVersion="1.3.1"
         activeThreadId={null}
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        defaultModel="sonnet"
         settingsOpen={false}
         onOpen={() => undefined}
         onCreate={() => undefined}
@@ -285,7 +281,6 @@ describe('ThreadList account footer', () => {
           claudeAccount: 'claude@corp.com',
           server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
         }}
-        defaultModel="sonnet"
         settingsOpen={false}
         onOpen={() => undefined}
         onCreate={() => undefined}
@@ -309,61 +304,100 @@ describe('ThreadList account footer', () => {
 });
 
 describe('ThreadList row layout', () => {
-  it('wraps title, non-default model badge, and delete button in .thread-header inside .thread-content above .thread-snippet and .thread-meta', async () => {
-    const nonDefaultRow: ThreadMeta = {
-      ...thread('opus-1', 'Very long conversation title about multi-agent architecture'),
+  it('renders only title, delete button, and timestamp for a synced row even with non-default model and orchestratorProfile, with zero inline styles', () => {
+    const syncedRow: ThreadMeta = {
+      ...thread('synced-1', 'Quarterly architecture review'),
       model: 'opus',
       orchestratorProfile: 'oim',
-      syncState: 'pending',
+      syncState: 'synced',
     };
-    const searchContent = vi.fn(async (): Promise<ThreadSearchHit[]> => [
-      {
-        threadId: 'opus-1',
-        matches: 1,
-        messageLocalId: 'm1',
-        role: 'assistant',
-        snippet: '…multi-agent sync policy keeps metadata on one line…',
-      },
-    ]);
 
-    const { container } = renderList(searchContent, [nonDefaultRow]);
-    search('metadata');
-    await waitFor(() => expect(container.querySelector('.thread-snippet')).toBeTruthy());
+    const { container } = renderList(undefined, [syncedRow]);
 
     const item = container.querySelector('.thread-item') as HTMLElement;
     expect(item).not.toBeNull();
-    // .thread-content is the sole direct child of .thread-item (no direct .model-badge or .thread-delete)
     expect(Array.from(item.children).map((el) => el.className)).toEqual(['thread-content']);
-    expect(item.querySelector(':scope > .model-badge')).toBeNull();
-    expect(item.querySelector(':scope > .thread-delete')).toBeNull();
 
     const content = item.querySelector('.thread-content') as HTMLElement;
     expect(Array.from(content.children).map((el) => el.className)).toEqual([
       'thread-header',
-      'thread-snippet',
       'thread-meta',
     ]);
 
     const header = content.querySelector('.thread-header') as HTMLElement;
-    expect(header.querySelector(':scope > .thread-title')?.textContent).toBe(nonDefaultRow.title);
-    expect(header.querySelector(':scope > .model-badge')?.textContent).toBe('opus');
-    expect(header.querySelector(':scope > .thread-delete')).not.toBeNull();
+    expect(Array.from(header.children).map((el) => el.className)).toEqual([
+      'thread-title',
+      'icon-button thread-delete',
+    ]);
+    expect(header.children).toHaveLength(2);
+    expect(header.querySelector('.thread-title')?.textContent).toBe(syncedRow.title);
+    expect(container.querySelectorAll('.model-badge')).toHaveLength(0);
 
     const meta = content.querySelector('.thread-meta') as HTMLElement;
-    expect(meta.textContent).toContain('· multi-agent');
-    expect(meta.querySelector('.sync-dot.pending')).not.toBeNull();
-  });
+    expect(meta.children).toHaveLength(1);
+    expect(meta.children[0].tagName).toBe('SPAN');
+    expect(meta.children[0].textContent?.trim().length).toBeGreaterThan(0);
+    expect(meta.querySelector('.sync-dot')).toBeNull();
+    expect(meta.textContent).not.toContain('multi-agent');
 
-  it('omits .model-badge inside .thread-header when thread.model equals defaultModel and renders zero inline styles', () => {
-    const { container } = renderList(undefined, [thread('default-1', 'Default model conversation')]);
-
-    const header = container.querySelector('.thread-content > .thread-header') as HTMLElement;
-    expect(header).not.toBeNull();
-    expect(header.querySelector(':scope > .thread-title')?.textContent).toBe('Default model conversation');
-    expect(header.querySelector(':scope > .model-badge')).toBeNull();
-    expect(header.querySelector(':scope > .thread-delete')).not.toBeNull();
+    expect(item.textContent?.toLowerCase()).not.toContain('opus');
+    expect(item.textContent?.toLowerCase()).not.toContain('multi-agent');
     expect(container.querySelectorAll('[style]')).toHaveLength(0);
   });
+
+  it.each(['pending', 'error'] as const)(
+    'shows snippet and %s .sync-dot while omitting .model-badge and multi-agent marker during search',
+    async (syncState) => {
+      const unsyncedRow: ThreadMeta = {
+        ...thread(`unsynced-${syncState}`, 'Database migration notes'),
+        model: 'opus',
+        orchestratorProfile: 'oim',
+        syncState,
+      };
+      const searchContent = vi.fn(async (): Promise<ThreadSearchHit[]> => [
+        {
+          threadId: unsyncedRow.id,
+          matches: 1,
+          messageLocalId: 'm1',
+          role: 'assistant',
+          snippet: '…backup retention schedule keeps snapshots for ninety days…',
+        },
+      ]);
+
+      const { container } = renderList(searchContent, [unsyncedRow]);
+      search('snapshots');
+      await waitFor(() => expect(container.querySelector('.thread-snippet')).toBeTruthy());
+
+      const item = container.querySelector('.thread-item') as HTMLElement;
+      expect(item).not.toBeNull();
+      expect(Array.from(item.children).map((el) => el.className)).toEqual(['thread-content']);
+
+      const content = item.querySelector('.thread-content') as HTMLElement;
+      expect(Array.from(content.children).map((el) => el.className)).toEqual([
+        'thread-header',
+        'thread-snippet',
+        'thread-meta',
+      ]);
+
+      const header = content.querySelector('.thread-header') as HTMLElement;
+      expect(Array.from(header.children).map((el) => el.className)).toEqual([
+        'thread-title',
+        'icon-button thread-delete',
+      ]);
+      expect(header.querySelector('.thread-title')?.textContent).toBe(unsyncedRow.title);
+      expect(container.querySelectorAll('.model-badge')).toHaveLength(0);
+
+      const meta = content.querySelector('.thread-meta') as HTMLElement;
+      expect(meta.children).toHaveLength(2);
+      expect(meta.children[0].tagName).toBe('SPAN');
+      expect(meta.children[0].textContent?.trim().length).toBeGreaterThan(0);
+      expect(meta.children[1].className).toBe(`sync-dot ${syncState}`);
+      expect(meta.querySelector(`.sync-dot.${syncState}`)).not.toBeNull();
+      expect(meta.textContent).not.toContain('multi-agent');
+      expect(item.textContent?.toLowerCase()).not.toContain('opus');
+      expect(item.textContent?.toLowerCase()).not.toContain('multi-agent');
+    },
+  );
 
   it('stops click propagation on .thread-delete inside .thread-header for both cancelled and confirmed deletes', () => {
     const onOpen = vi.fn();
@@ -377,7 +411,6 @@ describe('ThreadList row layout', () => {
           appVersion="1.3.1"
           activeThreadId={null}
           auth={null}
-          defaultModel="sonnet"
           settingsOpen={false}
           onOpen={onOpen}
           onCreate={() => undefined}
@@ -416,7 +449,6 @@ describe('ThreadList row layout', () => {
         appVersion="1.3.1"
         activeThreadId={null}
         auth={null}
-        defaultModel="sonnet"
         settingsOpen={false}
         onOpen={onOpen}
         onCreate={() => undefined}

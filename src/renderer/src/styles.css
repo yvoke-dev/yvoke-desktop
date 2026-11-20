@@ -538,24 +538,6 @@ h6 {
   text-overflow: ellipsis;
 }
 
-/* The model is a constant for almost every row; showing it always was the "sonnet nine times"
-   finding. It only earns space when the thread deviates from the default. */
-.model-badge {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  border: 1px solid var(--line);
-  color: var(--text-dim);
-  padding: 1px 4px;
-  line-height: 1.2;
-  max-width: 80px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 0 0 auto;
-}
-
 .thread-item .thread-delete {
   flex: 0 0 auto;
   visibility: hidden;

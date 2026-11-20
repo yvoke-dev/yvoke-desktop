@@ -663,5 +663,35 @@ describe('spec/ modular structure', () => {
       ).not.toMatch(bannedCorporateAuthIdentifiers);
     }
   });
+
+  it('documents minimalist sidebar conversation rows without model badge or multi-agent marker contradictions or implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+
+    expect(askingQuestions).toContain(
+      'Each sidebar conversation row shows only its title and last-activity timestamp',
+    );
+    expect(askingQuestions).toContain(
+      "The conversation's agent mode — and model in single-agent mode — remain visible in the composer once opened.",
+    );
+
+    const allChapters = chapterFiles();
+    for (const chapter of allChapters) {
+      const text = norm(chapter.content);
+      expect(text, `stale sidebar model badge statement in ${chapter.filename}`).not.toContain(
+        "The sidebar's model badge",
+      );
+      expect(text, `stale sidebar multi-agent marker statement in ${chapter.filename}`).not.toContain(
+        'multi-agent marker',
+      );
+    }
+
+    expect(
+      askingQuestions,
+      '01_asking_questions.md must remain pure functional specification prose without sidebar row implementation identifiers',
+    ).not.toMatch(
+      /\b(defaultModel|orchestratorProfile|syncState)\b|model-badge|thread-header|thread-meta|thread-snippet|sync-dot/,
+    );
+  });
 });
 
