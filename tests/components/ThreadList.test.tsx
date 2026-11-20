@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ThreadList } from '../../src/renderer/src/components/ThreadList';
 import type { ThreadMeta, ThreadSearchHit } from '../../src/shared/types';
 
@@ -252,8 +252,7 @@ describe('ThreadList account footer', () => {
     expect(onOpenAccounts).toHaveBeenCalledTimes(1);
   });
 
-  it('shows warning status dots when Entra or Claude needs sign-in, and renders Sign out of Yvoke button disabled during signingOut or serverSigningIn', () => {
-    const onSignOut = vi.fn();
+  it('shows warning/ok status dots and Entra account email, and renders only the Settings action button with zero sign-out buttons in the footer', () => {
     const { container, rerender } = render(
       <ThreadList
         threads={threads}
@@ -267,22 +266,25 @@ describe('ThreadList account footer', () => {
         onDelete={() => undefined}
         onOpenSettings={() => undefined}
         onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
       />,
     );
 
-    const warnDots = container.querySelectorAll('.account-status-dot.is-warn');
-    expect(warnDots).toHaveLength(2);
-    // Not signed in -> no Sign out button
-    expect(screen.queryByRole('button', { name: 'Sign out of Yvoke' })).toBeNull();
+    const footer = container.querySelector('.thread-list-footer') as HTMLElement;
+    expect(footer).not.toBeNull();
+    expect(container.querySelectorAll('.account-status-dot.is-warn')).toHaveLength(2);
+    expect(within(footer).queryByRole('button', { name: /sign out/i })).toBeNull();
 
-    // Signed in Entra -> shows Sign out of Yvoke with matching tooltip & aria-label
+    // Signed in to both Entra and Claude -> ok status dots, account email shown, still zero sign-out buttons
     rerender(
       <ThreadList
         threads={threads}
         appVersion="1.3.1"
         activeThreadId={null}
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        auth={{
+          claude: 'ok',
+          claudeAccount: 'claude@corp.com',
+          server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+        }}
         defaultModel="sonnet"
         settingsOpen={false}
         onOpen={() => undefined}
@@ -290,102 +292,155 @@ describe('ThreadList account footer', () => {
         onDelete={() => undefined}
         onOpenSettings={() => undefined}
         onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
       />,
     );
 
-    const signOutBtn = screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement;
-    expect(signOutBtn.getAttribute('data-tip')).toBe('Sign out of Yvoke');
-    expect(signOutBtn.disabled).toBe(false);
-    fireEvent.click(signOutBtn);
-    expect(onSignOut).toHaveBeenCalledTimes(1);
+    expect(container.querySelectorAll('.account-status-dot.is-ok')).toHaveLength(2);
+    expect(container.querySelectorAll('.account-status-dot.is-warn')).toHaveLength(0);
+    expect(footer.textContent).toContain('alice@corp.com');
+    expect(footer.textContent).toContain('claude@corp.com');
+    expect(within(footer).queryByRole('button', { name: /sign out/i })).toBeNull();
+    expect(container.querySelector('[data-tip="Sign out of Yvoke"]')).toBeNull();
 
-    // Disabled when signingOut is true
-    rerender(
+    const footerActionButtons = container.querySelectorAll('.footer-actions button');
+    expect(footerActionButtons).toHaveLength(1);
+    expect(footerActionButtons[0].getAttribute('aria-label')).toBe('Settings');
+  });
+});
+
+describe('ThreadList row layout', () => {
+  it('wraps title, non-default model badge, and delete button in .thread-header inside .thread-content above .thread-snippet and .thread-meta', async () => {
+    const nonDefaultRow: ThreadMeta = {
+      ...thread('opus-1', 'Very long conversation title about multi-agent architecture'),
+      model: 'opus',
+      orchestratorProfile: 'oim',
+      syncState: 'pending',
+    };
+    const searchContent = vi.fn(async (): Promise<ThreadSearchHit[]> => [
+      {
+        threadId: 'opus-1',
+        matches: 1,
+        messageLocalId: 'm1',
+        role: 'assistant',
+        snippet: '…multi-agent sync policy keeps metadata on one line…',
+      },
+    ]);
+
+    const { container } = renderList(searchContent, [nonDefaultRow]);
+    search('metadata');
+    await waitFor(() => expect(container.querySelector('.thread-snippet')).toBeTruthy());
+
+    const item = container.querySelector('.thread-item') as HTMLElement;
+    expect(item).not.toBeNull();
+    // .thread-content is the sole direct child of .thread-item (no direct .model-badge or .thread-delete)
+    expect(Array.from(item.children).map((el) => el.className)).toEqual(['thread-content']);
+    expect(item.querySelector(':scope > .model-badge')).toBeNull();
+    expect(item.querySelector(':scope > .thread-delete')).toBeNull();
+
+    const content = item.querySelector('.thread-content') as HTMLElement;
+    expect(Array.from(content.children).map((el) => el.className)).toEqual([
+      'thread-header',
+      'thread-snippet',
+      'thread-meta',
+    ]);
+
+    const header = content.querySelector('.thread-header') as HTMLElement;
+    expect(header.querySelector(':scope > .thread-title')?.textContent).toBe(nonDefaultRow.title);
+    expect(header.querySelector(':scope > .model-badge')?.textContent).toBe('opus');
+    expect(header.querySelector(':scope > .thread-delete')).not.toBeNull();
+
+    const meta = content.querySelector('.thread-meta') as HTMLElement;
+    expect(meta.textContent).toContain('· multi-agent');
+    expect(meta.querySelector('.sync-dot.pending')).not.toBeNull();
+  });
+
+  it('omits .model-badge inside .thread-header when thread.model equals defaultModel and renders zero inline styles', () => {
+    const { container } = renderList(undefined, [thread('default-1', 'Default model conversation')]);
+
+    const header = container.querySelector('.thread-content > .thread-header') as HTMLElement;
+    expect(header).not.toBeNull();
+    expect(header.querySelector(':scope > .thread-title')?.textContent).toBe('Default model conversation');
+    expect(header.querySelector(':scope > .model-badge')).toBeNull();
+    expect(header.querySelector(':scope > .thread-delete')).not.toBeNull();
+    expect(container.querySelectorAll('[style]')).toHaveLength(0);
+  });
+
+  it('stops click propagation on .thread-delete inside .thread-header for both cancelled and confirmed deletes', () => {
+    const onOpen = vi.fn();
+    const onDelete = vi.fn();
+    const confirmSpy = vi.spyOn(window, 'confirm');
+
+    try {
+      const { container } = render(
+        <ThreadList
+          threads={[thread('del-1', 'Conversation to delete')]}
+          appVersion="1.3.1"
+          activeThreadId={null}
+          auth={null}
+          defaultModel="sonnet"
+          settingsOpen={false}
+          onOpen={onOpen}
+          onCreate={() => undefined}
+          onDelete={onDelete}
+          onOpenSettings={() => undefined}
+        />,
+      );
+
+      const deleteBtn = container.querySelector(
+        '.thread-content > .thread-header > .thread-delete',
+      ) as HTMLButtonElement;
+      expect(deleteBtn).not.toBeNull();
+
+      // Cancelled confirm -> neither onDelete nor onOpen fires
+      confirmSpy.mockReturnValueOnce(false);
+      fireEvent.click(deleteBtn);
+      expect(onDelete).toHaveBeenCalledTimes(0);
+      expect(onOpen).toHaveBeenCalledTimes(0);
+
+      // Confirmed -> onDelete fires with thread id, onOpen never fires
+      confirmSpy.mockReturnValueOnce(true);
+      fireEvent.click(deleteBtn);
+      expect(onDelete).toHaveBeenCalledTimes(1);
+      expect(onDelete).toHaveBeenCalledWith('del-1');
+      expect(onOpen).toHaveBeenCalledTimes(0);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('gives .thread-delete type="button" and aria-label="Delete conversation" and prevents Enter/Space keyDown on it from invoking onOpen while keeping .thread-item keyboard activation intact', () => {
+    const onOpen = vi.fn();
+    const { container } = render(
       <ThreadList
-        threads={threads}
+        threads={[thread('kbd-1', 'Keyboard accessible row')]}
         appVersion="1.3.1"
         activeThreadId={null}
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        auth={null}
         defaultModel="sonnet"
         settingsOpen={false}
-        signingOut={true}
-        onOpen={() => undefined}
+        onOpen={onOpen}
         onCreate={() => undefined}
         onDelete={() => undefined}
         onOpenSettings={() => undefined}
-        onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
       />,
-    );
-    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
-      true,
     );
 
-    // Disabled when serverSigningIn is true
-    rerender(
-      <ThreadList
-        threads={threads}
-        appVersion="1.3.1"
-        activeThreadId={null}
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
-        defaultModel="sonnet"
-        settingsOpen={false}
-        serverSigningIn={true}
-        onOpen={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-        onOpenSettings={() => undefined}
-        onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
-      />,
-    );
-    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    const deleteBtn = screen.getByRole('button', {
+      name: 'Delete conversation',
+    }) as HTMLButtonElement;
+    expect(deleteBtn.getAttribute('type')).toBe('button');
+    expect(deleteBtn.getAttribute('aria-label')).toBe('Delete conversation');
 
-    // Disabled when claudeSigningOut is true
-    rerender(
-      <ThreadList
-        threads={threads}
-        appVersion="1.3.1"
-        activeThreadId={null}
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
-        defaultModel="sonnet"
-        settingsOpen={false}
-        claudeSigningOut={true}
-        onOpen={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-        onOpenSettings={() => undefined}
-        onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
-      />,
-    );
-    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    fireEvent.keyDown(deleteBtn, { key: 'Enter' });
+    fireEvent.keyDown(deleteBtn, { key: ' ' });
+    expect(onOpen).toHaveBeenCalledTimes(0);
 
-    // Disabled when claudeSigningIn is true
-    rerender(
-      <ThreadList
-        threads={threads}
-        appVersion="1.3.1"
-        activeThreadId={null}
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
-        defaultModel="sonnet"
-        settingsOpen={false}
-        claudeSigningIn={true}
-        onOpen={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-        onOpenSettings={() => undefined}
-        onOpenAccounts={() => undefined}
-        onSignOut={onSignOut}
-      />,
-    );
-    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    // Pressing Enter / Space directly on the row itself still opens the conversation
+    const row = container.querySelector('.thread-item') as HTMLElement;
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    expect(onOpen).toHaveBeenNthCalledWith(1, 'kbd-1');
+    expect(onOpen).toHaveBeenNthCalledWith(2, 'kbd-1');
   });
 });

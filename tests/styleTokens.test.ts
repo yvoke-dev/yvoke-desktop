@@ -154,3 +154,59 @@ describe('clarifying question card styles', () => {
   });
 });
 
+describe('thread list row styles', () => {
+  it('lays out .thread-header, .thread-title, .model-badge, .thread-delete, .thread-meta, and .sync-dot with single-line truncation and zero !important', () => {
+    const threadItem = CSS.match(/\.thread-item\s*\{[^}]*\}/)?.[0];
+    expect(threadItem).toBeDefined();
+    expect(threadItem).not.toContain('gap: 8px');
+
+    const threadHeader = CSS.match(/\.thread-header\s*\{[^}]*\}/)?.[0];
+    expect(threadHeader).toBeDefined();
+    expect(threadHeader).toContain('display: flex');
+    expect(threadHeader).toContain('align-items: center');
+    expect(threadHeader).toContain('min-width: 0');
+    expect(threadHeader).not.toContain('!important');
+
+    const threadTitle = CSS.match(/\.thread-title\s*\{[^}]*\}/)?.[0];
+    expect(threadTitle).toBeDefined();
+    expect(threadTitle).toContain('flex: 1');
+    expect(threadTitle).toContain('min-width: 0');
+    expect(threadTitle).toContain('text-overflow: ellipsis');
+    expect(threadTitle).not.toContain('!important');
+
+    const modelBadge = CSS.match(/\.model-badge\s*\{[^}]*\}/)?.[0];
+    expect(modelBadge).toBeDefined();
+    expect(modelBadge).toMatch(/max-width:\s*\d+px/);
+    expect(modelBadge).toContain('white-space: nowrap');
+    expect(modelBadge).toContain('overflow: hidden');
+    expect(modelBadge).toContain('text-overflow: ellipsis');
+    expect(modelBadge).not.toContain('margin-top: 1px');
+    expect(modelBadge).not.toContain('!important');
+
+    const threadDelete = CSS.match(/\.thread-item\s+\.thread-delete\s*\{[^}]*\}/)?.[0];
+    expect(threadDelete).toBeDefined();
+    expect(threadDelete).toContain('padding: 2px');
+    expect(threadDelete).not.toContain('margin-top: 1px');
+    expect(threadDelete).not.toContain('!important');
+
+    const threadMeta = CSS.match(/\.thread-meta\s*\{[^}]*\}/)?.[0];
+    expect(threadMeta).toBeDefined();
+    expect(threadMeta).toContain('white-space: nowrap');
+    expect(threadMeta).toContain('overflow: hidden');
+    expect(threadMeta).toContain('min-width: 0');
+    expect(threadMeta).not.toContain('!important');
+
+    const threadMetaSpan = CSS.match(/\.thread-meta\s*>\s*span:not\(\.sync-dot\)\s*\{[^}]*\}/)?.[0];
+    expect(threadMetaSpan).toBeDefined();
+    expect(threadMetaSpan).toContain('min-width: 0');
+    expect(threadMetaSpan).toContain('overflow: hidden');
+    expect(threadMetaSpan).toContain('text-overflow: ellipsis');
+    expect(threadMetaSpan).not.toContain('!important');
+
+    const syncDot = CSS.match(/\.sync-dot\s*\{[^}]*\}/)?.[0];
+    expect(syncDot).toBeDefined();
+    expect(syncDot).toContain('flex: 0 0 auto');
+    expect(syncDot).not.toContain('!important');
+  });
+});
+

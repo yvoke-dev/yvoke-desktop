@@ -1165,10 +1165,6 @@ export default function App(): React.JSX.Element {
         activeThreadId={activeThreadId}
         defaultModel={settings.defaultModel}
         settingsOpen={showSettings}
-        signingOut={signingOut}
-        claudeSigningOut={claudeSigningOut}
-        serverSigningIn={serverSignIn.signingIn}
-        claudeSigningIn={claudeSignIn.signingIn}
         searchContent={searchContent}
         onOpen={(id) => {
           closeSettings();
@@ -1181,7 +1177,6 @@ export default function App(): React.JSX.Element {
         onDelete={(id) => void deleteThread(id)}
         onOpenSettings={() => openSettings()}
         onOpenAccounts={() => openSettings('Accounts')}
-        onSignOut={() => void handleSignOut()}
         auth={auth}
       />
       <main className="main-pane">

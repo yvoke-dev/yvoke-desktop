@@ -454,7 +454,6 @@ h6 {
 .thread-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
   width: 100%;
   text-align: left;
   padding: var(--row-pad-y) var(--pane-pad) var(--row-pad-y) 17px;
@@ -481,7 +480,16 @@ h6 {
   min-width: 0;
 }
 
+.thread-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
 .thread-title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   line-height: 1.3;
@@ -516,9 +524,18 @@ h6 {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
   color: var(--text-dim);
   font-size: 11px;
   margin-top: 2px;
+}
+
+.thread-meta > span:not(.sync-dot) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* The model is a constant for almost every row; showing it always was the "sonnet nine times"
@@ -531,7 +548,11 @@ h6 {
   border: 1px solid var(--line);
   color: var(--text-dim);
   padding: 1px 4px;
-  margin-top: 1px;
+  line-height: 1.2;
+  max-width: 80px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   flex: 0 0 auto;
 }
 
@@ -541,8 +562,8 @@ h6 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 2px;
   color: var(--danger-ink);
-  margin-top: 1px;
 }
 
 .thread-item:hover .thread-delete,
@@ -556,6 +577,7 @@ h6 {
 }
 
 .sync-dot {
+  flex: 0 0 auto;
   line-height: 1;
 }
 
@@ -684,8 +706,8 @@ h6 {
   flex: 0 0 auto;
 }
 
-/* The footer's two actions carry the accent rather than the neutral icon-button grey: they are
-   the only always-present controls in the sidebar, and at this size a dim outline disappears. */
+/* The footer's Settings button carries the accent rather than the neutral icon-button grey: it is
+   the only always-present icon control in the sidebar, and at this size a dim outline disappears. */
 .footer-actions .icon-button {
   color: var(--accent-ink);
 }

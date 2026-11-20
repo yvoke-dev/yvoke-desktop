@@ -4,7 +4,6 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
-  LogOutIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -124,10 +123,6 @@ export function ThreadList(props: {
   /** Rows only show a model badge when they deviate from this. */
   defaultModel: string;
   settingsOpen: boolean;
-  signingOut?: boolean;
-  claudeSigningOut?: boolean;
-  serverSigningIn?: boolean;
-  claudeSigningIn?: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
   onOpen: (threadId: string) => void;
@@ -135,7 +130,6 @@ export function ThreadList(props: {
   onDelete: (threadId: string) => void;
   onOpenSettings: () => void;
   onOpenAccounts?: () => void;
-  onSignOut?: () => void;
 }): React.JSX.Element {
   const {
     threads,
@@ -144,17 +138,12 @@ export function ThreadList(props: {
     auth,
     defaultModel,
     settingsOpen,
-    signingOut = false,
-    claudeSigningOut = false,
-    serverSigningIn = false,
-    claudeSigningIn = false,
     searchContent,
     onOpen,
     onCreate,
     onDelete,
     onOpenSettings,
     onOpenAccounts,
-    onSignOut,
   } = props;
   const [query, setQuery] = useState('');
   /** Content matches for `hitsQuery`; titles filter instantly below, without waiting for these. */
@@ -288,6 +277,7 @@ export function ThreadList(props: {
                     className={`thread-item ${thread.id === activeThreadId && !settingsOpen ? 'active' : ''}`}
                     onClick={() => onOpen(thread.id)}
                     onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         onOpen(thread.id);
@@ -295,8 +285,31 @@ export function ThreadList(props: {
                     }}
                   >
                     <div className="thread-content">
-                      <div className="thread-title" data-tip={thread.title}>
-                        {thread.title}
+                      <div className="thread-header">
+                        <div className="thread-title" data-tip={thread.title}>
+                          {thread.title}
+                        </div>
+                        {/* The model is the same on nearly every row — it only earns space when it isn't. */}
+                        {thread.model && thread.model !== defaultModel && (
+                          <span className="model-badge" data-tip={`Model: ${thread.model}`}>
+                            {thread.model}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="icon-button thread-delete"
+                          data-tip="Delete conversation"
+                          aria-label="Delete conversation"
+                          onKeyDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Delete "${thread.title}"? This removes it from the server too.`)) {
+                              onDelete(thread.id);
+                            }
+                          }}
+                        >
+                          <TrashIcon size={14} />
+                        </button>
                       </div>
                       {contentHits.get(thread.id) && (
                         <div className="thread-snippet" title={contentHits.get(thread.id)?.snippet}>
@@ -316,24 +329,6 @@ export function ThreadList(props: {
                         )}
                       </div>
                     </div>
-                    {/* The model is the same on nearly every row — it only earns space when it isn't. */}
-                    {thread.model && thread.model !== defaultModel && (
-                      <span className="model-badge" data-tip={`Model: ${thread.model}`}>
-                        {thread.model}
-                      </span>
-                    )}
-                    <button
-                      className="icon-button thread-delete"
-                      data-tip="Delete conversation"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (window.confirm(`Delete "${thread.title}"? This removes it from the server too.`)) {
-                          onDelete(thread.id);
-                        }
-                      }}
-                    >
-                      <TrashIcon size={14} />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -408,18 +403,6 @@ export function ThreadList(props: {
           )}
         </div>
         <div className="footer-actions">
-          {auth?.server.signedIn && auth.server.mode === 'entra' && onSignOut && (
-            <button
-              type="button"
-              className="icon-button"
-              data-tip="Sign out of Yvoke"
-              aria-label="Sign out of Yvoke"
-              disabled={signingOut || serverSigningIn || claudeSigningIn || claudeSigningOut}
-              onClick={onSignOut}
-            >
-              <LogOutIcon size={16} />
-            </button>
-          )}
           <button
             type="button"
             className="icon-button"

@@ -586,6 +586,9 @@ describe('spec/ modular structure', () => {
     expect(signingIn).toContain('Signed in');
     expect(signingIn).toContain('Not signed in');
     expect(signingIn).toContain('Sign out');
+    expect(signingIn).toContain(
+      'Available in *Settings → Accounts* when signed in with a corporate account.',
+    );
     expect(signingIn).toContain('Server unreachable');
     expect(signingIn).toContain('suppressed while corporate sign-in is required');
 
@@ -638,6 +641,9 @@ describe('spec/ modular structure', () => {
       );
       expect(text, `stale Claude Code detection label in ${chapter.filename}`).not.toContain(
         'Detected from Claude Code',
+      );
+      expect(text, `stale sidebar footer sign-out statement in ${chapter.filename}`).not.toContain(
+        'Available from the sidebar footer',
       );
     }
     expect(signingIn).not.toContain('About pane');

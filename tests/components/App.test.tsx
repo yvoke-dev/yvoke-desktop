@@ -2697,12 +2697,22 @@ describe('App conversation switching with in-progress turn', () => {
 
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       try {
-        render(<App />);
-        await waitFor(() =>
-          expect(screen.getByRole('button', { name: 'Sign out of Yvoke' })).toBeTruthy(),
-        );
+        const { container } = render(<App />);
+        await waitFor(() => expect(screen.getByText('alice@corp.com')).toBeTruthy());
 
-        const signOutBtn = screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement;
+        // Sidebar footer must never render a sign-out button (sign-out lives exclusively in Settings → Accounts)
+        const footer = container.querySelector('.thread-list-footer') as HTMLElement;
+        expect(footer).not.toBeNull();
+        expect(within(footer).queryByRole('button', { name: /sign out/i })).toBeNull();
+
+        // Open Settings → Accounts via sidebar footer account button
+        fireEvent.click(container.querySelector('button.footer-account-btn') as HTMLButtonElement);
+        await waitFor(() => expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy());
+        const accountsPane = container.querySelector('.settings-pane') as HTMLElement;
+
+        const signOutBtn = within(accountsPane).getByRole('button', {
+          name: 'Sign out of Yvoke',
+        }) as HTMLButtonElement;
         fireEvent.click(signOutBtn);
         expect(api.serverSignOut).toHaveBeenCalledTimes(1);
         expect(signOutBtn.disabled).toBe(true);
@@ -2717,11 +2727,12 @@ describe('App conversation switching with in-progress turn', () => {
         });
         await waitFor(() => expect(signOutBtn.disabled).toBe(false));
 
-        // Second attempt succeeds -> refreshes auth and shows Sign in to Yvoke banner
+        // Second attempt succeeds -> refreshes auth and shows Sign in to Yvoke in both banner and Accounts pane
         fireEvent.click(signOutBtn);
         await waitFor(() => {
           expect(api.serverSignOut).toHaveBeenCalledTimes(2);
-          expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+          expect(within(accountsPane).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+          expect(screen.getAllByRole('button', { name: 'Sign in to Yvoke' }).length).toBeGreaterThanOrEqual(2);
         });
       } finally {
         warnSpy.mockRestore();
@@ -2747,8 +2758,12 @@ describe('App conversation switching with in-progress turn', () => {
         signedIn = false;
       });
 
-      render(<App />);
+      const { container } = render(<App />);
       await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Sidebar footer must not expose a sign-out button even while signed into Entra
+      const footer = container.querySelector('.thread-list-footer') as HTMLElement;
+      expect(within(footer).queryByRole('button', { name: /sign out/i })).toBeNull();
 
       // Seed a serverAuthRequired turn error so Sign in to Yvoke banner appears even while signedIn is stale-true
       emitAgent({
@@ -2765,8 +2780,11 @@ describe('App conversation switching with in-progress turn', () => {
         expect(screen.getByRole('alert').textContent).toBe('Previous Entra browser failure'),
       );
 
-      // Click Sign out of Yvoke -> stale serverSignIn error must be cleared!
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out of Yvoke' }));
+      // Open Settings → Accounts and click Sign out of Yvoke -> stale serverSignIn error must be cleared!
+      fireEvent.click(container.querySelector('button.footer-account-btn') as HTMLButtonElement);
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy());
+      const accountsPane = container.querySelector('.settings-pane') as HTMLElement;
+      fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign out of Yvoke' }));
       await waitFor(() => expect(api.serverSignOut).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     });
