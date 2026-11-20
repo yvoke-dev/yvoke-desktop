@@ -10,6 +10,7 @@ import type {
   AuthStatus,
   ChatMessage,
   McpPromptInfo,
+  OrchestratorProfile,
   SyncEvent,
   ThreadMeta,
 } from '../../src/shared/types';
@@ -3761,11 +3762,19 @@ describe('App conversation switching with in-progress turn', () => {
       expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
     });
 
-    it('forces fresh catalogues in refreshServer() and prevents a slow stale mount fetch from clobbering post-auth prompts via cataloguesEpochRef', async () => {
+    it('forces fresh catalogues in refreshServer() and prevents a slow stale mount fetch from clobbering post-auth prompts and orchestrator profiles via cataloguesEpochRef', async () => {
       const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
       let signedIn = false;
       let resolveStalePrompts!: (list: typeof PROMPTS) => void;
-      let resolveStaleProfiles!: (list: unknown[]) => void;
+      let resolveStaleProfiles!: (list: OrchestratorProfile[]) => void;
+      const freshProfiles: OrchestratorProfile[] = [
+        {
+          name: 'OIM',
+          orchestratorPlaybook: 'oim-orchestrator',
+          reviewerPlaybook: 'oim-orchestrator-reviewer',
+          specialistPlaybooks: [],
+        },
+      ];
 
       api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
       api.authStatus = vi.fn().mockImplementation(async () => ({
@@ -3796,18 +3805,11 @@ describe('App conversation switching with in-progress turn', () => {
       api.listOrchestratorProfiles = vi.fn().mockImplementation(() => {
         profileCalls += 1;
         if (profileCalls === 1) {
-          return new Promise<unknown[]>((r) => {
+          return new Promise<OrchestratorProfile[]>((r) => {
             resolveStaleProfiles = r;
           });
         }
-        return Promise.resolve([
-          {
-            name: 'OIM',
-            orchestratorPlaybook: 'oim-orchestrator',
-            reviewerPlaybook: 'oim-orchestrator-reviewer',
-            specialistPlaybooks: [],
-          },
-        ]);
+        return Promise.resolve(freshProfiles);
       });
       api.serverSignIn = vi.fn().mockImplementation(async () => {
         signedIn = true;
@@ -3827,17 +3829,23 @@ describe('App conversation switching with in-progress turn', () => {
         expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(2);
       });
 
-      // Open First Conversation and confirm fresh PROMPTS loaded
+      // Open First Conversation and confirm fresh PROMPTS and fresh orchestrator profiles loaded
       fireEvent.click(screen.getByText('First Conversation'));
       await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
       expect(screen.getByText('oim-getting-started')).toBeTruthy();
+      expect(latestChatViewProps?.prompts).toEqual(PROMPTS);
+      expect(latestChatViewProps?.profiles).toEqual(freshProfiles);
+      expect(screen.getByLabelText('Agent mode')).toBeTruthy();
 
-      // Now resolve the stale mount fetch with [] -> MUST NOT clobber the fresh post-auth PROMPTS!
+      // Now resolve the stale mount fetch with [] -> MUST NOT clobber the fresh post-auth PROMPTS or profiles!
       await act(async () => {
         resolveStalePrompts([]);
         resolveStaleProfiles([]);
       });
       expect(screen.getByText('oim-getting-started')).toBeTruthy();
+      expect(latestChatViewProps?.prompts).toEqual(PROMPTS);
+      expect(latestChatViewProps?.profiles).toEqual(freshProfiles);
+      expect(screen.getByLabelText('Agent mode')).toBeTruthy();
     });
 
     it('swallows mount catalogue 401 rejections cleanly while serverAuthRequired is true, gates retries until auth clears, then recovers on sync-state', async () => {
