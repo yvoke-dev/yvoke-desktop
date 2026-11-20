@@ -4,7 +4,11 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppCore as AppCoreInstance } from '../src/main/AppCore';
 import type { LoginVerificationResult } from '../src/shared/types';
-import { ServerAuthRequiredError, type ServerTokenVerification } from '../src/main/auth/ServerAuth';
+import {
+  ServerAuthRequiredError,
+  ServerAuthTransientError,
+  type ServerTokenVerification,
+} from '../src/main/auth/ServerAuth';
 import { SyncApiError } from '../src/main/sync/SyncClient';
 
 const mockSdkQuery = vi.fn(() => ({
@@ -422,7 +426,61 @@ describe('AppCore server auth lifecycle, listThreads 4-way matrix & updateSettin
     expect(devRes.serverReachable).toBe(false);
     expect(devRes.serverAuthRequired).toBe(false);
 
+    // 4c. Entra mode + ServerAuthTransientError or Entra 503 -> serverReachable: false, serverAuthRequired: false
+    core.settings.set({ serverAuthMode: 'entra' });
+    listSpy.mockRejectedValueOnce(new ServerAuthTransientError(new Error('503 Service Unavailable')));
+    const transRes1 = await core.listThreads();
+    expect(transRes1.serverReachable).toBe(false);
+    expect(transRes1.serverAuthRequired).toBe(false);
+
+    listSpy.mockRejectedValueOnce(new Error('Entra: 503 Service Unavailable'));
+    const transRes2 = await core.listThreads();
+    expect(transRes2.serverReachable).toBe(false);
+    expect(transRes2.serverAuthRequired).toBe(false);
+
     await core.waitForStartupTasks();
+  });
+
+  it('authStatus({ forceRefresh: true }) forwards forceRefresh and verifyAuth() invalidates claudeAuth cache BEFORE running verifyClaudeCredentials', async () => {
+    const order: string[] = [];
+    const claudeAuth = {
+      getStatus: vi.fn().mockResolvedValue({ claude: 'ok' as const, claudeAccount: 'u@yvoke.ai' }),
+      invalidateStatusCache: vi.fn(() => {
+        order.push('invalidateStatusCache');
+      }),
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+      cancelSignIn: vi.fn(),
+      getActiveSignInUrl: vi.fn(),
+      submitAuthCode: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const coreWithClaude = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+      claudeAuth: claudeAuth as any,
+    });
+    try {
+      await coreWithClaude.authStatus({ forceRefresh: true });
+      expect(claudeAuth.getStatus).toHaveBeenCalledWith({ forceRefresh: true });
+
+      await coreWithClaude.authStatus();
+      expect(claudeAuth.getStatus).toHaveBeenLastCalledWith({ forceRefresh: false });
+
+      coreWithClaude.settings.set({ serverBaseUrl: '' });
+      vi.spyOn(coreWithClaude.agent, 'verifyClaudeCredentials').mockImplementation(async () => {
+        order.push('verifyClaudeCredentials');
+        return { status: 'ok', account: 'u@yvoke.ai' };
+      });
+
+      await coreWithClaude.verifyAuth();
+      expect(order).toEqual(['invalidateStatusCache', 'verifyClaudeCredentials']);
+    } finally {
+      coreWithClaude.dispose();
+    }
   });
 
   it('serverSignIn() resets mcpPrompts, clears caches, and flushes pending syncQueue ONLY on signed_in', async () => {

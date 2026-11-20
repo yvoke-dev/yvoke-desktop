@@ -28,19 +28,23 @@ import type {
 import { EMPTY_USAGE, MCP_SERVER_NAME, MCP_TOOL_PREFIX, parseVerdict, resolveCanonicalModel } from '../../shared/types';
 import {
   hasErrorSourcePrefix,
-  isNetworkError,
   tagAttributedError,
   type ErrorSource,
 } from '../../shared/error';
-import { ServerAuthRequiredError } from '../auth/ServerAuth';
+import {
+  isServerAuthFailure,
+  ServerAuthRequiredError,
+  ServerAuthTransientError,
+} from '../auth/ServerAuth';
 import {
   classifyClaudeFailure,
   detectClaudeAccount,
   detectClaudeCredentials,
   LOGIN_INSTRUCTIONS,
+  resolveClaudeBinaryPath,
   sanitizedEnv,
 } from './ClaudeAuth';
-import { isResultFailure, NoReplyError, readSingleReply, toResultError } from './singleTurn';
+import { isResultFailure, NoReplyError, readSingleReply, ResultError, toResultError } from './singleTurn';
 import { VALIDATION_TIMEOUT_MS } from './playbookValidation';
 import { log, logError } from '../log';
 import { buildMcpServers, type McpAuthProvider } from './McpConnection';
@@ -84,42 +88,27 @@ export const MCP_UPDATE_TIMEOUT_MS = 10_000;
 /** Expected model response token during Claude credential verification. */
 const PROBE_TOKEN = 'pong';
 
-/**
- * Path to the native Claude Code binary staged for this build target, or null in dev.
- *
- * The SDK otherwise locates the binary by interpolating the running host into a package name
- * (`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude`) and resolving it
- * from node_modules. That only ever works for the platform the build machine happens to be, so
- * packaged builds ship a single binary fetched for the target instead — see
- * scripts/fetch-claude-binary.ts and the `extraResources` entry in electron-builder.yml.
- *
- * Resolved by probing resourcesPath rather than `app.isPackaged` so this module stays importable
- * outside Electron (unit tests load it directly). In a dev run resourcesPath
- * points into node_modules/electron, where no such file exists, and the SDK's own resolution
- * takes over.
- */
-function stagedClaudeBinary(): string | null {
-  if (!process.resourcesPath) return null;
-  const staged = path.join(process.resourcesPath, process.platform === 'win32' ? 'claude.exe' : 'claude');
-  return fs.existsSync(staged) ? staged : null;
-}
-
-const claudeBinary = stagedClaudeBinary();
+let cachedClaudeBinary: string | null | undefined;
 
 /**
- * The staged binary path (or null), for other local one-shot SDK calls — the playbook preflight
- * check runs its own `query()` and needs the same packaged-build resolution this module does.
+ * Lazily resolves and memoizes the bundled Claude Code native binary path (or null),
+ * delegating to `resolveClaudeBinaryPath()` so all Agent SDK calls and direct CLI auth
+ * helpers resolve the exact same staged or SDK binary without top-level import side effects.
  */
 export function claudeBinaryPath(): string | null {
-  return claudeBinary;
+  if (cachedClaudeBinary === undefined) {
+    cachedClaudeBinary = resolveClaudeBinaryPath();
+  }
+  return cachedClaudeBinary;
 }
 
 /**
  * Decides how a turn failure reaches the user.
  *
  * An Entra or Yvoke Backend message was already attributed by the layer that raised it and
- * passes through untouched — re-tagging it would blame the wrong subsystem. Anything else is
- * classified via `classifyClaudeFailure` (rate-limit before auth) and attributed to `fallbackSource`.
+ * passes through untouched — re-tagging it would blame the wrong subsystem. Claude failures
+ * (when `fallbackSource === 'Claude'` or `error instanceof ResultError`) are classified via
+ * `classifyClaudeFailure` (rate-limit before auth) and attributed to `Claude`.
  */
 function attributeTurnFailure(
   error: unknown,
@@ -129,32 +118,36 @@ function attributeTurnFailure(
   const messageText = error instanceof Error ? error.message : String(error);
   const preAttributed =
     error instanceof ServerAuthRequiredError ||
+    error instanceof ServerAuthTransientError ||
     hasErrorSourcePrefix(messageText, 'Entra') ||
     hasErrorSourcePrefix(messageText, 'Yvoke Backend');
   if (preAttributed) {
-    const serverAuthRequired =
-      isEntraMode &&
-      (error instanceof ServerAuthRequiredError ||
-        (hasErrorSourcePrefix(messageText, 'Entra') && !isNetworkError(error)));
-    return { messageText, message: messageText, authRequired: false, serverAuthRequired };
+    return {
+      messageText,
+      message: messageText,
+      authRequired: false,
+      serverAuthRequired: isServerAuthFailure(error, isEntraMode),
+    };
   }
 
-  const claudeFailure = classifyClaudeFailure(error);
-  if (claudeFailure?.status === 'expired') {
-    return {
-      messageText,
-      message: tagAttributedError('Claude', claudeFailure.message),
-      authRequired: true,
-      serverAuthRequired: false,
-    };
-  }
-  if (claudeFailure?.status === 'rate_limited') {
-    return {
-      messageText,
-      message: tagAttributedError('Claude', claudeFailure.message),
-      authRequired: false,
-      serverAuthRequired: false,
-    };
+  if (fallbackSource === 'Claude' || error instanceof ResultError) {
+    const claudeFailure = classifyClaudeFailure(error);
+    if (claudeFailure?.status === 'expired') {
+      return {
+        messageText,
+        message: tagAttributedError('Claude', claudeFailure.message),
+        authRequired: true,
+        serverAuthRequired: false,
+      };
+    }
+    if (claudeFailure?.status === 'rate_limited') {
+      return {
+        messageText,
+        message: tagAttributedError('Claude', claudeFailure.message),
+        authRequired: false,
+        serverAuthRequired: false,
+      };
+    }
   }
 
   // `error`, not `messageText`: a thrown non-Error stringifies to '[object Object]' here but
@@ -163,7 +156,10 @@ function attributeTurnFailure(
     messageText,
     message: tagAttributedError(fallbackSource, error),
     authRequired: false,
-    serverAuthRequired: false,
+    serverAuthRequired:
+      fallbackSource !== 'Claude' && !(error instanceof ResultError)
+        ? isServerAuthFailure(error, isEntraMode)
+        : false,
   };
 }
 
@@ -246,6 +242,8 @@ interface ThreadSession {
   interrupted: boolean;
   turn: TurnContext;
   lastActiveAt: number;
+  /** Timestamp (ms) when the current turn started, used for per-turn `durationMs` reporting. */
+  turnStartedAt: number;
   playbookName?: string;
   playbookVersion?: number;
   /** Selected multi-agent profile for this session, if orchestrator mode is active. */
@@ -280,8 +278,6 @@ export interface AgentServiceDeps {
   isClaudeMissing?: () => Promise<boolean> | boolean;
   /** Keychain-aware lookup for the signed-in Claude account email. */
   getClaudeAccount?: () => Promise<string | undefined> | string | undefined;
-  /** Invoked synchronously before emitting an `authRequired: true` event so caches invalidate immediately. */
-  onAuthFailure?: () => void;
 }
 
 /**
@@ -291,6 +287,10 @@ export interface AgentServiceDeps {
  */
 export class AgentService {
   private readonly sessions = new Map<string, ThreadSession>();
+  /** Threads currently in async session startup before `session.busy` is latched. */
+  private readonly startingThreads = new Set<string>();
+  /** Monotonic per-thread close counter so cold-start `ensureSession()` detects mid-setup `closeThread()`. */
+  private readonly closeGenerations = new Map<string, number>();
   public readonly pendingClarifications = new Map<string, (answer: string) => void>();
   /** Outstanding clarification toolUseIds per thread, so they can be cancelled on interrupt/close. */
   private readonly threadClarifications = new Map<string, Set<string>>();
@@ -331,7 +331,7 @@ export class AgentService {
 
   isBusy(threadId: string): boolean {
     const session = this.sessions.get(threadId);
-    return Boolean(session?.busy || session?.starting);
+    return Boolean(this.startingThreads.has(threadId) || session?.busy || session?.starting);
   }
 
   async sendMessage(thread: ThreadMeta, text: string, opts: SendOptions = {}): Promise<void> {
@@ -339,62 +339,18 @@ export class AgentService {
       throw new Error('A turn is already running for this conversation.');
     }
 
+    this.startingThreads.add(thread.id);
     let session: ThreadSession;
     try {
-      session = await this.ensureSession(thread, opts.playbook);
-    } catch (error) {
-      const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
-      const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
-        error,
-        'Yvoke Backend',
-        isEntraMode,
-      );
-      if (authRequired) {
-        this.deps.onAuthFailure?.();
-      }
-      logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
-      this.deps.emit({
-        kind: 'error',
-        threadId: thread.id,
-        message,
-        authRequired,
-        ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
-      });
-      throw error;
-    }
-
-    if (session.busy || session.starting) {
-      throw new Error('A turn is already running for this conversation.');
-    }
-    session.starting = true;
-
-    // In orchestrator mode the per-role models/thinking are fixed by the profile + settings; the
-    // thread-level model/thinking selectors (and per-message thinking override) do not apply.
-    if (!thread.orchestratorProfile) {
       try {
-        if (session.model !== thread.model) {
-          await session.query.setModel(resolveCanonicalModel(thread.model));
-          session.model = thread.model;
-        }
-        const effectiveThinking = opts.thinkingOverride ?? thread.thinkingLevel;
-        if (session.thinkingLevel !== effectiveThinking) {
-          await session.query.setMaxThinkingTokens(thinkingBudget(effectiveThinking));
-          session.thinkingLevel = effectiveThinking;
-        }
-      } catch (err) {
-        session.starting = false;
-        if (this.sessions.get(thread.id) === session) {
-          this.closeThread(thread.id);
-        }
+        session = await this.ensureSession(thread, opts.playbook);
+      } catch (error) {
         const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
         const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
-          err,
-          'Claude',
+          error,
+          'Yvoke Backend',
           isEntraMode,
         );
-        if (authRequired) {
-          this.deps.onAuthFailure?.();
-        }
         logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
         this.deps.emit({
           kind: 'error',
@@ -403,27 +359,79 @@ export class AgentService {
           authRequired,
           ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
         });
-        throw err;
+        throw error;
       }
-    }
 
-    if (this.sessions.get(thread.id) !== session) {
+      if (session.busy || session.starting) {
+        throw new Error('A turn is already running for this conversation.');
+      }
+      session.starting = true;
+
+      // In orchestrator mode the per-role models/thinking are fixed by the profile + settings; the
+      // thread-level model/thinking selectors (and per-message thinking override) do not apply.
+      if (!thread.orchestratorProfile) {
+        try {
+          if (session.model !== thread.model) {
+            await session.query.setModel(resolveCanonicalModel(thread.model));
+            session.model = thread.model;
+          }
+          const effectiveThinking = opts.thinkingOverride ?? thread.thinkingLevel;
+          if (session.thinkingLevel !== effectiveThinking) {
+            await session.query.setMaxThinkingTokens(thinkingBudget(effectiveThinking));
+            session.thinkingLevel = effectiveThinking;
+          }
+        } catch (err) {
+          session.starting = false;
+          if (this.sessions.get(thread.id) === session) {
+            this.closeThread(thread.id);
+          } else {
+            session.queue.close();
+            session.query.close();
+            session.activeReviewerQuery?.close();
+          }
+          const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+          const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
+            err,
+            'Claude',
+            isEntraMode,
+          );
+          logError('agent', `turn failed before start thread=${thread.id}:`, messageText);
+          this.deps.emit({
+            kind: 'error',
+            threadId: thread.id,
+            message,
+            authRequired,
+            ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
+          });
+          throw err;
+        }
+      }
+
+      if (this.sessions.get(thread.id) !== session) {
+        session.starting = false;
+        session.queue.close();
+        session.query.close();
+        session.activeReviewerQuery?.close();
+        const closedErr = new Error('Conversation session closed before turn could start.');
+        logError('agent', `turn failed before start thread=${thread.id}:`, closedErr.message);
+        this.deps.emit({
+          kind: 'error',
+          threadId: thread.id,
+          message: tagAttributedError('Claude', closedErr),
+          authRequired: false,
+        });
+        throw closedErr;
+      }
+
+      session.busy = true;
       session.starting = false;
-      const closedErr = new Error('Conversation session closed before turn could start.');
-      logError('agent', `turn failed before start thread=${thread.id}:`, closedErr.message);
-      this.deps.emit({
-        kind: 'error',
-        threadId: thread.id,
-        message: tagAttributedError('Claude', closedErr),
-        authRequired: false,
-      });
-      throw closedErr;
+    } finally {
+      this.startingThreads.delete(thread.id);
     }
-
-    session.busy = true;
-    session.starting = false;
     session.interrupted = false;
-    session.lastActiveAt = Date.now();
+    const now = Date.now();
+    session.lastActiveAt = now;
+    session.turnStartedAt = now;
     session.turn = newTurnContext(thread.id, Boolean(thread.orchestratorProfile));
     session.turn.sessionId = thread.sessionId;
     session.reviewState = session.orchestrator
@@ -497,8 +505,11 @@ export class AgentService {
   }
 
   closeThread(threadId: string): void {
+    this.closeGenerations.set(threadId, (this.closeGenerations.get(threadId) ?? 0) + 1);
     const session = this.sessions.get(threadId);
     if (session) {
+      session.pendingUser = undefined;
+      session.reviewState = undefined;
       session.queue.close();
       session.query.close();
       session.activeReviewerQuery?.close();
@@ -599,14 +610,15 @@ export class AgentService {
    */
   closeIdleSessions(): void {
     for (const [threadId, session] of [...this.sessions.entries()]) {
-      if (!session.busy && !session.starting) {
+      if (!this.startingThreads.has(threadId) && !session.busy && !session.starting) {
         this.closeThread(threadId);
       }
     }
   }
 
   closeAll(): void {
-    for (const threadId of [...this.sessions.keys()]) {
+    const allIds = new Set<string>([...this.sessions.keys(), ...this.startingThreads]);
+    for (const threadId of allIds) {
       this.closeThread(threadId);
     }
   }
@@ -726,12 +738,14 @@ export class AgentService {
       throw new Error('A playbook must be selected for single-agent chat.');
     }
 
+    const coldStartGen = this.closeGenerations.get(thread.id) ?? 0;
+
     const MAX_WARM_SESSIONS = 3;
     if (this.sessions.size >= MAX_WARM_SESSIONS) {
       let oldestId: string | null = null;
       let oldestTime = Infinity;
       for (const [id, s] of this.sessions.entries()) {
-        if (!s.busy && !s.starting && s.lastActiveAt < oldestTime) {
+        if (!this.isBusy(id) && s.lastActiveAt < oldestTime) {
           oldestTime = s.lastActiveAt;
           oldestId = id;
         }
@@ -869,6 +883,7 @@ export class AgentService {
         })
       : undefined;
 
+    const binary = claudeBinaryPath();
     const options: Options = {
       systemPrompt: orchestrator ? '' : singleAgentPrompt,
       mcpServers: {
@@ -896,10 +911,15 @@ export class AgentService {
       // in a packaged build it stays off unless the user explicitly exports CLAUDE_DEBUG
       // (which survives via sanitizedEnv), so production runs aren't verbose by default.
       env: debugEnv(),
-      ...(claudeBinary ? { pathToClaudeCodeExecutable: claudeBinary } : {}),
+      ...(binary ? { pathToClaudeCodeExecutable: binary } : {}),
       ...(orchestrator ? { agent: ORCHESTRATOR_AGENT, agents: orchestrator.agents, forwardSubagentText: true } : {}),
       ...(canResume ? { resume: thread.sessionId } : {}),
     };
+
+    if ((this.closeGenerations.get(thread.id) ?? 0) !== coldStartGen) {
+      queue.close();
+      throw new Error('Conversation session closed before turn could start.');
+    }
 
     log(
       'agent',
@@ -908,6 +928,7 @@ export class AgentService {
         (canResume ? ` resume=${thread.sessionId}` : ' (fresh)'),
     );
     const q = query({ prompt: queue, options });
+    const now = Date.now();
     const session: ThreadSession = {
       query: q,
       queue,
@@ -918,7 +939,8 @@ export class AgentService {
       consuming: false,
       interrupted: false,
       turn: newTurnContext(thread.id, Boolean(thread.orchestratorProfile)),
-      lastActiveAt: Date.now(),
+      lastActiveAt: now,
+      turnStartedAt: now,
       playbookName: thread.orchestratorProfile ? undefined : playbookName,
       playbookVersion: thread.orchestratorProfile ? undefined : playbookVersion,
       orchestratorProfile: thread.orchestratorProfile,
@@ -927,6 +949,17 @@ export class AgentService {
       lastMcpHeadersJson: JSON.stringify(resolvedHeaders),
     };
     sessionRef.current = session;
+    if ((this.closeGenerations.get(thread.id) ?? 0) !== coldStartGen) {
+      queue.close();
+      q.close();
+      throw new Error('Conversation session closed before turn could start.');
+    }
+    const prev = this.sessions.get(thread.id);
+    if (prev && prev !== session) {
+      prev.queue.close();
+      prev.query.close();
+      prev.activeReviewerQuery?.close();
+    }
     this.sessions.set(thread.id, session);
     return session;
   }
@@ -986,8 +1019,93 @@ export class AgentService {
     }
   }
 
+  private handleConsumeExit(
+    threadId: string,
+    session: ThreadSession,
+    startedAt: number,
+    error?: unknown,
+  ): void {
+    const wasBusy = session.busy || session.starting;
+    const wasInterrupted = session.interrupted;
+    const detached = this.sessions.get(threadId) !== session;
+
+    session.busy = false;
+    session.starting = false;
+    session.pendingUser = undefined;
+    session.reviewState = undefined;
+
+    if (!detached) {
+      this.closeThread(threadId);
+    } else {
+      session.queue.close();
+      session.query.close();
+      session.activeReviewerQuery?.close();
+    }
+
+    if (detached || !wasBusy) {
+      return;
+    }
+
+    if (wasInterrupted) {
+      const usage = session.turn.carriedUsage ?? { ...EMPTY_USAGE };
+      const costUsd = session.turn.carriedCostUsd;
+      const review = session.orchestratorProfile ? reviewStatusOf(session.turn.toolCalls) : undefined;
+      const content =
+        session.turn.turnText && session.turn.liveText
+          ? `${session.turn.turnText}\n\n${session.turn.liveText}`
+          : session.turn.turnText || session.turn.liveText;
+      const thinking = (session.turn.turnThinking + session.turn.liveThinking) || undefined;
+      const assistantMessage: ChatMessage = {
+        localId: randomUUID(),
+        role: 'assistant',
+        content,
+        thinking,
+        toolCalls: session.turn.toolCalls,
+        blocks: session.turn.blocks,
+        review,
+        playbook: session.orchestratorProfile ? undefined : session.playbookName,
+        playbookVersion:
+          !session.orchestratorProfile && session.playbookName ? session.playbookVersion : undefined,
+        usage,
+        createdAt: new Date().toISOString(),
+      };
+
+      session.interrupted = false;
+      session.reviewState = undefined;
+      session.turn = newTurnContext(threadId, Boolean(session.orchestratorProfile));
+
+      this.deps.emit({
+        kind: 'turn-complete',
+        threadId,
+        message: assistantMessage,
+        usage,
+        ...(costUsd !== undefined ? { costUsd } : {}),
+        durationMs: Date.now() - startedAt,
+        isError: true,
+        aborted: true,
+        authRequired: false,
+      });
+      return;
+    }
+
+    const exitError = error ?? new Error('Conversation session ended unexpectedly.');
+    const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
+    const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
+      exitError,
+      'Claude',
+      isEntraMode,
+    );
+    logError('agent', `turn failed thread=${threadId}:`, messageText);
+    this.deps.emit({
+      kind: 'error',
+      threadId,
+      message,
+      authRequired,
+      ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
+    });
+  }
+
   private async consume(threadId: string, session: ThreadSession): Promise<void> {
-    const startedAt = Date.now();
     try {
       for await (const message of session.query) {
         log('sdk', `${message.type}${'subtype' in message && message.subtype ? `/${message.subtype}` : ''}`);
@@ -1016,42 +1134,17 @@ export class AgentService {
           this.deps.onSessionId(threadId, message.session_id, session.orchestratorProfile);
         }
         if (message.type === 'result') {
-          await this.completeTurn(threadId, session, message, startedAt);
+          await this.completeTurn(threadId, session, message, session.turnStartedAt);
           if (this.sessions.get(threadId) !== session) {
             break;
           }
         }
       }
-    } catch (error) {
-      const wasBusy = session.busy || session.starting;
-      session.busy = false;
-      session.starting = false;
       if (this.sessions.get(threadId) === session) {
-        this.closeThread(threadId);
-      } else {
-        session.queue.close();
-        session.query.close();
-        session.activeReviewerQuery?.close();
+        this.handleConsumeExit(threadId, session, session.turnStartedAt);
       }
-      if (wasBusy && !session.interrupted) {
-        const isEntraMode = this.deps.getSettings().serverAuthMode === 'entra';
-        const { messageText, message, authRequired, serverAuthRequired } = attributeTurnFailure(
-          error,
-          'Claude',
-          isEntraMode,
-        );
-        if (authRequired) {
-          this.deps.onAuthFailure?.();
-        }
-        logError('agent', `turn failed thread=${threadId}:`, messageText);
-        this.deps.emit({
-          kind: 'error',
-          threadId,
-          message,
-          authRequired,
-          ...(serverAuthRequired ? { serverAuthRequired: true } : {}),
-        });
-      }
+    } catch (error) {
+      this.handleConsumeExit(threadId, session, session.turnStartedAt, error);
     }
   }
 
@@ -1086,6 +1179,7 @@ export class AgentService {
 
     let revQuery: Query | undefined;
     try {
+      const binary = claudeBinaryPath();
       const headers = await this.deps.mcpAuthProvider.headers();
       const reviewerOptions: Options = {
         systemPrompt: reviewerCfg.prompt,
@@ -1113,7 +1207,7 @@ export class AgentService {
         maxTurns: 6,
         cwd: this.deps.sandboxDir,
         env: debugEnv(),
-        ...(claudeBinary ? { pathToClaudeCodeExecutable: claudeBinary } : {}),
+        ...(binary ? { pathToClaudeCodeExecutable: binary } : {}),
         ...(reviewState.reviewerSessionId ? { resume: reviewState.reviewerSessionId } : {}),
       };
 
@@ -1694,12 +1788,9 @@ export class AgentService {
     );
 
     const pendingUser = session.pendingUser;
+    session.pendingUser = undefined;
     if (!isError && pendingUser) {
       this.deps.onTurnPersist(threadId, pendingUser, assistantMessage);
-    }
-
-    if (authRequired) {
-      this.deps.onAuthFailure?.();
     }
 
     this.deps.emit({

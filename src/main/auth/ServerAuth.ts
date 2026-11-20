@@ -3,19 +3,24 @@ import http from 'node:http';
 import path from 'node:path';
 import {
   AuthError,
+  InteractionRequiredAuthError,
   PublicClientApplication,
   type AccountInfo,
   type AuthorizeResponse,
   type Configuration,
   type ILoopbackClient,
 } from '@azure/msal-node';
-import { IpcChannels } from '../../shared/ipc';
 import type {
   AppSettings,
   AuthVerificationFailureReason,
   ServerSignInResult,
 } from '../../shared/types';
-import { isNetworkError, sanitizeLogContent, tagAttributedError } from '../../shared/error';
+import {
+  hasErrorSourcePrefix,
+  isNetworkError,
+  sanitizeLogContent,
+  tagAttributedError,
+} from '../../shared/error';
 import { log } from '../log';
 import type { McpAuthProvider } from '../agent/McpConnection';
 
@@ -41,7 +46,171 @@ export class ServerAuthRequiredError extends Error {
   constructor(message = 'Authentication session expired or invalid. Please sign in again.') {
     super(tagAttributedError('Entra', message));
     this.name = 'ServerAuthRequiredError';
+    Object.setPrototypeOf(this, ServerAuthRequiredError.prototype);
   }
+}
+
+/**
+ * Typed error raised when Entra silent acquisition fails transiently (network outage, MSAL
+ * timeout, Entra 5xx / 429) without invalidating the user's cached corporate account.
+ */
+export class ServerAuthTransientError extends Error {
+  constructor(cause: unknown, message?: string) {
+    super(tagAttributedError('Entra', message ?? cause), { cause });
+    this.name = 'ServerAuthTransientError';
+    Object.setPrototypeOf(this, ServerAuthTransientError.prototype);
+  }
+}
+
+const INTERACTION_OR_GRANT_ERROR_CODES = new Set([
+  'interaction_required',
+  'login_required',
+  'consent_required',
+  'invalid_grant',
+  'no_tokens_found',
+  'no_account_in_silent_request',
+  'no_account_found',
+  'token_refresh_required',
+  'refresh_token_expired',
+  'bad_token',
+  'interrupted_user',
+  'native_account_unavailable',
+  'ui_not_allowed',
+]);
+
+const NON_GRANT_ERROR_CODES = new Set([
+  'invalid_request',
+  'temporarily_unavailable',
+  'service_unavailable',
+  'server_error',
+  'request_timeout',
+]);
+
+function readHttpStatus(obj: unknown): number | undefined {
+  if (typeof obj !== 'object' || obj === null) return undefined;
+  const rec = obj as { status?: unknown; statusCode?: unknown };
+  if (typeof rec.status === 'number' && Number.isFinite(rec.status)) return rec.status;
+  if (typeof rec.statusCode === 'number' && Number.isFinite(rec.statusCode)) return rec.statusCode;
+  return undefined;
+}
+
+function isInteractionOrGrantFailure(err: unknown): boolean {
+  if (!err || isNetworkError(err)) {
+    return false;
+  }
+
+  // First pass: if any node in the cause chain reports a 5xx or 429 HTTP status, it is transient.
+  const seenStatus = new Set<unknown>();
+  let statusCursor: unknown = err;
+  while (statusCursor && !seenStatus.has(statusCursor)) {
+    seenStatus.add(statusCursor);
+    const status = readHttpStatus(statusCursor);
+    if (status !== undefined && (status >= 500 || status === 429)) {
+      return false;
+    }
+    statusCursor =
+      typeof statusCursor === 'object' ? (statusCursor as { cause?: unknown }).cause : undefined;
+  }
+
+  const seen = new Set<unknown>();
+  let cursor: unknown = err;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    if (cursor instanceof InteractionRequiredAuthError || cursor instanceof ServerAuthRequiredError) {
+      return true;
+    }
+    if (typeof cursor === 'object') {
+      const rec = cursor as { errorCode?: unknown; name?: unknown; message?: unknown };
+      const errorCode = typeof rec.errorCode === 'string' ? rec.errorCode.toLowerCase() : undefined;
+      if (errorCode && INTERACTION_OR_GRANT_ERROR_CODES.has(errorCode)) {
+        return true;
+      }
+      if (rec.name === 'InteractionRequiredAuthError') {
+        return true;
+      }
+      const status = readHttpStatus(cursor);
+      if (
+        (status === 400 || status === 401) &&
+        (!errorCode || !NON_GRANT_ERROR_CODES.has(errorCode))
+      ) {
+        return true;
+      }
+    }
+    const msg =
+      cursor instanceof Error
+        ? cursor.message
+        : typeof cursor === 'string'
+          ? cursor
+          : typeof cursor === 'object' && typeof (cursor as { message?: unknown }).message === 'string'
+            ? (cursor as { message: string }).message
+            : '';
+    if (
+      /InteractionRequiredAuthError|invalid_grant|interaction_required|login_required|consent_required|no_tokens_found|refresh_token_expired|interaction required/i.test(
+        msg,
+      )
+    ) {
+      return true;
+    }
+    cursor = typeof cursor === 'object' ? (cursor as { cause?: unknown }).cause : undefined;
+  }
+
+  return false;
+}
+
+/**
+ * Single shared predicate classifying whether an error represents an actionable corporate Entra
+ * sign-in failure (401 / expired grant) rather than a network outage, transient 5xx/429, or dev mode.
+ *
+ * Uses structural HTTP status inspection so `ServerAuth` never imports `SyncClient`.
+ */
+export function isServerAuthFailure(error: unknown, isEntraMode: boolean): boolean {
+  if (
+    !isEntraMode ||
+    !error ||
+    error instanceof ServerAuthTransientError ||
+    isNetworkError(error)
+  ) {
+    return false;
+  }
+  if (error instanceof ServerAuthRequiredError) {
+    return true;
+  }
+  // Claude ResultError carries its own `status` (e.g. 401 from Anthropic) — never a server auth failure.
+  if (error instanceof Error && error.name === 'ResultError') {
+    return false;
+  }
+
+  const seen = new Set<unknown>();
+  let cursor: unknown = error;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const status = readHttpStatus(cursor);
+    if (status === 401) {
+      return true;
+    }
+    if (
+      status !== undefined &&
+      (status >= 500 || status === 429 || status === 403 || status === 404)
+    ) {
+      return false;
+    }
+    cursor = typeof cursor === 'object' ? (cursor as { cause?: unknown }).cause : undefined;
+  }
+
+  const msg =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+  if (hasErrorSourcePrefix(msg, 'Entra')) {
+    if (
+      /\b(5\d{2}|429)\b|temporarily_unavailable|service_unavailable|server_error|timed?\s*out/i.test(
+        msg,
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 /** Typed error raised when an in-flight interactive Entra sign-in is cancelled. */
@@ -563,21 +732,22 @@ export class ServerAuth implements McpAuthProvider {
         }
 
         this.cachedToken = null;
-        // Network failure: preserve `this.account` so offline state never claims signed-out.
-        if (isNetworkError(err)) {
-          throw err;
+        if (isInteractionOrGrantFailure(err)) {
+          // Genuine expired/revoked grant: clear stale account and require explicit user sign-in.
+          this.account = null;
+          throw new ServerAuthRequiredError();
         }
 
-        // Non-network silent failure: clear stale account and require explicit user sign-in.
-        this.account = null;
-        throw new ServerAuthRequiredError();
+        // Transient failure (network outage, MSAL timeout, Entra 5xx/429): preserve `this.account`
+        // so temporary outages never claim signed-out.
+        throw new ServerAuthTransientError(err);
       }
 
       this.account = null;
       this.cachedToken = null;
       throw new ServerAuthRequiredError();
     } catch (err) {
-      if (err instanceof ServerAuthRequiredError) {
+      if (err instanceof ServerAuthRequiredError || err instanceof ServerAuthTransientError) {
         throw err;
       }
       if (this.signOutGeneration === startSignOutGen) {
@@ -808,9 +978,20 @@ export class ServerAuth implements McpAuthProvider {
       if (err instanceof SilentTokenError && err.reason === 'no-account') {
         return { status: 'missing', message: 'No cached corporate account found.' };
       }
+      if (
+        (err instanceof SilentTokenError && err.reason === 'expired') ||
+        isInteractionOrGrantFailure(err)
+      ) {
+        return {
+          status: 'expired',
+          message: 'Authentication session expired or invalid. Please sign in again.',
+        };
+      }
+      const raw = err instanceof Error ? err.message : String(err);
+      const safe = sanitizeLogContent(raw).trim();
       return {
-        status: 'expired',
-        message: 'Authentication session expired or invalid. Please sign in again.',
+        status: 'error',
+        message: safe || 'Failed to verify corporate authentication.',
       };
     }
   }
@@ -819,48 +1000,4 @@ export class ServerAuth implements McpAuthProvider {
   async headers(): Promise<Record<string, string>> {
     return { Authorization: `Bearer ${await this.getAccessToken()}` };
   }
-}
-
-export interface ServerAuthIpcTarget {
-  serverSignIn(): Promise<ServerSignInResult>;
-  cancelServerSignIn(): Promise<boolean> | boolean;
-  serverSignOut(): Promise<void>;
-}
-
-export interface ServerAuthIpcRegistrar {
-  handle(
-    channel: string,
-    listener: (event: { senderFrame?: { url?: string } | null }, ...args: unknown[]) => unknown,
-  ): void;
-}
-
-/**
- * Registers origin-guarded IPC handlers for corporate Entra authentication.
- * Validates `senderOrigin === trustedOrigin` before invoking `appCore`.
- */
-export function registerServerAuthIpc(deps: {
-  ipcMain: ServerAuthIpcRegistrar;
-  trustedOrigin: string;
-  appCore: ServerAuthIpcTarget;
-}): void {
-  const handleGuarded = (channel: string, fn: (...args: unknown[]) => unknown): void => {
-    deps.ipcMain.handle(channel, async (event, ...args) => {
-      let senderOrigin = '';
-      try {
-        senderOrigin = new URL(event?.senderFrame?.url ?? '').origin;
-      } catch {
-        senderOrigin = '';
-      }
-      if (!deps.trustedOrigin || senderOrigin !== deps.trustedOrigin) {
-        throw new Error(`IPC ${channel} rejected: untrusted sender origin`);
-      }
-      return fn(...args);
-    });
-  };
-
-  handleGuarded(IpcChannels.authSignin, () => deps.appCore.serverSignIn());
-  handleGuarded(IpcChannels.authCancelSignin, async () =>
-    Boolean(await deps.appCore.cancelServerSignIn()),
-  );
-  handleGuarded(IpcChannels.authSignout, () => deps.appCore.serverSignOut());
 }

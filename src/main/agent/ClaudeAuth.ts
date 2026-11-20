@@ -6,7 +6,6 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { sanitizeLogContent } from '../../shared/error';
-import { IpcChannels } from '../../shared/ipc';
 import type {
   ClaudeCodeSubmitResult,
   ClaudeSignInResult,
@@ -28,7 +27,9 @@ export type ClaudeCredentialStatus = 'ok' | 'missing' | 'unknown';
 
 export const CLAUDE_STATUS_TIMEOUT_MS = 4_000;
 export const CLAUDE_STATUS_CACHE_TTL_MS = 30_000;
+export const CLAUDE_MISSING_CACHE_TTL_MS = 15_000;
 export const CLAUDE_LOGIN_URL_TIMEOUT_MS = 10_000;
+export const CLAUDE_CODE_WRITE_TIMEOUT_MS = 5_000;
 export const CLAUDE_LOGIN_CODE_EXCHANGE_TIMEOUT_MS = 15_000;
 export const CLAUDE_LOGIN_TIMEOUT_MS = 5 * 60 * 1_000;
 export const CLAUDE_LOGOUT_TIMEOUT_MS = 10_000;
@@ -79,6 +80,19 @@ export function isAuthError(message: string): boolean {
   );
 }
 
+const DEFAULT_RATE_LIMIT_MESSAGE = 'Claude subscription allowance or rate limit reached.';
+const MAX_RATE_LIMIT_MESSAGE_CHARS = 300;
+
+function formatRateLimitMessage(raw: string): string {
+  const clean = sanitizeLogContent(raw).trim().replace(/^Claude:\s*/i, '').trim();
+  if (!clean) {
+    return DEFAULT_RATE_LIMIT_MESSAGE;
+  }
+  return clean.length > MAX_RATE_LIMIT_MESSAGE_CHARS
+    ? `${clean.slice(0, MAX_RATE_LIMIT_MESSAGE_CHARS)}…`
+    : clean;
+}
+
 /**
  * Classifies a Claude failure into a rate limit or auth expiration status, or returns undefined.
  * Checks typed NoReplyError and ResultError status first:
@@ -100,7 +114,7 @@ export function classifyClaudeFailure(
     if (err.status === 429) {
       return {
         status: 'rate_limited',
-        message: 'Claude subscription allowance or rate limit reached.',
+        message: formatRateLimitMessage(err.message),
       };
     }
     if (err.status === 401) {
@@ -122,7 +136,7 @@ export function classifyClaudeFailure(
   if (/rate limit|allowance|usage limit|\b429\b/i.test(text)) {
     return {
       status: 'rate_limited',
-      message: 'Claude subscription allowance or rate limit reached.',
+      message: formatRateLimitMessage(text),
     };
   }
   if (isAuthError(text)) {
@@ -257,6 +271,9 @@ export interface SpawnedCliProcess extends EventEmitter {
     destroyed?: boolean;
     writableEnded?: boolean;
     on(event: 'error', listener: (err: Error) => void): unknown;
+    once?(event: 'error' | 'close', listener: (...args: unknown[]) => void): unknown;
+    off?(event: 'error' | 'close', listener: (...args: unknown[]) => void): unknown;
+    removeListener?(event: 'error' | 'close', listener: (...args: unknown[]) => void): unknown;
   } | null;
   stdout: EventEmitter | null;
   stderr: EventEmitter | null;
@@ -405,6 +422,7 @@ interface ActiveLoginState {
   urlWindowClosed: boolean;
   urlReadyPromise: Promise<string | null>;
   resolveUrlReady: (url: string | null) => void;
+  codeSubmitting: boolean;
   codeSubmitted: boolean;
   codeExchangeTimer?: ReturnType<typeof setTimeout>;
   startCodeExchangeTimer: (ms: number) => void;
@@ -454,11 +472,14 @@ export class ClaudeAuthManager {
 
     if (opts?.forceRefresh) {
       this.invalidateStatusCache();
-    } else if (
-      this.statusCache &&
-      this.now() - this.statusCache.at < CLAUDE_STATUS_CACHE_TTL_MS
-    ) {
-      return { ...this.statusCache.value };
+    } else if (this.statusCache) {
+      const ttl =
+        this.statusCache.value.claude === 'missing'
+          ? CLAUDE_MISSING_CACHE_TTL_MS
+          : CLAUDE_STATUS_CACHE_TTL_MS;
+      if (this.now() - this.statusCache.at < ttl) {
+        return { ...this.statusCache.value };
+      }
     }
 
     if (this.statusInFlight) {
@@ -530,7 +551,6 @@ export class ClaudeAuthManager {
         this.activeStatusCancels.delete(cancelProbe);
         if (
           allowCache &&
-          state.claude === 'ok' &&
           !this.disposed &&
           this.activeSignOut === null &&
           gen === this.statusGeneration
@@ -578,8 +598,8 @@ export class ClaudeAuthManager {
             authMethod !== 'api_key_helper';
 
           if (!validLogin) {
-            // Never cache 'missing', and never expose an account when not signed in.
-            finish({ claude: 'missing' }, false);
+            // Cache genuine 'missing' briefly (15s TTL) to avoid redundant spawns; never expose an account.
+            finish({ claude: 'missing' }, true);
             return;
           }
 
@@ -614,6 +634,8 @@ export class ClaudeAuthManager {
         message: 'Claude sign-out is in progress. Please wait a moment and try again.',
       });
     }
+
+    this.invalidateStatusCache();
 
     const binary = this.resolveBinary();
     if (!binary) {
@@ -671,6 +693,7 @@ export class ClaudeAuthManager {
       urlWindowClosed: false,
       urlReadyPromise,
       resolveUrlReady,
+      codeSubmitting: false,
       codeSubmitted: false,
       startCodeExchangeTimer: (ms: number) => {
         loginState.codeExchangeTimer = setTimeout(() => {
@@ -727,6 +750,7 @@ export class ClaudeAuthManager {
       if (this.activeLogin === loginState) {
         this.activeLogin = null;
       }
+      this.invalidateStatusCache();
       if (result.status === 'error') {
         resolveLogin({ status: 'error', message: sanitizeLogContent(result.message) });
       } else {
@@ -737,24 +761,22 @@ export class ClaudeAuthManager {
     let stdoutBuffer = '';
     let stderrBuffer = '';
     let diagnosticTail = '';
+    let stdoutDiagnosticTail = '';
 
-    const appendDiagnostic = (cleanLine: string): void => {
+    const appendBoundedTail = (current: string, cleanLine: string): string => {
       const trimmed = cleanLine.trim();
-      if (!trimmed) return;
+      if (!trimmed) return current;
       const redacted = sanitizeLogContent(trimmed);
-      diagnosticTail = diagnosticTail ? `${diagnosticTail}\n${redacted}` : redacted;
-      if (diagnosticTail.length > MAX_CLI_DIAGNOSTIC_CHARS) {
-        diagnosticTail = diagnosticTail.slice(-MAX_CLI_DIAGNOSTIC_CHARS);
-      }
+      const next = current ? `${current}\n${redacted}` : redacted;
+      return next.length > MAX_CLI_DIAGNOSTIC_CHARS
+        ? next.slice(-MAX_CLI_DIAGNOSTIC_CHARS)
+        : next;
     };
 
-    const handleCompleteLine = (rawLine: string, recordDiagnostic: boolean): void => {
-      if (recordDiagnostic) {
-        appendDiagnostic(stripAnsiAndOsc8(rawLine));
-      }
-      if (!loginState.oauthUrl) {
-        const extracted = extractOAuthUrlFromCompleteLine(rawLine);
-        if (extracted) {
+    const handleCompleteLine = (rawLine: string, stream: 'stdout' | 'stderr'): void => {
+      const extracted = extractOAuthUrlFromCompleteLine(rawLine);
+      if (extracted) {
+        if (!loginState.oauthUrl) {
           loginState.oauthUrl = extracted;
           if (!loginState.urlWindowClosed) {
             loginState.urlWindowClosed = true;
@@ -763,6 +785,16 @@ export class ClaudeAuthManager {
           }
           log('auth', 'Claude browser sign-in started (fallback OAuth URL ready)');
         }
+        if (stream === 'stderr') {
+          diagnosticTail = appendBoundedTail(diagnosticTail, stripAnsiAndOsc8(rawLine));
+        }
+        return;
+      }
+
+      if (stream === 'stderr') {
+        diagnosticTail = appendBoundedTail(diagnosticTail, stripAnsiAndOsc8(rawLine));
+      } else {
+        stdoutDiagnosticTail = appendBoundedTail(stdoutDiagnosticTail, stripAnsiAndOsc8(rawLine));
       }
     };
 
@@ -772,7 +804,7 @@ export class ClaudeAuthManager {
       while (nl !== -1) {
         const line = stdoutBuffer.slice(0, nl);
         stdoutBuffer = stdoutBuffer.slice(nl + 1);
-        handleCompleteLine(line, false);
+        handleCompleteLine(line, 'stdout');
         nl = stdoutBuffer.indexOf('\n');
       }
       if (stdoutBuffer.length > MAX_CLI_LINE_BUFFER_CHARS) {
@@ -786,7 +818,7 @@ export class ClaudeAuthManager {
       while (nl !== -1) {
         const line = stderrBuffer.slice(0, nl);
         stderrBuffer = stderrBuffer.slice(nl + 1);
-        handleCompleteLine(line, true);
+        handleCompleteLine(line, 'stderr');
         nl = stderrBuffer.indexOf('\n');
       }
       if (stderrBuffer.length > MAX_CLI_LINE_BUFFER_CHARS) {
@@ -803,8 +835,17 @@ export class ClaudeAuthManager {
     child.once('close', (code: number | null) => {
       if (settled) return;
       if (stderrBuffer.trim().length > 0) {
-        appendDiagnostic(stripAnsiAndOsc8(stderrBuffer));
+        diagnosticTail = appendBoundedTail(diagnosticTail, stripAnsiAndOsc8(stderrBuffer));
         stderrBuffer = '';
+      }
+      if (stdoutBuffer.trim().length > 0) {
+        if (!extractOAuthUrlFromCompleteLine(stdoutBuffer)) {
+          stdoutDiagnosticTail = appendBoundedTail(
+            stdoutDiagnosticTail,
+            stripAnsiAndOsc8(stdoutBuffer),
+          );
+        }
+        stdoutBuffer = '';
       }
       if (this.disposed || cancelled) {
         settle({ status: 'cancelled' });
@@ -851,7 +892,7 @@ export class ClaudeAuthManager {
         return;
       }
 
-      const detail = diagnosticTail.trim();
+      const detail = diagnosticTail.trim() || stdoutDiagnosticTail.trim();
       const message = detail
         ? `Claude sign-in failed: ${detail.slice(0, 300)}`
         : `Claude sign-in failed (exit code ${code ?? 'unknown'}).`;
@@ -919,19 +960,65 @@ export class ClaudeAuthManager {
       };
     }
 
-    if (login.codeSubmitted) {
+    if (login.codeSubmitted || login.codeSubmitting) {
       return {
         accepted: false,
         message: 'Authorization code has already been submitted. Waiting for Claude to finish…',
       };
     }
 
+    const stdin = login.child.stdin;
+    login.codeSubmitting = true;
+    let writeOk = false;
     try {
-      login.child.stdin.write(`${trimmed}\n`);
-    } catch {
+      writeOk = await new Promise<boolean>((resolve) => {
+        let done = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const detach = (): void => {
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+          const remove = stdin.off?.bind(stdin) ?? stdin.removeListener?.bind(stdin);
+          remove?.('error', onFail);
+          remove?.('close', onFail);
+        };
+        const finish = (ok: boolean): void => {
+          if (done) return;
+          done = true;
+          detach();
+          resolve(ok);
+        };
+        const onFail = (): void => finish(false);
+
+        stdin.once?.('error', onFail);
+        stdin.once?.('close', onFail);
+        timer = setTimeout(onFail, CLAUDE_CODE_WRITE_TIMEOUT_MS);
+        timer.unref?.();
+
+        try {
+          stdin.write(`${trimmed}\n`, (err) => {
+            finish(!err);
+          });
+        } catch {
+          finish(false);
+        }
+      });
+    } finally {
+      login.codeSubmitting = false;
+    }
+
+    if (!writeOk) {
       return {
         accepted: false,
         message: 'Claude sign-in could not receive the code. Click Sign in to Claude again.',
+      };
+    }
+
+    if (this.activeLogin !== login || login.child.exitCode !== null) {
+      return {
+        accepted: false,
+        message: 'No Claude sign-in is currently waiting for a code. Click Sign in to Claude again.',
       };
     }
 
@@ -1095,60 +1182,4 @@ export class ClaudeAuthManager {
       this.activeSignOut.cancel();
     }
   }
-}
-
-export interface ClaudeAuthIpcTarget {
-  claudeSignIn(): Promise<ClaudeSignInResult>;
-  cancelClaudeSignIn(): Promise<boolean> | boolean;
-  getActiveClaudeSignInUrl(): Promise<string | null> | string | null;
-  submitClaudeAuthCode(code: unknown): Promise<ClaudeCodeSubmitResult>;
-  claudeSignOut(): Promise<ClaudeSignOutResult>;
-}
-
-export interface ClaudeAuthIpcRegistrar {
-  handle(
-    channel: string,
-    listener: (event: { senderFrame?: { url?: string } | null }, ...args: unknown[]) => unknown,
-  ): void;
-}
-
-/**
- * Registers origin-guarded IPC handlers for in-app Claude authentication.
- * Validates `senderOrigin === trustedOrigin` before invoking `appCore` or writing to the OS clipboard.
- */
-export function registerClaudeAuthIpc(deps: {
-  ipcMain: ClaudeAuthIpcRegistrar;
-  trustedOrigin: string;
-  appCore: ClaudeAuthIpcTarget;
-  writeClipboardText: (text: string) => void;
-}): void {
-  const handleGuarded = (channel: string, fn: (...args: unknown[]) => unknown): void => {
-    deps.ipcMain.handle(channel, async (event, ...args) => {
-      let senderOrigin = '';
-      try {
-        senderOrigin = new URL(event?.senderFrame?.url ?? '').origin;
-      } catch {
-        senderOrigin = '';
-      }
-      if (!deps.trustedOrigin || senderOrigin !== deps.trustedOrigin) {
-        throw new Error(`IPC ${channel} rejected: untrusted sender origin`);
-      }
-      return fn(...args);
-    });
-  };
-
-  handleGuarded(IpcChannels.authClaudeSignin, () => deps.appCore.claudeSignIn());
-  handleGuarded(IpcChannels.authClaudeCancel, async () => Boolean(await deps.appCore.cancelClaudeSignIn()));
-  handleGuarded(IpcChannels.authClaudeCopyUrl, async () => {
-    const url = await deps.appCore.getActiveClaudeSignInUrl();
-    if (!url) {
-      return false;
-    }
-    deps.writeClipboardText(url);
-    return true;
-  });
-  handleGuarded(IpcChannels.authClaudeSubmitCode, (code: unknown) =>
-    deps.appCore.submitClaudeAuthCode(code),
-  );
-  handleGuarded(IpcChannels.authClaudeSignout, () => deps.appCore.claudeSignOut());
 }

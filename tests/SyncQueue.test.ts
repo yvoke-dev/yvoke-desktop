@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SyncEvent } from '../src/shared/types';
-import { ServerAuthRequiredError } from '../src/main/auth/ServerAuth';
+import { ServerAuthRequiredError, ServerAuthTransientError } from '../src/main/auth/ServerAuth';
 import { SyncApiError, type SyncClient } from '../src/main/sync/SyncClient';
 import { SyncQueue, type QueuedTurn, type SyncQueueDeps } from '../src/main/sync/SyncQueue';
 
@@ -1199,6 +1199,62 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
           ),
         );
         q.enqueue(turn('t-retriable', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        q.dispose();
+      }
+    });
+
+    it('schedules backoff retry (does not pause) on ServerAuthTransientError, Entra 503, and in dev mode (isEntraMode: () => false) even on 401/ServerAuthRequiredError', async () => {
+      // 1. Entra mode + transient Entra errors -> retry scheduled (NOT paused)
+      for (const transient of [
+        new ServerAuthTransientError(new Error('503 Service Unavailable')),
+        new Error('Entra: 503 Service Unavailable'),
+      ]) {
+        let scheduledTimers = 0;
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw transient;
+            }),
+            {
+              isEntraMode: () => true,
+              setTimeoutFn: (() => {
+                scheduledTimers += 1;
+                return 0 as unknown as ReturnType<typeof setTimeout>;
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn('t-entra-transient', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        q.dispose();
+      }
+
+      // 2. Dev mode (isEntraMode: () => false) + 401 / ServerAuthRequiredError -> retry scheduled (NOT paused)
+      for (const err of [
+        new SyncApiError(401, 'Yvoke Backend: Unauthorized'),
+        new ServerAuthRequiredError(),
+      ]) {
+        let scheduledTimers = 0;
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw err;
+            }),
+            {
+              isEntraMode: () => false,
+              setTimeoutFn: (() => {
+                scheduledTimers += 1;
+                return 0 as unknown as ReturnType<typeof setTimeout>;
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn('t-dev-retry', 1));
         await q.flush();
         expect(scheduledTimers).toBe(1);
         expect(q.pendingCount()).toBe(1);

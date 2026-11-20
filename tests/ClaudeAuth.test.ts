@@ -5,10 +5,12 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CLAUDE_CODE_WRITE_TIMEOUT_MS,
   CLAUDE_LOGIN_CODE_EXCHANGE_TIMEOUT_MS,
   CLAUDE_LOGIN_TIMEOUT_MS,
   CLAUDE_LOGIN_URL_TIMEOUT_MS,
   CLAUDE_LOGOUT_TIMEOUT_MS,
+  CLAUDE_MISSING_CACHE_TTL_MS,
   CLAUDE_STATUS_CACHE_TTL_MS,
   CLAUDE_STATUS_TIMEOUT_MS,
   ClaudeAuthManager,
@@ -23,13 +25,26 @@ import { ResultError } from '../src/main/agent/singleTurn';
 class FakeStdin extends EventEmitter {
   readonly writes: string[] = [];
   throwOnWrite: Error | null = null;
+  callbackError: Error | null = null;
+  deferCallback = false;
+  pendingCallback: ((err?: Error | null) => void) | null = null;
   destroyed = false;
 
-  write(chunk: string): boolean {
+  write(chunk: string, callback?: (error?: Error | null) => void): boolean {
     if (this.throwOnWrite) {
       throw this.throwOnWrite;
     }
     this.writes.push(chunk);
+    if (callback) {
+      if (this.deferCallback) {
+        this.pendingCallback = callback;
+      } else if (this.callbackError) {
+        const err = this.callbackError;
+        queueMicrotask(() => callback(err));
+      } else {
+        callback(null);
+      }
+    }
     return true;
   }
 
@@ -412,7 +427,7 @@ describe('ClaudeAuthManager', () => {
       }
     });
 
-    it('never caches missing across sequential calls so window focus rechecks immediately detect external sign-in', async () => {
+    it('caches genuine missing status for 15s TTL, re-probes after 15s or on forceRefresh/signIn, and never caches fallback/error probes', async () => {
       // Simulate macOS ~/.claude directory existing without credentials (where detectClaudeCredentials was inconclusive)
       fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true });
       const mgr = createManager();
@@ -422,14 +437,49 @@ describe('ClaudeAuthManager', () => {
       spawned[0].child.finish(0);
       expect(await p1).toEqual({ claude: 'missing' });
 
-      // Immediate second call without advancing clock must re-spawn rather than serving cached missing
-      const p2 = mgr.getStatus();
+      // Within 15s TTL -> served from cache without spawning a second subprocess
+      nowMs += CLAUDE_MISSING_CACHE_TTL_MS - 1;
+      expect(await mgr.getStatus()).toEqual({ claude: 'missing' });
+      expect(spawned).toHaveLength(1);
+
+      // forceRefresh: true bypasses the 15s missing cache immediately
+      const pForced = mgr.getStatus({ forceRefresh: true });
       expect(spawned).toHaveLength(2);
-      spawned[1].child.emitStdout(
+      spawned[1].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+      spawned[1].child.finish(0);
+      expect(await pForced).toEqual({ claude: 'missing' });
+
+      // Past 15s TTL -> re-spawns and detects external sign-in
+      nowMs += CLAUDE_MISSING_CACHE_TTL_MS + 1;
+      const p2 = mgr.getStatus();
+      expect(spawned).toHaveLength(3);
+      spawned[2].child.emitStdout(
         JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'now-signed-in@yvoke.ai' }),
       );
-      spawned[1].child.finish(0);
+      spawned[2].child.finish(0);
       expect(await p2).toEqual({ claude: 'ok', claudeAccount: 'now-signed-in@yvoke.ai' });
+
+      // signIn() entry invalidates cached status immediately
+      const signInP = mgr.signIn();
+      expect(spawned).toHaveLength(4);
+      mgr.cancelSignIn();
+      await signInP;
+      const pAfterCancel = mgr.getStatus();
+      expect(spawned).toHaveLength(5);
+      spawned[4].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+      spawned[4].child.finish(0);
+      expect(await pAfterCancel).toEqual({ claude: 'missing' });
+
+      // Fallback/corrupt-JSON probe is NEVER cached
+      const pCorrupt = mgr.getStatus({ forceRefresh: true });
+      spawned[5].child.emitStdout('{{{corrupt');
+      spawned[5].child.finish(0);
+      await pCorrupt;
+      const pAfterCorrupt = mgr.getStatus();
+      expect(spawned).toHaveLength(7);
+      spawned[6].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+      spawned[6].child.finish(0);
+      expect(await pAfterCorrupt).toEqual({ claude: 'missing' });
     });
 
     it('falls back to detectClaudeCredentials + detectClaudeAccount on corrupt JSON, non-boolean loggedIn, ENOENT, null binary, and 4s timeout', async () => {
@@ -662,6 +712,121 @@ describe('ClaudeAuthManager', () => {
 
       mgr.cancelSignIn();
       await signInPromise;
+    });
+
+    it('awaits stdin.write callback, handles async EPIPE/close/5s timeout, blocks concurrent codeSubmitting, and skips exchange timer if login ends mid-write', async () => {
+      // 1. Async callback error -> accepted: false and latch clears
+      const mgr1 = createManager();
+      const p1 = mgr1.signIn();
+      spawned[0].child.stdin.callbackError = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+      const errRes = await mgr1.submitAuthCode('codeA#stateA');
+      expect(errRes).toEqual({
+        accepted: false,
+        message: 'Claude sign-in could not receive the code. Click Sign in to Claude again.',
+      });
+      // Latch cleared so a retry succeeds once stdin recovers
+      spawned[0].child.stdin.callbackError = null;
+      expect(await mgr1.submitAuthCode('codeB#stateB')).toEqual({ accepted: true });
+      mgr1.cancelSignIn();
+      await p1;
+
+      // 2. Concurrent submitAuthCode while first write is pending -> blocked by codeSubmitting latch without writing twice
+      const mgr2 = createManager();
+      const p2 = mgr2.signIn();
+      spawned[1].child.stdin.deferCallback = true;
+      const firstSubmit = mgr2.submitAuthCode('firstCode#firstState');
+      const concurrentSubmit = await mgr2.submitAuthCode('secondCode#secondState');
+      expect(concurrentSubmit).toEqual({
+        accepted: false,
+        message: 'Authorization code has already been submitted. Waiting for Claude to finish…',
+      });
+      expect(spawned[1].child.stdin.writes).toEqual(['firstCode#firstState\n']);
+      spawned[1].child.stdin.pendingCallback?.(null);
+      expect(await firstSubmit).toEqual({ accepted: true });
+      mgr2.cancelSignIn();
+      await p2;
+
+      // 3. stdin 'close' event mid-write -> accepted: false
+      const mgr3 = createManager();
+      const p3 = mgr3.signIn();
+      spawned[2].child.stdin.deferCallback = true;
+      const closeSubmit = mgr3.submitAuthCode('closeCode#closeState');
+      spawned[2].child.stdin.emit('close');
+      expect(await closeSubmit).toEqual({
+        accepted: false,
+        message: 'Claude sign-in could not receive the code. Click Sign in to Claude again.',
+      });
+      mgr3.cancelSignIn();
+      await p3;
+
+      // 4. Child exits mid-write before callback succeeds -> accepted: false and NO codeExchangeTimer armed
+      vi.useFakeTimers();
+      const mgr4 = createManager();
+      const p4 = mgr4.signIn();
+      spawned[3].child.stdin.deferCallback = true;
+      const raceSubmit = mgr4.submitAuthCode('raceCode#raceState');
+      spawned[3].child.finish(1);
+      spawned[3].child.stdin.pendingCallback?.(null);
+      expect(await raceSubmit).toEqual({
+        accepted: false,
+        message: 'No Claude sign-in is currently waiting for a code. Click Sign in to Claude again.',
+      });
+      await p4;
+
+      // 5. Hung stdin.write times out after CLAUDE_CODE_WRITE_TIMEOUT_MS (5s)
+      const mgr5 = createManager();
+      const p5 = mgr5.signIn();
+      spawned[4].child.stdin.deferCallback = true;
+      const hungSubmit = mgr5.submitAuthCode('hungCode#hungState');
+      await vi.advanceTimersByTimeAsync(CLAUDE_CODE_WRITE_TIMEOUT_MS);
+      expect(await hungSubmit).toEqual({
+        accepted: false,
+        message: 'Claude sign-in could not receive the code. Click Sign in to Claude again.',
+      });
+      mgr5.cancelSignIn();
+      await p5;
+    });
+
+    it('falls back to sanitized non-URL stdout diagnostics on non-zero exit when stderr is empty, while keeping stderr primary', async () => {
+      // 1. Empty stderr -> uses sanitized non-URL stdout (including trailing line without newline), never leaking OAuth URL lines
+      const mgr1 = createManager();
+      const p1 = mgr1.signIn();
+      spawned[0].child.emitStdout(
+        'https://claude.ai/oauth/authorize?state=FIRST_SECRET&code_challenge=CHAL1\n',
+      );
+      spawned[0].child.emitStdout(
+        'https://claude.ai/oauth/authorize?state=SECOND_SECRET&code_challenge=CHAL2\n',
+      );
+      spawned[0].child.emitStdout(
+        '\x1b[31mCallback server failed to bind port 54545 with Bearer SECRET_STDOUT_JWT\x1b[0m',
+      );
+      spawned[0].child.finish(1);
+
+      const res1 = await p1;
+      expect(res1.status).toBe('error');
+      if (res1.status === 'error') {
+        expect(res1.message).toContain('Callback server failed to bind port 54545');
+        expect(res1.message).toContain('Bearer [REDACTED]');
+        expect(res1.message).not.toContain('FIRST_SECRET');
+        expect(res1.message).not.toContain('SECOND_SECRET');
+        expect(res1.message).not.toContain('SECRET_STDOUT_JWT');
+        expect(res1.message).not.toContain('/oauth/authorize');
+        expect(res1.message).not.toMatch(/\x1b/);
+      }
+
+      // 2. Non-empty stderr takes precedence over stdout
+      const mgr2 = createManager();
+      const p2 = mgr2.signIn();
+      spawned[1].child.emitStdout('stdout fallback detail\n');
+      spawned[1].child.emitStderr('stderr primary detail\n');
+      spawned[1].child.finish(1);
+
+      const res2 = await p2;
+      expect(res2.status).toBe('error');
+      if (res2.status === 'error') {
+        expect(res2.message).toContain('stderr primary detail');
+        expect(res2.message).not.toContain('stdout fallback detail');
+      }
     });
 
     it('enforces 15s code-exchange timeout and 5m overall login ceiling', async () => {

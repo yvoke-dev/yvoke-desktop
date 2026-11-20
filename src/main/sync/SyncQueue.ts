@@ -2,13 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
 import {
-  hasErrorSourcePrefix,
   isAttributedError,
-  isNetworkError,
   sanitizeLogContent,
   tagAttributedError,
 } from '../../shared/error';
-import { ServerAuthRequiredError } from '../auth/ServerAuth';
+import { isServerAuthFailure } from '../auth/ServerAuth';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -40,6 +38,8 @@ export interface SyncQueueDeps {
   /** Backoff schedule in ms; index = attempts (capped at last entry). */
   backoffMs?: number[];
   setTimeoutFn?: typeof setTimeout;
+  /** Whether the app is currently using corporate Entra auth mode (defaults to true). */
+  isEntraMode?: () => boolean;
 }
 
 const DEFAULT_BACKOFF = [2_000, 5_000, 15_000, 30_000, 60_000];
@@ -57,17 +57,6 @@ const MAX_DETAIL_LENGTH = 300;
 function sanitizeDetail(raw: string): string {
   const safe = sanitizeLogContent(raw).trim();
   return safe.length > MAX_DETAIL_LENGTH ? `${safe.slice(0, MAX_DETAIL_LENGTH)}…` : safe;
-}
-
-function isServerAuthPauseError(error: unknown): boolean {
-  if (error instanceof ServerAuthRequiredError) {
-    return true;
-  }
-  if (error instanceof SyncApiError && error.status === 401) {
-    return true;
-  }
-  const msg = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-  return hasErrorSourcePrefix(msg, 'Entra') && !isNetworkError(error);
 }
 
 function isValidQueuedTurn(item: unknown): item is QueuedTurn {
@@ -506,7 +495,8 @@ export class SyncQueue {
           continue;
         }
 
-        if (isServerAuthPauseError(error)) {
+        const isEntra = this.deps.isEntraMode ? this.deps.isEntraMode() : true;
+        if (isServerAuthFailure(error, isEntra)) {
           // Pause retries until explicit serverSignIn() or settings update nudges flush().
           if (this.timer) {
             clearTimeout(this.timer);

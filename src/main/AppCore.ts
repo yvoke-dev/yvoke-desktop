@@ -42,7 +42,6 @@ import {
   MAX_TOTAL_IMAGE_BYTES,
   normalizeImageDescription,
 } from '../shared/types';
-import { hasErrorSourcePrefix, isNetworkError } from '../shared/error';
 import { log, logError } from './log';
 import { webAccessDiagnostics } from './agent/policy';
 import { AgentService, sandboxDirFor } from './agent/AgentService';
@@ -56,7 +55,7 @@ import {
   detectClaudeAccount,
   detectClaudeCredentials,
 } from './agent/ClaudeAuth';
-import { ServerAuth, ServerAuthRequiredError, type TokenCachePersistence } from './auth/ServerAuth';
+import { isServerAuthFailure, ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
 import { SettingsStore } from './settings/Settings';
 import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore, type StoredChatMessage } from './store/ThreadStore';
@@ -335,6 +334,7 @@ export class AppCore {
           this.pendingRuns.delete(lid);
         }
       },
+      isEntraMode: () => !this.serverAuth.isDevMode(),
     });
 
     // Purge any tombstoned or malformed thread IDs from sync-queue.json FIRST so deleted
@@ -2317,12 +2317,7 @@ export class AppCore {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logError('sync', 'listThreads failed:', msg);
-      const isAuthFailure =
-        !this.serverAuth.isDevMode() &&
-        !isNetworkError(err) &&
-        (err instanceof ServerAuthRequiredError ||
-          hasErrorSourcePrefix(msg, 'Entra') ||
-          (err instanceof SyncApiError && err.status === 401));
+      const isAuthFailure = isServerAuthFailure(err, !this.serverAuth.isDevMode());
       const pendingAtReturn = this.totalPendingSyncCount();
       const threads = this.threads
         .list()
@@ -2725,10 +2720,10 @@ export class AppCore {
     this.agent.closeIdleSessions();
   }
 
-  async authStatus(): Promise<AuthStatus> {
+  async authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus> {
     const [claudeState, server] = await Promise.all([
       this.claudeAuth
-        ? this.claudeAuth.getStatus()
+        ? this.claudeAuth.getStatus({ forceRefresh: Boolean(opts?.forceRefresh) })
         : Promise.resolve({
             claude: detectClaudeCredentials() === 'missing' ? ('missing' as const) : ('ok' as const),
             claudeAccount: detectClaudeAccount(),
@@ -2792,6 +2787,7 @@ export class AppCore {
     }
 
     const run = (async (): Promise<AuthVerificationResponse> => {
+      this.claudeAuth?.invalidateStatusCache();
       const [server, claude] = await Promise.all([
         this.verifyServerLogin(),
         this.agent.verifyClaudeCredentials(

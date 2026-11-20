@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
     options: Record<string, unknown>;
     pushed: string[];
     closed: boolean;
-    closeSpy: ReturnType<typeof vi.fn>;
+    closeSpy: ReturnType<typeof vi.fn<() => void>>;
   }[],
   turnHandler: null as
     | ((
@@ -147,8 +147,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
   return { ...actual, query };
 });
 
-const { AgentService } = await import('../src/main/agent/AgentService');
-const { ServerAuthRequiredError } = await import('../src/main/auth/ServerAuth');
+const { AgentService, claudeBinaryPath } = await import('../src/main/agent/AgentService');
+const { resolveClaudeBinaryPath } = await import('../src/main/agent/ClaudeAuth');
+const { ServerAuthRequiredError, ServerAuthTransientError } = await import('../src/main/auth/ServerAuth');
+const { SyncApiError } = await import('../src/main/sync/SyncClient');
 
 const PLAYBOOKS: McpPromptInfo[] = [
   {
@@ -465,7 +467,7 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     await waitForEvent('turn-complete', 1);
     const c1 = events.find((e) => e.kind === 'turn-complete') as Extract<AgentEvent, { kind: 'turn-complete' }>;
     expect(c1.authRequired).toBe(false);
-    expect(c1.errorMessage).toBe('Claude: Claude subscription allowance or rate limit reached.');
+    expect(c1.errorMessage).toBe('Claude: 429 rate limit for API key exceeded');
 
     // 2. api_error_status: 500 mentioning invalid api key -> non-fallthrough, authRequired: false
     events = [];
@@ -738,24 +740,14 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     svc.closeAll();
   });
 
-  it('emits error event, calls onAuthFailure synchronously before emit, closes session, and rejects sendMessage when setModel throws', async () => {
+  it('emits error event with authRequired: true, closes session, and rejects sendMessage when setModel throws', async () => {
     const meta = makeThread({ id: 'thread-setmodel-err', model: 'sonnet', initialPlaybook: 'oim-full' });
-    const order: string[] = [];
-    const svc = createService(meta, {
-      onAuthFailure: () => {
-        order.push('onAuthFailure');
-      },
-      emit: (e) => {
-        order.push(`emit:${e.kind}:${String((e as { authRequired?: boolean }).authRequired)}`);
-        events.push(e);
-      },
-    });
+    const svc = createService(meta);
 
     await svc.sendMessage(meta, 'Turn 1', { playbook: 'oim-full' });
     await waitForEvent('turn-complete', 1);
 
     events = [];
-    order.length = 0;
     meta.model = 'opus';
     h.setModelImpl = async () => {
       throw new Error('Not logged in · Please run /login');
@@ -767,7 +759,6 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
 
     expect(svc.isBusy(meta.id)).toBe(false);
     expect(h.sessions[0].closed).toBe(true);
-    expect(order).toEqual(['onAuthFailure', 'emit:error:true']);
     expect(events).toEqual([
       {
         kind: 'error',
@@ -808,7 +799,9 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     releaseSetModel();
 
     await expect(sendPromise).rejects.toThrow('Conversation session closed before turn could start.');
+    await new Promise((r) => setTimeout(r, 10));
     expect(svc.isBusy(meta.id)).toBe(false);
+    expect(events).toHaveLength(1);
     expect(events).toContainEqual({
       kind: 'error',
       threadId: meta.id,
@@ -1042,6 +1035,515 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     expect(complete.serverAuthRequired).toBe(true);
     expect(complete.errorMessage).toMatch(/^Entra: /);
 
+    svc.closeAll();
+  });
+
+  it('emits aborted turn-complete without persisting when an interrupted turn fails in consume() or exits its stream early', async () => {
+    // 1. Interrupted turn whose stream throws an error
+    const meta1 = makeThread({ id: 'thread-stop-throw', initialPlaybook: 'oim-full' });
+    const onTurnPersist1 = vi.fn();
+    const svc1 = createService(meta1, { onTurnPersist: onTurnPersist1 });
+    let failTurn1!: (err: Error) => void;
+    let ready1!: () => void;
+    const readyPromise1 = new Promise<void>((r) => {
+      ready1 = r;
+    });
+
+    h.turnHandler = (_s, _t, emit, failNext) => {
+      emit({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Partial answer before stop' }] },
+      });
+      failTurn1 = failNext;
+      ready1();
+    };
+
+    await svc1.sendMessage(meta1, 'Q1', { playbook: 'oim-full' });
+    await readyPromise1;
+    await waitForEvent('assistant-block', 1);
+
+    await svc1.interrupt(meta1.id);
+    failTurn1(new Error('CLI process exited with code 143'));
+    await waitForEvent('turn-complete', 1);
+
+    const completes1 = events.filter((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >[];
+    expect(completes1).toHaveLength(1);
+    expect(completes1[0].isError).toBe(true);
+    expect(completes1[0].aborted).toBe(true);
+    expect(completes1[0].message.content).toBe('Partial answer before stop');
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(0);
+    expect(onTurnPersist1).not.toHaveBeenCalled();
+    expect(svc1.isBusy(meta1.id)).toBe(false);
+    svc1.closeAll();
+
+    // 2. Interrupted turn whose stream exits cleanly without yielding a result message
+    events = [];
+    const meta2 = makeThread({ id: 'thread-stop-clean-eof', initialPlaybook: 'oim-full' });
+    const onTurnPersist2 = vi.fn();
+    const svc2 = createService(meta2, { onTurnPersist: onTurnPersist2 });
+    let ready2!: () => void;
+    const readyPromise2 = new Promise<void>((r) => {
+      ready2 = r;
+    });
+
+    h.turnHandler = (_s, _t, emit) => {
+      emit({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Partial answer before clean EOF' }] },
+      });
+      ready2();
+    };
+
+    await svc2.sendMessage(meta2, 'Q2', { playbook: 'oim-full' });
+    await readyPromise2;
+    await waitForEvent('assistant-block', 1);
+
+    await svc2.interrupt(meta2.id);
+    // Simulate CLI exiting cleanly (iterator returns done: true) without emitting a result message
+    h.sessions[h.sessions.length - 1].closeSpy();
+    await waitForEvent('turn-complete', 1);
+
+    const completes2 = events.filter((e) => e.kind === 'turn-complete') as Extract<
+      AgentEvent,
+      { kind: 'turn-complete' }
+    >[];
+    expect(completes2).toHaveLength(1);
+    expect(completes2[0].isError).toBe(true);
+    expect(completes2[0].aborted).toBe(true);
+    expect(completes2[0].message.content).toBe('Partial answer before clean EOF');
+    expect(events.filter((e) => e.kind === 'error')).toHaveLength(0);
+    expect(onTurnPersist2).not.toHaveBeenCalled();
+    expect(svc2.isBusy(meta2.id)).toBe(false);
+    svc2.closeAll();
+
+    // 3. Uninterrupted turn whose stream exits cleanly without a result emits attributed error
+    events = [];
+    const meta3 = makeThread({ id: 'thread-unexpected-eof', initialPlaybook: 'oim-full' });
+    const svc3 = createService(meta3);
+    let ready3!: () => void;
+    const readyPromise3 = new Promise<void>((r) => {
+      ready3 = r;
+    });
+    h.turnHandler = () => {
+      ready3();
+    };
+    await svc3.sendMessage(meta3, 'Q3', { playbook: 'oim-full' });
+    await readyPromise3;
+    h.sessions[h.sessions.length - 1].closeSpy();
+    await waitForEvent('error', 1);
+    expect(events.find((e) => e.kind === 'error')).toMatchObject({
+      kind: 'error',
+      threadId: meta3.id,
+      message: 'Claude: Conversation session ended unexpectedly.',
+      authRequired: false,
+    });
+    svc3.closeAll();
+  });
+
+  it('does not emit error or turn-complete from a replaced dead session when it crashes or exits early', async () => {
+    const meta = makeThread({ id: 'thread-replaced-quiet', initialPlaybook: 'oim-full' });
+    const svc = createService(meta);
+    let failOld!: (err: Error) => void;
+    let oldReady!: () => void;
+    const oldReadyPromise = new Promise<void>((r) => {
+      oldReady = r;
+    });
+
+    let calls = 0;
+    h.turnHandler = (_s, _t, emit, failNext, id) => {
+      calls += 1;
+      if (calls === 1) {
+        failOld = failNext;
+        oldReady();
+      } else {
+        emit({
+          type: 'system',
+          subtype: 'init',
+          session_id: `sdk-session-${id}`,
+          mcp_servers: [],
+          tools: [],
+          slash_commands: [],
+        });
+        emit({ type: 'result', subtype: 'success', is_error: false, result: 'replacement ok', usage: {} });
+      }
+    };
+
+    await svc.sendMessage(meta, 'Old turn', { playbook: 'oim-full' });
+    await oldReadyPromise;
+    const oldSession = (svc as any).sessions.get(meta.id);
+    oldSession.interrupted = true;
+    (svc as any).sessions.delete(meta.id);
+
+    await svc.sendMessage(meta, 'New turn', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 1);
+
+    // Clear events from the completed replacement turn, then crash the displaced old session
+    events = [];
+    failOld(new Error('Displaced CLI crashed'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(events).toEqual([]);
+    svc.closeAll();
+  });
+
+  it('guards cold-start concurrency with startingThreads, aborts cold-start if closed mid-setup, and closes displaced session handles', async () => {
+    // 1. Concurrent cold-start sendMessage() calls serialize cleanly with 1 subprocess
+    const meta1 = makeThread({ id: 'thread-cold-race', initialPlaybook: 'oim-full' });
+    let releaseHeaders!: () => void;
+    let enteredHeaders!: () => void;
+    const headersEntered = new Promise<void>((r) => {
+      enteredHeaders = r;
+    });
+    const svc1 = createService(meta1, {
+      mcpAuthProvider: {
+        headers: () =>
+          new Promise<Record<string, string>>((resolve) => {
+            enteredHeaders();
+            releaseHeaders = () => resolve({});
+          }),
+      } as never,
+    });
+
+    const p1 = svc1.sendMessage(meta1, 'First', { playbook: 'oim-full' });
+    await headersEntered;
+    expect(svc1.isBusy(meta1.id)).toBe(true);
+    await expect(svc1.sendMessage(meta1, 'Second concurrent', { playbook: 'oim-full' })).rejects.toThrow(
+      'A turn is already running for this conversation.',
+    );
+
+    releaseHeaders();
+    await p1;
+    await waitForEvent('turn-complete', 1);
+    expect(h.sessions).toHaveLength(1);
+    svc1.closeAll();
+
+    // 2. Cold-start failure clears startingThreads so subsequent retry succeeds
+    events = [];
+    let shouldFailHeaders = true;
+    const meta2 = makeThread({ id: 'thread-cold-retry', initialPlaybook: 'oim-full' });
+    const svc2 = createService(meta2, {
+      mcpAuthProvider: {
+        headers: async () => {
+          if (shouldFailHeaders) {
+            shouldFailHeaders = false;
+            throw new Error('Yvoke Backend: temporary error');
+          }
+          return {};
+        },
+      } as never,
+    });
+    await expect(svc2.sendMessage(meta2, 'Fail first', { playbook: 'oim-full' })).rejects.toThrow();
+    expect(svc2.isBusy(meta2.id)).toBe(false);
+    await svc2.sendMessage(meta2, 'Retry succeeds', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 1);
+    svc2.closeAll();
+
+    // 3. closeThread() during cold-start ensureSession() prevents storing a zombie session
+    events = [];
+    const meta3 = makeThread({ id: 'thread-cold-close', initialPlaybook: 'oim-full' });
+    let releaseColdHeaders!: () => void;
+    let enteredColdHeaders!: () => void;
+    const coldHeadersEntered = new Promise<void>((r) => {
+      enteredColdHeaders = r;
+    });
+    const svc3 = createService(meta3, {
+      mcpAuthProvider: {
+        headers: () =>
+          new Promise<Record<string, string>>((resolve) => {
+            enteredColdHeaders();
+            releaseColdHeaders = () => resolve({});
+          }),
+      } as never,
+    });
+    const beforeCount = h.sessions.length;
+    const coldPromise = svc3.sendMessage(meta3, 'Closed mid-cold-start', { playbook: 'oim-full' });
+    await coldHeadersEntered;
+    svc3.closeThread(meta3.id);
+    releaseColdHeaders();
+
+    await expect(coldPromise).rejects.toThrow('Conversation session closed before turn could start.');
+    expect(svc3.isBusy(meta3.id)).toBe(false);
+    expect((svc3 as any).sessions.has(meta3.id)).toBe(false);
+    expect(h.sessions.length).toBe(beforeCount);
+    svc3.closeAll();
+
+    // 4. Displaced session during setModel() has its own query/queue/reviewer handles closed
+    events = [];
+    const meta4 = makeThread({ id: 'thread-displaced-setmodel', model: 'sonnet', initialPlaybook: 'oim-full' });
+    const svc4 = createService(meta4);
+    await svc4.sendMessage(meta4, 'Turn 1', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 1);
+    const originalQuerySession = h.sessions[h.sessions.length - 1];
+    const originalThreadSession = (svc4 as any).sessions.get(meta4.id);
+    const displacedReviewerClose = vi.fn();
+    originalThreadSession.activeReviewerQuery = { close: displacedReviewerClose };
+
+    meta4.model = 'opus';
+    let releaseDisplacedSetModel!: () => void;
+    let enteredDisplacedSetModel!: () => void;
+    const displacedEntered = new Promise<void>((r) => {
+      enteredDisplacedSetModel = r;
+    });
+    h.setModelImpl = () =>
+      new Promise<void>((resolve) => {
+        enteredDisplacedSetModel();
+        releaseDisplacedSetModel = resolve;
+      });
+    const displacedPromise = svc4.sendMessage(meta4, 'Turn 2', { playbook: 'oim-full' });
+    await displacedEntered;
+    // Overwrite map entry WITHOUT calling closeThread() to verify line-410 teardown itself closes handles
+    const dummyReplacement = { query: { close: vi.fn() }, queue: { close: vi.fn() }, busy: false, starting: false };
+    (svc4 as any).sessions.set(meta4.id, dummyReplacement);
+    releaseDisplacedSetModel();
+
+    await expect(displacedPromise).rejects.toThrow('Conversation session closed before turn could start.');
+    expect(originalQuerySession.closeSpy).toHaveBeenCalled();
+    expect(displacedReviewerClose).toHaveBeenCalled();
+    svc4.closeAll();
+  });
+
+  it('routes SyncApiError(401) as serverAuthRequired in entra mode, ignores ServerAuthTransientError, and never mislabels Yvoke Backend errors as Claude rate limits or auth errors', async () => {
+    const entraSettings = (): AppSettings => ({ ...settings(), serverAuthMode: 'entra' });
+
+    // 1. SyncApiError(401) in Entra mode -> serverAuthRequired: true, authRequired: false
+    events = [];
+    const svc401 = createService(makeThread({ id: 't-401-entra' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new SyncApiError(401, 'Yvoke Backend: Unauthorized');
+        },
+      } as never,
+    });
+    await expect(
+      svc401.sendMessage(makeThread({ id: 't-401-entra' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toThrow();
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: 't-401-entra',
+      message: 'Yvoke Backend: Unauthorized',
+      authRequired: false,
+      serverAuthRequired: true,
+    });
+    svc401.closeAll();
+
+    // 2. ServerAuthTransientError in Entra mode -> serverAuthRequired omitted
+    events = [];
+    const svcTransient = createService(makeThread({ id: 't-trans-entra' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new ServerAuthTransientError(new Error('503 Service Unavailable'));
+        },
+      } as never,
+    });
+    await expect(
+      svcTransient.sendMessage(makeThread({ id: 't-trans-entra' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toBeInstanceOf(ServerAuthTransientError);
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svcTransient.closeAll();
+
+    // 3. Unprefixed backend error in ensureSession() mentioning "rate limit" and "API key" stays Yvoke Backend with authRequired: false
+    events = [];
+    const svcBackendProse = createService(makeThread({ id: 't-be-prose', orchestratorProfile: 'OIM' }), {
+      getSettings: entraSettings,
+      getOrchestratorProfile: async () => {
+        throw new Error('Upstream gateway rate limit exceeded for API key');
+      },
+    });
+    await expect(
+      svcBackendProse.sendMessage(makeThread({ id: 't-be-prose', orchestratorProfile: 'OIM' }), 'Q', {}),
+    ).rejects.toThrow();
+    expect(events[0]).toEqual({
+      kind: 'error',
+      threadId: 't-be-prose',
+      message: 'Yvoke Backend: Upstream gateway rate limit exceeded for API key',
+      authRequired: false,
+    });
+    svcBackendProse.closeAll();
+  });
+
+  it('unifies claudeBinaryPath() with resolveClaudeBinaryPath()', () => {
+    expect(claudeBinaryPath()).toBe(resolveClaudeBinaryPath());
+  });
+
+  it('emits 0 error or turn-complete events when closeThread() closes an active busy turn, and clears pendingUser and reviewState on exit', async () => {
+    const meta1 = makeThread({ id: 'thread-close-active-eof', initialPlaybook: 'oim-full' });
+    const svc = createService(meta1);
+    let ready1!: () => void;
+    const readyPromise1 = new Promise<void>((r) => {
+      ready1 = r;
+    });
+    h.turnHandler = () => {
+      ready1();
+    };
+
+    await svc.sendMessage(meta1, 'Active turn closed via closeThread', { playbook: 'oim-full' });
+    await readyPromise1;
+    const activeSession1 = (svc as any).sessions.get(meta1.id);
+    activeSession1.reviewState = { originalQuestion: 'q' };
+    expect(activeSession1.pendingUser).toBeDefined();
+
+    // Clear turn-start event, then closeThread() mid-turn (clean EOF path)
+    events = [];
+    svc.closeThread(meta1.id);
+    await new Promise((r) => setTimeout(r, 15));
+
+    expect(events).toEqual([]);
+    expect(activeSession1.pendingUser).toBeUndefined();
+    expect(activeSession1.reviewState).toBeUndefined();
+
+    // Also verify closeThread() mid-turn when the SDK stream rejects (catch path in consume)
+    const meta1b = makeThread({ id: 'thread-close-active-reject', initialPlaybook: 'oim-full' });
+    let failActive!: (err: Error) => void;
+    let ready1b!: () => void;
+    const readyPromise1b = new Promise<void>((r) => {
+      ready1b = r;
+    });
+    h.turnHandler = (_s, _t, _emit, failNext) => {
+      failActive = failNext;
+      ready1b();
+    };
+    await svc.sendMessage(meta1b, 'Active turn closed then rejects', { playbook: 'oim-full' });
+    await readyPromise1b;
+    const activeSession1b = (svc as any).sessions.get(meta1b.id);
+    events = [];
+    // Simulate closeThread() removing session before query rejects with transport error
+    (svc as any).sessions.delete(meta1b.id);
+    failActive(new Error('Process terminated by closeThread'));
+    await new Promise((r) => setTimeout(r, 15));
+    expect(events).toEqual([]);
+    expect(activeSession1b.pendingUser).toBeUndefined();
+    expect(activeSession1b.reviewState).toBeUndefined();
+
+    // Also verify completeTurn() clears pendingUser after a completed turn
+    events = [];
+    h.turnHandler = null;
+    const meta2 = makeThread({ id: 'thread-clear-pending', initialPlaybook: 'oim-full' });
+    await svc.sendMessage(meta2, 'Completed turn', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 1);
+    const completedSession = (svc as any).sessions.get(meta2.id);
+    expect(completedSession.pendingUser).toBeUndefined();
+    expect(completedSession.reviewState).toBeUndefined();
+
+    svc.closeAll();
+  });
+
+  it('tracks per-turn turnStartedAt on warm sessions so Turn 2 durationMs reflects Turn 2 rather than Turn 1', async () => {
+    let fakeNow = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => fakeNow);
+    try {
+      const meta = makeThread({ id: 'thread-per-turn-duration', initialPlaybook: 'oim-full' });
+      const svc = createService(meta);
+
+      let emitTurn!: (m: unknown) => void;
+      let turnReady!: () => void;
+      let readyPromise = new Promise<void>((r) => {
+        turnReady = r;
+      });
+      h.turnHandler = (_s, _t, emit) => {
+        emitTurn = emit;
+        turnReady();
+      };
+
+      // Turn 1: starts at 1_000, finishes at 1_150 -> durationMs === 150
+      await svc.sendMessage(meta, 'Turn 1', { playbook: 'oim-full' });
+      await readyPromise;
+      fakeNow = 1_150;
+      emitTurn({ type: 'result', subtype: 'success', is_error: false, result: 'ok 1', usage: {} });
+      await waitForEvent('turn-complete', 1);
+      const c1 = events.find((e) => e.kind === 'turn-complete') as Extract<
+        AgentEvent,
+        { kind: 'turn-complete' }
+      >;
+      expect(c1.durationMs).toBe(150);
+
+      // Advance clock by 60 seconds while session stays warm & idle, then run Turn 2 (200ms)
+      events = [];
+      fakeNow = 61_000;
+      readyPromise = new Promise<void>((r) => {
+        turnReady = r;
+      });
+      await svc.sendMessage(meta, 'Turn 2', { playbook: 'oim-full' });
+      await readyPromise;
+      fakeNow = 61_200;
+      emitTurn({ type: 'result', subtype: 'success', is_error: false, result: 'ok 2', usage: {} });
+      await waitForEvent('turn-complete', 1);
+      const c2 = events.find((e) => e.kind === 'turn-complete') as Extract<
+        AgentEvent,
+        { kind: 'turn-complete' }
+      >;
+      expect(c2.durationMs).toBe(200);
+
+      svc.closeAll();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('protects a warm session in startingThreads from MAX_WARM_SESSIONS eviction during a concurrent cold-start sendMessage()', async () => {
+    const t1 = makeThread({ id: 'thread-evict-1', initialPlaybook: 'oim-full' });
+    const t2 = makeThread({ id: 'thread-evict-2', initialPlaybook: 'oim-full' });
+    const t3 = makeThread({ id: 'thread-evict-3', initialPlaybook: 'oim-full' });
+    const t4 = makeThread({ id: 'thread-evict-4', initialPlaybook: 'oim-full' });
+
+    let blockT1Headers = false;
+    let releaseT1Headers!: () => void;
+    let enteredT1Headers!: () => void;
+    const t1HeadersEntered = new Promise<void>((r) => {
+      enteredT1Headers = r;
+    });
+
+    let headerCallCount = 0;
+    const svc = createService(t1, {
+      mcpAuthProvider: {
+        headers: () => {
+          headerCallCount += 1;
+          if (blockT1Headers && headerCallCount === 4) {
+            return new Promise<Record<string, string>>((resolve) => {
+              enteredT1Headers();
+              releaseT1Headers = () => resolve({});
+            });
+          }
+          return Promise.resolve({});
+        },
+      } as never,
+    });
+
+    // Warm up 3 sessions: t1 (oldest), t2, t3
+    await svc.sendMessage(t1, 'Warm 1', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 1);
+    (svc as any).sessions.get(t1.id).lastActiveAt = 100;
+
+    await svc.sendMessage(t2, 'Warm 2', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 2);
+    (svc as any).sessions.get(t2.id).lastActiveAt = 200;
+
+    await svc.sendMessage(t3, 'Warm 3', { playbook: 'oim-full' });
+    await waitForEvent('turn-complete', 3);
+    (svc as any).sessions.get(t3.id).lastActiveAt = 300;
+
+    // Now start Turn 2 on oldest thread t1: it enters startingThreads and suspends inside headers() (BEFORE session.starting = true!)
+    blockT1Headers = true;
+    const t1Turn2 = svc.sendMessage(t1, 'Turn 2 on t1', { playbook: 'oim-full' });
+    await t1HeadersEntered;
+    expect(svc.isBusy(t1.id)).toBe(true);
+    expect((svc as any).sessions.get(t1.id).starting).toBe(false);
+
+    // Concurrently cold-start t4 -> triggers MAX_WARM_SESSIONS eviction; must evict t2, NOT t1!
+    const t4Turn = svc.sendMessage(t4, 'Cold start t4', { playbook: 'oim-full' });
+    await t4Turn;
+    await waitForEvent('turn-complete', 4);
+
+    expect(h.sessions[0].closed).toBe(false); // t1 protected!
+    expect(h.sessions[1].closed).toBe(true); // t2 evicted!
+
+    releaseT1Headers();
+    await t1Turn2;
+    await waitForEvent('turn-complete', 5);
     svc.closeAll();
   });
 });

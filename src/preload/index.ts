@@ -51,7 +51,7 @@ export interface DesktopApi {
   interrupt(threadId: string): Promise<void>;
   submitClarification(threadId: string, toolUseId: string, answer: string): Promise<boolean>;
   submitFeedback(request: FeedbackRequest): Promise<void>;
-  authStatus(): Promise<AuthStatus>;
+  authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus>;
   verifyAuth(): Promise<AuthVerificationResponse>;
   serverSignIn(): Promise<ServerSignInResult>;
   cancelServerSignIn(): Promise<boolean>;
@@ -88,7 +88,10 @@ const api: DesktopApi = {
   submitClarification: (threadId, toolUseId, answer) =>
     ipcRenderer.invoke(IpcChannels.chatSubmitClarification, threadId, toolUseId, answer),
   submitFeedback: (request) => ipcRenderer.invoke(IpcChannels.feedbackSubmit, request),
-  authStatus: () => ipcRenderer.invoke(IpcChannels.authStatus),
+  authStatus: (opts) =>
+    opts?.forceRefresh === true
+      ? ipcRenderer.invoke(IpcChannels.authStatus, { forceRefresh: true })
+      : ipcRenderer.invoke(IpcChannels.authStatus),
   verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
   cancelServerSignIn: () => ipcRenderer.invoke(IpcChannels.authCancelSignin),

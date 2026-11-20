@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthError, type Configuration } from '@azure/msal-node';
+import { AuthError, InteractionRequiredAuthError, ServerError, type Configuration } from '@azure/msal-node';
 import type { AppSettings } from '../src/shared/types';
 import {
   CancellableLoopbackClient,
@@ -8,7 +8,9 @@ import {
   SERVER_SIGNIN_TIMEOUT_MS,
   ServerAuth,
   ServerAuthRequiredError,
+  ServerAuthTransientError,
   SignInCancelledError,
+  isServerAuthFailure,
   type TokenCachePersistence,
 } from '../src/main/auth/ServerAuth';
 
@@ -1237,6 +1239,126 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
       status: 'error',
       message: 'Sign-in timed out. Please try again.',
     });
+  });
+
+  it('preserves this.account and throws ServerAuthTransientError on Entra 5xx, ServerError without auth code, MSAL network_error, and AbortError', async () => {
+    const transientErrors: unknown[] = [
+      new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
+      new ServerError('server_error', 'Unexpected upstream error'),
+      new AuthError('network_error', 'Network request failed'),
+      Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+      Object.assign(new Error('HTTP 429 Too Many Requests'), { statusCode: 429 }),
+    ];
+
+    for (const transientErr of transientErrors) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(transientErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+      await expect(auth.getAccessToken()).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof ServerAuthTransientError &&
+          !(err instanceof ServerAuthRequiredError) &&
+          err.message.startsWith('Entra: ') &&
+          err.cause === transientErr
+        );
+      });
+
+      // Account MUST remain preserved on transient Entra outages
+      expect(await auth.status()).toEqual({
+        mode: 'entra',
+        signedIn: true,
+        account: 'corp-user@corp.example',
+      });
+    }
+  });
+
+  it('clears this.account and throws ServerAuthRequiredError on genuine InteractionRequiredAuthError and grant failures', async () => {
+    const authFailures: unknown[] = [
+      new InteractionRequiredAuthError('interaction_required', 'AADSTS50076 MFA required'),
+      new AuthError('invalid_grant', 'AADSTS700082 refresh token expired'),
+      new AuthError('login_required', 'Login required'),
+      Object.assign(new Error('Bad grant'), { status: 400 }),
+      Object.assign(new Error('Unauthorized'), { statusCode: 401 }),
+    ];
+
+    for (const authErr of authFailures) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(authErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+      await expect(auth.getAccessToken()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+      expect(await auth.status()).toEqual({
+        mode: 'entra',
+        signedIn: false,
+        account: undefined,
+      });
+    }
+  });
+
+  it('verifyToken() reports unreachable on MSAL network_error/AbortError, error on Entra 5xx, and expired on interaction/grant failures', async () => {
+    // 1. MSAL network_error & AbortError -> unreachable
+    for (const netErr of [
+      new AuthError('network_error', 'Network error'),
+      Object.assign(new Error('Aborted'), { name: 'AbortError' }),
+      Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+    ]) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(netErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+      const res = await auth.verifyToken();
+      expect(res.status).toBe('unreachable');
+    }
+
+    // 2. Entra 503 ServerError & ServerAuthTransientError -> error (NOT expired)
+    for (const transientErr of [
+      new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
+      new ServerAuthTransientError(new Error('502 Bad Gateway')),
+    ]) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(transientErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+      const res = await auth.verifyToken();
+      expect(res.status).toBe('error');
+    }
+
+    // 3. Genuine InteractionRequiredAuthError -> expired
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    mockAcquireTokenSilent.mockRejectedValueOnce(
+      new InteractionRequiredAuthError('consent_required', 'Consent required'),
+    );
+    const authExp = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const expRes = await authExp.verifyToken();
+    expect(expRes.status).toBe('expired');
+  });
+
+  it('isServerAuthFailure() classifies server auth failures accurately across Entra and dev modes', () => {
+    // Dev mode: ALWAYS false
+    expect(isServerAuthFailure(new ServerAuthRequiredError(), false)).toBe(false);
+    expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, false)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: Session expired'), false)).toBe(false);
+
+    // Entra mode: true cases
+    expect(isServerAuthFailure(new ServerAuthRequiredError(), true)).toBe(true);
+    expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, true)).toBe(true);
+    expect(isServerAuthFailure({ statusCode: 401, message: 'Unauthorized' }, true)).toBe(true);
+    expect(isServerAuthFailure(new Error('Entra: Session expired'), true)).toBe(true);
+
+    // Entra mode: false cases (transient, network, non-401 HTTP, null/undefined)
+    expect(isServerAuthFailure(null, true)).toBe(false);
+    expect(isServerAuthFailure(undefined, true)).toBe(false);
+    expect(isServerAuthFailure(new ServerAuthTransientError(new Error('503')), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: fetch failed'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: 503 Service Unavailable'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: 429 Too Many Requests'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: temporarily_unavailable'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: server_error'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: Request timed out'), true)).toBe(false);
+    expect(isServerAuthFailure({ status: 500, message: 'Entra: 500' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 429, message: 'Entra: throttled' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 403, message: 'Forbidden' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 404, message: 'Not found' }, true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Yvoke Backend: 500 Internal Server Error'), true)).toBe(false);
   });
 });
 

@@ -313,7 +313,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'rate_limited',
-      message: 'Claude subscription allowance or rate limit reached.',
+      message: 'Too many requests for tenant',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -383,7 +383,7 @@ describe('AgentService.verifyClaudeCredentials', () => {
 
     expect(result).toEqual({
       status: 'rate_limited',
-      message: 'Claude subscription allowance or rate limit reached.',
+      message: '429 rate limit exceeded or usage limit reached',
     });
     expect(close).toHaveBeenCalled();
   });
@@ -513,12 +513,34 @@ describe('AgentService.verifyClaudeCredentials isolation', () => {
 });
 
 describe('classifyClaudeFailure', () => {
-  it('classifies ResultError with status 429 as rate_limited', () => {
+  it('classifies ResultError with status 429 as rate_limited preserving sanitized provider message and falling back when empty', () => {
     const err = new ResultError('API error', 'success', 429);
     expect(classifyClaudeFailure(err)).toEqual({
       status: 'rate_limited',
+      message: 'API error',
+    });
+
+    const emptyErr = new ResultError('   ', 'success', 429);
+    expect(classifyClaudeFailure(emptyErr)).toEqual({
+      status: 'rate_limited',
       message: 'Claude subscription allowance or rate limit reached.',
     });
+
+    const prefixedSecret = new ResultError(
+      'Claude: Rate limit resets at 14:00 UTC (key sk-ant-api03-SECRET123 Bearer jwt.tok.sig)',
+      'success',
+      429,
+    );
+    expect(classifyClaudeFailure(prefixedSecret)).toEqual({
+      status: 'rate_limited',
+      message: 'Rate limit resets at 14:00 UTC (key sk-ant-[REDACTED] Bearer [REDACTED])',
+    });
+
+    const veryLong = new ResultError(`Rate limit: ${'A'.repeat(400)}`, 'success', 429);
+    const classifiedLong = classifyClaudeFailure(veryLong);
+    expect(classifiedLong?.status).toBe('rate_limited');
+    expect(classifiedLong?.message.length).toBe(301);
+    expect(classifiedLong?.message.endsWith('…')).toBe(true);
   });
 
   it('classifies ResultError with status 401 as expired with login message', () => {
@@ -546,7 +568,7 @@ describe('classifyClaudeFailure', () => {
     const rateLimitErr = new ResultError('monthly usage limit reached', 'success');
     expect(classifyClaudeFailure(rateLimitErr)).toEqual({
       status: 'rate_limited',
-      message: 'Claude subscription allowance or rate limit reached.',
+      message: 'monthly usage limit reached',
     });
 
     const authErr = new ResultError('Not logged in · Please run /login', 'success');
