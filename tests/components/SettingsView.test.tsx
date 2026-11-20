@@ -4,11 +4,30 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import {
   areSettingsEqual,
   SETTINGS_PANES,
-  SettingsView,
+  SettingsView as RawSettingsView,
+  type SettingsViewProps,
 } from '../../src/renderer/src/components/SettingsView';
-import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
-import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
-import type { AppSettings, AuthVerificationResponse } from '../../src/shared/types';
+import { useServerSignIn } from '../../src/renderer/src/components/ServerSignInControls';
+import {
+  DEFAULT_APPEARANCE,
+  DEFAULT_ORCHESTRATOR_SETTINGS,
+  type AppSettings,
+  type AuthVerificationResponse,
+} from '../../src/shared/types';
+import { makeClaudeSignInStub, makeServerSignInStub } from './signInStubs';
+
+function SettingsView(
+  props: Omit<SettingsViewProps, 'claudeSignIn' | 'serverSignIn'> &
+    Partial<Pick<SettingsViewProps, 'claudeSignIn' | 'serverSignIn'>>,
+): React.JSX.Element {
+  return (
+    <RawSettingsView
+      {...props}
+      claudeSignIn={props.claudeSignIn ?? makeClaudeSignInStub()}
+      serverSignIn={props.serverSignIn ?? makeServerSignInStub()}
+    />
+  );
+}
 
 const settings: AppSettings = {
   serverBaseUrl: 'https://app.example/',
@@ -478,15 +497,21 @@ describe('SettingsView', () => {
       const onAuthChange = vi.fn();
       (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn, cancelServerSignIn };
 
-      render(
-        <SettingsView
-          settings={{ ...settings, serverAuthMode: 'entra' }}
-          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
-          onAuthChange={onAuthChange}
-          onSave={vi.fn()}
-          onClose={vi.fn()}
-        />,
-      );
+      function EntraSignInHarness(): React.JSX.Element {
+        const ctrl = useServerSignIn();
+        return (
+          <RawSettingsView
+            settings={{ ...settings, serverAuthMode: 'entra' }}
+            auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+            claudeSignIn={makeClaudeSignInStub()}
+            serverSignIn={ctrl}
+            onAuthChange={onAuthChange}
+            onSave={vi.fn()}
+            onClose={vi.fn()}
+          />
+        );
+      }
+      render(<EntraSignInHarness />);
       openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
@@ -917,28 +942,7 @@ describe('SettingsView', () => {
   });
 
   describe('Wave 2: Claude account inline sign-in & prevSuccessCountRef guard', () => {
-    function makeClaudeController(
-      overrides: Partial<ClaudeSignInController> = {},
-    ): ClaudeSignInController {
-      return {
-        signingIn: false,
-        cancelling: false,
-        copyingUrl: false,
-        copiedUrl: false,
-        altBrowserOpen: false,
-        codeDraft: '',
-        submittingCode: false,
-        error: null,
-        successCount: 0,
-        startSignIn: vi.fn(async () => undefined),
-        cancelSignIn: vi.fn(async () => undefined),
-        toggleAltBrowser: vi.fn(),
-        copySignInUrl: vi.fn(async () => undefined),
-        setCodeDraft: vi.fn(),
-        submitAuthCode: vi.fn(async () => undefined),
-        ...overrides,
-      };
-    }
+    const makeClaudeController = makeClaudeSignInStub;
 
     it('renders Sign in to Claude strictly when missing or expired, never on ok/rate_limited/unreachable/error, and omits Claude sign-out when onClaudeSignOut is not provided', async () => {
       const verifyAuth = vi
@@ -1189,20 +1193,7 @@ describe('SettingsView', () => {
   });
 
   describe('Wave 6: Accounts pane, slim About pane, paneRequest & dirty-aware footer', () => {
-    function makeServerController(
-      overrides: Partial<ServerSignInController> = {},
-    ): ServerSignInController {
-      return {
-        signingIn: false,
-        cancelling: false,
-        error: null,
-        successCount: 0,
-        startSignIn: vi.fn(async () => undefined),
-        cancelSignIn: vi.fn(async () => undefined),
-        clearError: vi.fn(),
-        ...overrides,
-      };
-    }
+    const makeServerController = makeServerSignInStub;
 
     it('exports SETTINGS_PANES with Accounts right after Server', () => {
       expect(SETTINGS_PANES).toEqual([
@@ -1625,44 +1616,8 @@ describe('SettingsView', () => {
   });
 
   describe('Wave 10: One-click Claude sign-out in Accounts pane', () => {
-    function makeClaudeController(
-      overrides: Partial<ClaudeSignInController> = {},
-    ): ClaudeSignInController {
-      return {
-        signingIn: false,
-        cancelling: false,
-        copyingUrl: false,
-        copiedUrl: false,
-        altBrowserOpen: false,
-        codeDraft: '',
-        submittingCode: false,
-        error: null,
-        successCount: 0,
-        startSignIn: vi.fn(async () => undefined),
-        cancelSignIn: vi.fn(async () => undefined),
-        toggleAltBrowser: vi.fn(),
-        copySignInUrl: vi.fn(async () => undefined),
-        setCodeDraft: vi.fn(),
-        submitAuthCode: vi.fn(async () => undefined),
-        clearError: vi.fn(),
-        ...overrides,
-      };
-    }
-
-    function makeServerController(
-      overrides: Partial<ServerSignInController> = {},
-    ): ServerSignInController {
-      return {
-        signingIn: false,
-        cancelling: false,
-        error: null,
-        successCount: 0,
-        startSignIn: vi.fn(async () => undefined),
-        cancelSignIn: vi.fn(async () => undefined),
-        clearError: vi.fn(),
-        ...overrides,
-      };
-    }
+    const makeClaudeController = makeClaudeSignInStub;
+    const makeServerController = makeServerSignInStub;
 
     it('renders disambiguated Sign out of Claude and Sign out of Yvoke buttons with data-tip (zero native title, zero inline style), Signing out… state, click handler, and inline error alert', () => {
       const onSignOut = vi.fn();
@@ -2048,6 +2003,468 @@ describe('SettingsView', () => {
       expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
       expect(document.body.textContent).not.toContain('stale-claude@corp.com');
       expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+    });
+  });
+
+  describe('Wave 17: serverAuthRequired, serverSignOutError, schema-exhaustive areSettingsEqual & unified successCount effect', () => {
+    it('#4: honors serverAuthRequired in Entra mode (shows Not signed in + Sign in to Yvoke, hides Sign out, clears verification & discards late verifyAuth), and ignores it in dev mode', async () => {
+      let resolveInFlightVerify!: (val: AuthVerificationResponse) => void;
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise<AuthVerificationResponse>((resolve) => {
+              resolveInFlightVerify = resolve;
+            }),
+        )
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'dev-user' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onSignOut = vi.fn();
+
+      // 1. Entra mode with stale signedIn: true + serverAuthRequired: true -> shows Not signed in & Sign in to Yvoke, hides Sign out
+      const { rerender } = render(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverAuthRequired={true}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      const yvokeDd = screen.getByText('Yvoke account').nextElementSibling as HTMLElement;
+      expect(yvokeDd.textContent).toContain('Not signed in');
+      expect(yvokeDd.textContent).not.toContain('alice@corp.com');
+      expect(within(yvokeDd).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect(within(yvokeDd).queryByRole('button', { name: 'Sign out of Yvoke' })).toBeNull();
+
+      // 2. Flip serverAuthRequired -> false, verify credentials, then flip false -> true -> clears ✓ Verified badge
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverAuthRequired={false}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(within(yvokeDd).getByRole('button', { name: 'Sign out of Yvoke' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverAuthRequired={true}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(within(yvokeDd).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect(within(yvokeDd).queryByRole('button', { name: 'Sign out of Yvoke' })).toBeNull();
+
+      // 3. Start in-flight verifyAuth while serverAuthRequired is false, flip false -> true before resolution -> late result discarded
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverAuthRequired={false}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect(verifyAuth).toHaveBeenCalledTimes(2);
+
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverAuthRequired={true}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      resolveInFlightVerify({
+        server: { status: 'ok', account: 'late-stale@corp.com' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      await new Promise((r) => setTimeout(r, 15));
+
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain('late-stale@corp.com');
+      expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(false);
+
+      // 4. Defensive: dev mode ignores serverAuthRequired={true} completely (never shows Sign in to Yvoke or drops ✓ Verified)
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'dev' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'dev', signedIn: true },
+          }}
+          serverAuthRequired={false}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'dev' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'dev', signedIn: true },
+          }}
+          serverAuthRequired={true}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+    });
+
+    it('#8: renders serverSignOutError in role="alert" on Yvoke row (row-isolated, zero inline styles) and invokes onClearServerSignOutError on Check Credentials', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'unreachable', message: 'Offline' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'missing', message: 'Not signed in' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onClearServerSignOutError = vi.fn();
+
+      const { container } = render(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onSignOut={vi.fn()}
+          onClaudeSignOut={vi.fn()}
+          serverSignOutError="MSAL cache locked during sign-out."
+          onClearServerSignOutError={onClearServerSignOutError}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      const yvokeDd = screen.getByText('Yvoke account').nextElementSibling as HTMLElement;
+      const claudeDd = screen.getByText('Claude account').nextElementSibling as HTMLElement;
+
+      const yvokeAlert = within(yvokeDd).getByRole('alert');
+      expect(yvokeAlert.className).toContain('server-signin-error');
+      expect(yvokeAlert.textContent).toBe('MSAL cache locked during sign-out.');
+      expect(within(claudeDd).queryByRole('alert')).toBeNull();
+      expect(container.querySelector('.settings-pane')?.querySelectorAll('[style]')).toHaveLength(0);
+
+      // Check Credentials: clears on start (+1), unreachable does NOT trigger a 2nd clear
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Offline/)).toBeTruthy());
+      expect(onClearServerSignOutError).toHaveBeenCalledTimes(1);
+
+      // Check Credentials -> server ok: clears on start (+1) and on ok (+1) -> total 3
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(onClearServerSignOutError).toHaveBeenCalledTimes(3);
+
+      // Check Credentials -> server missing: clears on start (+1) and on missing (+1) -> total 5
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Not signed in/)).toBeTruthy());
+      expect(onClearServerSignOutError).toHaveBeenCalledTimes(5);
+    });
+
+    it('#15: areSettingsEqual is schema-exhaustive over EVERY Required<AppSettings> key (including nested and unknown future keys) and preserves normalization invariants', () => {
+      const ALL_SETTINGS: Required<AppSettings> = {
+        settingsVersion: 1,
+        serverBaseUrl: '',
+        mcpTransport: 'http',
+        serverAuthMode: 'entra',
+        entra: { tenantId: '', clientId: '', scope: '' },
+        models: [],
+        defaultModel: '',
+        defaultThinkingLevel: 'off',
+        webSearch: { enabled: false, allowedDomains: [] },
+        maxTurns: 0,
+        playbookValidationEnabled: true,
+        playbookValidationExcludedPlaybooks: ['oim-full'],
+        showPrototypePlaybooks: false,
+        imageDescriptionsEnabled: true,
+        orchestrator: { ...DEFAULT_ORCHESTRATOR_SETTINGS },
+        appearance: { ...DEFAULT_APPEARANCE },
+      };
+      const cloneBase = (): AppSettings => structuredClone(ALL_SETTINGS);
+
+      // Normalization invariants
+      expect(areSettingsEqual(cloneBase(), cloneBase())).toBe(true);
+      expect(
+        areSettingsEqual(
+          { ...cloneBase(), settingsVersion: 1 },
+          { ...cloneBase(), settingsVersion: 2 },
+        ),
+      ).toBe(true);
+      const withoutVersion = cloneBase();
+      delete withoutVersion.settingsVersion;
+      expect(areSettingsEqual(cloneBase(), withoutVersion)).toBe(true);
+
+      // Whitespace padding & omitted optional defaults normalize to equal
+      const padded: AppSettings = {
+        ...cloneBase(),
+        serverBaseUrl: '  https://app.example/  ',
+        defaultModel: '  sonnet  ',
+        models: [' sonnet ', ' opus '],
+        entra: { tenantId: ' t ', clientId: ' c ', scope: ' s ' },
+        webSearch: { enabled: false, allowedDomains: [' docs.example.com '] },
+        playbookValidationExcludedPlaybooks: [' oim-full '],
+        orchestrator: {
+          ...DEFAULT_ORCHESTRATOR_SETTINGS,
+          orchestrator: { model: ' sonnet ', thinkingLevel: 'medium' },
+          reviewer: { model: ' sonnet ', thinkingLevel: 'medium' },
+          specialist: { model: ' haiku ', thinkingLevel: 'high' },
+        },
+      };
+      const cleanPadded: AppSettings = {
+        ...cloneBase(),
+        serverBaseUrl: 'https://app.example/',
+        defaultModel: 'sonnet',
+        models: ['sonnet', 'opus'],
+        entra: { tenantId: 't', clientId: 'c', scope: 's' },
+        webSearch: { enabled: false, allowedDomains: ['docs.example.com'] },
+        playbookValidationExcludedPlaybooks: ['oim-full'],
+      };
+      expect(areSettingsEqual(padded, cleanPadded)).toBe(true);
+
+      const omittedOptionals: AppSettings = {
+        ...cloneBase(),
+        playbookValidationEnabled: undefined,
+        imageDescriptionsEnabled: undefined,
+        showPrototypePlaybooks: undefined,
+        orchestrator: undefined,
+        appearance: undefined,
+      };
+      expect(areSettingsEqual(cloneBase(), omittedOptionals)).toBe(true);
+
+      // Explicit undefined unknown property equals absent property
+      expect(
+        areSettingsEqual(
+          cloneBase(),
+          { ...cloneBase(), futureOptional: undefined } as unknown as AppSettings,
+        ),
+      ).toBe(true);
+
+      // Programmatic mutation over EVERY top-level & nested key in Required<AppSettings>
+      const mutateValue = (val: unknown): unknown => {
+        if (typeof val === 'string') return `${val || 'x'}-mutated`;
+        if (typeof val === 'number') return val + 1;
+        if (typeof val === 'boolean') return !val;
+        if (Array.isArray(val)) return [...val, 'extra-entry'];
+        throw new Error(`Unhandled value type: ${typeof val}`);
+      };
+
+      const visitAndAssertMutations = (
+        obj: Record<string, unknown>,
+        path: string[] = [],
+      ): number => {
+        let checked = 0;
+        for (const key of Object.keys(obj)) {
+          const fullPath = [...path, key];
+          const pathStr = fullPath.join('.');
+          if (pathStr === 'settingsVersion') continue;
+
+          const val = obj[key];
+          if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+            checked += visitAndAssertMutations(val as Record<string, unknown>, fullPath);
+          } else {
+            const base = cloneBase();
+            const mutated = cloneBase();
+            let cursor: Record<string, unknown> = mutated as unknown as Record<string, unknown>;
+            for (let i = 0; i < path.length; i++) {
+              cursor = cursor[path[i]] as Record<string, unknown>;
+            }
+            if (pathStr === 'mcpTransport') {
+              cursor[key] = val === 'http' ? 'sse' : 'http';
+            } else if (pathStr === 'serverAuthMode') {
+              cursor[key] = val === 'entra' ? 'dev' : 'entra';
+            } else if (pathStr === 'defaultThinkingLevel' || key === 'thinkingLevel') {
+              cursor[key] = val === 'off' ? 'high' : 'off';
+            } else if (pathStr === 'appearance.theme') {
+              cursor[key] = val === 'system' ? 'dark' : 'system';
+            } else if (pathStr === 'appearance.density') {
+              cursor[key] = val === 'comfortable' ? 'compact' : 'comfortable';
+            } else {
+              cursor[key] = mutateValue(val);
+            }
+            expect(
+              areSettingsEqual(base, mutated),
+              `Expected areSettingsEqual to return false when mutating "${pathStr}"`,
+            ).toBe(false);
+            checked += 1;
+          }
+        }
+        return checked;
+      };
+
+      const checkedCount = visitAndAssertMutations(
+        ALL_SETTINGS as unknown as Record<string, unknown>,
+      );
+      expect(checkedCount).toBeGreaterThanOrEqual(25);
+
+      // Synthetic unknown future top-level & nested keys are ALSO detected!
+      expect(
+        areSettingsEqual(
+          cloneBase(),
+          { ...cloneBase(), futureFlag: true } as unknown as AppSettings,
+        ),
+      ).toBe(false);
+      expect(
+        areSettingsEqual(
+          cloneBase(),
+          {
+            ...cloneBase(),
+            appearance: { ...DEFAULT_APPEARANCE, futureRadius: 8 },
+          } as unknown as AppSettings,
+        ),
+      ).toBe(false);
+    });
+
+    it('Note A: unified successCount effect fires 1 verifyAuth() when both claudeSignIn and serverSignIn increment simultaneously while preserving mount and verification===null guards', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'expired', message: 'Entra expired' },
+          claude: { status: 'expired', message: 'Claude expired' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onAuthChange = vi.fn();
+
+      // 1. Mount guard: both start > 0 -> 0 onAuthChange, 0 verifyAuth
+      const { rerender } = render(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+          claudeSignIn={makeClaudeSignInStub({ successCount: 2 })}
+          serverSignIn={makeServerSignInStub({ successCount: 3 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+      expect(onAuthChange).toHaveBeenCalledTimes(0);
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+
+      // 2. verification === null guard: simultaneous increment calls onAuthChange 1x, verifyAuth 0x
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
+          claudeSignIn={makeClaudeSignInStub({ successCount: 3 })}
+          serverSignIn={makeServerSignInStub({ successCount: 4 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onAuthChange).toHaveBeenCalledTimes(1);
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+
+      // 3. Establish verification !== null via Check Credentials
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Claude expired/)).toBeTruthy());
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+
+      // 4. Simultaneous increment on BOTH controllers -> exactly 1 verifyAuth() (+1 -> total 2) and 1 onAuthChange() (+1 -> total 2)!
+      rerender(
+        <RawSettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          claudeSignIn={makeClaudeSignInStub({ successCount: 4 })}
+          serverSignIn={makeServerSignInStub({ successCount: 5 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onAuthChange).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(verifyAuth).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -12,16 +12,8 @@ import type {
   ThinkingLevel,
   UpdateCheckResult,
 } from '../../../shared/types';
-import {
-  ClaudeSignInControls,
-  useClaudeSignIn,
-  type ClaudeSignInController,
-} from './ClaudeSignInControls';
-import {
-  ServerSignInControls,
-  useServerSignIn,
-  type ServerSignInController,
-} from './ServerSignInControls';
+import { ClaudeSignInControls, type ClaudeSignInController } from './ClaudeSignInControls';
+import { ServerSignInControls, type ServerSignInController } from './ServerSignInControls';
 import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
@@ -44,85 +36,91 @@ export const SETTINGS_PANES = [
 export type SettingsPane = (typeof SETTINGS_PANES)[number];
 const SECONDARY_PANES: SettingsPane[] = ['Advanced', 'About'];
 
-function normalizedStringListEqual(a?: readonly string[], b?: readonly string[]): boolean {
-  const listA = (a ?? []).map((s) => s.trim());
-  const listB = (b ?? []).map((s) => s.trim());
-  if (listA.length !== listB.length) return false;
-  for (let i = 0; i < listA.length; i++) {
-    if (listA[i] !== listB[i]) return false;
-  }
-  return true;
+function normalizeStringList(list?: readonly string[]): string[] {
+  return (list ?? []).map((item) => item.trim());
 }
 
-function roleConfigEqual(a: RoleModelConfig, b: RoleModelConfig): boolean {
-  return a.model.trim() === b.model.trim() && a.thinkingLevel === b.thinkingLevel;
+function normalizeRoleConfig(role: RoleModelConfig): Record<string, unknown> {
+  return {
+    ...role,
+    model: role.model.trim(),
+  };
+}
+
+function normalizeSettingsForCompare(s: AppSettings): Record<string, unknown> {
+  const rawOrch = s.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
+  const normalized: Record<string, unknown> = {
+    ...s,
+    serverBaseUrl: s.serverBaseUrl.trim(),
+    entra: {
+      ...s.entra,
+      tenantId: s.entra.tenantId.trim(),
+      clientId: s.entra.clientId.trim(),
+      scope: s.entra.scope.trim(),
+    },
+    models: normalizeStringList(s.models),
+    defaultModel: s.defaultModel.trim(),
+    webSearch: {
+      ...s.webSearch,
+      enabled: Boolean(s.webSearch.enabled),
+      allowedDomains: normalizeStringList(s.webSearch.allowedDomains),
+    },
+    playbookValidationEnabled: s.playbookValidationEnabled !== false,
+    playbookValidationExcludedPlaybooks: normalizeStringList(
+      s.playbookValidationExcludedPlaybooks,
+    ),
+    showPrototypePlaybooks: Boolean(s.showPrototypePlaybooks),
+    imageDescriptionsEnabled: s.imageDescriptionsEnabled !== false,
+    orchestrator: {
+      ...DEFAULT_ORCHESTRATOR_SETTINGS,
+      ...rawOrch,
+      orchestrator: normalizeRoleConfig(
+        rawOrch.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS.orchestrator,
+      ),
+      reviewer: normalizeRoleConfig(
+        rawOrch.reviewer ?? DEFAULT_ORCHESTRATOR_SETTINGS.reviewer,
+      ),
+      specialist: normalizeRoleConfig(
+        rawOrch.specialist ?? DEFAULT_ORCHESTRATOR_SETTINGS.specialist,
+      ),
+    },
+    appearance: {
+      ...DEFAULT_APPEARANCE,
+      ...(s.appearance ?? {}),
+    },
+  };
+  delete normalized.settingsVersion;
+  return normalized;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+    return false;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const recA = a as Record<string, unknown>;
+  const recB = b as Record<string, unknown>;
+  const keys = new Set([...Object.keys(recA), ...Object.keys(recB)]);
+  for (const key of keys) {
+    if (!deepEqual(recA[key], recB[key])) return false;
+  }
+  return true;
 }
 
 /**
  * Compares two `AppSettings` objects normalizing whitespace, arrays, and optional default fields
- * so read-only panes (`Accounts`, `About`) can accurately tell whether other panes hold unsaved edits.
+ * while preserving every schema key (including future keys) so read-only panes (`Accounts`,
+ * `About`) can accurately tell whether other panes hold unsaved edits.
  */
 export function areSettingsEqual(a: AppSettings, b: AppSettings): boolean {
-  if (a.serverBaseUrl.trim() !== b.serverBaseUrl.trim()) return false;
-  if (a.mcpTransport !== b.mcpTransport) return false;
-  if (a.serverAuthMode !== b.serverAuthMode) return false;
-  if (
-    a.entra.tenantId.trim() !== b.entra.tenantId.trim() ||
-    a.entra.clientId.trim() !== b.entra.clientId.trim() ||
-    a.entra.scope.trim() !== b.entra.scope.trim()
-  ) {
-    return false;
-  }
-  if (!normalizedStringListEqual(a.models, b.models)) return false;
-  if (a.defaultModel.trim() !== b.defaultModel.trim()) return false;
-  if (a.defaultThinkingLevel !== b.defaultThinkingLevel) return false;
-  if (a.webSearch.enabled !== b.webSearch.enabled) return false;
-  if (!normalizedStringListEqual(a.webSearch.allowedDomains, b.webSearch.allowedDomains)) {
-    return false;
-  }
-  if (a.maxTurns !== b.maxTurns) return false;
-  if ((a.playbookValidationEnabled !== false) !== (b.playbookValidationEnabled !== false)) {
-    return false;
-  }
-  if (
-    !normalizedStringListEqual(
-      a.playbookValidationExcludedPlaybooks,
-      b.playbookValidationExcludedPlaybooks,
-    )
-  ) {
-    return false;
-  }
-  if (Boolean(a.showPrototypePlaybooks) !== Boolean(b.showPrototypePlaybooks)) return false;
-  if ((a.imageDescriptionsEnabled !== false) !== (b.imageDescriptionsEnabled !== false)) {
-    return false;
-  }
-
-  const orchA = a.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
-  const orchB = b.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
-  if (
-    !roleConfigEqual(orchA.orchestrator, orchB.orchestrator) ||
-    !roleConfigEqual(orchA.reviewer, orchB.reviewer) ||
-    !roleConfigEqual(orchA.specialist, orchB.specialist) ||
-    orchA.maxReviewRounds !== orchB.maxReviewRounds ||
-    orchA.maxSpecialistCalls !== orchB.maxSpecialistCalls ||
-    orchA.orchestratorMaxTurns !== orchB.orchestratorMaxTurns ||
-    orchA.specialistMaxTurns !== orchB.specialistMaxTurns
-  ) {
-    return false;
-  }
-
-  const appA = a.appearance ?? DEFAULT_APPEARANCE;
-  const appB = b.appearance ?? DEFAULT_APPEARANCE;
-  if (
-    appA.theme !== appB.theme ||
-    appA.density !== appB.density ||
-    appA.answerTextSize !== appB.answerTextSize ||
-    appA.traceExpanded !== appB.traceExpanded
-  ) {
-    return false;
-  }
-
-  return true;
+  return deepEqual(normalizeSettingsForCompare(a), normalizeSettingsForCompare(b));
 }
 
 /** Parse a number field, keeping a cleared/garbage input at 0 rather than NaN. */
@@ -388,12 +386,15 @@ export interface SettingsViewProps {
   settings: AppSettings;
   appVersion?: string;
   auth?: AuthStatus | null;
-  claudeSignIn?: ClaudeSignInController;
-  serverSignIn?: ServerSignInController;
+  serverAuthRequired?: boolean;
+  claudeSignIn: ClaudeSignInController;
+  serverSignIn: ServerSignInController;
   paneRequest?: { pane: SettingsPane; seq: number } | null;
   onAuthChange?: () => void;
   onSignOut?: () => void | Promise<void>;
   signingOut?: boolean;
+  serverSignOutError?: string | null;
+  onClearServerSignOutError?: () => void;
   onClaudeSignOut?: () => void | Promise<void>;
   claudeSigningOut?: boolean;
   claudeSignOutError?: string | null;
@@ -415,24 +416,23 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const verifySeqRef = useRef(0);
   const lastPaneSeqRef = useRef<number | null>(props.paneRequest?.seq ?? null);
   const prevServerSignedInRef = useRef(props.auth?.server.signedIn ?? false);
+  const prevServerAuthRequiredRef = useRef(Boolean(props.serverAuthRequired));
   const prevSavedServerModeRef = useRef(props.auth?.server.mode);
   const prevClaudeStatusRef = useRef(props.auth?.claude);
-  const fallbackClaudeSignIn = useClaudeSignIn();
-  const effectiveClaudeSignIn = props.claudeSignIn ?? fallbackClaudeSignIn;
-  const fallbackServerSignIn = useServerSignIn();
-  const effectiveServerSignIn = props.serverSignIn ?? fallbackServerSignIn;
   const verificationRef = useRef(verification);
   verificationRef.current = verification;
   const onAuthChangeRef = useRef(props.onAuthChange);
   onAuthChangeRef.current = props.onAuthChange;
-  const clearClaudeErrorRef = useRef(effectiveClaudeSignIn.clearError);
-  clearClaudeErrorRef.current = effectiveClaudeSignIn.clearError;
-  const clearServerErrorRef = useRef(effectiveServerSignIn.clearError);
-  clearServerErrorRef.current = effectiveServerSignIn.clearError;
+  const clearClaudeErrorRef = useRef(props.claudeSignIn.clearError);
+  clearClaudeErrorRef.current = props.claudeSignIn.clearError;
+  const clearServerErrorRef = useRef(props.serverSignIn.clearError);
+  clearServerErrorRef.current = props.serverSignIn.clearError;
   const onClearClaudeSignOutErrorRef = useRef(props.onClearClaudeSignOutError);
   onClearClaudeSignOutErrorRef.current = props.onClearClaudeSignOutError;
-  const prevSuccessCountRef = useRef(effectiveClaudeSignIn.successCount);
-  const prevServerSuccessCountRef = useRef(effectiveServerSignIn.successCount);
+  const onClearServerSignOutErrorRef = useRef(props.onClearServerSignOutError);
+  onClearServerSignOutErrorRef.current = props.onClearServerSignOutError;
+  const prevClaudeSuccessRef = useRef(props.claudeSignIn.successCount);
+  const prevServerSuccessRef = useRef(props.serverSignIn.successCount);
 
   useEffect(() => {
     isMounted.current = true;
@@ -443,10 +443,13 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
 
   useEffect(() => {
     const curSignedIn = props.auth?.server.signedIn ?? false;
+    const curServerAuthRequired = Boolean(props.serverAuthRequired);
     const curMode = props.auth?.server.mode;
     const curClaude = props.auth?.claude;
 
     const signedOutServer = prevServerSignedInRef.current && !curSignedIn;
+    const serverAuthInvalidated =
+      curMode === 'entra' && !prevServerAuthRequiredRef.current && curServerAuthRequired;
     const changedSavedMode =
       prevSavedServerModeRef.current !== undefined &&
       curMode !== undefined &&
@@ -454,15 +457,21 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     const signedOutClaude = prevClaudeStatusRef.current === 'ok' && curClaude === 'missing';
 
     prevServerSignedInRef.current = curSignedIn;
+    prevServerAuthRequiredRef.current = curServerAuthRequired;
     prevSavedServerModeRef.current = curMode;
     prevClaudeStatusRef.current = curClaude;
 
-    if (signedOutServer || changedSavedMode || signedOutClaude) {
+    if (signedOutServer || serverAuthInvalidated || changedSavedMode || signedOutClaude) {
       verifySeqRef.current += 1;
       setVerification(null);
       setVerifying(false);
     }
-  }, [props.auth?.server.signedIn, props.auth?.server.mode, props.auth?.claude]);
+  }, [
+    props.auth?.server.signedIn,
+    props.serverAuthRequired,
+    props.auth?.server.mode,
+    props.auth?.claude,
+  ]);
 
   useEffect(() => {
     if (!props.paneRequest) return;
@@ -471,11 +480,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     setPane(props.paneRequest.pane);
   }, [props.paneRequest]);
 
-  useEffect(() => {
-    if (effectiveClaudeSignIn.successCount === prevSuccessCountRef.current) return;
-    prevSuccessCountRef.current = effectiveClaudeSignIn.successCount;
-    onAuthChangeRef.current?.();
-    if (verificationRef.current === null) return;
+  const reverifyCredentials = (): void => {
     const seq = ++verifySeqRef.current;
     setVerification(null);
     setVerifying(true);
@@ -488,8 +493,14 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
         if (res.claude.status === 'ok') {
           clearClaudeErrorRef.current?.();
         }
+        if (res.claude.status === 'ok' || res.claude.status === 'missing') {
+          onClearClaudeSignOutErrorRef.current?.();
+        }
         if (res.server.status === 'ok') {
           clearServerErrorRef.current?.();
+        }
+        if (res.server.status === 'ok' || res.server.status === 'missing') {
+          onClearServerSignOutErrorRef.current?.();
         }
       })
       .catch((e: unknown) => {
@@ -502,40 +513,18 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
           setVerifying(false);
         }
       });
-  }, [effectiveClaudeSignIn.successCount]);
+  };
 
   useEffect(() => {
-    if (effectiveServerSignIn.successCount === prevServerSuccessCountRef.current) return;
-    prevServerSuccessCountRef.current = effectiveServerSignIn.successCount;
+    const claudeChanged = props.claudeSignIn.successCount !== prevClaudeSuccessRef.current;
+    const serverChanged = props.serverSignIn.successCount !== prevServerSuccessRef.current;
+    if (!claudeChanged && !serverChanged) return;
+    prevClaudeSuccessRef.current = props.claudeSignIn.successCount;
+    prevServerSuccessRef.current = props.serverSignIn.successCount;
     onAuthChangeRef.current?.();
     if (verificationRef.current === null) return;
-    const seq = ++verifySeqRef.current;
-    setVerification(null);
-    setVerifying(true);
-    setError(null);
-    void window.api
-      .verifyAuth()
-      .then((res) => {
-        if (!isMounted.current || verifySeqRef.current !== seq) return;
-        setVerification(res);
-        if (res.claude.status === 'ok') {
-          clearClaudeErrorRef.current?.();
-        }
-        if (res.server.status === 'ok') {
-          clearServerErrorRef.current?.();
-        }
-      })
-      .catch((e: unknown) => {
-        if (isMounted.current && verifySeqRef.current === seq) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (isMounted.current && verifySeqRef.current === seq) {
-          setVerifying(false);
-        }
-      });
-  }, [effectiveServerSignIn.successCount]);
+    reverifyCredentials();
+  }, [props.claudeSignIn.successCount, props.serverSignIn.successCount]);
 
   /**
    * A verdict describes the settings that were on disk when it was taken — main reads the *saved*
@@ -570,8 +559,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const handleCheckCredentials = async (): Promise<void> => {
     if (
       verifying ||
-      effectiveServerSignIn.signingIn ||
-      effectiveClaudeSignIn.signingIn ||
+      props.serverSignIn.signingIn ||
+      props.claudeSignIn.signingIn ||
       Boolean(props.signingOut) ||
       Boolean(props.claudeSigningOut)
     ) {
@@ -581,18 +570,22 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     setVerifying(true);
     setError(null);
     onClearClaudeSignOutErrorRef.current?.();
+    onClearServerSignOutErrorRef.current?.();
     try {
       const res = await window.api.verifyAuth();
       if (isMounted.current && verifySeqRef.current === seq) {
         setVerification(res);
         if (res.claude.status === 'ok') {
-          effectiveClaudeSignIn.clearError?.();
+          props.claudeSignIn.clearError?.();
         }
         if (res.claude.status === 'ok' || res.claude.status === 'missing') {
           onClearClaudeSignOutErrorRef.current?.();
         }
         if (res.server.status === 'ok') {
-          effectiveServerSignIn.clearError();
+          props.serverSignIn.clearError();
+        }
+        if (res.server.status === 'ok' || res.server.status === 'missing') {
+          onClearServerSignOutErrorRef.current?.();
         }
       }
     } catch (e) {
@@ -648,26 +641,28 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const caps = worstCase(orch);
   const savedServerMode = props.auth?.server.mode;
   const serverSignedIn = props.auth?.server.signedIn ?? false;
+  const effectiveServerSignedIn =
+    serverSignedIn && !(savedServerMode === 'entra' && Boolean(props.serverAuthRequired));
   const showServerSignIn =
     savedServerMode === 'entra' &&
-    (Boolean(effectiveServerSignIn.signingIn) ||
+    (Boolean(props.serverSignIn.signingIn) ||
       (verification
         ? verification.server.status === 'missing' || verification.server.status === 'expired'
-        : !serverSignedIn));
+        : !effectiveServerSignedIn));
   const showServerSignOut =
     savedServerMode === 'entra' &&
-    serverSignedIn &&
+    effectiveServerSignedIn &&
     !showServerSignIn &&
     Boolean(props.onSignOut);
   const showClaudeSignIn =
-    Boolean(effectiveClaudeSignIn.signingIn) ||
+    Boolean(props.claudeSignIn.signingIn) ||
     (verification
       ? verification.claude.status === 'missing' || verification.claude.status === 'expired'
       : props.auth?.claude === 'missing');
   const showClaudeSignOut =
     props.auth?.claude === 'ok' &&
     !showClaudeSignIn &&
-    !effectiveClaudeSignIn.signingIn &&
+    !props.claudeSignIn.signingIn &&
     Boolean(props.onClaudeSignOut);
   const isReadOnlyPane = pane === 'Accounts' || pane === 'About';
   const isDirty = !areSettingsEqual(draft, props.settings);
@@ -1256,7 +1251,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                             </span>
                           );
                         })()
-                      ) : serverSignedIn ? (
+                      ) : effectiveServerSignedIn ? (
                         props.auth?.server.account ? (
                           <>
                             <span>{props.auth.server.account}</span> · <span>Signed in</span>
@@ -1269,11 +1264,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                       )}
                       {showServerSignIn && (
                         <ServerSignInControls
-                          controller={effectiveServerSignIn}
+                          controller={props.serverSignIn}
                           variant="settings"
                           disabled={
                             verifying ||
-                            effectiveClaudeSignIn.signingIn ||
+                            props.claudeSignIn.signingIn ||
                             Boolean(props.signingOut) ||
                             Boolean(props.claudeSigningOut)
                           }
@@ -1289,13 +1284,18 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                             Boolean(props.signingOut) ||
                             Boolean(props.claudeSigningOut) ||
                             verifying ||
-                            effectiveServerSignIn.signingIn ||
-                            effectiveClaudeSignIn.signingIn
+                            props.serverSignIn.signingIn ||
+                            props.claudeSignIn.signingIn
                           }
                           onClick={() => void props.onSignOut?.()}
                         >
                           {props.signingOut ? 'Signing out…' : 'Sign out'}
                         </button>
+                      )}
+                      {props.serverSignOutError && (
+                        <div role="alert" className="server-signin-error">
+                          {props.serverSignOutError}
+                        </div>
                       )}
                     </>
                   )}
@@ -1338,11 +1338,11 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   )}
                   {showClaudeSignIn && (
                     <ClaudeSignInControls
-                      controller={effectiveClaudeSignIn}
+                      controller={props.claudeSignIn}
                       variant="inline"
                       disabled={
                         verifying ||
-                        effectiveServerSignIn.signingIn ||
+                        props.serverSignIn.signingIn ||
                         Boolean(props.claudeSigningOut) ||
                         Boolean(props.signingOut)
                       }
@@ -1358,8 +1358,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                         Boolean(props.claudeSigningOut) ||
                         Boolean(props.signingOut) ||
                         verifying ||
-                        effectiveClaudeSignIn.signingIn ||
-                        effectiveServerSignIn.signingIn
+                        props.claudeSignIn.signingIn ||
+                        props.serverSignIn.signingIn
                       }
                       onClick={() => void props.onClaudeSignOut?.()}
                     >
@@ -1380,8 +1380,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                     onClick={handleCheckCredentials}
                     disabled={
                       verifying ||
-                      effectiveServerSignIn.signingIn ||
-                      effectiveClaudeSignIn.signingIn ||
+                      props.serverSignIn.signingIn ||
+                      props.claudeSignIn.signingIn ||
                       Boolean(props.signingOut) ||
                       Boolean(props.claudeSigningOut)
                     }

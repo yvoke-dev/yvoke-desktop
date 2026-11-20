@@ -1,21 +1,13 @@
 import React from 'react';
 import type { AuthStatus } from '../../../shared/types';
-import {
-  ClaudeSignInControls,
-  useClaudeSignIn,
-  type ClaudeSignInController,
-} from './ClaudeSignInControls';
-import {
-  ServerSignInControls,
-  useServerSignIn,
-  type ServerSignInController,
-} from './ServerSignInControls';
+import { ClaudeSignInControls, type ClaudeSignInController } from './ClaudeSignInControls';
+import { ServerSignInControls, type ServerSignInController } from './ServerSignInControls';
 import { AlertIcon, InfoIcon } from './icons';
 
 export function StatusBanners(props: {
   auth: AuthStatus | null;
-  claudeSignIn?: ClaudeSignInController;
-  serverSignIn?: ServerSignInController;
+  claudeSignIn: ClaudeSignInController;
+  serverSignIn: ServerSignInController;
   serverAuthRequired?: boolean;
   signingOut?: boolean;
   claudeSigningOut?: boolean;
@@ -40,15 +32,10 @@ export function StatusBanners(props: {
     onDismissDroppedSyncError,
     onRetryServer,
   } = props;
-  const fallbackClaudeSignIn = useClaudeSignIn();
-  const effectiveClaudeSignIn = claudeSignIn ?? fallbackClaudeSignIn;
-  const fallbackServerSignIn = useServerSignIn();
-  const effectiveServerSignIn = serverSignIn ?? fallbackServerSignIn;
-  const showClaudeBanner =
-    auth?.claude === 'missing' || Boolean(effectiveClaudeSignIn.signingIn);
+  const showClaudeBanner = auth?.claude === 'missing' || Boolean(claudeSignIn.signingIn);
   const showServerSignInBanner =
     (auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired)) ||
-    Boolean(effectiveServerSignIn.signingIn);
+    Boolean(serverSignIn.signingIn);
 
   return (
     <div className="banners">
@@ -62,9 +49,9 @@ export function StatusBanners(props: {
             browser to ask questions.
           </span>
           <ClaudeSignInControls
-            controller={effectiveClaudeSignIn}
+            controller={claudeSignIn}
             variant="banner"
-            disabled={effectiveServerSignIn.signingIn || claudeSigningOut || signingOut}
+            disabled={serverSignIn.signingIn || claudeSigningOut || signingOut}
           />
         </div>
       )}
@@ -78,9 +65,9 @@ export function StatusBanners(props: {
             conversations.
           </span>
           <ServerSignInControls
-            controller={effectiveServerSignIn}
+            controller={serverSignIn}
             variant="banner"
-            disabled={effectiveClaudeSignIn.signingIn || signingOut || claudeSigningOut}
+            disabled={claudeSignIn.signingIn || signingOut || claudeSigningOut}
           />
         </div>
       )}

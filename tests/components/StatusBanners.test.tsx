@@ -2,8 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StatusBanners } from '../../src/renderer/src/components/StatusBanners';
-import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
-import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
+import { makeClaudeSignInStub, makeServerSignInStub } from './signInStubs';
 import type { AuthStatus } from '../../src/shared/types';
 
 let originalApi: unknown;
@@ -30,50 +29,13 @@ const mockAuth: AuthStatus = {
   server: { mode: 'dev', signedIn: true },
 };
 
-function makeClaudeController(
-  overrides: Partial<ClaudeSignInController> = {},
-): ClaudeSignInController {
-  return {
-    signingIn: false,
-    cancelling: false,
-    copyingUrl: false,
-    copiedUrl: false,
-    altBrowserOpen: false,
-    codeDraft: '',
-    submittingCode: false,
-    error: null,
-    successCount: 0,
-    startSignIn: vi.fn(async () => undefined),
-    cancelSignIn: vi.fn(async () => undefined),
-    toggleAltBrowser: vi.fn(),
-    copySignInUrl: vi.fn(async () => undefined),
-    setCodeDraft: vi.fn(),
-    submitAuthCode: vi.fn(async () => undefined),
-    clearError: vi.fn(),
-    ...overrides,
-  };
-}
-
-function makeServerController(
-  overrides: Partial<ServerSignInController> = {},
-): ServerSignInController {
-  return {
-    signingIn: false,
-    cancelling: false,
-    error: null,
-    successCount: 0,
-    startSignIn: vi.fn(async () => undefined),
-    cancelSignIn: vi.fn(async () => undefined),
-    clearError: vi.fn(),
-    ...overrides,
-  };
-}
-
 describe('StatusBanners', () => {
   it('renders nothing problematic when server is reachable and auth is good', () => {
     const { container } = render(
       <StatusBanners
         auth={mockAuth}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -88,6 +50,8 @@ describe('StatusBanners', () => {
     const { rerender } = render(
       <StatusBanners
         auth={mockAuth}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={false}
         pendingSync={0}
         syncError={null}
@@ -104,6 +68,8 @@ describe('StatusBanners', () => {
     rerender(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'a@corp.com' } }}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={false}
         serverAuthRequired={false}
         pendingSync={0}
@@ -118,7 +84,8 @@ describe('StatusBanners', () => {
     const { rerender } = render(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
-        serverSignIn={makeServerController()}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={false}
         pendingSync={0}
         syncError={null}
@@ -133,7 +100,8 @@ describe('StatusBanners', () => {
     rerender(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
-        serverSignIn={makeServerController()}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverAuthRequired={true}
         serverReachable={false}
         pendingSync={0}
@@ -147,11 +115,12 @@ describe('StatusBanners', () => {
 
   it('renders terminal-free Connect Claude banner with Sign in to Claude button and triggers startSignIn', () => {
     const startSignIn = vi.fn(async () => undefined);
-    const ctrl = makeClaudeController({ startSignIn });
+    const ctrl = makeClaudeSignInStub({ startSignIn });
     const { container } = render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
         claudeSignIn={ctrl}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -178,8 +147,8 @@ describe('StatusBanners', () => {
     const { rerender } = render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeClaudeController({ startSignIn: claudeStart })}
-        serverSignIn={makeServerController({ startSignIn: serverStart })}
+        claudeSignIn={makeClaudeSignInStub({ startSignIn: claudeStart })}
+        serverSignIn={makeServerSignInStub({ startSignIn: serverStart })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -198,8 +167,8 @@ describe('StatusBanners', () => {
     rerender(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeClaudeController({ startSignIn: claudeStart })}
-        serverSignIn={makeServerController({ signingIn: true })}
+        claudeSignIn={makeClaudeSignInStub({ startSignIn: claudeStart })}
+        serverSignIn={makeServerSignInStub({ signingIn: true })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -212,8 +181,8 @@ describe('StatusBanners', () => {
     rerender(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeClaudeController({ signingIn: true, cancelSignIn: claudeCancel })}
-        serverSignIn={makeServerController({ startSignIn: serverStart })}
+        claudeSignIn={makeClaudeSignInStub({ signingIn: true, cancelSignIn: claudeCancel })}
+        serverSignIn={makeServerSignInStub({ startSignIn: serverStart })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -231,7 +200,8 @@ describe('StatusBanners', () => {
     render(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
-        serverSignIn={makeServerController({ startSignIn })}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub({ startSignIn })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -249,8 +219,8 @@ describe('StatusBanners', () => {
     render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeClaudeController()}
-        serverSignIn={makeServerController()}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         signingOut={true}
         serverReachable={true}
         pendingSync={0}
@@ -271,8 +241,8 @@ describe('StatusBanners', () => {
     render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeClaudeController()}
-        serverSignIn={makeServerController()}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         claudeSigningOut={true}
         serverReachable={true}
         pendingSync={0}
@@ -293,6 +263,8 @@ describe('StatusBanners', () => {
     render(
       <StatusBanners
         auth={mockAuth}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={true}
         pendingSync={3}
         syncError="Connection timeout"
@@ -308,6 +280,8 @@ describe('StatusBanners', () => {
     const { container } = render(
       <StatusBanners
         auth={mockAuth}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
@@ -338,6 +312,8 @@ describe('StatusBanners', () => {
     const { container } = render(
       <StatusBanners
         auth={mockAuth}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         serverReachable={true}
         pendingSync={2}
         syncError="Temporary timeout"

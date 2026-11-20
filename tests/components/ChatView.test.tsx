@@ -6,6 +6,7 @@ import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
 import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
 import type { LiveTurn } from '../../src/renderer/src/App';
+import { makeClaudeSignInStub, makeServerSignInStub } from './signInStubs';
 import {
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
   type AppSettings,
@@ -93,8 +94,8 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
-      claudeSignIn={opts.claudeSignIn}
-      serverSignIn={opts.serverSignIn}
+      claudeSignIn={opts.claudeSignIn ?? makeClaudeSignInStub()}
+      serverSignIn={opts.serverSignIn ?? makeServerSignInStub()}
       signingOut={opts.signingOut}
       claudeSigningOut={opts.claudeSigningOut}
       onSend={opts.onSend ?? onSend}
@@ -1427,6 +1428,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={opts.prompts ?? PROMPTS}
           profiles={opts.profiles ?? [ORDINARY]}
           liveTurn={opts.liveTurn ?? IDLE}
+          claudeSignIn={opts.claudeSignIn ?? makeClaudeSignInStub()}
+          serverSignIn={opts.serverSignIn ?? makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={opts.onInterrupt ?? onInterrupt}
           onPatchThread={(patch) => setThread((prev) => ({ ...prev, ...patch }))}
@@ -1829,6 +1832,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -1850,6 +1855,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2675,6 +2682,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={onPatchThread}
@@ -2794,6 +2803,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={runningTurn}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2815,6 +2826,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2837,6 +2850,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2852,6 +2867,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import React from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { LiveTurn } from '../../src/renderer/src/App';
+import { makeClaudeSignInStub, makeServerSignInStub } from './signInStubs';
 import type {
   AppSettings,
   ChatMessage,
@@ -79,6 +80,8 @@ describe('ChatView Image UI & Interactions', () => {
         prompts={[]}
         profiles={[]}
         liveTurn={IDLE}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         onSend={onSend}
         onInterrupt={() => undefined}
         onPatchThread={() => undefined}
@@ -132,6 +135,8 @@ describe('ChatView Image UI & Interactions', () => {
         prompts={[]}
         profiles={[]}
         liveTurn={IDLE}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         onSend={onSend}
         onInterrupt={() => undefined}
         onPatchThread={() => undefined}
@@ -156,6 +161,8 @@ describe('ChatView Image UI & Interactions', () => {
         prompts={[]}
         profiles={[]}
         liveTurn={IDLE}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         onSend={onSend}
         onInterrupt={() => undefined}
         onPatchThread={() => undefined}
@@ -233,6 +240,8 @@ describe('ChatView Image UI & Interactions', () => {
         prompts={[]}
         profiles={[]}
         liveTurn={IDLE}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         onSend={onSend}
         onInterrupt={() => undefined}
         onPatchThread={() => undefined}
@@ -286,6 +295,8 @@ describe('ChatView Image UI & Interactions', () => {
         prompts={[]}
         profiles={[]}
         liveTurn={IDLE}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
         onSend={onSend}
         onInterrupt={() => undefined}
         onPatchThread={() => undefined}

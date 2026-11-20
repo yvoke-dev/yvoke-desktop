@@ -301,6 +301,63 @@ describe('ThreadList account footer', () => {
     expect(footerActionButtons).toHaveLength(1);
     expect(footerActionButtons[0].getAttribute('aria-label')).toBe('Settings');
   });
+
+  it('honors serverAuthRequired in Entra mode even when auth.server.signedIn is stale-true, and ignores it in dev mode', () => {
+    const { container, rerender } = render(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{
+          claude: 'ok',
+          claudeAccount: 'claude@corp.com',
+          server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+        }}
+        serverAuthRequired={true}
+        settingsOpen={false}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+      />,
+    );
+
+    const rows = container.querySelectorAll('.account-status-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector('.account-status-dot.is-warn')).not.toBeNull();
+    expect(rows[0].querySelector('.account-status-dot.is-ok')).toBeNull();
+    expect(rows[0].querySelector('.account-mode')?.textContent).toBe('Sign in needed');
+    expect(rows[0].textContent).not.toContain('alice@corp.com');
+    // Claude row stays healthy
+    expect(rows[1].querySelector('.account-status-dot.is-ok')).not.toBeNull();
+
+    // Defensive: dev mode must NEVER flip to Sign in needed even if serverAuthRequired is true
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{
+          claude: 'ok',
+          claudeAccount: 'claude@corp.com',
+          server: { mode: 'dev', signedIn: true },
+        }}
+        serverAuthRequired={true}
+        settingsOpen={false}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+      />,
+    );
+
+    const devRows = container.querySelectorAll('.account-status-row');
+    expect(devRows[0].querySelector('.account-status-dot.is-ok')).not.toBeNull();
+    expect(devRows[0].querySelector('.account-status-dot.is-warn')).toBeNull();
+    expect(devRows[0].querySelector('.account-mode')?.textContent).toBe('dev');
+  });
 });
 
 describe('ThreadList row layout', () => {

@@ -68,6 +68,7 @@ export default function App(): React.JSX.Element {
   const [showSettings, setShowSettings] = useState(false);
   const [paneRequest, setPaneRequest] = useState<{ pane: SettingsPane; seq: number } | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  const [serverSignOutError, setServerSignOutError] = useState<string | null>(null);
   const [claudeSigningOut, setClaudeSigningOut] = useState(false);
   const [claudeSignOutError, setClaudeSignOutError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -90,6 +91,8 @@ export default function App(): React.JSX.Element {
   const promptsCountRef = useRef(0);
   promptsCountRef.current = prompts.length;
   const initialPromptsLoadedRef = useRef(false);
+  const initialCatalogueStartedRef = useRef(false);
+  const cataloguesInFlightRef = useRef<Promise<void> | null>(null);
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const recreationEpochByThreadRef = useRef<Map<string, number>>(new Map());
   const recentServerIdsByThreadRef = useRef<Map<string, Record<string, string>>>(new Map());
@@ -119,65 +122,90 @@ export default function App(): React.JSX.Element {
   // Stable identity so the sidebar's debounced search effect doesn't re-fire every render.
   const searchContent = useCallback((query: string) => window.api.searchThreads(query), []);
 
-  /** Re-read the conversation list. Returns whether the server answered, for callers that need it. */
-  const refreshThreads = useCallback(async () => {
-    let result: Awaited<ReturnType<typeof window.api.listThreads>>;
-    try {
-      result = await window.api.listThreads();
-    } catch (error) {
-      if (mountedRef.current) {
-        console.warn('Failed to list threads:', error);
-      }
-      return false;
+  const fetchCatalogues = useCallback((): Promise<void> => {
+    if (cataloguesInFlightRef.current) {
+      return cataloguesInFlightRef.current;
     }
-    if (!mountedRef.current) return false;
-    setThreads(() => {
-      const seen = new Set<string>();
-      const next: ThreadMeta[] = [];
-      for (const raw of result.threads) {
-        if (deletedIdsRef.current.has(raw.id) || seen.has(raw.id)) continue;
-        seen.add(raw.id);
-        next.push(raw);
-      }
-      threadsRef.current = next;
-      return next;
-    });
-    const authReq = Boolean(result.serverAuthRequired);
-    setServerAuthRequired(authReq);
-    serverAuthRequiredRef.current = authReq;
-    setServerReachable(result.serverReachable);
-    if (typeof result.pendingSyncCount === 'number') {
-      setPendingSync(result.pendingSyncCount);
-      if (result.pendingSyncCount === 0) {
-        setSyncError(null);
-      }
-    }
-    const entraSignedOut =
-      authReq || (authRef.current?.server.mode === 'entra' && !authRef.current.server.signedIn);
-    if (
-      result.serverReachable &&
-      !entraSignedOut &&
-      initialPromptsLoadedRef.current &&
-      promptsCountRef.current === 0
-    ) {
-      void window.api
+    const run = Promise.all([
+      window.api
         .listPrompts()
         .then((list) => {
           if (!mountedRef.current) return;
           promptsCountRef.current = list.length;
           setPrompts(list);
         })
-        .catch(() => undefined);
-      void window.api
+        .catch(() => undefined),
+      window.api
         .listOrchestratorProfiles()
         .then((list) => {
           if (!mountedRef.current) return;
           setProfiles(list);
         })
-        .catch(() => undefined);
-    }
-    return result.serverReachable;
+        .catch(() => undefined),
+    ])
+      .then(() => undefined)
+      .finally(() => {
+        if (cataloguesInFlightRef.current === run) {
+          cataloguesInFlightRef.current = null;
+        }
+        initialPromptsLoadedRef.current = true;
+      });
+    cataloguesInFlightRef.current = run;
+    return run;
   }, []);
+
+  /** Re-read the conversation list. Returns authoritative reachability and auth-required flags. */
+  const refreshThreads = useCallback(
+    async (options?: {
+      skipCatalogueRetry?: boolean;
+    }): Promise<{ serverReachable: boolean; serverAuthRequired: boolean }> => {
+      let result: Awaited<ReturnType<typeof window.api.listThreads>>;
+      try {
+        result = await window.api.listThreads();
+      } catch (error) {
+        if (mountedRef.current) {
+          console.warn('Failed to list threads:', error);
+        }
+        return { serverReachable: false, serverAuthRequired: serverAuthRequiredRef.current };
+      }
+      if (!mountedRef.current) {
+        return { serverReachable: false, serverAuthRequired: serverAuthRequiredRef.current };
+      }
+      setThreads(() => {
+        const seen = new Set<string>();
+        const next: ThreadMeta[] = [];
+        for (const raw of result.threads) {
+          if (deletedIdsRef.current.has(raw.id) || seen.has(raw.id)) continue;
+          seen.add(raw.id);
+          next.push(raw);
+        }
+        threadsRef.current = next;
+        return next;
+      });
+      const authReq = Boolean(result.serverAuthRequired);
+      setServerAuthRequired(authReq);
+      serverAuthRequiredRef.current = authReq;
+      setServerReachable(result.serverReachable);
+      if (typeof result.pendingSyncCount === 'number') {
+        setPendingSync(result.pendingSyncCount);
+        if (result.pendingSyncCount === 0) {
+          setSyncError(null);
+        }
+      }
+      if (
+        !options?.skipCatalogueRetry &&
+        result.serverReachable &&
+        !authReq &&
+        promptsCountRef.current === 0 &&
+        (initialPromptsLoadedRef.current || !initialCatalogueStartedRef.current)
+      ) {
+        initialCatalogueStartedRef.current = true;
+        void fetchCatalogues();
+      }
+      return { serverReachable: result.serverReachable, serverAuthRequired: authReq };
+    },
+    [fetchCatalogues],
+  );
 
   const clearClaudeErrorRef = useRef<(() => void) | undefined>(undefined);
   const clearServerErrorRef = useRef<(() => void) | undefined>(undefined);
@@ -186,14 +214,24 @@ export default function App(): React.JSX.Element {
     if (!mountedRef.current || epoch !== authEpochRef.current) return false;
     authRef.current = status;
     setAuth(status);
+    if (status.server.mode === 'dev' && serverAuthRequiredRef.current) {
+      setServerAuthRequired(false);
+      serverAuthRequiredRef.current = false;
+    }
     return true;
   }, []);
 
   const fetchAuthStatus = useCallback(
-    async (authoritative = false): Promise<AuthStatus | null> => {
+    async (
+      authoritative = false,
+      opts?: { forceRefresh?: boolean },
+    ): Promise<AuthStatus | null> => {
       const epoch = authoritative ? ++authEpochRef.current : authEpochRef.current;
       try {
-        const status = await window.api.authStatus();
+        const status =
+          opts?.forceRefresh === true
+            ? await window.api.authStatus({ forceRefresh: true })
+            : await window.api.authStatus();
         if (!applyAuthStatus(status, epoch)) return null;
         return status;
       } catch {
@@ -205,6 +243,10 @@ export default function App(): React.JSX.Element {
 
   const clearClaudeSignOutError = useCallback(() => {
     setClaudeSignOutError(null);
+  }, []);
+
+  const clearServerSignOutError = useCallback(() => {
+    setServerSignOutError(null);
   }, []);
 
   const clearAuthTurnErrors = useCallback(() => {
@@ -251,41 +293,23 @@ export default function App(): React.JSX.Element {
    * check failed — exactly when `refreshThreads()` is still reporting unreachable.
    */
   const refreshServer = useCallback(async () => {
-    const status = await fetchAuthStatus(false);
-    if (status) {
+    void fetchAuthStatus(false).then((status) => {
+      if (!status || !mountedRef.current) return;
       if (status.claude === 'ok') {
         clearClaudeErrorRef.current?.();
       }
       if (status.server.mode !== 'entra' || status.server.signedIn) {
         clearServerErrorRef.current?.();
       }
-    }
+    });
+    const { serverReachable: reachable, serverAuthRequired: authReq } = await refreshThreads({
+      skipCatalogueRetry: true,
+    });
     if (!mountedRef.current) return;
-    const shouldFetchCatalogues = !initialPromptsLoadedRef.current || promptsCountRef.current > 0;
-    if (!(await refreshThreads())) return;
-    if (!mountedRef.current) return;
-    const entraSignedOut =
-      serverAuthRequiredRef.current ||
-      (authRef.current?.server.mode === 'entra' && !authRef.current.server.signedIn);
-    if (entraSignedOut) return;
-    if (shouldFetchCatalogues) {
-      void window.api
-        .listPrompts()
-        .then((list) => {
-          if (!mountedRef.current) return;
-          promptsCountRef.current = list.length;
-          setPrompts(list);
-        })
-        .catch(() => undefined);
-      void window.api
-        .listOrchestratorProfiles()
-        .then((list) => {
-          if (!mountedRef.current) return;
-          setProfiles(list);
-        })
-        .catch(() => undefined);
-    }
-  }, [fetchAuthStatus, refreshThreads]);
+    if (!reachable || authReq) return;
+    initialCatalogueStartedRef.current = true;
+    void fetchCatalogues();
+  }, [fetchAuthStatus, fetchCatalogues, refreshThreads]);
 
   useEffect(() => {
     void window.api
@@ -297,46 +321,35 @@ export default function App(): React.JSX.Element {
     void window.api
       .getSettings()
       .then((s) => {
-        if (mountedRef.current) setSettings(s);
+        if (!mountedRef.current) return;
+        setSettings(s);
+        if (s.serverAuthMode === 'dev' && !initialCatalogueStartedRef.current) {
+          initialCatalogueStartedRef.current = true;
+          void fetchCatalogues();
+        }
       })
       .catch(() => undefined);
     const initialAuthEpoch = authEpochRef.current;
     void window.api
       .authStatus()
       .then((status) => {
-        if (!applyAuthStatus(status, initialAuthEpoch)) {
-          initialPromptsLoadedRef.current = true;
-          return;
-        }
+        if (!applyAuthStatus(status, initialAuthEpoch)) return;
         if (status.server.mode === 'entra' && !status.server.signedIn) {
           setServerAuthRequired(true);
           serverAuthRequiredRef.current = true;
-          initialPromptsLoadedRef.current = true;
-          return;
         }
-        void window.api
-          .listPrompts()
-          .then((list) => {
-            if (!mountedRef.current) return;
-            promptsCountRef.current = list.length;
-            setPrompts(list);
-          })
-          .catch(() => undefined)
-          .finally(() => {
-            initialPromptsLoadedRef.current = true;
-          });
-        void window.api
-          .listOrchestratorProfiles()
-          .then((list) => {
-            if (mountedRef.current) setProfiles(list);
-          })
-          .catch(() => undefined);
       })
-      .catch(() => {
-        initialPromptsLoadedRef.current = true;
-      });
-    void refreshThreads();
-  }, [applyAuthStatus, refreshThreads]);
+      .catch(() => undefined);
+    void refreshThreads({ skipCatalogueRetry: true }).then(
+      ({ serverReachable: reachable, serverAuthRequired: authReq }) => {
+        if (!mountedRef.current) return;
+        if (reachable && !authReq && !initialCatalogueStartedRef.current) {
+          initialCatalogueStartedRef.current = true;
+          void fetchCatalogues();
+        }
+      },
+    );
+  }, [applyAuthStatus, fetchCatalogues, refreshThreads]);
 
   const claudeSignIn = useClaudeSignIn({
     onSignedIn: (account) => {
@@ -375,6 +388,7 @@ export default function App(): React.JSX.Element {
     onSignedIn: (account) => {
       if (!mountedRef.current) return;
       authEpochRef.current += 1;
+      setServerSignOutError(null);
       setServerAuthRequired(false);
       serverAuthRequiredRef.current = false;
       if (authRef.current) {
@@ -405,19 +419,25 @@ export default function App(): React.JSX.Element {
   });
   clearServerErrorRef.current = serverSignIn.clearError;
 
+  useEffect(() => {
+    if (serverSignIn.signingIn) {
+      setServerSignOutError(null);
+    }
+  }, [serverSignIn.signingIn]);
+
   // Re-check Claude credentials on window focus only while signed out and not already running an
   // in-app sign-in or sign-out, throttled at 2s so rapid focus bounces do not spawn back-to-back checks.
   const lastFocusAuthCheckRef = useRef<number | null>(null);
   useEffect(() => {
     if (auth?.claude !== 'missing' || claudeSignIn.signingIn || claudeSigningOut) return;
     const onFocus = (): void => {
-      if (claudeSigningOutRef.current) return;
+      if (claudeSigningOutRef.current || authRef.current?.claude !== 'missing') return;
       const now = Date.now();
       if (lastFocusAuthCheckRef.current !== null && now - lastFocusAuthCheckRef.current < 2_000) {
         return;
       }
       lastFocusAuthCheckRef.current = now;
-      void fetchAuthStatus(false).then((status) => {
+      void fetchAuthStatus(false, { forceRefresh: true }).then((status) => {
         if (!status) return;
         if (status.claude === 'ok') {
           clearClaudeErrorRef.current?.();
@@ -430,7 +450,8 @@ export default function App(): React.JSX.Element {
   }, [auth?.claude, claudeSignIn.signingIn, claudeSigningOut, fetchAuthStatus, clearAuthTurnErrors]);
 
   const entraUnauthenticated =
-    (auth?.server.mode === 'entra' && !auth.server.signedIn) || serverAuthRequired;
+    auth?.server.mode !== 'dev' &&
+    ((auth?.server.mode === 'entra' && !auth.server.signedIn) || serverAuthRequired);
 
   // When the server is unreachable or the playbook catalogue is still empty, periodically poll
   // so the banner clears and playbooks load automatically once the backend service answers.
@@ -990,6 +1011,7 @@ export default function App(): React.JSX.Element {
     setShowSettings(false);
     setPaneRequest(null);
     setClaudeSignOutError(null);
+    setServerSignOutError(null);
   }, []);
 
   const openSettings = useCallback((targetPane?: SettingsPane) => {
@@ -1004,6 +1026,7 @@ export default function App(): React.JSX.Element {
         setPaneRequest(null);
       } else {
         setClaudeSignOutError(null);
+        setServerSignOutError(null);
       }
       showSettingsRef.current = next;
       setShowSettings(next);
@@ -1021,11 +1044,14 @@ export default function App(): React.JSX.Element {
     }
     signingOutRef.current = true;
     setSigningOut(true);
+    setServerSignOutError(null);
     try {
       await window.api.serverSignOut();
       if (!mountedRef.current) return;
       clearServerErrorRef.current?.();
+      setServerSignOutError(null);
       const epoch = ++authEpochRef.current;
+      const wasEntra = authRef.current?.server.mode === 'entra';
       if (authRef.current) {
         authRef.current = {
           ...authRef.current,
@@ -1037,15 +1063,44 @@ export default function App(): React.JSX.Element {
           ? { ...prev, server: { ...prev.server, signedIn: false, account: undefined } }
           : prev,
       );
-      const status = await window.api.authStatus();
-      if (!applyAuthStatus(status, epoch)) return;
-      const needsEntra = status.server.mode === 'entra' && !status.server.signedIn;
-      setServerAuthRequired(needsEntra);
-      serverAuthRequiredRef.current = needsEntra;
-      await refreshThreads();
+      if (wasEntra) {
+        setServerAuthRequired(true);
+        serverAuthRequiredRef.current = true;
+      }
+      try {
+        const status = await window.api.authStatus();
+        if (!applyAuthStatus(status, epoch)) return;
+        const needsEntra = status.server.mode === 'entra' && !status.server.signedIn;
+        setServerAuthRequired(needsEntra);
+        serverAuthRequiredRef.current = needsEntra;
+        await refreshThreads();
+      } catch {
+        // Optimistic signed-out state already applied; post-success refresh blips must not surface a sign-out failure.
+      }
     } catch (error) {
-      if (mountedRef.current) {
-        console.warn('Failed to sign out:', error);
+      if (!mountedRef.current) return;
+      console.warn('Failed to sign out:', error);
+      const rawMsg = error instanceof Error ? error.message : String(error ?? '');
+      const safeMsg = sanitizeLogContent(rawMsg).trim() || 'Failed to sign out of Yvoke.';
+      const epoch = ++authEpochRef.current;
+      let latest: AuthStatus | null = null;
+      try {
+        latest = await window.api.authStatus();
+      } catch {
+        latest = null;
+      }
+      if (!mountedRef.current) return;
+      if (latest) {
+        if (!applyAuthStatus(latest, epoch)) return;
+      } else if (epoch !== authEpochRef.current) {
+        return;
+      }
+      if (latest && latest.server.mode === 'entra' && !latest.server.signedIn) {
+        setServerSignOutError(null);
+        setServerAuthRequired(true);
+        serverAuthRequiredRef.current = true;
+      } else {
+        setServerSignOutError(safeMsg);
       }
     } finally {
       signingOutRef.current = false;
@@ -1177,6 +1232,7 @@ export default function App(): React.JSX.Element {
         onOpenSettings={() => openSettings()}
         onOpenAccounts={() => openSettings('Accounts')}
         auth={auth}
+        serverAuthRequired={serverAuthRequired}
       />
       <main className="main-pane">
         <StatusBanners
@@ -1200,20 +1256,27 @@ export default function App(): React.JSX.Element {
             settings={settings}
             appVersion={appVersion}
             auth={auth}
+            serverAuthRequired={serverAuthRequired}
             claudeSignIn={claudeSignIn}
             serverSignIn={serverSignIn}
             paneRequest={paneRequest}
             signingOut={signingOut}
+            serverSignOutError={serverSignOutError}
             claudeSigningOut={claudeSigningOut}
             claudeSignOutError={claudeSignOutError}
             onAuthChange={() => void refreshServer()}
             onSignOut={() => void handleSignOut()}
+            onClearServerSignOutError={clearServerSignOutError}
             onClaudeSignOut={() => void handleClaudeSignOut()}
             onClearClaudeSignOutError={clearClaudeSignOutError}
             onSave={async (update) => {
               const saved = await window.api.setSettings(update);
               if (!mountedRef.current) return;
               setSettings(saved);
+              if (saved.serverAuthMode === 'dev') {
+                setServerAuthRequired(false);
+                serverAuthRequiredRef.current = false;
+              }
               closeSettings();
               // A save can change the server address or auth mode, so re-check auth too — not just
               // the list and the catalogues.

@@ -120,6 +120,7 @@ export function ThreadList(props: {
   appVersion: string;
   activeThreadId: string | null;
   auth: AuthStatus | null;
+  serverAuthRequired?: boolean;
   settingsOpen: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
@@ -134,6 +135,7 @@ export function ThreadList(props: {
     appVersion,
     activeThreadId,
     auth,
+    serverAuthRequired = false,
     settingsOpen,
     searchContent,
     onOpen,
@@ -142,6 +144,8 @@ export function ThreadList(props: {
     onOpenSettings,
     onOpenAccounts,
   } = props;
+  const serverNeedsSignIn =
+    auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired);
   const [query, setQuery] = useState('');
   /** Content matches for `hitsQuery`; titles filter instantly below, without waiting for these. */
   const [hits, setHits] = useState<{ query: string; byThread: Map<string, ThreadSearchHit> }>({
@@ -343,11 +347,7 @@ export function ThreadList(props: {
               <span className="account-status-row">
                 <span
                   className={`account-status-dot ${
-                    !auth
-                      ? 'is-muted'
-                      : auth.server.mode === 'dev' || auth.server.signedIn
-                        ? 'is-ok'
-                        : 'is-warn'
+                    !auth ? 'is-muted' : serverNeedsSignIn ? 'is-warn' : 'is-ok'
                   }`}
                   aria-hidden="true"
                 />
@@ -357,9 +357,9 @@ export function ThreadList(props: {
                     ? 'Checking…'
                     : auth.server.mode === 'dev'
                       ? 'dev'
-                      : auth.server.signedIn
-                        ? (auth.server.account ?? 'Signed in')
-                        : 'Sign in needed'}
+                      : serverNeedsSignIn
+                        ? 'Sign in needed'
+                        : (auth.server.account ?? 'Signed in')}
                 </span>
               </span>
               <span className="account-status-row">
