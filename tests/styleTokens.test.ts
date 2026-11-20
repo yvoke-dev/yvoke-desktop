@@ -108,6 +108,37 @@ describe('button variant selectors', () => {
       expect(block).not.toContain('!important');
     }
   });
+
+  it('excludes .footer-account-btn from the default button chrome and uses no !important on account/server sign-in rules', () => {
+    const defaultChrome = CSS.match(/^button:not\([^{]*\{/m)?.[0];
+    expect(defaultChrome).toBeDefined();
+    expect(defaultChrome).toContain(':not(.footer-account-btn)');
+
+    for (const selector of [
+      /\.footer-account-btn\s*\{[^}]*\}/,
+      /\.server-signin-controls\s*\{[^}]*\}/,
+      /\.account-status-dot\s*\{[^}]*\}/,
+    ]) {
+      const block = CSS.match(selector)?.[0];
+      expect(block).toBeDefined();
+      expect(block).not.toContain('!important');
+    }
+
+    const footerBtnBlock = CSS.match(/\.footer-account-btn\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(footerBtnBlock).toContain('width: calc(100% + 12px)');
+  });
+
+  it('uses overflow-wrap on .about-grid dd and reserves word-break: break-all strictly for .about-url', () => {
+    const ddBlock = CSS.match(/\.about-grid dd\s*\{[^}]*\}/)?.[0];
+    expect(ddBlock).toBeDefined();
+    expect(ddBlock).not.toContain('word-break: break-all');
+    expect(ddBlock).toMatch(/overflow-wrap:\s*(?:break-word|anywhere)/);
+
+    const urlBlock = CSS.match(/\.about-url\s*\{[^}]*\}/)?.[0];
+    expect(urlBlock).toBeDefined();
+    expect(urlBlock).toContain('word-break: break-all');
+    expect(urlBlock).not.toContain('!important');
+  });
 });
 
 describe('clarifying question card styles', () => {

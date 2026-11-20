@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { SettingsView } from '../../src/renderer/src/components/SettingsView';
+import {
+  areSettingsEqual,
+  SETTINGS_PANES,
+  SettingsView,
+} from '../../src/renderer/src/components/SettingsView';
 import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
+import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
 import type { AppSettings, AuthVerificationResponse } from '../../src/shared/types';
 
 const settings: AppSettings = {
@@ -289,10 +294,10 @@ describe('SettingsView', () => {
       openPane('Models');
       expect(verifyAuth).not.toHaveBeenCalled();
 
-      openPane('About');
+      openPane('Accounts');
       expect(verifyAuth).not.toHaveBeenCalled();
 
-      // "Check Credentials" button is present in About pane
+      // "Check Credentials" button is present in Accounts pane
       expect(screen.getByRole('button', { name: 'Check Credentials' })).toBeTruthy();
     });
 
@@ -305,7 +310,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
 
       const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
       expect((checkBtn as HTMLButtonElement).disabled).toBe(false);
@@ -345,7 +350,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       const { unmount } = render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       expect(verifyAuth).toHaveBeenCalledTimes(1);
@@ -373,11 +378,12 @@ describe('SettingsView', () => {
       render(
         <SettingsView
           settings={{ ...settings, serverAuthMode: 'dev' }}
+          auth={{ claude: 'ok', server: { mode: 'dev', signedIn: true } }}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       await waitFor(() => expect(screen.getAllByText('✓ Verified').length).toBe(2));
 
@@ -385,7 +391,7 @@ describe('SettingsView', () => {
       openPane('Server');
       const modeGroup = screen.getByRole('group', { name: 'Server authentication' });
       fireEvent.click(within(modeGroup).getByRole('button', { name: 'Entra ID' }));
-      openPane('About');
+      openPane('Accounts');
 
       expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
       expect(document.body.textContent).not.toContain('dev-mode (mock security)');
@@ -399,7 +405,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       await waitFor(() => expect(screen.getAllByText('✓ Verified').length).toBe(2));
 
@@ -407,7 +413,7 @@ describe('SettingsView', () => {
       fireEvent.change(screen.getByLabelText('Server base URL'), {
         target: { value: 'https://other.example' },
       });
-      openPane('About');
+      openPane('Accounts');
 
       expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
     });
@@ -417,7 +423,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
 
       const checkBtn = screen.getByRole('button', { name: 'Check Credentials' });
       fireEvent.click(checkBtn);
@@ -439,7 +445,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
 
@@ -456,7 +462,7 @@ describe('SettingsView', () => {
       expect(screen.getByText(/claude-user@corp\.com/)).toBeTruthy();
     });
 
-    it('renders failure alerts with inline "Sign in" button in Entra mode and handles sign-in', async () => {
+    it('renders failure alerts with inline "Sign in to Yvoke" button in Entra mode and handles sign-in', async () => {
       const verifyAuth = vi
         .fn()
         .mockResolvedValueOnce({
@@ -467,9 +473,10 @@ describe('SettingsView', () => {
           server: { status: 'ok', account: 'signed-in@corp.com' },
           claude: { status: 'ok', account: 'claude@corp.com' },
         });
-      const serverSignIn = vi.fn().mockResolvedValue('new-token');
+      const serverSignIn = vi.fn().mockResolvedValue({ status: 'signed_in', account: 'signed-in@corp.com' });
+      const cancelServerSignIn = vi.fn().mockResolvedValue(true);
       const onAuthChange = vi.fn();
-      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn };
+      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn, cancelServerSignIn };
 
       render(
         <SettingsView
@@ -480,7 +487,7 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
 
@@ -498,8 +505,8 @@ describe('SettingsView', () => {
       expect(claudeBadge.className).toContain('cred-badge');
       expect(claudeBadge.className).toContain('warning');
 
-      // Inline "Sign in" button is rendered in Entra mode
-      const signInBtn = screen.getByRole('button', { name: 'Sign in' });
+      // Inline "Sign in to Yvoke" button is rendered in Entra mode
+      const signInBtn = screen.getByRole('button', { name: 'Sign in to Yvoke' });
       expect(signInBtn).toBeTruthy();
       expect(signInBtn.className).toContain('cred-inline-btn');
 
@@ -513,12 +520,16 @@ describe('SettingsView', () => {
     });
 
 
-    it('offers no inline Sign in when the saved mode is the dev token', async () => {
+    it('offers no inline Sign in to Yvoke when the saved mode is the dev token', async () => {
       const verifyAuth = vi.fn().mockResolvedValue({
         server: { status: 'expired', message: 'Token expired' },
         claude: { status: 'ok', account: 'claude@corp.com' },
       });
-      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn: vi.fn() };
+      (window as unknown as { api: unknown }).api = {
+        verifyAuth,
+        serverSignIn: vi.fn(),
+        cancelServerSignIn: vi.fn(),
+      };
 
       render(
         <SettingsView
@@ -528,11 +539,11 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       await waitFor(() => expect(screen.getByText(/Token expired/)).toBeTruthy());
 
-      expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
     });
 
     it('renders failure alerts with ⚠ for unreachable server and ✗ for missing claude credentials', async () => {
@@ -545,11 +556,12 @@ describe('SettingsView', () => {
       render(
         <SettingsView
           settings={{ ...settings, serverAuthMode: 'dev' }}
+          auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
 
@@ -567,8 +579,8 @@ describe('SettingsView', () => {
       expect(claudeBadge.className).toContain('cred-badge');
       expect(claudeBadge.className).toContain('error');
 
-      // In Dev token mode, Server inline "Sign in" button is NOT rendered while Claude account offers "Sign in to Claude"
-      expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull();
+      // In Dev token mode, Server inline "Sign in to Yvoke" button is NOT rendered while Claude account offers "Sign in to Claude"
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
     });
 
@@ -585,7 +597,7 @@ describe('SettingsView', () => {
       (window as unknown as { api: unknown }).api = { verifyAuth };
 
       render(<SettingsView settings={settings} onSave={vi.fn()} onClose={vi.fn()} />);
-      openPane('About');
+      openPane('Accounts');
 
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
 
@@ -962,7 +974,7 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
 
       // Pre-verification with auth.claude === 'missing' offers Sign in to Claude
       expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
@@ -1008,12 +1020,16 @@ describe('SettingsView', () => {
       expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
     });
 
-    it('disambiguates Entra Sign in / Settings Cancel from Sign in to Claude / Cancel sign-in and disables sibling credential actions while signingIn is active', async () => {
+    it('disambiguates Sign in to Yvoke / Settings Close from Sign in to Claude / Cancel sign-in and disables sibling credential actions while signingIn is active', async () => {
       const verifyAuth = vi.fn().mockResolvedValue({
         server: { status: 'expired', message: 'Entra token expired' },
         claude: { status: 'expired', message: 'Claude session expired' },
       });
-      (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn: vi.fn() };
+      (window as unknown as { api: unknown }).api = {
+        verifyAuth,
+        serverSignIn: vi.fn(),
+        cancelServerSignIn: vi.fn(),
+      };
       const onClose = vi.fn();
       const cancelSignIn = vi.fn(async () => undefined);
 
@@ -1026,15 +1042,15 @@ describe('SettingsView', () => {
           onClose={onClose}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
       fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
       await waitFor(() => expect(screen.getByText(/Claude session expired/)).toBeTruthy());
 
-      // Both Sign in (Entra) and Sign in to Claude coexist with distinct accessible names
-      expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy();
+      // Both Sign in to Yvoke (Entra) and Sign in to Claude coexist with distinct accessible names
+      expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
 
-      // While Claude signingIn is true: Check Credentials and Entra Sign in are disabled, and Cancel vs Cancel sign-in are distinct
+      // While Claude signingIn is true: Check Credentials and Sign in to Yvoke are disabled, and Close vs Cancel sign-in are distinct
       rerender(
         <SettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
@@ -1046,13 +1062,13 @@ describe('SettingsView', () => {
       );
 
       expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(true);
-      expect((screen.getByRole('button', { name: 'Sign in' }) as HTMLButtonElement).disabled).toBe(true);
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
       expect(cancelSignIn).toHaveBeenCalledTimes(1);
       expect(onClose).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
@@ -1081,7 +1097,7 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
       expect(verifyAuth).toHaveBeenCalledTimes(0);
       expect(onAuthChange).toHaveBeenCalledTimes(0);
 
@@ -1150,7 +1166,7 @@ describe('SettingsView', () => {
           onClose={vi.fn()}
         />,
       );
-      openPane('About');
+      openPane('Accounts');
 
       // Pre-verification with auth.claude === 'ok': neither Sign in to Claude nor stale error is shown
       expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
@@ -1169,6 +1185,441 @@ describe('SettingsView', () => {
       expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
       expect(screen.queryByText('Stale error from earlier login attempt')).toBeNull();
       expect(clearError).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Wave 6: Accounts pane, slim About pane, paneRequest & dirty-aware footer', () => {
+    function makeServerController(
+      overrides: Partial<ServerSignInController> = {},
+    ): ServerSignInController {
+      return {
+        signingIn: false,
+        cancelling: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        clearError: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    it('exports SETTINGS_PANES with Accounts right after Server', () => {
+      expect(SETTINGS_PANES).toEqual([
+        'Server',
+        'Accounts',
+        'Models',
+        'Agents',
+        'Web search',
+        'Appearance',
+        'Advanced',
+        'About',
+      ]);
+    });
+
+    it('areSettingsEqual normalizes whitespace, arrays, and optional default fields while catching real edits', () => {
+      const base: AppSettings = { ...settings };
+      // Identical copy is equal
+      expect(areSettingsEqual(base, { ...base })).toBe(true);
+      // Whitespace-only differences normalize to equal
+      expect(
+        areSettingsEqual(base, {
+          ...base,
+          serverBaseUrl: `  ${base.serverBaseUrl}  `,
+          entra: { clientId: ' c ', tenantId: ' t ', scope: ' s ' },
+          defaultModel: ' sonnet ',
+          models: [' sonnet '],
+        }),
+      ).toBe(true);
+      // Absent optional booleans default to true (playbookValidationEnabled, imageDescriptionsEnabled) / false (showPrototypePlaybooks)
+      expect(
+        areSettingsEqual(base, {
+          ...base,
+          playbookValidationEnabled: true,
+          imageDescriptionsEnabled: true,
+          showPrototypePlaybooks: false,
+        }),
+      ).toBe(true);
+      // Real edits are detected
+      expect(areSettingsEqual(base, { ...base, serverBaseUrl: 'https://other.example/' })).toBe(false);
+      expect(areSettingsEqual(base, { ...base, maxTurns: 30 })).toBe(false);
+      expect(areSettingsEqual(base, { ...base, models: ['sonnet', 'opus'] })).toBe(false);
+      expect(areSettingsEqual(base, { ...base, showPrototypePlaybooks: true })).toBe(false);
+      expect(areSettingsEqual(base, { ...base, webSearch: { ...base.webSearch, enabled: true } })).toBe(false);
+      expect(
+        areSettingsEqual(base, {
+          ...base,
+          appearance: { theme: 'dark', density: 'comfortable', answerTextSize: 14, traceExpanded: false },
+        }),
+      ).toBe(false);
+    });
+
+    it('shows Close button on clean Accounts and About panes, and shows dirty-draft notice + Cancel/Save when draft is modified', () => {
+      const onClose = vi.fn();
+      render(<SettingsView settings={settings} onSave={vi.fn()} onClose={onClose} />);
+
+      // Clean Accounts pane -> single Close button, no Cancel/Save
+      openPane('Accounts');
+      expect(screen.getByRole('button', { name: 'Close' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+
+      // Clean About pane -> single Close button, no Cancel/Save
+      openPane('About');
+      expect(screen.getByRole('button', { name: 'Close' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
+
+      // Modify a setting in Models, then revisit Accounts and About -> dirty notice + Cancel + Save
+      openPane('Models');
+      fireEvent.change(screen.getByLabelText('Max turns per message'), { target: { value: '42' } });
+
+      openPane('Accounts');
+      expect(screen.getByText('You have unsaved changes in other settings panes.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
+
+      openPane('About');
+      expect(screen.getByText('You have unsaved changes in other settings panes.')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+    });
+
+    it('switches active pane via paneRequest without discarding dirty draft edits', async () => {
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      const { rerender } = render(
+        <SettingsView settings={settings} onSave={onSave} onClose={vi.fn()} />,
+      );
+
+      openPane('Models');
+      fireEvent.change(screen.getByLabelText('Max turns per message'), { target: { value: '55' } });
+
+      // Incoming paneRequest switches to Accounts while preserving draft
+      rerender(
+        <SettingsView
+          settings={settings}
+          paneRequest={{ pane: 'Accounts', seq: 1 }}
+          onSave={onSave}
+          onClose={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy();
+      expect(screen.getByText('You have unsaved changes in other settings panes.')).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ maxTurns: 55 })));
+    });
+
+    it('gates Accounts Yvoke row strictly on saved props.auth.server.mode (never draft.serverAuthMode)', () => {
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'dev' }}
+          auth={{ claude: 'ok', server: { mode: 'dev', signedIn: true } }}
+          serverSignIn={makeServerController()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+
+      // Edit draft.serverAuthMode to 'entra' without saving
+      const modeGroup = screen.getByRole('group', { name: 'Server authentication' });
+      fireEvent.click(within(modeGroup).getByRole('button', { name: 'Entra ID' }));
+
+      openPane('Accounts');
+      // Still shows Dev mode and NO Sign in to Yvoke button because saved auth.server.mode is 'dev'
+      expect(screen.getByText('Dev mode')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+    });
+
+    it('shows upfront Sign in to Yvoke when Entra signed out, hides on unreachable/rate_limited/error/ok, shows inline Entra Sign out only (never Claude), and uses plain Signed in / Not signed in copy', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'unreachable', message: 'Server offline' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'rate_limited', message: 'Too many requests' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'error', message: 'Unexpected error' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onSignOut = vi.fn();
+      const clearError = vi.fn();
+
+      const { rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+          serverSignIn={makeServerController({ clearError })}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      // Plain "Not signed in" copy (no old "Detected from Claude Code")
+      expect(screen.getAllByText('Not signed in')).toHaveLength(2);
+      expect(document.body.textContent).not.toContain('Detected from Claude Code');
+      expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
+
+      // Verification: unreachable / rate_limited / error hide Sign in to Yvoke
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Server offline/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Too many requests/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Unexpected error/)).toBeTruthy());
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+
+      // Verification: server ok invokes serverSignIn.clearError()
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(clearError).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+
+      // Signed-in Entra shows plain Signed in + exactly 1 Sign out button (for Entra only, never Claude)
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverSignIn={makeServerController({ clearError })}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      const signOutBtns = screen.getAllByRole('button', { name: 'Sign out' });
+      expect(signOutBtns).toHaveLength(1);
+      fireEvent.click(signOutBtns[0]);
+      expect(onSignOut).toHaveBeenCalledTimes(1);
+    });
+
+    it('prevServerSuccessCountRef guard: 0 verifyAuth on mount when successCount >= 1, 0 when verification is null, 1 when verification is non-null', async () => {
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'expired', message: 'Entra expired' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        });
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onAuthChange = vi.fn();
+
+      const { rerender } = render(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+          serverSignIn={makeServerController({ successCount: 2 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+      expect(onAuthChange).toHaveBeenCalledTimes(0);
+
+      // Increment successCount while verification === null -> 0 verifyAuth calls
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
+          serverSignIn={makeServerController({ successCount: 3 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onAuthChange).toHaveBeenCalledTimes(1);
+      expect(verifyAuth).toHaveBeenCalledTimes(0);
+
+      // Verify once so verification !== null
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getByText(/Entra expired/)).toBeTruthy());
+      expect(verifyAuth).toHaveBeenCalledTimes(1);
+
+      // Increment successCount while verification !== null -> re-verifies once
+      rerender(
+        <SettingsView
+          settings={settings}
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+          serverSignIn={makeServerController({ successCount: 4 })}
+          onAuthChange={onAuthChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => {
+        expect(verifyAuth).toHaveBeenCalledTimes(2);
+        expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
+      });
+    });
+
+    it('renders slim About pane with Version, Check for Updates, .about-url Server, and Open Logs Folder without credential rows', () => {
+      const { container } = render(
+        <SettingsView
+          settings={settings}
+          appVersion="1.3.1"
+          auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('About');
+
+      expect(screen.getByText('v1.3.1')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Check for Updates' })).toBeTruthy();
+      const serverUrlDd = container.querySelector('dd.about-url');
+      expect(serverUrlDd).not.toBeNull();
+      expect(serverUrlDd!.textContent).toBe('https://app.example/');
+      expect(screen.getByRole('button', { name: 'Open Logs Folder' })).toBeTruthy();
+
+      // Credential controls moved to Accounts
+      expect(screen.queryByRole('button', { name: 'Check Credentials' })).toBeNull();
+      expect(screen.queryByText('Yvoke account')).toBeNull();
+      expect(screen.queryByText('Claude account')).toBeNull();
+    });
+
+    it('clears stale verification verdict on Entra sign-out (true -> false) so Sign in to Yvoke reappears, and drops late in-flight verifyAuth resolutions', async () => {
+      let resolveSecondVerify!: (val: AuthVerificationResponse) => void;
+      const verifyAuth = vi
+        .fn()
+        .mockResolvedValueOnce({
+          server: { status: 'ok', account: 'alice@corp.com' },
+          claude: { status: 'ok', account: 'claude@corp.com' },
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise<AuthVerificationResponse>((resolve) => {
+              resolveSecondVerify = resolve;
+            }),
+        );
+      (window as unknown as { api: unknown }).api = { verifyAuth };
+      const onSignOut = vi.fn();
+
+      const { rerender } = render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+
+      // 1. Verify while signed in -> ✓ Verified shown, Sign in to Yvoke hidden
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+
+      // 2. Sign out completes (props.auth.server.signedIn flips true -> false) -> stale ✓ Verified cleared & Sign in to Yvoke rendered!
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: false },
+          }}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+
+      // 3. Re-sign in, start an in-flight verifyAuth, then sign out BEFORE it resolves -> late resolution is discarded!
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Check Credentials' }));
+      expect(verifyAuth).toHaveBeenCalledTimes(2);
+
+      rerender(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            claudeAccount: 'claude@corp.com',
+            server: { mode: 'entra', signedIn: false },
+          }}
+          serverSignIn={makeServerController()}
+          onSignOut={onSignOut}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      resolveSecondVerify({
+        server: { status: 'ok', account: 'stale@corp.com' },
+        claude: { status: 'ok', account: 'claude@corp.com' },
+      });
+      await new Promise((r) => setTimeout(r, 15));
+
+      expect(screen.queryAllByText('✓ Verified')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain('stale@corp.com');
+      expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect((screen.getByRole('button', { name: 'Check Credentials' }) as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    });
+
+    it('omits inline Sign out button in Accounts pane when onSignOut callback is not provided', () => {
+      render(
+        <SettingsView
+          settings={{ ...settings, serverAuthMode: 'entra' }}
+          auth={{
+            claude: 'ok',
+            server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+          }}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      openPane('Accounts');
+      expect(screen.queryByRole('button', { name: 'Sign out' })).toBeNull();
     });
   });
 });

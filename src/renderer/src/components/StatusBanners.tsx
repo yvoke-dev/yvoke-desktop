@@ -5,34 +5,48 @@ import {
   useClaudeSignIn,
   type ClaudeSignInController,
 } from './ClaudeSignInControls';
+import {
+  ServerSignInControls,
+  useServerSignIn,
+  type ServerSignInController,
+} from './ServerSignInControls';
 import { AlertIcon, InfoIcon } from './icons';
 
 export function StatusBanners(props: {
   auth: AuthStatus | null;
   claudeSignIn?: ClaudeSignInController;
+  serverSignIn?: ServerSignInController;
+  serverAuthRequired?: boolean;
+  signingOut?: boolean;
   serverReachable: boolean;
   pendingSync: number;
   syncError: string | null;
   droppedSyncError?: string | null;
   onDismissDroppedSyncError?: () => void;
-  onServerSignIn: () => void;
   onRetryServer: () => void;
 }): React.JSX.Element | null {
   const {
     auth,
     claudeSignIn,
+    serverSignIn,
+    serverAuthRequired = false,
+    signingOut = false,
     serverReachable,
     pendingSync,
     syncError,
     droppedSyncError,
     onDismissDroppedSyncError,
-    onServerSignIn,
     onRetryServer,
   } = props;
   const fallbackClaudeSignIn = useClaudeSignIn();
   const effectiveClaudeSignIn = claudeSignIn ?? fallbackClaudeSignIn;
+  const fallbackServerSignIn = useServerSignIn();
+  const effectiveServerSignIn = serverSignIn ?? fallbackServerSignIn;
   const showClaudeBanner =
     auth?.claude === 'missing' || Boolean(effectiveClaudeSignIn.signingIn);
+  const showServerSignInBanner =
+    (auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired)) ||
+    Boolean(effectiveServerSignIn.signingIn);
 
   return (
     <div className="banners">
@@ -45,24 +59,30 @@ export function StatusBanners(props: {
             <strong>Connect Claude:</strong> sign in with your Claude Pro or Max account in your
             browser to ask questions.
           </span>
-          <ClaudeSignInControls controller={effectiveClaudeSignIn} variant="banner" />
+          <ClaudeSignInControls
+            controller={effectiveClaudeSignIn}
+            variant="banner"
+            disabled={effectiveServerSignIn.signingIn}
+          />
         </div>
       )}
-      {auth?.server.mode === 'entra' && !auth.server.signedIn && (
+      {showServerSignInBanner && (
         <div className="banner warn">
           <span className="banner-icon">
             <AlertIcon size={14} />
           </span>
-          <span>
+          <span className="banner-text">
             <strong>Server sign-in required:</strong> sign in with your corporate account to load and save
             conversations.
           </span>
-          <button className="primary small banner-action" onClick={onServerSignIn}>
-            Sign in
-          </button>
+          <ServerSignInControls
+            controller={effectiveServerSignIn}
+            variant="banner"
+            disabled={effectiveClaudeSignIn.signingIn || signingOut}
+          />
         </div>
       )}
-      {!serverReachable && (
+      {!serverReachable && !showServerSignInBanner && (
         <div className="banner error">
           <span className="banner-icon">
             <AlertIcon size={14} />

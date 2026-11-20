@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StatusBanners } from '../../src/renderer/src/components/StatusBanners';
 import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
+import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
 import type { AuthStatus } from '../../src/shared/types';
 
 let originalApi: unknown;
@@ -14,6 +15,8 @@ beforeEach(() => {
     cancelClaudeSignIn: vi.fn(async () => true),
     copyClaudeSignInUrl: vi.fn(async () => true),
     submitClaudeAuthCode: vi.fn(async () => ({ accepted: true as const })),
+    serverSignIn: vi.fn(async () => ({ status: 'signed_in' as const })),
+    cancelServerSignIn: vi.fn(async () => true),
   };
 });
 
@@ -27,7 +30,9 @@ const mockAuth: AuthStatus = {
   server: { mode: 'dev', signedIn: true },
 };
 
-function makeController(overrides: Partial<ClaudeSignInController> = {}): ClaudeSignInController {
+function makeClaudeController(
+  overrides: Partial<ClaudeSignInController> = {},
+): ClaudeSignInController {
   return {
     signingIn: false,
     cancelling: false,
@@ -44,6 +49,22 @@ function makeController(overrides: Partial<ClaudeSignInController> = {}): Claude
     copySignInUrl: vi.fn(async () => undefined),
     setCodeDraft: vi.fn(),
     submitAuthCode: vi.fn(async () => undefined),
+    clearError: vi.fn(),
+    ...overrides,
+  };
+}
+
+function makeServerController(
+  overrides: Partial<ServerSignInController> = {},
+): ServerSignInController {
+  return {
+    signingIn: false,
+    cancelling: false,
+    error: null,
+    successCount: 0,
+    startSignIn: vi.fn(async () => undefined),
+    cancelSignIn: vi.fn(async () => undefined),
+    clearError: vi.fn(),
     ...overrides,
   };
 }
@@ -56,37 +77,77 @@ describe('StatusBanners', () => {
         serverReachable={true}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={() => undefined}
         onRetryServer={() => undefined}
       />,
     );
     expect(container.querySelectorAll('.banner')).toHaveLength(0);
   });
 
-  it('renders Server unreachable banner with Retry button and triggers onRetryServer', () => {
+  it('renders Server unreachable banner with Retry button in dev mode and when signed in under Entra', () => {
     const onRetryServer = vi.fn();
-    render(
+    const { rerender } = render(
       <StatusBanners
         auth={mockAuth}
         serverReachable={false}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={() => undefined}
         onRetryServer={onRetryServer}
       />,
     );
 
     expect(screen.getByText(/Server unreachable:/i)).toBeTruthy();
     const retryBtn = screen.getByRole('button', { name: 'Retry connection' });
-    expect(retryBtn).toBeTruthy();
-
     fireEvent.click(retryBtn);
     expect(onRetryServer).toHaveBeenCalledTimes(1);
+
+    // Signed-in Entra with no serverAuthRequired also shows Server unreachable
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'a@corp.com' } }}
+        serverReachable={false}
+        serverAuthRequired={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={onRetryServer}
+      />,
+    );
+    expect(screen.getByText(/Server unreachable:/i)).toBeTruthy();
+  });
+
+  it('suppresses red Server unreachable banner whenever showServerSignInBanner is true (signed out Entra or serverAuthRequired)', () => {
+    const { rerender } = render(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+        serverSignIn={makeServerController()}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+    expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
+
+    // Also suppressed when auth.server.signedIn is stale-true but serverAuthRequired is true
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
+        serverSignIn={makeServerController()}
+        serverAuthRequired={true}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+    expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
   });
 
   it('renders terminal-free Connect Claude banner with Sign in to Claude button and triggers startSignIn', () => {
     const startSignIn = vi.fn(async () => undefined);
-    const ctrl = makeController({ startSignIn });
+    const ctrl = makeClaudeController({ startSignIn });
     const { container } = render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
@@ -94,7 +155,6 @@ describe('StatusBanners', () => {
         serverReachable={true}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={() => undefined}
         onRetryServer={() => undefined}
       />,
     );
@@ -111,63 +171,96 @@ describe('StatusBanners', () => {
     expect(startSignIn).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps Connect Claude banner mounted while signingIn is active and disambiguates Sign in vs Sign in to Claude', () => {
-    const onServerSignIn = vi.fn();
-    const startSignIn = vi.fn(async () => undefined);
-    const cancelSignIn = vi.fn(async () => undefined);
+  it('keeps Connect Claude banner mounted while signingIn is active, disambiguates Sign in to Yvoke vs Sign in to Claude, and mutually disables controls', () => {
+    const serverStart = vi.fn(async () => undefined);
+    const claudeStart = vi.fn(async () => undefined);
+    const claudeCancel = vi.fn(async () => undefined);
     const { rerender } = render(
       <StatusBanners
         auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
-        claudeSignIn={makeController({ startSignIn })}
+        claudeSignIn={makeClaudeController({ startSignIn: claudeStart })}
+        serverSignIn={makeServerController({ startSignIn: serverStart })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={onServerSignIn}
         onRetryServer={() => undefined}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(onServerSignIn).toHaveBeenCalledTimes(1);
-    expect(startSignIn).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+    expect(serverStart).toHaveBeenCalledTimes(1);
+    expect(claudeStart).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
-    expect(startSignIn).toHaveBeenCalledTimes(1);
+    expect(claudeStart).toHaveBeenCalledTimes(1);
 
-    // Remains visible with Cancel sign-in while signingIn is true even if auth.claude updated
+    // While serverSignIn.signingIn is true, Sign in to Claude is disabled
     rerender(
       <StatusBanners
-        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
-        claudeSignIn={makeController({ signingIn: true, cancelSignIn })}
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeController({ startSignIn: claudeStart })}
+        serverSignIn={makeServerController({ signingIn: true })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={onServerSignIn}
+        onRetryServer={() => undefined}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(true);
+
+    // While claudeSignIn.signingIn is true, Sign in to Yvoke is disabled and Connect Claude stays mounted
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeController({ signingIn: true, cancelSignIn: claudeCancel })}
+        serverSignIn={makeServerController({ startSignIn: serverStart })}
+        serverReachable={true}
+        pendingSync={0}
+        syncError={null}
         onRetryServer={() => undefined}
       />,
     );
     expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
-    expect(cancelSignIn).toHaveBeenCalledTimes(1);
+    expect(claudeCancel).toHaveBeenCalledTimes(1);
   });
 
-  it('renders Sign in banner and triggers onServerSignIn', () => {
-    const onServerSignIn = vi.fn();
+  it('renders Sign in to Yvoke banner and triggers serverSignIn.startSignIn', () => {
+    const startSignIn = vi.fn(async () => undefined);
     render(
       <StatusBanners
         auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+        serverSignIn={makeServerController({ startSignIn })}
         serverReachable={true}
         pendingSync={0}
         syncError={null}
-        onServerSignIn={onServerSignIn}
         onRetryServer={() => undefined}
       />,
     );
 
     expect(screen.getByText(/Server sign-in required:/i)).toBeTruthy();
-    const signInBtn = screen.getByRole('button', { name: 'Sign in' });
+    const signInBtn = screen.getByRole('button', { name: 'Sign in to Yvoke' });
     fireEvent.click(signInBtn);
-    expect(onServerSignIn).toHaveBeenCalledTimes(1);
+    expect(startSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables Sign in to Yvoke banner button while signingOut is true', () => {
+    render(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
+        serverSignIn={makeServerController()}
+        signingOut={true}
+        serverReachable={true}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 
   it('renders pending sync turns info', () => {
@@ -177,7 +270,6 @@ describe('StatusBanners', () => {
         serverReachable={true}
         pendingSync={3}
         syncError="Connection timeout"
-        onServerSignIn={() => undefined}
         onRetryServer={() => undefined}
       />,
     );
@@ -195,7 +287,6 @@ describe('StatusBanners', () => {
         syncError={null}
         droppedSyncError="A queued conversation turn was rejected by the server (HTTP 422)."
         onDismissDroppedSyncError={onDismiss}
-        onServerSignIn={() => undefined}
         onRetryServer={() => undefined}
       />,
     );
@@ -226,7 +317,6 @@ describe('StatusBanners', () => {
         syncError="Temporary timeout"
         droppedSyncError="Turn rejected by server (HTTP 400)."
         onDismissDroppedSyncError={onDismiss}
-        onServerSignIn={() => undefined}
         onRetryServer={() => undefined}
       />,
     );

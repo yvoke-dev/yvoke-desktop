@@ -34,6 +34,11 @@ import {
   useClaudeSignIn,
   type ClaudeSignInController,
 } from './ClaudeSignInControls';
+import {
+  ServerSignInControls,
+  useServerSignIn,
+  type ServerSignInController,
+} from './ServerSignInControls';
 import { CopyButton } from './CopyButton';
 import { FeedbackControls } from './FeedbackControls';
 import { Markdown } from './Markdown';
@@ -236,6 +241,8 @@ export function ChatView(props: {
   profiles: OrchestratorProfile[];
   liveTurn: LiveTurn;
   claudeSignIn?: ClaudeSignInController;
+  serverSignIn?: ServerSignInController;
+  signingOut?: boolean;
   onSend: (text: string, promptName?: string, images?: ImageAttachment[]) => void;
   onInterrupt: () => void;
   onPatchThread: (update: Partial<ThreadMeta>) => void;
@@ -249,6 +256,8 @@ export function ChatView(props: {
     profiles,
     liveTurn,
     claudeSignIn,
+    serverSignIn,
+    signingOut = false,
     onSend,
     onInterrupt,
     onPatchThread,
@@ -256,6 +265,8 @@ export function ChatView(props: {
   } = props;
   const fallbackClaudeSignIn = useClaudeSignIn();
   const effectiveClaudeSignIn = claudeSignIn ?? fallbackClaudeSignIn;
+  const fallbackServerSignIn = useServerSignIn();
+  const effectiveServerSignIn = serverSignIn ?? fallbackServerSignIn;
   // Orchestrator mode replaces the single-playbook + model/thinking controls with a profile.
   const orchestratorActive = !!thread.orchestratorProfile;
   // Prototype profiles are hidden under the same setting as prototype playbooks. `profiles` stays
@@ -904,7 +915,18 @@ export function ChatView(props: {
               </span>
               <span className="banner-text">{liveTurn.error}</span>
               {liveTurn.authRequired && (
-                <ClaudeSignInControls controller={effectiveClaudeSignIn} variant="inline" />
+                <ClaudeSignInControls
+                  controller={effectiveClaudeSignIn}
+                  variant="inline"
+                  disabled={effectiveServerSignIn.signingIn}
+                />
+              )}
+              {liveTurn.serverAuthRequired && !liveTurn.authRequired && (
+                <ServerSignInControls
+                  controller={effectiveServerSignIn}
+                  variant="inline"
+                  disabled={effectiveClaudeSignIn.signingIn || signingOut}
+                />
               )}
             </div>
           )}

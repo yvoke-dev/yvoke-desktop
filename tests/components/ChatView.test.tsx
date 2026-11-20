@@ -4,6 +4,7 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@
 import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
 import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
+import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
 import type { LiveTurn } from '../../src/renderer/src/App';
 import {
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
@@ -76,6 +77,8 @@ interface ChatOpts {
   profiles?: OrchestratorProfile[];
   liveTurn?: LiveTurn;
   claudeSignIn?: ClaudeSignInController;
+  serverSignIn?: ServerSignInController;
+  signingOut?: boolean;
   onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
@@ -90,6 +93,8 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
       claudeSignIn={opts.claudeSignIn}
+      serverSignIn={opts.serverSignIn}
+      signingOut={opts.signingOut}
       onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
@@ -138,6 +143,8 @@ beforeEach(() => {
     cancelClaudeSignIn: vi.fn(async () => true),
     copyClaudeSignInUrl: vi.fn(async () => true),
     submitClaudeAuthCode: vi.fn(async () => ({ accepted: true as const })),
+    serverSignIn: vi.fn(async () => ({ status: 'signed_in' as const })),
+    cancelServerSignIn: vi.fn(async () => true),
   };
 
   // Stubbed per test and restored below: a leaked always-succeeding clipboard would stop a later
@@ -3414,6 +3421,119 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
 
       fireEvent.click(signInBtn);
       expect(startSignIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders inline Sign in to Yvoke inside .chat-notices .banner.error when liveTurn.serverAuthRequired is true (and not authRequired), and mutually disables with Claude sign-in', () => {
+      const serverStart = vi.fn(async () => undefined);
+      const claudeCtrl: ClaudeSignInController = {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+      };
+      const serverCtrl: ServerSignInController = {
+        signingIn: false,
+        cancelling: false,
+        error: null,
+        successCount: 0,
+        startSignIn: serverStart,
+        cancelSignIn: vi.fn(async () => undefined),
+        clearError: vi.fn(),
+      };
+
+      // Generic error renders neither button
+      const { container, rerender } = renderChat({
+        liveTurn: {
+          ...IDLE,
+          error: 'Knowledge base query timed out.',
+        },
+        claudeSignIn: claudeCtrl,
+        serverSignIn: serverCtrl,
+      });
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      // serverAuthRequired: true -> renders Sign in to Yvoke inside .chat-notices .banner.error
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+        }),
+      );
+      const errorBanner = container.querySelector('.chat-notices .banner.error');
+      const yvokeBtn = screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement;
+      expect(errorBanner?.contains(yvokeBtn)).toBe(true);
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(yvokeBtn.disabled).toBe(false);
+      fireEvent.click(yvokeBtn);
+      expect(serverStart).toHaveBeenCalledTimes(1);
+
+      // Mutual disable when claudeSignIn.signingIn is true
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: { ...claudeCtrl, signingIn: true },
+          serverSignIn: serverCtrl,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // Disabled while signingOut is true
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          signingOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // When authRequired is ALSO true, Claude takes precedence and Sign in to Yvoke is omitted
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: { ...serverCtrl, signingIn: true },
+        }),
+      );
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
     });
   });
 });

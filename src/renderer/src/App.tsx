@@ -15,7 +15,8 @@ import type {
 } from '../../shared/types';
 import { ChatView } from './components/ChatView';
 import { useClaudeSignIn } from './components/ClaudeSignInControls';
-import { SettingsView } from './components/SettingsView';
+import { useServerSignIn } from './components/ServerSignInControls';
+import { SettingsView, type SettingsPane } from './components/SettingsView';
 import { StatusBanners } from './components/StatusBanners';
 import { ThreadList } from './components/ThreadList';
 import { TooltipLayer } from './components/Tooltip';
@@ -29,6 +30,7 @@ export interface LiveTurn {
   blocks: { text: string; thinking?: string; toolCalls: ToolCallInfo[] }[];
   error?: string;
   authRequired?: boolean;
+  serverAuthRequired?: boolean;
   /** Neutral status note (e.g. after the user stops a turn). */
   notice?: string;
   /**
@@ -54,6 +56,7 @@ export default function App(): React.JSX.Element {
   const [profiles, setProfiles] = useState<OrchestratorProfile[]>([]);
   const [threads, setThreads] = useState<ThreadMeta[]>([]);
   const [serverReachable, setServerReachable] = useState(true);
+  const [serverAuthRequired, setServerAuthRequired] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messagesByThread, setMessagesByThread] = useState<Record<string, ChatMessage[]>>({});
   const [liveTurnsByThread, setLiveTurnsByThread] = useState<Record<string, LiveTurn>>({});
@@ -62,7 +65,17 @@ export default function App(): React.JSX.Element {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [droppedSyncError, setDroppedSyncError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [paneRequest, setPaneRequest] = useState<{ pane: SettingsPane; seq: number } | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
   const mountedRef = useRef(true);
+  const authRef = useRef<AuthStatus | null>(null);
+  authRef.current = auth;
+  const serverAuthRequiredRef = useRef(false);
+  serverAuthRequiredRef.current = serverAuthRequired;
+  const paneSeqRef = useRef(0);
+  const showSettingsRef = useRef(showSettings);
+  showSettingsRef.current = showSettings;
+  const signingOutRef = useRef(false);
   const activeThreadIdRef = useRef<string | null>(null);
   activeThreadIdRef.current = activeThreadId;
   const threadsRef = useRef<ThreadMeta[]>([]);
@@ -124,6 +137,9 @@ export default function App(): React.JSX.Element {
       threadsRef.current = next;
       return next;
     });
+    const authReq = Boolean(result.serverAuthRequired);
+    setServerAuthRequired(authReq);
+    serverAuthRequiredRef.current = authReq;
     setServerReachable(result.serverReachable);
     if (typeof result.pendingSyncCount === 'number') {
       setPendingSync(result.pendingSyncCount);
@@ -131,7 +147,14 @@ export default function App(): React.JSX.Element {
         setSyncError(null);
       }
     }
-    if (result.serverReachable && initialPromptsLoadedRef.current && promptsCountRef.current === 0) {
+    const entraSignedOut =
+      authReq || (authRef.current?.server.mode === 'entra' && !authRef.current.server.signedIn);
+    if (
+      result.serverReachable &&
+      !entraSignedOut &&
+      initialPromptsLoadedRef.current &&
+      promptsCountRef.current === 0
+    ) {
       void window.api
         .listPrompts()
         .then((list) => {
@@ -152,6 +175,7 @@ export default function App(): React.JSX.Element {
   }, []);
 
   const clearClaudeErrorRef = useRef<(() => void) | undefined>(undefined);
+  const clearServerErrorRef = useRef<(() => void) | undefined>(undefined);
 
   const clearAuthTurnErrors = useCallback(() => {
     setLiveTurnsByThread((prev) => {
@@ -171,6 +195,24 @@ export default function App(): React.JSX.Element {
     });
   }, []);
 
+  const clearServerAuthTurnErrors = useCallback(() => {
+    setLiveTurnsByThread((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [id, turn] of Object.entries(prev)) {
+        if (!turn.running && turn.serverAuthRequired && !turn.authRequired) {
+          next[id] = {
+            ...EMPTY_TURN,
+            notice: 'Signed in to Yvoke — send your question again.',
+            seen: id === activeThreadIdRef.current,
+          };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   /**
    * The list plus the catalogues only the server can supply — skipped when it is not answering.
    *
@@ -179,19 +221,28 @@ export default function App(): React.JSX.Element {
    * check failed — exactly when `refreshThreads()` is still reporting unreachable.
    */
   const refreshServer = useCallback(async () => {
-    void window.api
+    await window.api
       .authStatus()
       .then((status) => {
         if (!mountedRef.current) return;
+        authRef.current = status;
         setAuth(status);
         if (status.claude === 'ok') {
           clearClaudeErrorRef.current?.();
         }
+        if (status.server.mode !== 'entra' || status.server.signedIn) {
+          clearServerErrorRef.current?.();
+        }
       })
       .catch(() => undefined);
+    if (!mountedRef.current) return;
     const shouldFetchCatalogues = !initialPromptsLoadedRef.current || promptsCountRef.current > 0;
     if (!(await refreshThreads())) return;
     if (!mountedRef.current) return;
+    const entraSignedOut =
+      serverAuthRequiredRef.current ||
+      (authRef.current?.server.mode === 'entra' && !authRef.current.server.signedIn);
+    if (entraSignedOut) return;
     if (shouldFetchCatalogues) {
       void window.api
         .listPrompts()
@@ -227,32 +278,49 @@ export default function App(): React.JSX.Element {
     void window.api
       .authStatus()
       .then((status) => {
-        if (mountedRef.current) setAuth(status);
-      })
-      .catch(() => undefined);
-    void window.api
-      .listPrompts()
-      .then((list) => {
         if (!mountedRef.current) return;
-        promptsCountRef.current = list.length;
-        setPrompts(list);
+        authRef.current = status;
+        setAuth(status);
+        if (status.server.mode === 'entra' && !status.server.signedIn) {
+          setServerAuthRequired(true);
+          serverAuthRequiredRef.current = true;
+          initialPromptsLoadedRef.current = true;
+          return;
+        }
+        void window.api
+          .listPrompts()
+          .then((list) => {
+            if (!mountedRef.current) return;
+            promptsCountRef.current = list.length;
+            setPrompts(list);
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            initialPromptsLoadedRef.current = true;
+          });
+        void window.api
+          .listOrchestratorProfiles()
+          .then((list) => {
+            if (mountedRef.current) setProfiles(list);
+          })
+          .catch(() => undefined);
       })
-      .catch(() => undefined)
-      .finally(() => {
+      .catch(() => {
         initialPromptsLoadedRef.current = true;
       });
-    void window.api
-      .listOrchestratorProfiles()
-      .then((list) => {
-        if (mountedRef.current) setProfiles(list);
-      })
-      .catch(() => undefined);
     void refreshThreads();
   }, [refreshThreads]);
 
   const claudeSignIn = useClaudeSignIn({
     onSignedIn: (account) => {
       if (!mountedRef.current) return;
+      if (authRef.current) {
+        authRef.current = {
+          ...authRef.current,
+          claude: 'ok',
+          claudeAccount: account,
+        };
+      }
       setAuth((prev) =>
         prev
           ? {
@@ -267,6 +335,39 @@ export default function App(): React.JSX.Element {
     },
   });
   clearClaudeErrorRef.current = claudeSignIn.clearError;
+
+  const serverSignIn = useServerSignIn({
+    onSignedIn: (account) => {
+      if (!mountedRef.current) return;
+      setServerAuthRequired(false);
+      serverAuthRequiredRef.current = false;
+      if (authRef.current) {
+        authRef.current = {
+          ...authRef.current,
+          server: {
+            ...authRef.current.server,
+            signedIn: true,
+            account,
+          },
+        };
+      }
+      setAuth((prev) =>
+        prev
+          ? {
+              ...prev,
+              server: {
+                ...prev.server,
+                signedIn: true,
+                account,
+              },
+            }
+          : prev,
+      );
+      clearServerAuthTurnErrors();
+      void refreshServer();
+    },
+  });
+  clearServerErrorRef.current = serverSignIn.clearError;
 
   // Re-check Claude credentials on window focus only while signed out and not already running an
   // in-app sign-in, throttled at 2s so rapid focus bounces do not spawn back-to-back checks.
@@ -283,6 +384,7 @@ export default function App(): React.JSX.Element {
         .authStatus()
         .then((status) => {
           if (!mountedRef.current) return;
+          authRef.current = status;
           setAuth(status);
           if (status.claude === 'ok') {
             clearClaudeErrorRef.current?.();
@@ -295,15 +397,20 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('focus', onFocus);
   }, [auth?.claude, claudeSignIn.signingIn, clearAuthTurnErrors]);
 
+  const entraUnauthenticated =
+    (auth?.server.mode === 'entra' && !auth.server.signedIn) || serverAuthRequired;
+
   // When the server is unreachable or the playbook catalogue is still empty, periodically poll
   // so the banner clears and playbooks load automatically once the backend service answers.
+  // Paused while Entra sign-in is required so we do not spam unauthenticated 401 loops.
   useEffect(() => {
+    if (entraUnauthenticated) return;
     if (serverReachable && prompts.length > 0) return;
     const interval = setInterval(() => {
       void refreshServer();
     }, 10_000);
     return () => clearInterval(interval);
-  }, [serverReachable, prompts.length, refreshServer]);
+  }, [entraUnauthenticated, serverReachable, prompts.length, refreshServer]);
 
   // Orchestrator and reviewer playbooks are the runtime's own machinery, so they never appear in
   // the picker (see isUserSelectablePlaybook). Specialist playbooks stay pickable — they're useful
@@ -512,6 +619,7 @@ export default function App(): React.JSX.Element {
                     ...EMPTY_TURN,
                     error: event.errorMessage ?? 'The turn failed.',
                     authRequired: Boolean(event.authRequired),
+                    serverAuthRequired: Boolean(event.serverAuthRequired),
                     seen: onScreen,
                   },
           }));
@@ -520,11 +628,18 @@ export default function App(): React.JSX.Element {
               ...prev,
               [threadId]: [...(prev[threadId] ?? []), event.message],
             }));
-          } else if (!event.aborted && event.authRequired) {
+          } else if (!event.aborted && (event.authRequired || event.serverAuthRequired)) {
+            if (event.serverAuthRequired) {
+              setServerAuthRequired(true);
+              serverAuthRequiredRef.current = true;
+            }
             void window.api
               .authStatus()
               .then((status) => {
-                if (mountedRef.current) setAuth(status);
+                if (mountedRef.current) {
+                  authRef.current = status;
+                  setAuth(status);
+                }
               })
               .catch(() => undefined);
           }
@@ -534,19 +649,27 @@ export default function App(): React.JSX.Element {
         case 'error': {
           cancelFlushForThread(threadId);
           const onScreen = threadId === activeThreadIdRef.current;
+          if (event.serverAuthRequired) {
+            setServerAuthRequired(true);
+            serverAuthRequiredRef.current = true;
+          }
           setLiveTurnsByThread((prev) => ({
             ...prev,
             [threadId]: {
               ...EMPTY_TURN,
               error: event.message,
               authRequired: Boolean(event.authRequired),
+              serverAuthRequired: Boolean(event.serverAuthRequired),
               seen: onScreen,
             },
           }));
           void window.api
             .authStatus()
             .then((status) => {
-              if (mountedRef.current) setAuth(status);
+              if (mountedRef.current) {
+                authRef.current = status;
+                setAuth(status);
+              }
             })
             .catch(() => undefined);
           break;
@@ -851,6 +974,50 @@ export default function App(): React.JSX.Element {
     [refreshThreads],
   );
 
+  const openSettings = useCallback((targetPane?: SettingsPane) => {
+    if (targetPane) {
+      paneSeqRef.current += 1;
+      setPaneRequest({ pane: targetPane, seq: paneSeqRef.current });
+      showSettingsRef.current = true;
+      setShowSettings(true);
+    } else {
+      const next = !showSettingsRef.current;
+      if (next) {
+        setPaneRequest(null);
+      }
+      showSettingsRef.current = next;
+      setShowSettings(next);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    if (signingOutRef.current || serverSignIn.signingIn) return;
+    signingOutRef.current = true;
+    setSigningOut(true);
+    try {
+      await window.api.serverSignOut();
+      if (!mountedRef.current) return;
+      clearServerErrorRef.current?.();
+      const status = await window.api.authStatus();
+      if (!mountedRef.current) return;
+      authRef.current = status;
+      setAuth(status);
+      const needsEntra = status.server.mode === 'entra' && !status.server.signedIn;
+      setServerAuthRequired(needsEntra);
+      serverAuthRequiredRef.current = needsEntra;
+      await refreshThreads();
+    } catch (error) {
+      if (mountedRef.current) {
+        console.warn('Failed to sign out:', error);
+      }
+    } finally {
+      signingOutRef.current = false;
+      if (mountedRef.current) {
+        setSigningOut(false);
+      }
+    }
+  }, [refreshThreads, serverSignIn.signingIn]);
+
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
@@ -889,41 +1056,37 @@ export default function App(): React.JSX.Element {
         activeThreadId={activeThreadId}
         defaultModel={settings.defaultModel}
         settingsOpen={showSettings}
+        signingOut={signingOut}
+        serverSigningIn={serverSignIn.signingIn}
         searchContent={searchContent}
         onOpen={(id) => {
           setShowSettings(false);
+          setPaneRequest(null);
           void openThread(id);
         }}
         onCreate={() => {
           setShowSettings(false);
+          setPaneRequest(null);
           void createThread();
         }}
         onDelete={(id) => void deleteThread(id)}
-        onOpenSettings={() => setShowSettings((prev) => !prev)}
-        onSignOut={async () => {
-          await window.api.serverSignOut();
-          setAuth(await window.api.authStatus());
-          await refreshThreads();
-        }}
+        onOpenSettings={() => openSettings()}
+        onOpenAccounts={() => openSettings('Accounts')}
+        onSignOut={() => void handleSignOut()}
         auth={auth}
       />
       <main className="main-pane">
         <StatusBanners
           auth={auth}
           claudeSignIn={claudeSignIn}
+          serverSignIn={serverSignIn}
+          serverAuthRequired={serverAuthRequired}
+          signingOut={signingOut}
           serverReachable={serverReachable}
           pendingSync={pendingSync}
           syncError={syncError}
           droppedSyncError={droppedSyncError}
           onDismissDroppedSyncError={() => setDroppedSyncError(null)}
-          onServerSignIn={() => {
-            void window.api
-              .serverSignIn()
-              .then(() => {
-                if (mountedRef.current) void refreshServer();
-              })
-              .catch(() => undefined);
-          }}
           onRetryServer={() => {
             void refreshServer();
           }}
@@ -934,17 +1097,25 @@ export default function App(): React.JSX.Element {
             appVersion={appVersion}
             auth={auth}
             claudeSignIn={claudeSignIn}
+            serverSignIn={serverSignIn}
+            paneRequest={paneRequest}
+            signingOut={signingOut}
             onAuthChange={() => void refreshServer()}
+            onSignOut={() => void handleSignOut()}
             onSave={async (update) => {
               const saved = await window.api.setSettings(update);
               if (!mountedRef.current) return;
               setSettings(saved);
               setShowSettings(false);
+              setPaneRequest(null);
               // A save can change the server address or auth mode, so re-check auth too — not just
               // the list and the catalogues.
               void refreshServer();
             }}
-            onClose={() => setShowSettings(false)}
+            onClose={() => {
+              setShowSettings(false);
+              setPaneRequest(null);
+            }}
           />
         ) : activeThread ? (
           <ChatView
@@ -955,6 +1126,8 @@ export default function App(): React.JSX.Element {
             profiles={profiles}
             liveTurn={liveTurn}
             claudeSignIn={claudeSignIn}
+            serverSignIn={serverSignIn}
+            signingOut={signingOut}
             onSend={sendMessage}
             onInterrupt={() => {
               if (activeThreadId) {

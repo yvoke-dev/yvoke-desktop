@@ -17,6 +17,11 @@ import {
   useClaudeSignIn,
   type ClaudeSignInController,
 } from './ClaudeSignInControls';
+import {
+  ServerSignInControls,
+  useServerSignIn,
+  type ServerSignInController,
+} from './ServerSignInControls';
 import { CloseIcon, MonitorIcon, MoonIcon, SunIcon } from './icons';
 
 const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
@@ -26,9 +31,99 @@ const THINKING_LEVELS: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
 const THINKING_SHORT: Record<ThinkingLevel, string> = { off: 'off', low: 'low', medium: 'med', high: 'high' };
 
 /** The panes of the settings spine, in nav order. `Advanced` and `About` sit below the divider. */
-const PANES = ['Server', 'Models', 'Agents', 'Web search', 'Appearance', 'Advanced', 'About'] as const;
-type Pane = (typeof PANES)[number];
-const SECONDARY_PANES: Pane[] = ['Advanced', 'About'];
+export const SETTINGS_PANES = [
+  'Server',
+  'Accounts',
+  'Models',
+  'Agents',
+  'Web search',
+  'Appearance',
+  'Advanced',
+  'About',
+] as const;
+export type SettingsPane = (typeof SETTINGS_PANES)[number];
+const SECONDARY_PANES: SettingsPane[] = ['Advanced', 'About'];
+
+function normalizedStringListEqual(a?: readonly string[], b?: readonly string[]): boolean {
+  const listA = (a ?? []).map((s) => s.trim());
+  const listB = (b ?? []).map((s) => s.trim());
+  if (listA.length !== listB.length) return false;
+  for (let i = 0; i < listA.length; i++) {
+    if (listA[i] !== listB[i]) return false;
+  }
+  return true;
+}
+
+function roleConfigEqual(a: RoleModelConfig, b: RoleModelConfig): boolean {
+  return a.model.trim() === b.model.trim() && a.thinkingLevel === b.thinkingLevel;
+}
+
+/**
+ * Compares two `AppSettings` objects normalizing whitespace, arrays, and optional default fields
+ * so read-only panes (`Accounts`, `About`) can accurately tell whether other panes hold unsaved edits.
+ */
+export function areSettingsEqual(a: AppSettings, b: AppSettings): boolean {
+  if (a.serverBaseUrl.trim() !== b.serverBaseUrl.trim()) return false;
+  if (a.mcpTransport !== b.mcpTransport) return false;
+  if (a.serverAuthMode !== b.serverAuthMode) return false;
+  if (
+    a.entra.tenantId.trim() !== b.entra.tenantId.trim() ||
+    a.entra.clientId.trim() !== b.entra.clientId.trim() ||
+    a.entra.scope.trim() !== b.entra.scope.trim()
+  ) {
+    return false;
+  }
+  if (!normalizedStringListEqual(a.models, b.models)) return false;
+  if (a.defaultModel.trim() !== b.defaultModel.trim()) return false;
+  if (a.defaultThinkingLevel !== b.defaultThinkingLevel) return false;
+  if (a.webSearch.enabled !== b.webSearch.enabled) return false;
+  if (!normalizedStringListEqual(a.webSearch.allowedDomains, b.webSearch.allowedDomains)) {
+    return false;
+  }
+  if (a.maxTurns !== b.maxTurns) return false;
+  if ((a.playbookValidationEnabled !== false) !== (b.playbookValidationEnabled !== false)) {
+    return false;
+  }
+  if (
+    !normalizedStringListEqual(
+      a.playbookValidationExcludedPlaybooks,
+      b.playbookValidationExcludedPlaybooks,
+    )
+  ) {
+    return false;
+  }
+  if (Boolean(a.showPrototypePlaybooks) !== Boolean(b.showPrototypePlaybooks)) return false;
+  if ((a.imageDescriptionsEnabled !== false) !== (b.imageDescriptionsEnabled !== false)) {
+    return false;
+  }
+
+  const orchA = a.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
+  const orchB = b.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
+  if (
+    !roleConfigEqual(orchA.orchestrator, orchB.orchestrator) ||
+    !roleConfigEqual(orchA.reviewer, orchB.reviewer) ||
+    !roleConfigEqual(orchA.specialist, orchB.specialist) ||
+    orchA.maxReviewRounds !== orchB.maxReviewRounds ||
+    orchA.maxSpecialistCalls !== orchB.maxSpecialistCalls ||
+    orchA.orchestratorMaxTurns !== orchB.orchestratorMaxTurns ||
+    orchA.specialistMaxTurns !== orchB.specialistMaxTurns
+  ) {
+    return false;
+  }
+
+  const appA = a.appearance ?? DEFAULT_APPEARANCE;
+  const appB = b.appearance ?? DEFAULT_APPEARANCE;
+  if (
+    appA.theme !== appB.theme ||
+    appA.density !== appB.density ||
+    appA.answerTextSize !== appB.answerTextSize ||
+    appA.traceExpanded !== appB.traceExpanded
+  ) {
+    return false;
+  }
+
+  return true;
+}
 
 /** Parse a number field, keeping a cleared/garbage input at 0 rather than NaN. */
 function toNumber(value: string): number {
@@ -294,31 +389,44 @@ export interface SettingsViewProps {
   appVersion?: string;
   auth?: AuthStatus | null;
   claudeSignIn?: ClaudeSignInController;
+  serverSignIn?: ServerSignInController;
+  paneRequest?: { pane: SettingsPane; seq: number } | null;
   onAuthChange?: () => void;
+  onSignOut?: () => void | Promise<void>;
+  signingOut?: boolean;
   onSave: (update: Partial<AppSettings>) => Promise<void>;
   onClose: () => void;
 }
 
 export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const [draft, setDraft] = useState<AppSettings>(props.settings);
-  const [pane, setPane] = useState<Pane>('Server');
+  const [pane, setPane] = useState<SettingsPane>(() => props.paneRequest?.pane ?? 'Server');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [verification, setVerification] = useState<AuthVerificationResponse | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const isMounted = useRef(true);
+  const verifySeqRef = useRef(0);
+  const lastPaneSeqRef = useRef<number | null>(props.paneRequest?.seq ?? null);
+  const prevServerSignedInRef = useRef(props.auth?.server.signedIn ?? false);
+  const prevSavedServerModeRef = useRef(props.auth?.server.mode);
+  const prevClaudeStatusRef = useRef(props.auth?.claude);
   const fallbackClaudeSignIn = useClaudeSignIn();
   const effectiveClaudeSignIn = props.claudeSignIn ?? fallbackClaudeSignIn;
+  const fallbackServerSignIn = useServerSignIn();
+  const effectiveServerSignIn = props.serverSignIn ?? fallbackServerSignIn;
   const verificationRef = useRef(verification);
   verificationRef.current = verification;
   const onAuthChangeRef = useRef(props.onAuthChange);
   onAuthChangeRef.current = props.onAuthChange;
   const clearClaudeErrorRef = useRef(effectiveClaudeSignIn.clearError);
   clearClaudeErrorRef.current = effectiveClaudeSignIn.clearError;
+  const clearServerErrorRef = useRef(effectiveServerSignIn.clearError);
+  clearServerErrorRef.current = effectiveServerSignIn.clearError;
   const prevSuccessCountRef = useRef(effectiveClaudeSignIn.successCount);
+  const prevServerSuccessCountRef = useRef(effectiveServerSignIn.successCount);
 
   useEffect(() => {
     isMounted.current = true;
@@ -328,29 +436,100 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    const curSignedIn = props.auth?.server.signedIn ?? false;
+    const curMode = props.auth?.server.mode;
+    const curClaude = props.auth?.claude;
+
+    const signedOutServer = prevServerSignedInRef.current && !curSignedIn;
+    const changedSavedMode =
+      prevSavedServerModeRef.current !== undefined &&
+      curMode !== undefined &&
+      prevSavedServerModeRef.current !== curMode;
+    const signedOutClaude = prevClaudeStatusRef.current === 'ok' && curClaude === 'missing';
+
+    prevServerSignedInRef.current = curSignedIn;
+    prevSavedServerModeRef.current = curMode;
+    prevClaudeStatusRef.current = curClaude;
+
+    if (signedOutServer || changedSavedMode || signedOutClaude) {
+      verifySeqRef.current += 1;
+      setVerification(null);
+      setVerifying(false);
+    }
+  }, [props.auth?.server.signedIn, props.auth?.server.mode, props.auth?.claude]);
+
+  useEffect(() => {
+    if (!props.paneRequest) return;
+    if (lastPaneSeqRef.current === props.paneRequest.seq) return;
+    lastPaneSeqRef.current = props.paneRequest.seq;
+    setPane(props.paneRequest.pane);
+  }, [props.paneRequest]);
+
+  useEffect(() => {
     if (effectiveClaudeSignIn.successCount === prevSuccessCountRef.current) return;
     prevSuccessCountRef.current = effectiveClaudeSignIn.successCount;
     onAuthChangeRef.current?.();
     if (verificationRef.current === null) return;
+    const seq = ++verifySeqRef.current;
     setVerification(null);
     setVerifying(true);
     setError(null);
     void window.api
       .verifyAuth()
       .then((res) => {
-        if (!isMounted.current) return;
+        if (!isMounted.current || verifySeqRef.current !== seq) return;
         setVerification(res);
         if (res.claude.status === 'ok') {
           clearClaudeErrorRef.current?.();
         }
+        if (res.server.status === 'ok') {
+          clearServerErrorRef.current?.();
+        }
       })
       .catch((e: unknown) => {
-        if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
+        if (isMounted.current && verifySeqRef.current === seq) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
       })
       .finally(() => {
-        if (isMounted.current) setVerifying(false);
+        if (isMounted.current && verifySeqRef.current === seq) {
+          setVerifying(false);
+        }
       });
   }, [effectiveClaudeSignIn.successCount]);
+
+  useEffect(() => {
+    if (effectiveServerSignIn.successCount === prevServerSuccessCountRef.current) return;
+    prevServerSuccessCountRef.current = effectiveServerSignIn.successCount;
+    onAuthChangeRef.current?.();
+    if (verificationRef.current === null) return;
+    const seq = ++verifySeqRef.current;
+    setVerification(null);
+    setVerifying(true);
+    setError(null);
+    void window.api
+      .verifyAuth()
+      .then((res) => {
+        if (!isMounted.current || verifySeqRef.current !== seq) return;
+        setVerification(res);
+        if (res.claude.status === 'ok') {
+          clearClaudeErrorRef.current?.();
+        }
+        if (res.server.status === 'ok') {
+          clearServerErrorRef.current?.();
+        }
+      })
+      .catch((e: unknown) => {
+        if (isMounted.current && verifySeqRef.current === seq) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (isMounted.current && verifySeqRef.current === seq) {
+          setVerifying(false);
+        }
+      });
+  }, [effectiveServerSignIn.successCount]);
 
   /**
    * A verdict describes the settings that were on disk when it was taken — main reads the *saved*
@@ -358,7 +537,9 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
    * about a configuration that was never tested, so the verdict is dropped rather than relabelled.
    */
   useEffect(() => {
+    verifySeqRef.current += 1;
     setVerification(null);
+    setVerifying(false);
   }, [draft.serverAuthMode, draft.serverBaseUrl, draft.defaultModel]);
 
   const orch: OrchestratorSettings = draft.orchestrator ?? DEFAULT_ORCHESTRATOR_SETTINGS;
@@ -381,42 +562,36 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     });
 
   const handleCheckCredentials = async (): Promise<void> => {
-    if (verifying || signingIn || effectiveClaudeSignIn.signingIn) return;
+    if (
+      verifying ||
+      effectiveServerSignIn.signingIn ||
+      effectiveClaudeSignIn.signingIn ||
+      Boolean(props.signingOut)
+    ) {
+      return;
+    }
+    const seq = ++verifySeqRef.current;
     setVerifying(true);
     setError(null);
     try {
       const res = await window.api.verifyAuth();
-      if (isMounted.current) {
+      if (isMounted.current && verifySeqRef.current === seq) {
         setVerification(res);
         if (res.claude.status === 'ok') {
           effectiveClaudeSignIn.clearError?.();
         }
-      }
-    } catch (e) {
-      if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (isMounted.current) setVerifying(false);
-    }
-  };
-
-  const handleInlineSignIn = async (): Promise<void> => {
-    if (signingIn || verifying || effectiveClaudeSignIn.signingIn) return;
-    setSigningIn(true);
-    setError(null);
-    try {
-      await window.api.serverSignIn();
-      props.onAuthChange?.();
-      const res = await window.api.verifyAuth();
-      if (isMounted.current) {
-        setVerification(res);
-        if (res.claude.status === 'ok') {
-          effectiveClaudeSignIn.clearError?.();
+        if (res.server.status === 'ok') {
+          effectiveServerSignIn.clearError();
         }
       }
     } catch (e) {
-      if (isMounted.current) setError(e instanceof Error ? e.message : String(e));
+      if (isMounted.current && verifySeqRef.current === seq) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      if (isMounted.current) setSigningIn(false);
+      if (isMounted.current && verifySeqRef.current === seq) {
+        setVerifying(false);
+      }
     }
   };
 
@@ -460,13 +635,32 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   };
 
   const caps = worstCase(orch);
-  const signedIn = props.auth?.server.signedIn ?? false;
+  const savedServerMode = props.auth?.server.mode;
+  const serverSignedIn = props.auth?.server.signedIn ?? false;
+  const showServerSignIn =
+    savedServerMode === 'entra' &&
+    (Boolean(effectiveServerSignIn.signingIn) ||
+      (verification
+        ? verification.server.status === 'missing' || verification.server.status === 'expired'
+        : !serverSignedIn));
+  const showServerSignOut =
+    savedServerMode === 'entra' &&
+    serverSignedIn &&
+    !showServerSignIn &&
+    Boolean(props.onSignOut);
+  const showClaudeSignIn =
+    Boolean(effectiveClaudeSignIn.signingIn) ||
+    (verification
+      ? verification.claude.status === 'missing' || verification.claude.status === 'expired'
+      : props.auth?.claude === 'missing');
+  const isReadOnlyPane = pane === 'Accounts' || pane === 'About';
+  const isDirty = !areSettingsEqual(draft, props.settings);
 
   return (
     <div className="settings-view">
       <nav className="settings-nav">
         <div className="settings-nav-label">Settings</div>
-        {PANES.map((name) => (
+        {SETTINGS_PANES.map((name) => (
           <React.Fragment key={name}>
             {name === SECONDARY_PANES[0] && <div className="settings-nav-divider" />}
             <button
@@ -987,6 +1181,169 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
             </>
           )}
 
+          {pane === 'Accounts' && (
+            <>
+              <div className="settings-pane-head">
+                <h2>Accounts</h2>
+                <p>Sign in to your Yvoke server and Claude accounts, or verify active credentials.</p>
+              </div>
+              <dl className="about-grid">
+                <dt>Yvoke account</dt>
+                <dd>
+                  {savedServerMode === 'dev' ? (
+                    verification ? (
+                      verification.server.status === 'ok' ? (
+                        <>
+                          {verification.server.account
+                            ? `${verification.server.account} `
+                            : 'Dev mode '}
+                          <span className="cred-badge verified">✓ Verified</span>
+                        </>
+                      ) : (() => {
+                        const isWarning =
+                          verification.server.status === 'unreachable' ||
+                          verification.server.status === 'rate_limited';
+                        return (
+                          <>
+                            Dev mode{' '}
+                            <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
+                              {isWarning ? '⚠' : '✗'} {verification.server.message}
+                            </span>
+                          </>
+                        );
+                      })()
+                    ) : (
+                      'Dev mode'
+                    )
+                  ) : (
+                    <>
+                      {verification ? (
+                        verification.server.status === 'ok' ? (
+                          <>
+                            {(verification.server.account ?? props.auth?.server.account) ? (
+                              <>
+                                <span>{verification.server.account ?? props.auth?.server.account}</span>{' '}
+                                · <span>Signed in</span>{' '}
+                              </>
+                            ) : (
+                              'Signed in '
+                            )}
+                            <span className="cred-badge verified">✓ Verified</span>
+                          </>
+                        ) : (() => {
+                          const isWarning =
+                            verification.server.status === 'unreachable' ||
+                            verification.server.status === 'rate_limited';
+                          return (
+                            <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
+                              {isWarning ? '⚠' : '✗'} {verification.server.message}
+                            </span>
+                          );
+                        })()
+                      ) : serverSignedIn ? (
+                        props.auth?.server.account ? (
+                          <>
+                            <span>{props.auth.server.account}</span> · <span>Signed in</span>
+                          </>
+                        ) : (
+                          'Signed in'
+                        )
+                      ) : (
+                        'Not signed in'
+                      )}
+                      {showServerSignIn && (
+                        <ServerSignInControls
+                          controller={effectiveServerSignIn}
+                          variant="settings"
+                          disabled={
+                            verifying ||
+                            effectiveClaudeSignIn.signingIn ||
+                            Boolean(props.signingOut)
+                          }
+                        />
+                      )}
+                      {showServerSignOut && (
+                        <button
+                          type="button"
+                          className="button secondary cred-inline-btn"
+                          disabled={
+                            Boolean(props.signingOut) ||
+                            verifying ||
+                            effectiveServerSignIn.signingIn ||
+                            effectiveClaudeSignIn.signingIn
+                          }
+                          onClick={() => void props.onSignOut?.()}
+                        >
+                          {props.signingOut ? 'Signing out…' : 'Sign out'}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </dd>
+                <dt>Claude account</dt>
+                <dd>
+                  {verification ? (
+                    verification.claude.status === 'ok' ? (
+                      <>
+                        {(verification.claude.account ?? props.auth?.claudeAccount) ? (
+                          <>
+                            <span>{verification.claude.account ?? props.auth?.claudeAccount}</span>{' '}
+                            · <span>Signed in</span>{' '}
+                          </>
+                        ) : (
+                          'Signed in '
+                        )}
+                        <span className="cred-badge verified">✓ Verified</span>
+                      </>
+                    ) : (() => {
+                      const isWarning =
+                        verification.claude.status === 'unreachable' ||
+                        verification.claude.status === 'rate_limited';
+                      return (
+                        <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
+                          {isWarning ? '⚠' : '✗'} {verification.claude.message}
+                        </span>
+                      );
+                    })()
+                  ) : props.auth?.claude === 'ok' ? (
+                    props.auth.claudeAccount ? (
+                      <>
+                        <span>{props.auth.claudeAccount}</span> · <span>Signed in</span>
+                      </>
+                    ) : (
+                      'Signed in'
+                    )
+                  ) : (
+                    'Not signed in'
+                  )}
+                  {showClaudeSignIn && (
+                    <ClaudeSignInControls
+                      controller={effectiveClaudeSignIn}
+                      variant="inline"
+                      disabled={verifying || effectiveServerSignIn.signingIn}
+                    />
+                  )}
+                </dd>
+                <dt>Credentials</dt>
+                <dd>
+                  <button
+                    type="button"
+                    className="button secondary check-credentials-btn"
+                    onClick={handleCheckCredentials}
+                    disabled={
+                      verifying ||
+                      effectiveServerSignIn.signingIn ||
+                      effectiveClaudeSignIn.signingIn ||
+                      Boolean(props.signingOut)
+                    }
+                  >
+                    {verifying ? 'Verifying credentials…' : 'Check Credentials'}
+                  </button>
+                </dd>
+              </dl>
+            </>
+          )}
+
           {pane === 'About' && (
             <>
               <div className="settings-pane-head">
@@ -1026,95 +1383,7 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
                   )}
                 </dd>
                 <dt>Server</dt>
-                <dd>{draft.serverBaseUrl || 'Not configured'}</dd>
-                <dt>Server sign-in</dt>
-                <dd>
-                  {draft.serverAuthMode === 'entra' ? 'Microsoft Entra' : 'Dev token'} ·{' '}
-                  {verification ? (
-                    verification.server.status === 'ok' ? (
-                      <>
-                        {(verification.server.account ?? props.auth?.server.account)
-                          ? `${verification.server.account ?? props.auth?.server.account} `
-                          : ''}
-                        <span className="cred-badge verified">✓ Verified</span>
-                      </>
-                    ) : (() => {
-                      const isWarning =
-                        verification.server.status === 'unreachable' ||
-                        verification.server.status === 'rate_limited';
-                      return (
-                        <>
-                          <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
-                            {isWarning ? '⚠' : '✗'} {verification.server.message}
-                          </span>
-                          {/* Gated on the mode main actually signed in with, not the draft: a
-                              button offered against an unsaved mode signs in to the other one. */}
-                          {props.auth?.server.mode === 'entra' && (
-                            <button
-                              type="button"
-                              className="button secondary cred-inline-btn"
-                              onClick={handleInlineSignIn}
-                              disabled={signingIn || verifying || effectiveClaudeSignIn.signingIn}
-                            >
-                              {signingIn ? 'Signing in…' : 'Sign in'}
-                            </button>
-                          )}
-                        </>
-                      );
-                    })()
-                  ) : (
-                    signedIn ? (props.auth?.server.account ?? 'signed in') : 'not signed in'
-                  )}
-                </dd>
-                <dt>Claude account</dt>
-                <dd>
-                  {verification ? (
-                    verification.claude.status === 'ok' ? (
-                      <>
-                        {(verification.claude.account ?? props.auth?.claudeAccount)
-                          ? `${verification.claude.account ?? props.auth?.claudeAccount} `
-                          : ''}
-                        <span className="cred-badge verified">✓ Verified</span>
-                      </>
-                    ) : (() => {
-                      const isWarning =
-                        verification.claude.status === 'unreachable' ||
-                        verification.claude.status === 'rate_limited';
-                      return (
-                        <span className={`cred-badge ${isWarning ? 'warning' : 'error'}`}>
-                          {isWarning ? '⚠' : '✗'} {verification.claude.message}
-                        </span>
-                      );
-                    })()
-                  ) : (
-                    props.auth?.claudeAccount ??
-                    (props.auth?.claude === 'missing'
-                      ? 'No Claude Code credentials found'
-                      : 'Detected from Claude Code')
-                  )}
-                  {(Boolean(effectiveClaudeSignIn.signingIn) ||
-                    (verification
-                      ? verification.claude.status === 'missing' ||
-                        verification.claude.status === 'expired'
-                      : props.auth?.claude === 'missing')) && (
-                    <ClaudeSignInControls
-                      controller={effectiveClaudeSignIn}
-                      variant="inline"
-                      disabled={verifying || signingIn}
-                    />
-                  )}
-                </dd>
-                <dt>Credentials</dt>
-                <dd>
-                  <button
-                    type="button"
-                    className="button secondary check-credentials-btn"
-                    onClick={handleCheckCredentials}
-                    disabled={verifying || signingIn || effectiveClaudeSignIn.signingIn}
-                  >
-                    {verifying ? 'Verifying credentials…' : 'Check Credentials'}
-                  </button>
-                </dd>
+                <dd className="about-url">{draft.serverBaseUrl || 'Not configured'}</dd>
                 <dt>Diagnostics</dt>
                 <dd>
                   <button
@@ -1138,18 +1407,54 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
         </div>
 
         <div className="settings-footer">
-          <p className="settings-note">
-            Model and thinking changes apply to new turns. New conversations use these defaults;
-            existing ones keep their per-conversation choice, changeable in the composer.
-          </p>
-          <div className="dialog-actions">
-            <button onClick={props.onClose} disabled={saving}>
-              Cancel
-            </button>
-            <button className="primary" onClick={() => void handleSave()} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-          </div>
+          {isReadOnlyPane ? (
+            isDirty ? (
+              <>
+                <p className="settings-note settings-dirty-note" role="status">
+                  You have unsaved changes in other settings panes.
+                </p>
+                <div className="dialog-actions">
+                  <button type="button" onClick={props.onClose} disabled={saving}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => void handleSave()}
+                    disabled={saving}
+                  >
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="dialog-actions">
+                <button type="button" onClick={props.onClose}>
+                  Close
+                </button>
+              </div>
+            )
+          ) : (
+            <>
+              <p className="settings-note">
+                Model and thinking changes apply to new turns. New conversations use these defaults;
+                existing ones keep their per-conversation choice, changeable in the composer.
+              </p>
+              <div className="dialog-actions">
+                <button type="button" onClick={props.onClose} disabled={saving}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void handleSave()}
+                  disabled={saving}
+                >
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

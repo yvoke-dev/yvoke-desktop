@@ -144,7 +144,8 @@ describe('App conversation switching with in-progress turn', () => {
       interrupt: vi.fn().mockResolvedValue(undefined),
       submitClarification: vi.fn().mockResolvedValue(true),
       submitFeedback: vi.fn().mockResolvedValue(undefined),
-      serverSignIn: vi.fn().mockResolvedValue(''),
+      serverSignIn: vi.fn().mockResolvedValue({ status: 'signed_in', account: 'alice@corp.com' }),
+      cancelServerSignIn: vi.fn().mockResolvedValue(true),
       serverSignOut: vi.fn().mockResolvedValue(undefined),
       claudeSignIn: vi.fn().mockResolvedValue({ status: 'signed_in', account: 'claude@yvoke.dev' }),
       cancelClaudeSignIn: vi.fn().mockResolvedValue(true),
@@ -1092,7 +1093,9 @@ describe('App conversation switching with in-progress turn', () => {
       'onSend',
       'profiles',
       'prompts',
+      'serverSignIn',
       'settings',
+      'signingOut',
       'thread',
     ]);
     expect(latestChatViewProps?.thread.id).toBe('thread-2');
@@ -2517,11 +2520,312 @@ describe('App conversation switching with in-progress turn', () => {
       fireEvent.click(screen.getAllByRole('button', { name: 'Sign in to Claude' })[0]);
       await waitFor(() => expect(screen.queryByText(/Connect Claude:/i)).toBeNull());
 
-      // Open Settings -> About and verify 'stale-expired@old.com' was cleared to 'Detected from Claude Code'
+      // Open Settings -> Accounts and verify 'stale-expired@old.com' was cleared to 'Signed in'
       fireEvent.click(document.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
-      fireEvent.click(screen.getByRole('button', { name: 'About' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Accounts' }));
       expect(document.body.textContent).not.toContain('stale-expired@old.com');
-      expect(screen.getByText('Detected from Claude Code')).toBeTruthy();
+      const settingsPane = document.querySelector('.settings-pane') as HTMLElement;
+      expect(settingsPane.textContent).toContain('Signed in');
+    });
+  });
+
+  describe('Wave 6: Entra server sign-in, polling gating, cross-auth isolation, paneRequest & signingOut guard', () => {
+    it('pauses 10s reconnect poll and gates catalogue fetches while Entra is unauthenticated, then resumes after Sign in to Yvoke', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+        let signedIn = false;
+        api.authStatus = vi.fn().mockImplementation(async () => ({
+          claude: 'ok',
+          server: {
+            mode: 'entra',
+            signedIn,
+            ...(signedIn ? { account: 'alice@corp.com' } : {}),
+          },
+        }));
+        api.listThreads = vi.fn().mockImplementation(async () => ({
+          threads: storedThreads.map((t) => ({ ...t })),
+          serverReachable: signedIn,
+          serverAuthRequired: !signedIn,
+        }));
+        api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+        api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
+        api.serverSignIn = vi.fn().mockImplementation(async () => {
+          signedIn = true;
+          return { status: 'signed_in', account: 'alice@corp.com' };
+        });
+
+        render(<App />);
+        await waitFor(() =>
+          expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy(),
+        );
+
+        // Red Server unreachable banner is suppressed while Entra sign-in banner is active
+        expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
+        // Catalogues are gated while unauthenticated
+        expect(api.listPrompts).not.toHaveBeenCalled();
+        expect(api.listOrchestratorProfiles).not.toHaveBeenCalled();
+
+        const listThreadsCountBefore = api.listThreads.mock.calls.length;
+        // Advance 30s -> 10s poll must NOT fire while Entra is unauthenticated
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+        });
+        expect(api.listThreads).toHaveBeenCalledTimes(listThreadsCountBefore);
+        expect(api.listPrompts).not.toHaveBeenCalled();
+
+        // Click Sign in to Yvoke -> refreshes threads and catalogues immediately
+        fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+        await waitFor(() => {
+          expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+          expect(api.listPrompts).toHaveBeenCalledTimes(1);
+          expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('isolates cross-auth turn errors and preserves serverAuthRequired across sendMessage catch', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'ok',
+        server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' },
+      });
+      api.sendMessage = vi.fn().mockImplementation(async () => {
+        emitAgent({
+          kind: 'error',
+          threadId: 'thread-1',
+          message: 'Yvoke Server: Your corporate sign-in expired. Click Sign in to Yvoke.',
+          serverAuthRequired: true,
+        });
+        throw new Error("Error invoking remote method 'chat:send': Error: 401");
+      });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Seed a Claude authRequired error on thread-2
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Claude: Your Claude login expired.',
+        authRequired: true,
+      });
+
+      // Open thread-1 and send -> triggers serverAuthRequired + sendMessage rejection
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+      fireEvent.click(screen.getByText('oim-getting-started').closest('button')!);
+      const textarea = await screen.findByPlaceholderText(/Add your question/);
+      fireEvent.change(textarea, { target: { value: 'Check Entra expiry' } });
+      fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+
+      // sendMessage catch preserves serverAuthRequired and clean error without IPC wrapper
+      await waitFor(() =>
+        expect(
+          screen.getByText('Yvoke Server: Your corporate sign-in expired. Click Sign in to Yvoke.'),
+        ).toBeTruthy(),
+      );
+      expect(container.textContent).not.toContain("Error invoking remote method 'chat:send'");
+      const errorBanner = container.querySelector('.chat-notices .banner.error')!;
+      const inlineYvokeBtn = Array.from(errorBanner.querySelectorAll('button')).find(
+        (b) => b.textContent === 'Sign in to Yvoke',
+      );
+      expect(inlineYvokeBtn).toBeTruthy();
+
+      // Sign in to Yvoke -> clears thread-1 serverAuthRequired error with notice, leaves thread-2 Claude authRequired error untouched!
+      fireEvent.click(inlineYvokeBtn!);
+      await waitFor(() =>
+        expect(screen.getByText('Signed in to Yvoke — send your question again.')).toBeTruthy(),
+      );
+
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() =>
+        expect(screen.getByText('Claude: Your Claude login expired.')).toBeTruthy(),
+      );
+    });
+
+    it('opens Settings -> Accounts from sidebar account footer without dropping unsaved Settings edits', async () => {
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Open Settings via gear icon -> lands on Server pane
+      fireEvent.click(container.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
+      expect(screen.getByRole('heading', { name: 'Server' })).toBeTruthy();
+
+      // Switch to Models and edit maxTurns (unsaved dirty draft)
+      fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+      fireEvent.change(screen.getByLabelText('Max turns per message'), { target: { value: '77' } });
+
+      // Click sidebar account footer button -> switches to Accounts WITHOUT unmounting SettingsView or losing draft!
+      fireEvent.click(container.querySelector('button.footer-account-btn') as HTMLButtonElement);
+      expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy();
+      expect(screen.getByText('You have unsaved changes in other settings panes.')).toBeTruthy();
+
+      // Switch back to Models -> edited value 77 is still intact
+      fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+      expect((screen.getByLabelText('Max turns per message') as HTMLInputElement).value).toBe('77');
+    });
+
+    it('guards handleSignOut across concurrent clicks, IPC rejection recovery, and success refresh', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let signedIn = true;
+      api.authStatus = vi.fn().mockImplementation(async () => ({
+        claude: 'ok',
+        server: {
+          mode: 'entra',
+          signedIn,
+          ...(signedIn ? { account: 'alice@corp.com' } : {}),
+        },
+      }));
+
+      let rejectFirst!: (err: Error) => void;
+      api.serverSignOut = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              rejectFirst = reject;
+            }),
+        )
+        .mockImplementationOnce(async () => {
+          signedIn = false;
+        });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        render(<App />);
+        await waitFor(() =>
+          expect(screen.getByRole('button', { name: 'Sign out of Yvoke' })).toBeTruthy(),
+        );
+
+        const signOutBtn = screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement;
+        fireEvent.click(signOutBtn);
+        expect(api.serverSignOut).toHaveBeenCalledTimes(1);
+        expect(signOutBtn.disabled).toBe(true);
+
+        // Concurrent click while in-flight is ignored
+        fireEvent.click(signOutBtn);
+        expect(api.serverSignOut).toHaveBeenCalledTimes(1);
+
+        // First attempt rejects -> restores interactivity without crashing
+        await act(async () => {
+          rejectFirst(new Error('MSAL cache locked'));
+        });
+        await waitFor(() => expect(signOutBtn.disabled).toBe(false));
+
+        // Second attempt succeeds -> refreshes auth and shows Sign in to Yvoke banner
+        fireEvent.click(signOutBtn);
+        await waitFor(() => {
+          expect(api.serverSignOut).toHaveBeenCalledTimes(2);
+          expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+        });
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('clears a stale serverSignIn error when handleSignOut completes', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let signedIn = true;
+      api.authStatus = vi.fn().mockImplementation(async () => ({
+        claude: 'ok',
+        server: {
+          mode: 'entra',
+          signedIn,
+          ...(signedIn ? { account: 'alice@corp.com' } : {}),
+        },
+      }));
+      api.serverSignIn = vi.fn().mockResolvedValueOnce({
+        status: 'error',
+        message: 'Previous Entra browser failure',
+      });
+      api.serverSignOut = vi.fn().mockImplementation(async () => {
+        signedIn = false;
+      });
+
+      render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Seed a serverAuthRequired turn error so Sign in to Yvoke banner appears even while signedIn is stale-true
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-1',
+        message: 'Yvoke Server: Token expired',
+        serverAuthRequired: true,
+      });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy());
+
+      // Trigger a failing Sign in to Yvoke -> surfaces alert
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() =>
+        expect(screen.getByRole('alert').textContent).toBe('Previous Entra browser failure'),
+      );
+
+      // Click Sign out of Yvoke -> stale serverSignIn error must be cleared!
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out of Yvoke' }));
+      await waitFor(() => expect(api.serverSignOut).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    });
+
+    it('awaits authStatus() before refreshThreads() in refreshServer so switching entra signed-out -> dev fetches catalogues even when listThreads resolves faster', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let mode: 'entra' | 'dev' = 'entra';
+      let resolveDelayedAuth!: (status: AuthStatus) => void;
+      let delayNextAuth = false;
+
+      api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+      api.setSettings = vi.fn().mockImplementation(async (update: Partial<AppSettings>) => {
+        if (update.serverAuthMode === 'dev') {
+          mode = 'dev';
+          delayNextAuth = true;
+        }
+        return { ...sampleSettings(), ...update };
+      });
+      api.authStatus = vi.fn().mockImplementation(() => {
+        if (delayNextAuth) {
+          delayNextAuth = false;
+          return new Promise<AuthStatus>((resolve) => {
+            resolveDelayedAuth = resolve;
+          });
+        }
+        return Promise.resolve({
+          claude: 'ok',
+          server: mode === 'dev' ? { mode: 'dev', signedIn: true } : { mode: 'entra', signedIn: false },
+        });
+      });
+      api.listThreads = vi.fn().mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: mode === 'dev',
+        serverAuthRequired: mode === 'entra',
+      }));
+      api.listPrompts = vi.fn().mockResolvedValue(PROMPTS);
+      api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
+
+      const { container } = render(<App />);
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy(),
+      );
+      expect(api.listPrompts).not.toHaveBeenCalled();
+
+      // Open Settings -> Server, switch Server authentication to Dev token, and Save
+      fireEvent.click(container.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
+      fireEvent.click(screen.getByRole('button', { name: 'Dev token' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      // Wait until delayed authStatus is in-flight, then resolve it
+      await waitFor(() => expect(resolveDelayedAuth).toBeTypeOf('function'));
+      await act(async () => {
+        resolveDelayedAuth({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
+      });
+
+      // Because refreshServer awaited authStatus() before refreshThreads(), authRef.current is already 'dev'
+      // and listPrompts + listOrchestratorProfiles are fetched immediately!
+      await waitFor(() => {
+        expect(api.listPrompts).toHaveBeenCalledTimes(1);
+        expect(api.listOrchestratorProfiles).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

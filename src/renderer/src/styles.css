@@ -587,12 +587,77 @@ h6 {
   min-width: 0;
 }
 
+.footer-account-btn {
+  display: flex;
+  flex-direction: column;
+  width: calc(100% + 12px);
+  min-width: 0;
+  padding: 4px 6px;
+  margin: -4px -6px 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.footer-account-btn:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
 .account-chip {
-  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.account-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.account-status-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.account-status-dot.is-ok {
+  background: var(--ok-ink);
+}
+
+.account-status-dot.is-warn {
+  background: var(--warn-ink);
+}
+
+.account-status-dot.is-muted {
+  background: var(--text-faint);
+}
+
+.account-status-service {
+  flex: 0 0 auto;
   font-weight: 600;
+  color: var(--text);
+}
+
+.account-status-value {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--text-dim);
+  font-weight: 400;
 }
 
 .footer-sub-meta {
@@ -601,13 +666,11 @@ h6 {
   gap: 5px;
   font-size: 10px;
   color: var(--text-dim);
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .account-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  display: inline-block;
 }
 
 .app-version {
@@ -2543,6 +2606,11 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
   margin: 0;
 }
 
+.settings-dirty-note {
+  color: var(--warn-ink);
+  font-weight: 600;
+}
+
 .settings-footer .dialog-actions {
   margin-left: auto;
   flex: 0 0 auto;
@@ -2563,6 +2631,10 @@ input[type='range'].safety-cap::-webkit-slider-runnable-track {
 
 .about-grid dd {
   margin: 0;
+  overflow-wrap: break-word;
+}
+
+.about-url {
   word-break: break-all;
 }
 
@@ -2710,7 +2782,7 @@ button.small {
  * omitted class silently inherits this box, which is what used to put a border around the
  * citation pills.
  */
-button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.option-button):not(.claude-alt-toggle) {
+button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citation-link):not(.seg-opt):not(.thread-item):not(.thread-group-label):not(.trace-bar):not(.trace-step):not(.picker-row):not(.prompt-option):not(.nav-pane):not(.theme-choice):not(.subagent-card-header):not(.subagent-trace-toggle):not(.search-clear):not(.active-playbook-remove):not(.composer-select):not(.chip-remove):not(.composer-attach-btn):not(.attachment-pill-remove):not(.attachment-pill-thumb):not(.user-image-card):not(.lightbox-close-btn):not(.lightbox-action-btn):not(.diagram-lightbox-btn):not(.banner-dismiss):not(.option-button):not(.claude-alt-toggle):not(.footer-account-btn) {
   background: transparent;
   border: 1px solid var(--rule);
   padding: 7px 14px;
@@ -2855,6 +2927,56 @@ button:not(.primary):not(.secondary):not(.danger):not(.icon-button):not(.citatio
 }
 
 .claude-signin-error {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--danger-ink);
+  line-height: 1.4;
+}
+
+/* ── Yvoke server (Entra) browser sign-in controls ── */
+.server-signin-controls {
+  word-break: normal;
+}
+
+.server-signin-controls.is-banner {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.server-signin-controls.is-inline,
+.server-signin-controls.is-settings {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.server-signin-controls.is-inline.is-waiting,
+.server-signin-controls.is-settings.is-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 6px;
+  width: 100%;
+}
+
+.server-signin-waiting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-signin-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.server-signin-error {
   font-size: 12px;
   font-weight: 500;
   color: var(--danger-ink);

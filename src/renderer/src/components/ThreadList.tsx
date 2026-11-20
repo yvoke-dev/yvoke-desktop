@@ -4,7 +4,6 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
-  LockIcon,
   LogOutIcon,
   PlusIcon,
   SearchIcon,
@@ -125,12 +124,15 @@ export function ThreadList(props: {
   /** Rows only show a model badge when they deviate from this. */
   defaultModel: string;
   settingsOpen: boolean;
+  signingOut?: boolean;
+  serverSigningIn?: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
   onOpen: (threadId: string) => void;
   onCreate: () => void;
   onDelete: (threadId: string) => void;
   onOpenSettings: () => void;
+  onOpenAccounts?: () => void;
   onSignOut?: () => void;
 }): React.JSX.Element {
   const {
@@ -140,11 +142,14 @@ export function ThreadList(props: {
     auth,
     defaultModel,
     settingsOpen,
+    signingOut = false,
+    serverSigningIn = false,
     searchContent,
     onOpen,
     onCreate,
     onDelete,
     onOpenSettings,
+    onOpenAccounts,
     onSignOut,
   } = props;
   const [query, setQuery] = useState('');
@@ -339,33 +344,85 @@ export function ThreadList(props: {
 
       <div className="thread-list-footer">
         <div className="footer-info">
-          <div className="account-chip" data-tip={auth?.claudeAccount ?? auth?.server.account ?? ''}>
-            {auth?.claudeAccount ?? (auth?.server.signedIn ? auth.server.account : 'Not signed in')}
-          </div>
-          <div className="footer-sub-meta">
-            {auth && (
-              <span
-                className="account-mode"
-                data-tip={
-                  auth.server.mode === 'dev'
-                    ? 'Server running with mock security (APP_SECURITY_MOCK)'
-                    : 'Authenticated via Microsoft Entra'
-                }
-              >
-                <LockIcon size={10} />
-                {auth.server.mode === 'dev' ? 'dev' : 'Entra'}
+          <button
+            type="button"
+            className="footer-account-btn"
+            data-tip="Manage accounts"
+            onClick={onOpenAccounts ?? onOpenSettings}
+          >
+            <span className="account-chip">
+              <span className="account-status-row">
+                <span
+                  className={`account-status-dot ${
+                    !auth
+                      ? 'is-muted'
+                      : auth.server.mode === 'dev' || auth.server.signedIn
+                        ? 'is-ok'
+                        : 'is-warn'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="account-status-service">Yvoke</span>
+                <span className="account-status-value account-mode">
+                  {!auth
+                    ? 'Checking…'
+                    : auth.server.mode === 'dev'
+                      ? 'dev'
+                      : auth.server.signedIn
+                        ? (auth.server.account ?? 'Signed in')
+                        : 'Sign in needed'}
+                </span>
               </span>
-            )}
-            {appVersion && <span className="app-version">· v{appVersion}</span>}
-          </div>
+              <span className="account-status-row">
+                <span
+                  className={`account-status-dot ${
+                    auth?.claude === 'ok'
+                      ? 'is-ok'
+                      : auth?.claude === 'missing'
+                        ? 'is-warn'
+                        : 'is-muted'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="account-status-service">Claude</span>
+                <span className="account-status-value">
+                  {!auth
+                    ? 'Checking…'
+                    : auth.claude === 'ok'
+                      ? (auth.claudeAccount ?? 'Signed in')
+                      : auth.claude === 'missing'
+                        ? 'Sign in needed'
+                        : 'Checking…'}
+                </span>
+              </span>
+            </span>
+          </button>
+          {appVersion && (
+            <div className="footer-sub-meta">
+              <span className="app-version">v{appVersion}</span>
+            </div>
+          )}
         </div>
         <div className="footer-actions">
           {auth?.server.signedIn && auth.server.mode === 'entra' && onSignOut && (
-            <button className="icon-button" data-tip="Sign out of Entra" onClick={onSignOut}>
+            <button
+              type="button"
+              className="icon-button"
+              data-tip="Sign out of Yvoke"
+              aria-label="Sign out of Yvoke"
+              disabled={signingOut || serverSigningIn}
+              onClick={onSignOut}
+            >
               <LogOutIcon size={16} />
             </button>
           )}
-          <button className="icon-button" data-tip="Settings" onClick={onOpenSettings}>
+          <button
+            type="button"
+            className="icon-button"
+            data-tip="Settings"
+            aria-label="Settings"
+            onClick={onOpenSettings}
+          >
             <SettingsIcon size={16} />
           </button>
         </div>

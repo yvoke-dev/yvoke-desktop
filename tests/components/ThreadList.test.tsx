@@ -205,3 +205,143 @@ describe('ThreadList grouping', () => {
     expect(screen.getByText('today thread')).toBeTruthy();
   });
 });
+
+describe('ThreadList account footer', () => {
+  it('renders clickable .footer-account-btn with dual Yvoke + Claude status rows, preserves .account-chip and .account-mode containing "dev" in dev mode, and calls onOpenAccounts', () => {
+    const onOpenAccounts = vi.fn();
+    const { container } = render(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', claudeAccount: 'claude@corp.com', server: { mode: 'dev', signedIn: true } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={onOpenAccounts}
+      />,
+    );
+
+    const accountBtn = container.querySelector('button.footer-account-btn') as HTMLButtonElement | null;
+    expect(accountBtn).not.toBeNull();
+    expect(accountBtn!.type).toBe('button');
+
+    // E2E compatibility selectors inside footer-account-btn
+    const accountChip = accountBtn!.querySelector('.account-chip');
+    const accountMode = accountBtn!.querySelector('.account-mode');
+    expect(accountChip).not.toBeNull();
+    expect(accountMode).not.toBeNull();
+    expect(accountMode!.textContent).toContain('dev');
+
+    // Dual Yvoke + Claude status rows with ok status dots
+    const rows = accountBtn!.querySelectorAll('.account-status-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('Yvoke');
+    expect(rows[0].querySelector('.account-status-dot.is-ok')).not.toBeNull();
+    expect(rows[1].textContent).toContain('Claude');
+    expect(rows[1].textContent).toContain('claude@corp.com');
+    expect(rows[1].querySelector('.account-status-dot.is-ok')).not.toBeNull();
+
+    // No sign-out button in dev mode
+    expect(container.querySelector('[data-tip="Sign out of Yvoke"]')).toBeNull();
+
+    fireEvent.click(accountBtn!);
+    expect(onOpenAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows warning status dots when Entra or Claude needs sign-in, and renders Sign out of Yvoke button disabled during signingOut or serverSigningIn', () => {
+    const onSignOut = vi.fn();
+    const { container, rerender } = render(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+
+    const warnDots = container.querySelectorAll('.account-status-dot.is-warn');
+    expect(warnDots).toHaveLength(2);
+    // Not signed in -> no Sign out button
+    expect(screen.queryByRole('button', { name: 'Sign out of Yvoke' })).toBeNull();
+
+    // Signed in Entra -> shows Sign out of Yvoke with matching tooltip & aria-label
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+
+    const signOutBtn = screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement;
+    expect(signOutBtn.getAttribute('data-tip')).toBe('Sign out of Yvoke');
+    expect(signOutBtn.disabled).toBe(false);
+    fireEvent.click(signOutBtn);
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+
+    // Disabled when signingOut is true
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        signingOut={true}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    // Disabled when serverSigningIn is true
+    rerender(
+      <ThreadList
+        threads={threads}
+        appVersion="1.3.1"
+        activeThreadId={null}
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
+        defaultModel="sonnet"
+        settingsOpen={false}
+        serverSigningIn={true}
+        onOpen={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onOpenSettings={() => undefined}
+        onOpenAccounts={() => undefined}
+        onSignOut={onSignOut}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'Sign out of Yvoke' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+});
