@@ -24,6 +24,7 @@ describe('registerClaudeAuthIpc boundary validation', () => {
           ? { accepted: true as const }
           : { accepted: false as const, message: 'Invalid authorization code' },
       ),
+      claudeSignOut: vi.fn().mockResolvedValue({ status: 'signed_out' }),
     };
     const writeClipboardText = vi.fn();
 
@@ -53,7 +54,7 @@ describe('registerClaudeAuthIpc boundary validation', () => {
     return { handlers, appCore, writeClipboardText, invoke };
   }
 
-  it('registers all 4 auth:claude-* channels and serves trusted sender invocations', async () => {
+  it('registers all 5 auth:claude-* channels and serves trusted sender invocations', async () => {
     const { appCore, writeClipboardText, invoke } = setup();
     const trustedFrame = { url: 'http://localhost:5173/index.html' };
 
@@ -76,15 +77,21 @@ describe('registerClaudeAuthIpc boundary validation', () => {
       accepted: true,
     });
     expect(appCore.submitClaudeAuthCode).toHaveBeenCalledWith('code1#state1');
+
+    expect(await invoke(IpcChannels.authClaudeSignout, trustedFrame)).toEqual({
+      status: 'signed_out',
+    });
+    expect(appCore.claudeSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects foreign, empty, undefined, and malformed senderFrame.url across all 4 channels before touching appCore or clipboard', async () => {
+  it('rejects foreign, empty, undefined, and malformed senderFrame.url across all 5 channels before touching appCore or clipboard', async () => {
     const { appCore, writeClipboardText, invoke } = setup();
     const channels = [
       IpcChannels.authClaudeSignin,
       IpcChannels.authClaudeCancel,
       IpcChannels.authClaudeCopyUrl,
       IpcChannels.authClaudeSubmitCode,
+      IpcChannels.authClaudeSignout,
     ];
     const untrustedFrames: Array<{ url?: string } | null | undefined> = [
       { url: 'https://attacker.example/phish.html' },
@@ -107,16 +114,30 @@ describe('registerClaudeAuthIpc boundary validation', () => {
     expect(appCore.cancelClaudeSignIn).not.toHaveBeenCalled();
     expect(appCore.getActiveClaudeSignInUrl).not.toHaveBeenCalled();
     expect(appCore.submitClaudeAuthCode).not.toHaveBeenCalled();
+    expect(appCore.claudeSignOut).not.toHaveBeenCalled();
     expect(writeClipboardText).not.toHaveBeenCalled();
   });
 
   it('fails closed when trustedOrigin itself is empty even if senderFrame.url is also empty', async () => {
     const { appCore, writeClipboardText, invoke } = setup('');
+    const channels = [
+      IpcChannels.authClaudeSignin,
+      IpcChannels.authClaudeCancel,
+      IpcChannels.authClaudeCopyUrl,
+      IpcChannels.authClaudeSubmitCode,
+      IpcChannels.authClaudeSignout,
+    ];
 
-    await expect(invoke(IpcChannels.authClaudeSignin, { url: '' })).rejects.toThrow(
-      `IPC ${IpcChannels.authClaudeSignin} rejected: untrusted sender origin`,
-    );
+    for (const channel of channels) {
+      await expect(invoke(channel, { url: '' })).rejects.toThrow(
+        `IPC ${channel} rejected: untrusted sender origin`,
+      );
+    }
     expect(appCore.claudeSignIn).not.toHaveBeenCalled();
+    expect(appCore.cancelClaudeSignIn).not.toHaveBeenCalled();
+    expect(appCore.getActiveClaudeSignInUrl).not.toHaveBeenCalled();
+    expect(appCore.submitClaudeAuthCode).not.toHaveBeenCalled();
+    expect(appCore.claudeSignOut).not.toHaveBeenCalled();
     expect(writeClipboardText).not.toHaveBeenCalled();
   });
 
@@ -146,7 +167,7 @@ describe('registerClaudeAuthIpc boundary validation', () => {
 });
 
 describe('preload DesktopApi Claude auth methods', () => {
-  it('exposes claudeSignIn, cancelClaudeSignIn, copyClaudeSignInUrl, and submitClaudeAuthCode wired to IpcChannels', async () => {
+  it('exposes claudeSignIn, cancelClaudeSignIn, copyClaudeSignInUrl, submitClaudeAuthCode, and claudeSignOut wired to IpcChannels', async () => {
     vi.resetModules();
     let exposedApi: DesktopApi | undefined;
     const invokeMock = vi.fn();
@@ -186,6 +207,10 @@ describe('preload DesktopApi Claude auth methods', () => {
       invokeMock.mockResolvedValueOnce({ accepted: true });
       await expect(exposedApi!.submitClaudeAuthCode('abc#xyz')).resolves.toEqual({ accepted: true });
       expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authClaudeSubmitCode, 'abc#xyz');
+
+      invokeMock.mockResolvedValueOnce({ status: 'signed_out' });
+      await expect(exposedApi!.claudeSignOut()).resolves.toEqual({ status: 'signed_out' });
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authClaudeSignout);
 
       invokeMock.mockResolvedValueOnce({ status: 'signed_in', account: 'corp@yvoke.ai' });
       await expect(exposedApi!.serverSignIn()).resolves.toEqual({

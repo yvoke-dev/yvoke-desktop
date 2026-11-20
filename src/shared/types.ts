@@ -688,6 +688,10 @@ export type ClaudeSignInResult =
   | { status: 'cancelled' }
   | { status: 'error'; message: string };
 
+export type ClaudeSignOutResult =
+  | { status: 'signed_out' }
+  | { status: 'error'; message: string };
+
 export type ServerSignInResult =
   | { status: 'signed_in'; account?: string }
   | { status: 'cancelled' }

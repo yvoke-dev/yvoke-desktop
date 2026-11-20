@@ -8,6 +8,7 @@ import {
   CLAUDE_LOGIN_CODE_EXCHANGE_TIMEOUT_MS,
   CLAUDE_LOGIN_TIMEOUT_MS,
   CLAUDE_LOGIN_URL_TIMEOUT_MS,
+  CLAUDE_LOGOUT_TIMEOUT_MS,
   CLAUDE_STATUS_CACHE_TTL_MS,
   CLAUDE_STATUS_TIMEOUT_MS,
   ClaudeAuthManager,
@@ -809,6 +810,336 @@ describe('ClaudeAuthManager', () => {
       );
       mgrLogin.cancelSignIn();
       await signInPromise;
+    });
+  });
+
+  describe('signOut', () => {
+    it('spawns claude auth logout with sanitized env, coalesces concurrent calls, cancels activeLogin, and blocks signIn() while in flight', async () => {
+      const origApiKey = process.env.ANTHROPIC_API_KEY;
+      const origNodeOpts = process.env.NODE_OPTIONS;
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-ambient-logout';
+      process.env.NODE_OPTIONS = '--require /evil.js';
+
+      try {
+        const mgr = createManager();
+
+        // Start an active sign-in that must be synchronously cancelled when signOut() begins
+        const loginPromise = mgr.signIn();
+        expect(spawned).toHaveLength(1);
+        const loginChild = spawned[0].child;
+
+        // Concurrent signOut() calls must coalesce onto a single spawned child
+        const out1 = mgr.signOut();
+        const out2 = mgr.signOut();
+
+        expect(loginChild.kill).toHaveBeenCalledWith('SIGTERM');
+        expect(await loginPromise).toEqual({ status: 'cancelled' });
+
+        expect(spawned).toHaveLength(2);
+        const logoutCall = spawned[1];
+        expect(logoutCall.cmd).toBe('/bundled/claude');
+        expect(logoutCall.args).toEqual(['auth', 'logout']);
+        expect(logoutCall.opts.cwd).toBe(sandboxDir);
+        expect(logoutCall.opts.windowsHide).toBe(true);
+        expect(logoutCall.opts.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+        const spawnEnv = logoutCall.opts.env as Record<string, string | undefined>;
+        expect(spawnEnv.ANTHROPIC_API_KEY).toBeUndefined();
+        expect(spawnEnv.NODE_OPTIONS).toBeUndefined();
+        expect(spawnEnv.NO_COLOR).toBe('1');
+        expect(spawnEnv.FORCE_COLOR).toBe('0');
+        expect(spawnEnv.FORCE_HYPERLINK).toBe('0');
+        expect(spawnEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('1');
+
+        // Concurrent signIn() during activeSignOut must fail immediately without spawning
+        const blockedSignIn = await mgr.signIn();
+        expect(blockedSignIn).toEqual({
+          status: 'error',
+          message: 'Claude sign-out is in progress. Please wait a moment and try again.',
+        });
+        expect(spawned).toHaveLength(2);
+
+        logoutCall.child.finish(0);
+
+        const [r1, r2] = await Promise.all([out1, out2]);
+        expect(r1).toEqual({ status: 'signed_out' });
+        expect(r2).toEqual({ status: 'signed_out' });
+
+        // After signOut settles, signIn() is permitted again
+        const followUpLogin = mgr.signIn();
+        expect(spawned).toHaveLength(3);
+        expect(spawned[2].args).toEqual(['auth', 'login', '--claudeai']);
+        mgr.cancelSignIn();
+        await followUpLogin;
+      } finally {
+        if (origApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+        else process.env.ANTHROPIC_API_KEY = origApiKey;
+        if (origNodeOpts === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = origNodeOpts;
+      }
+    });
+
+    it('prevents mid-flight getStatus() from populating statusCache while signOut() is running', async () => {
+      const mgr = createManager();
+
+      const signOutPromise = mgr.signOut();
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].args).toEqual(['auth', 'logout']);
+
+      // Mid-flight getStatus() #1 returns loggedIn: true while signOut() is still running
+      const status1Promise = mgr.getStatus();
+      expect(spawned).toHaveLength(2);
+      expect(spawned[1].args).toEqual(['auth', 'status', '--json']);
+      spawned[1].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'stale@yvoke.ai' }),
+      );
+      spawned[1].child.finish(0);
+      expect(await status1Promise).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+
+      // Invoke getStatus() #2 BEFORE signOut() settles -> must NOT hit cache; must spawn a new status probe
+      const status2Promise = mgr.getStatus();
+      expect(spawned).toHaveLength(3);
+      expect(spawned[2].args).toEqual(['auth', 'status', '--json']);
+
+      // Settling signOut() cancels active status probes and invalidates cache again
+      spawned[0].child.finish(0);
+      expect(await signOutPromise).toEqual({ status: 'signed_out' });
+      expect(spawned[2].child.kill).toHaveBeenCalledWith('SIGTERM');
+      await status2Promise;
+    });
+
+    it('cancels pre-existing in-flight getStatus() probes and prevents them from caching', async () => {
+      const mgr = createManager();
+
+      const statusBefore = mgr.getStatus();
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].args).toEqual(['auth', 'status', '--json']);
+      const statusChild = spawned[0].child;
+
+      const signOutPromise = mgr.signOut();
+      expect(statusChild.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(spawned).toHaveLength(2);
+      expect(spawned[1].args).toEqual(['auth', 'logout']);
+
+      // Even if the killed status child emits loggedIn: true late, it must not poison cache
+      statusChild.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'late-stale@yvoke.ai' }),
+      );
+      statusChild.finish(0);
+      await statusBefore;
+
+      spawned[1].child.finish(0);
+      expect(await signOutPromise).toEqual({ status: 'signed_out' });
+
+      // Next getStatus() must spawn a fresh probe (0 cache hit)
+      const statusAfter = mgr.getStatus();
+      expect(spawned).toHaveLength(3);
+      expect(spawned[2].args).toEqual(['auth', 'status', '--json']);
+      spawned[2].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+      spawned[2].child.finish(0);
+      expect(await statusAfter).toEqual({ claude: 'missing' });
+    });
+
+    it('handles entry failures (disposed, null binary, mkdirSync throw, sync spawn throw) cleanly and recovers latch', async () => {
+      // (a) Already disposed -> cancelled error, 0 spawns
+      const disposedMgr = createManager();
+      disposedMgr.dispose();
+      expect(await disposedMgr.signOut()).toEqual({
+        status: 'error',
+        message: 'Claude sign-out was cancelled.',
+      });
+      expect(spawned).toHaveLength(0);
+
+      // (b) resolveBinary() === null -> error + latch clears so retry succeeds
+      let binaryPath: string | null = null;
+      const binMgr = createManager({ resolveBinary: () => binaryPath });
+      expect(await binMgr.signOut()).toEqual({
+        status: 'error',
+        message: 'Bundled Claude binary not found.',
+      });
+      expect(spawned).toHaveLength(0);
+
+      binaryPath = '/bundled/claude';
+      const retryBin = binMgr.signOut();
+      expect(spawned).toHaveLength(1);
+      spawned[0].child.finish(0);
+      expect(await retryBin).toEqual({ status: 'signed_out' });
+
+      // (c) fs.mkdirSync throws -> sanitized error + latch clears for follow-up signOut/signIn
+      const mkdirSpy = vi
+        .spyOn(fs, 'mkdirSync')
+        .mockImplementationOnce(() => {
+          throw new Error('EACCES Bearer SECRET_MKDIR_JWT');
+        });
+      const mkdirMgr = createManager();
+      const mkdirRes = await mkdirMgr.signOut();
+      expect(mkdirRes.status).toBe('error');
+      if (mkdirRes.status === 'error') {
+        expect(mkdirRes.message).not.toContain('SECRET_MKDIR_JWT');
+        expect(mkdirRes.message).toContain('Bearer [REDACTED]');
+      }
+      expect(spawned).toHaveLength(1);
+      mkdirSpy.mockRestore();
+
+      const afterMkdirLogin = mkdirMgr.signIn();
+      expect(spawned).toHaveLength(2);
+      mkdirMgr.cancelSignIn();
+      await afterMkdirLogin;
+
+      // (d) spawnFn throws synchronously -> sanitized error + latch clears for follow-up signOut/signIn
+      let shouldThrowSpawn = true;
+      const spawnErrMgr = createManager({
+        spawn: (cmd, args, opts) => {
+          if (shouldThrowSpawn) {
+            throw new Error('spawn EACCES sk-ant-api03-SECRET_SPAWN_KEY');
+          }
+          const child = new FakeChildProcess();
+          spawned.push({ cmd, args, opts: opts as unknown as Record<string, unknown>, child });
+          return child;
+        },
+      });
+      const spawnRes = await spawnErrMgr.signOut();
+      expect(spawnRes.status).toBe('error');
+      if (spawnRes.status === 'error') {
+        expect(spawnRes.message).not.toContain('SECRET_SPAWN_KEY');
+        expect(spawnRes.message).toContain('sk-ant-[REDACTED]');
+      }
+
+      shouldThrowSpawn = false;
+      const afterSpawnOut = spawnErrMgr.signOut();
+      expect(spawned).toHaveLength(3);
+      spawned[2].child.finish(0);
+      expect(await afterSpawnOut).toEqual({ status: 'signed_out' });
+    });
+
+    it('enforces 10s timeout and dispose() SIGKILL escalation, drains >64KB dual streams, and strips ANSI/OSC-8 + redacts secrets', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // (a) 10s timeout -> SIGTERM + 1s SIGKILL escalation + latch recovery
+      vi.useFakeTimers();
+      const timeoutMgr = createManager();
+      const timeoutPromise = timeoutMgr.signOut();
+      expect(spawned).toHaveLength(1);
+      const hungChild = spawned[0].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGOUT_TIMEOUT_MS);
+      expect(await timeoutPromise).toEqual({
+        status: 'error',
+        message: 'Claude sign-out timed out.',
+      });
+      expect(hungChild.kill).toHaveBeenCalledWith('SIGTERM');
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(hungChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+      // Latch cleared -> retry works
+      const retryPromise = timeoutMgr.signOut();
+      expect(spawned).toHaveLength(2);
+      spawned[1].child.finish(0);
+      expect(await retryPromise).toEqual({ status: 'signed_out' });
+
+      // (b) dispose() during activeSignOut -> SIGTERM + 1s SIGKILL escalation + cancelled error
+      const disposeMgr = createManager();
+      const disposeOutPromise = disposeMgr.signOut();
+      expect(spawned).toHaveLength(3);
+      const disposeChild = spawned[2].child;
+
+      disposeMgr.dispose();
+      expect(disposeChild.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(await disposeOutPromise).toEqual({
+        status: 'error',
+        message: 'Claude sign-out was cancelled.',
+      });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(disposeChild.kill).toHaveBeenCalledWith('SIGKILL');
+      vi.useRealTimers();
+
+      // (c) Dual-stream >64KB drain + ANSI/OSC-8 stripping + secret redaction + <= 300 char bound
+      const pipeStdout = new PassThrough({ highWaterMark: 64 });
+      const pipeStderr = new PassThrough({ highWaterMark: 64 });
+      const drainMgr = createManager({
+        spawn: (cmd, args, opts) => {
+          const child = new FakeChildProcess();
+          (child as unknown as { stdout: PassThrough }).stdout = pipeStdout;
+          (child as unknown as { stderr: PassThrough }).stderr = pipeStderr;
+          spawned.push({ cmd, args, opts: opts as unknown as Record<string, unknown>, child });
+          return child;
+        },
+      });
+
+      const drainOutPromise = drainMgr.signOut();
+      expect(spawned).toHaveLength(4);
+
+      pipeStdout.write(
+        `${'O'.repeat(70_000)}\n\x1b[33m\x1b]8;;https://claude.ai/oauth/authorize?code=OUT_CODE_SECRET&state=OUT_STATE_SECRET\x07stdout-fail\x1b]8;;\x07\x1b[0m sk-ant-api03-STDOUT_SECRET Bearer STDOUT_JWT_SECRET\n`,
+      );
+      pipeStderr.write(
+        `${'E'.repeat(70_000)}\n\x1b[31m\x1b]8;;https://claude.ai/oauth/authorize?code=ERR_CODE_SECRET&state=ERR_STATE_SECRET\x07stderr-fail\x1b]8;;\x07\x1b[0m sk-ant-api03-STDERR_SECRET Bearer STDERR_JWT_SECRET\n`,
+      );
+
+      // Both PassThrough streams must be drained immediately with 0 unread backpressure
+      expect(pipeStdout.readableLength).toBe(0);
+      expect(pipeStderr.readableLength).toBe(0);
+
+      spawned[3].child.finish(1);
+      const failRes = await drainOutPromise;
+      expect(failRes.status).toBe('error');
+      if (failRes.status === 'error') {
+        expect(failRes.message.length).toBeLessThanOrEqual(300);
+        expect(failRes.message).toContain('stderr-fail');
+        expect(failRes.message).toContain('stdout-fail');
+        expect(failRes.message).toContain('[REDACTED]');
+        expect(failRes.message).not.toMatch(/\x1b/);
+        for (const leaked of [
+          'OUT_CODE_SECRET',
+          'OUT_STATE_SECRET',
+          'STDOUT_SECRET',
+          'STDOUT_JWT_SECRET',
+          'ERR_CODE_SECRET',
+          'ERR_STATE_SECRET',
+          'STDERR_SECRET',
+          'STDERR_JWT_SECRET',
+        ]) {
+          expect(failRes.message).not.toContain(leaked);
+        }
+      }
+
+      // Check logged output via console.error also contains no leaked secrets or ANSI escapes
+      expect(errSpy).toHaveBeenCalled();
+      const allLogs = [
+        ...logSpy.mock.calls.flat().map(String),
+        ...errSpy.mock.calls.flat().map(String),
+      ].join('\n');
+      for (const leaked of [
+        'OUT_CODE_SECRET',
+        'OUT_STATE_SECRET',
+        'STDOUT_SECRET',
+        'STDOUT_JWT_SECRET',
+        'ERR_CODE_SECRET',
+        'ERR_STATE_SECRET',
+        'STDERR_SECRET',
+        'STDERR_JWT_SECRET',
+      ]) {
+        expect(allLogs).not.toContain(leaked);
+      }
+
+      // (d) Subprocess error event -> sanitized error & latch recovery
+      const errEventMgr = createManager();
+      const errEventPromise = errEventMgr.signOut();
+      expect(spawned).toHaveLength(5);
+      spawned[4].child.emit('error', new Error('spawn ENOENT Bearer EVENT_ERR_SECRET'));
+      const errEventRes = await errEventPromise;
+      expect(errEventRes.status).toBe('error');
+      if (errEventRes.status === 'error') {
+        expect(errEventRes.message).not.toContain('EVENT_ERR_SECRET');
+        expect(errEventRes.message).toContain('Bearer [REDACTED]');
+        expect(errEventRes.message.length).toBeLessThanOrEqual(300);
+      }
+      const afterErrEvent = errEventMgr.signOut();
+      expect(spawned).toHaveLength(6);
+      spawned[5].child.finish(0);
+      expect(await afterErrEvent).toEqual({ status: 'signed_out' });
     });
   });
 });

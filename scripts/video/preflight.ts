@@ -24,7 +24,7 @@ export async function probeBackend(
   bearerToken = 'dev-local-token',
 ): Promise<void> {
   const normalizedUrl = url.replace(/\/+$/, '');
-  const endpoint = `${normalizedUrl}/api/chat/v1/areas`;
+  const endpoint = `${normalizedUrl}/api/chat/v1/conversations?limit=1&offset=0`;
 
   let res: Response;
   let bodyText: string;

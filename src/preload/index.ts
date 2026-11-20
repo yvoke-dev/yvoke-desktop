@@ -9,6 +9,7 @@ import type {
   CitationRef,
   ClaudeCodeSubmitResult,
   ClaudeSignInResult,
+  ClaudeSignOutResult,
   FeedbackRequest,
   McpPromptInfo,
   OrchestratorProfile,
@@ -59,6 +60,7 @@ export interface DesktopApi {
   cancelClaudeSignIn(): Promise<boolean>;
   copyClaudeSignInUrl(): Promise<boolean>;
   submitClaudeAuthCode(code: string): Promise<ClaudeCodeSubmitResult>;
+  claudeSignOut(): Promise<ClaudeSignOutResult>;
   writeClipboardImage(dataUrl: string): Promise<void>;
   openLogsFolder(): Promise<void>;
   onAgentEvent(listener: (event: AgentEvent) => void): () => void;
@@ -95,6 +97,7 @@ const api: DesktopApi = {
   cancelClaudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeCancel),
   copyClaudeSignInUrl: () => ipcRenderer.invoke(IpcChannels.authClaudeCopyUrl),
   submitClaudeAuthCode: (code: string) => ipcRenderer.invoke(IpcChannels.authClaudeSubmitCode, code),
+  claudeSignOut: () => ipcRenderer.invoke(IpcChannels.authClaudeSignout),
   writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke(IpcChannels.clipboardWriteImage, dataUrl),
   openLogsFolder: () => ipcRenderer.invoke(IpcChannels.logsOpenFolder),
   onAgentEvent: (listener) => {

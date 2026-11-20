@@ -7,7 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { sanitizeLogContent } from '../../shared/error';
 import { IpcChannels } from '../../shared/ipc';
-import type { ClaudeCodeSubmitResult, ClaudeSignInResult } from '../../shared/types';
+import type {
+  ClaudeCodeSubmitResult,
+  ClaudeSignInResult,
+  ClaudeSignOutResult,
+} from '../../shared/types';
 import { log, logError } from '../log';
 import { NoReplyError, ResultError } from './singleTurn';
 
@@ -27,6 +31,7 @@ export const CLAUDE_STATUS_CACHE_TTL_MS = 30_000;
 export const CLAUDE_LOGIN_URL_TIMEOUT_MS = 10_000;
 export const CLAUDE_LOGIN_CODE_EXCHANGE_TIMEOUT_MS = 15_000;
 export const CLAUDE_LOGIN_TIMEOUT_MS = 5 * 60 * 1_000;
+export const CLAUDE_LOGOUT_TIMEOUT_MS = 10_000;
 
 const KILL_ESCALATION_MS = 1_000;
 const MAX_AUTH_CODE_LENGTH = 4_096;
@@ -361,6 +366,38 @@ function extractOAuthUrlFromCompleteLine(rawLine: string): string | null {
   return null;
 }
 
+const MAX_SIGNOUT_ERROR_CHARS = 300;
+
+function formatSignOutMessage(raw: string): string {
+  const clean = sanitizeLogContent(stripAnsiAndOsc8(raw)).replace(/\s+/g, ' ').trim();
+  if (clean.length <= MAX_SIGNOUT_ERROR_CHARS) {
+    return clean;
+  }
+  return `${clean.slice(0, MAX_SIGNOUT_ERROR_CHARS - 1)}…`;
+}
+
+function extractCleanSignOutTail(raw: string): string {
+  const lines = sanitizeLogContent(stripAnsiAndOsc8(raw))
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return '';
+  }
+  let tail = '';
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const candidate = tail ? `${lines[i]} ${tail}` : lines[i];
+    if (candidate.length > MAX_SIGNOUT_ERROR_CHARS && tail.length > 0) {
+      break;
+    }
+    tail = candidate;
+    if (tail.length >= MAX_SIGNOUT_ERROR_CHARS) {
+      break;
+    }
+  }
+  return tail;
+}
+
 interface ActiveLoginState {
   child: SpawnedCliProcess;
   promise: Promise<ClaudeSignInResult>;
@@ -371,6 +408,12 @@ interface ActiveLoginState {
   codeSubmitted: boolean;
   codeExchangeTimer?: ReturnType<typeof setTimeout>;
   startCodeExchangeTimer: (ms: number) => void;
+  cancel: () => void;
+}
+
+interface ActiveSignOutState {
+  child: SpawnedCliProcess | null;
+  promise: Promise<ClaudeSignOutResult>;
   cancel: () => void;
 }
 
@@ -387,6 +430,7 @@ export class ClaudeAuthManager {
   private statusInFlight: Promise<ClaudeAuthState> | null = null;
   private activeStatusCancels = new Set<() => void>();
   private activeLogin: ActiveLoginState | null = null;
+  private activeSignOut: ActiveSignOutState | null = null;
 
   constructor(deps: ClaudeAuthManagerDeps) {
     this.sandboxDir = deps.sandboxDir;
@@ -488,6 +532,7 @@ export class ClaudeAuthManager {
           allowCache &&
           state.claude === 'ok' &&
           !this.disposed &&
+          this.activeSignOut === null &&
           gen === this.statusGeneration
         ) {
           this.statusCache = { value: state, at: this.now() };
@@ -562,6 +607,12 @@ export class ClaudeAuthManager {
     }
     if (this.activeLogin) {
       return this.activeLogin.promise;
+    }
+    if (this.activeSignOut !== null) {
+      return Promise.resolve({
+        status: 'error',
+        message: 'Claude sign-out is in progress. Please wait a moment and try again.',
+      });
     }
 
     const binary = this.resolveBinary();
@@ -889,15 +940,159 @@ export class ClaudeAuthManager {
     return { accepted: true };
   }
 
-  dispose(): void {
-    this.disposed = true;
-    this.invalidateStatusCache();
+  private cancelActiveStatusProbes(): void {
     for (const cancelStatus of [...this.activeStatusCancels]) {
       cancelStatus();
     }
     this.activeStatusCancels.clear();
+  }
+
+  signOut(): Promise<ClaudeSignOutResult> {
+    if (this.disposed) {
+      return Promise.resolve({ status: 'error', message: 'Claude sign-out was cancelled.' });
+    }
+    if (this.activeSignOut) {
+      return this.activeSignOut.promise;
+    }
+
+    this.cancelSignIn();
+    this.cancelActiveStatusProbes();
+    this.invalidateStatusCache();
+
+    const binary = this.resolveBinary();
+    if (!binary) {
+      this.activeSignOut = null;
+      return Promise.resolve({
+        status: 'error',
+        message: 'Bundled Claude binary not found.',
+      });
+    }
+
+    try {
+      fs.mkdirSync(this.sandboxDir, { recursive: true });
+    } catch (err) {
+      this.activeSignOut = null;
+      const msg = sanitizeLogContent(err instanceof Error ? err.message : String(err));
+      const message = formatSignOutMessage(`Failed to prepare Claude sign-out sandbox: ${msg}`);
+      logError('auth', message);
+      return Promise.resolve({ status: 'error', message });
+    }
+
+    let child: SpawnedCliProcess;
+    try {
+      child = this.spawnFn(binary, ['auth', 'logout'], {
+        cwd: this.sandboxDir,
+        env: claudeCliEnv(),
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      this.activeSignOut = null;
+      const msg = sanitizeLogContent(err instanceof Error ? err.message : String(err));
+      const message = formatSignOutMessage(`Failed to start Claude sign-out: ${msg}`);
+      logError('auth', message);
+      return Promise.resolve({ status: 'error', message });
+    }
+
+    let settled = false;
+    let resolveSignOut!: (result: ClaudeSignOutResult) => void;
+    const promise = new Promise<ClaudeSignOutResult>((res) => {
+      resolveSignOut = res;
+    });
+
+    const signOutState: ActiveSignOutState = {
+      child,
+      promise,
+      cancel: () => {
+        terminateChild(child);
+        settle({ status: 'error', message: 'Claude sign-out was cancelled.' });
+      },
+    };
+    this.activeSignOut = signOutState;
+
+    const timeoutTimer = setTimeout(() => {
+      terminateChild(child);
+      const message = 'Claude sign-out timed out.';
+      logError('auth', message);
+      settle({ status: 'error', message });
+    }, CLAUDE_LOGOUT_TIMEOUT_MS);
+    timeoutTimer.unref?.();
+
+    const settle = (result: ClaudeSignOutResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (this.activeSignOut === signOutState) {
+        this.activeSignOut = null;
+      }
+      this.cancelActiveStatusProbes();
+      this.invalidateStatusCache();
+      if (result.status === 'error') {
+        resolveSignOut({ status: 'error', message: formatSignOutMessage(result.message) });
+      } else {
+        resolveSignOut(result);
+      }
+    };
+
+    let stdoutTail = '';
+    let stderrTail = '';
+
+    const appendTail = (current: string, chunk: Buffer | string): string => {
+      const next = current + (typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+      return next.length > MAX_CLI_LINE_BUFFER_CHARS
+        ? next.slice(-MAX_CLI_LINE_BUFFER_CHARS)
+        : next;
+    };
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdoutTail = appendTail(stdoutTail, chunk);
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderrTail = appendTail(stderrTail, chunk);
+    });
+
+    child.once('error', (err: Error) => {
+      const message = formatSignOutMessage(
+        `Claude sign-out failed: ${err.message || 'Unknown subprocess error'}`,
+      );
+      logError('auth', message);
+      settle({ status: 'error', message });
+    });
+
+    child.once('close', (code: number | null) => {
+      if (settled) return;
+      if (this.disposed) {
+        settle({ status: 'error', message: 'Claude sign-out was cancelled.' });
+        return;
+      }
+      if (code === 0) {
+        log('auth', 'Claude sign-out completed');
+        settle({ status: 'signed_out' });
+        return;
+      }
+
+      const stderrDetail = extractCleanSignOutTail(stderrTail);
+      const stdoutDetail = extractCleanSignOutTail(stdoutTail);
+      const detail = [stderrDetail, stdoutDetail].filter(Boolean).join(' | ');
+      const message = detail
+        ? formatSignOutMessage(`Claude sign-out failed: ${detail}`)
+        : `Claude sign-out failed (exit code ${code ?? 'unknown'}).`;
+      logError('auth', message);
+      settle({ status: 'error', message });
+    });
+
+    return promise;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.invalidateStatusCache();
+    this.cancelActiveStatusProbes();
     if (this.activeLogin) {
       this.activeLogin.cancel();
+    }
+    if (this.activeSignOut) {
+      this.activeSignOut.cancel();
     }
   }
 }
@@ -907,6 +1102,7 @@ export interface ClaudeAuthIpcTarget {
   cancelClaudeSignIn(): Promise<boolean> | boolean;
   getActiveClaudeSignInUrl(): Promise<string | null> | string | null;
   submitClaudeAuthCode(code: unknown): Promise<ClaudeCodeSubmitResult>;
+  claudeSignOut(): Promise<ClaudeSignOutResult>;
 }
 
 export interface ClaudeAuthIpcRegistrar {
@@ -954,4 +1150,5 @@ export function registerClaudeAuthIpc(deps: {
   handleGuarded(IpcChannels.authClaudeSubmitCode, (code: unknown) =>
     deps.appCore.submitClaudeAuthCode(code),
   );
+  handleGuarded(IpcChannels.authClaudeSignout, () => deps.appCore.claudeSignOut());
 }

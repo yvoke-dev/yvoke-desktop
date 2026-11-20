@@ -190,7 +190,7 @@ describe('SyncClient.verifyConnection', () => {
     expect(result).toEqual({ status: 'ok' });
     expect(getTokenMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/areas',
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer passed-token-xyz',
@@ -240,7 +240,7 @@ describe('SyncClient.verifyConnection', () => {
     const result = await client.verifyConnection('test-token');
     expect(result).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/areas',
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({
@@ -248,6 +248,51 @@ describe('SyncClient.verifyConnection', () => {
         }),
       }),
     );
+  });
+
+  it('accepts 200 empty array [], reports 404 as error, and rejects 200 {} or SSO HTML as expired on /conversations?limit=1&offset=0', async () => {
+    const emptyListFetch = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }));
+    const emptyClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: emptyListFetch as unknown as typeof fetch,
+    });
+    expect(await emptyClient.verifyConnection('test-token')).toEqual({ status: 'ok' });
+    expect(emptyListFetch).toHaveBeenCalledWith(
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
+      expect.objectContaining({ method: 'GET' }),
+    );
+
+    const notFoundClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () => new Response('Not Found', { status: 404 })) as unknown as typeof fetch,
+    });
+    const res404 = await notFoundClient.verifyConnection('test-token');
+    expect(res404.status).toBe('error');
+    if (res404.status === 'error') {
+      expect(res404.message).toMatch(/404/);
+    }
+
+    const objectBodyClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
+    });
+    const resObj = await objectBodyClient.verifyConnection('test-token');
+    expect(resObj.status).toBe('expired');
+
+    const ssoHtmlClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () =>
+        new Response('<!DOCTYPE html><html><body>Sign in</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        })) as unknown as typeof fetch,
+    });
+    const resHtml = await ssoHtmlClient.verifyConnection('test-token');
+    expect(resHtml.status).toBe('expired');
   });
 });
 

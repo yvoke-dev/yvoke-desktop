@@ -21,7 +21,7 @@ const MESSAGES_PAGE_SIZE = 500;
 const MAX_MESSAGE_PAGES = 20;
 
 /**
- * Whatever the server said, made safe to render in the About pane: bearer tokens redacted (a
+ * Whatever the server said, made safe to render in the Accounts pane: bearer tokens redacted (a
  * gateway that echoes the request would otherwise hand one back) and length capped, since the
  * body may be a multi-kilobyte HTML error page.
  */
@@ -271,13 +271,13 @@ export class SyncClient {
     }
 
     // A server that accepts the connection and never answers would otherwise hold this for
-    // undici's 300s default, with the About pane's button disabled the whole time.
+    // undici's 300s default, with the Accounts pane's button disabled the whole time.
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
 
     let response: Response;
     try {
-      response = await this.fetchFn(this.url('/areas'), {
+      response = await this.fetchFn(this.url('/conversations?limit=1&offset=0'), {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
         signal: abort.signal,

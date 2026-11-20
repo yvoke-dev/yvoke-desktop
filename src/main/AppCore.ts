@@ -10,6 +10,7 @@ import type {
   CitationRef,
   ClaudeCodeSubmitResult,
   ClaudeSignInResult,
+  ClaudeSignOutResult,
   FeedbackRequest,
   ImageAttachment,
   LoginVerificationResult,
@@ -2747,6 +2748,17 @@ export class AppCore {
     }
     const result = await this.claudeAuth.signIn();
     if (result.status === 'signed_in') {
+      this.agent.closeIdleSessions();
+    }
+    return result;
+  }
+
+  async claudeSignOut(): Promise<ClaudeSignOutResult> {
+    if (!this.claudeAuth) {
+      return { status: 'error', message: 'Claude sign-out is unavailable.' };
+    }
+    const result = await this.claudeAuth.signOut();
+    if (result.status === 'signed_out') {
       this.agent.closeIdleSessions();
     }
     return result;

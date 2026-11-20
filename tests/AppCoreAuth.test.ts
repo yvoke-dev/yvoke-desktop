@@ -189,6 +189,7 @@ describe('AppCore integration with ClaudeAuthManager', () => {
       getStatus: vi.fn().mockResolvedValue({ claude: 'ok' as const, claudeAccount: 'claude@yvoke.ai' }),
       invalidateStatusCache: vi.fn(),
       signIn: vi.fn().mockResolvedValue({ status: 'signed_in' as const, account: 'claude@yvoke.ai' }),
+      signOut: vi.fn().mockResolvedValue({ status: 'signed_out' as const }),
       cancelSignIn: vi.fn().mockReturnValue(true),
       getActiveSignInUrl: vi.fn().mockResolvedValue('https://claude.ai/oauth/authorize?state=x'),
       submitAuthCode: vi.fn().mockResolvedValue({ accepted: true as const }),
@@ -298,6 +299,54 @@ describe('AppCore integration with ClaudeAuthManager', () => {
       expect(mockSdkQuery).not.toHaveBeenCalled();
     } finally {
       core.dispose();
+    }
+  });
+
+  it('claudeSignOut() returns unavailable error without closing sessions when claudeAuth is absent, and closes idle sessions ONLY on signed_out', async () => {
+    // 1. Without claudeAuth
+    const coreWithout = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+    });
+    try {
+      const closeIdleSpy = vi.spyOn(coreWithout.agent, 'closeIdleSessions');
+      expect(await coreWithout.claudeSignOut()).toEqual({
+        status: 'error',
+        message: 'Claude sign-out is unavailable.',
+      });
+      expect(closeIdleSpy).not.toHaveBeenCalled();
+    } finally {
+      coreWithout.dispose();
+    }
+
+    // 2. With claudeAuth: closes idle sessions on signed_out, NOT on error
+    const claudeAuth = makeFakeClaudeAuth();
+    const coreWith = new AppCore({
+      userDataDir: tmpDir,
+      emitAgentEvent: vi.fn(),
+      emitSyncEvent: vi.fn(),
+      openBrowser: vi.fn().mockResolvedValue(undefined),
+      tokenCache: null,
+      claudeAuth: claudeAuth as any,
+    });
+    try {
+      const closeIdleSpy = vi.spyOn(coreWith.agent, 'closeIdleSessions');
+
+      claudeAuth.signOut.mockResolvedValueOnce({ status: 'error', message: 'Claude sign-out timed out.' });
+      expect(await coreWith.claudeSignOut()).toEqual({
+        status: 'error',
+        message: 'Claude sign-out timed out.',
+      });
+      expect(closeIdleSpy).not.toHaveBeenCalled();
+
+      claudeAuth.signOut.mockResolvedValueOnce({ status: 'signed_out' });
+      expect(await coreWith.claudeSignOut()).toEqual({ status: 'signed_out' });
+      expect(closeIdleSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      coreWith.dispose();
     }
   });
 });
