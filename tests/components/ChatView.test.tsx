@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React, { useState } from 'react';
 import { ChatView } from '../../src/renderer/src/components/ChatView';
+import type { ClaudeSignInController } from '../../src/renderer/src/components/ClaudeSignInControls';
+import type { ServerSignInController } from '../../src/renderer/src/components/ServerSignInControls';
 import type { LiveTurn } from '../../src/renderer/src/App';
+import { makeClaudeSignInStub, makeServerSignInStub } from './signInStubs';
 import {
   REHYDRATED_TOOL_RESULT_PLACEHOLDER,
   type AppSettings,
@@ -74,6 +77,10 @@ interface ChatOpts {
   prompts?: McpPromptInfo[];
   profiles?: OrchestratorProfile[];
   liveTurn?: LiveTurn;
+  claudeSignIn?: ClaudeSignInController;
+  serverSignIn?: ServerSignInController;
+  signingOut?: boolean;
+  claudeSigningOut?: boolean;
   onSend?: (text: string, promptName?: string) => void;
   onInterrupt?: () => void;
 }
@@ -87,6 +94,10 @@ function chat(opts: ChatOpts = {}): React.JSX.Element {
       prompts={opts.prompts ?? PROMPTS}
       profiles={opts.profiles ?? []}
       liveTurn={opts.liveTurn ?? IDLE}
+      claudeSignIn={opts.claudeSignIn ?? makeClaudeSignInStub()}
+      serverSignIn={opts.serverSignIn ?? makeServerSignInStub()}
+      signingOut={opts.signingOut}
+      claudeSigningOut={opts.claudeSigningOut}
       onSend={opts.onSend ?? onSend}
       onInterrupt={opts.onInterrupt ?? onInterrupt}
       onPatchThread={() => undefined}
@@ -129,7 +140,15 @@ beforeEach(() => {
   validatePlaybook = vi.fn(async () => ({ plausible: true }) as PlaybookValidation);
   onSend = vi.fn<(text: string, promptName?: string) => void>();
   onInterrupt = vi.fn<() => void>();
-  (window as unknown as { api: unknown }).api = { validatePlaybook };
+  (window as unknown as { api: unknown }).api = {
+    validatePlaybook,
+    claudeSignIn: vi.fn(async () => ({ status: 'signed_in' as const })),
+    cancelClaudeSignIn: vi.fn(async () => true),
+    copyClaudeSignInUrl: vi.fn(async () => true),
+    submitClaudeAuthCode: vi.fn(async () => ({ accepted: true as const })),
+    serverSignIn: vi.fn(async () => ({ status: 'signed_in' as const })),
+    cancelServerSignIn: vi.fn(async () => true),
+  };
 
   // Stubbed per test and restored below: a leaked always-succeeding clipboard would stop a later
   // test from ever reaching CopyButton's execCommand fallback.
@@ -1409,6 +1428,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={opts.prompts ?? PROMPTS}
           profiles={opts.profiles ?? [ORDINARY]}
           liveTurn={opts.liveTurn ?? IDLE}
+          claudeSignIn={opts.claudeSignIn ?? makeClaudeSignInStub()}
+          serverSignIn={opts.serverSignIn ?? makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={opts.onInterrupt ?? onInterrupt}
           onPatchThread={(patch) => setThread((prev) => ({ ...prev, ...patch }))}
@@ -1811,6 +1832,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -1832,6 +1855,8 @@ describe('composer redesign (inline send/stop and split toolbar)', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2657,6 +2682,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={onPatchThread}
@@ -2776,6 +2803,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={runningTurn}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2797,6 +2826,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[ORDINARY]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2819,6 +2850,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -2834,6 +2867,8 @@ describe('deterministic platform shortcut labels', () => {
           prompts={PROMPTS}
           profiles={[]}
           liveTurn={IDLE}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
           onSend={onSend}
           onInterrupt={onInterrupt}
           onPatchThread={() => undefined}
@@ -3351,6 +3386,223 @@ describe('immutable thread.id composer preservation & 3-way preflight resolution
         promptName: 'oim-getting-started',
       },
     ]);
+  });
+
+  describe('Claude auth-required turn error banner', () => {
+    it('renders inline Sign in to Claude inside .chat-notices .banner.error ONLY when liveTurn.authRequired is true', () => {
+      const startSignIn = vi.fn(async () => undefined);
+      const mockCtrl: ClaudeSignInController = {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn,
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+      };
+
+      const { container, rerender } = renderChat({
+        liveTurn: {
+          ...IDLE,
+          error: 'Claude: Rate limit reached — wait a moment and try again.',
+          authRequired: false,
+        },
+        claudeSignIn: mockCtrl,
+      });
+
+      expect(screen.getByText(/Rate limit reached/)).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
+            authRequired: true,
+          },
+          claudeSignIn: mockCtrl,
+        }),
+      );
+
+      const errorBanner = container.querySelector('.chat-notices .banner.error');
+      expect(errorBanner).not.toBeNull();
+      const signInBtn = screen.getByRole('button', { name: 'Sign in to Claude' });
+      expect(errorBanner?.contains(signInBtn)).toBe(true);
+      expect(errorBanner?.querySelectorAll('[style]')).toHaveLength(0);
+
+      fireEvent.click(signInBtn);
+      expect(startSignIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders inline Sign in to Yvoke inside .chat-notices .banner.error when liveTurn.serverAuthRequired is true (and not authRequired), and mutually disables with Claude sign-in', () => {
+      const serverStart = vi.fn(async () => undefined);
+      const claudeCtrl: ClaudeSignInController = {
+        signingIn: false,
+        cancelling: false,
+        copyingUrl: false,
+        copiedUrl: false,
+        altBrowserOpen: false,
+        codeDraft: '',
+        submittingCode: false,
+        error: null,
+        successCount: 0,
+        startSignIn: vi.fn(async () => undefined),
+        cancelSignIn: vi.fn(async () => undefined),
+        toggleAltBrowser: vi.fn(),
+        copySignInUrl: vi.fn(async () => undefined),
+        setCodeDraft: vi.fn(),
+        submitAuthCode: vi.fn(async () => undefined),
+      };
+      const serverCtrl: ServerSignInController = {
+        signingIn: false,
+        cancelling: false,
+        error: null,
+        successCount: 0,
+        startSignIn: serverStart,
+        cancelSignIn: vi.fn(async () => undefined),
+        clearError: vi.fn(),
+      };
+
+      // Generic error renders neither button
+      const { container, rerender } = renderChat({
+        liveTurn: {
+          ...IDLE,
+          error: 'Knowledge base query timed out.',
+        },
+        claudeSignIn: claudeCtrl,
+        serverSignIn: serverCtrl,
+      });
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+
+      // serverAuthRequired: true -> renders Sign in to Yvoke inside .chat-notices .banner.error
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+        }),
+      );
+      const errorBanner = container.querySelector('.chat-notices .banner.error');
+      const yvokeBtn = screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement;
+      expect(errorBanner?.contains(yvokeBtn)).toBe(true);
+      expect(screen.queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      expect(yvokeBtn.disabled).toBe(false);
+      fireEvent.click(yvokeBtn);
+      expect(serverStart).toHaveBeenCalledTimes(1);
+
+      // Mutual disable when claudeSignIn.signingIn is true
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: { ...claudeCtrl, signingIn: true },
+          serverSignIn: serverCtrl,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // Disabled while signingOut is true: disables BOTH Sign in to Yvoke and Sign in to Claude
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          signingOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          signingOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // When authRequired is ALSO true, Claude takes precedence and Sign in to Yvoke is omitted
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: { ...serverCtrl, signingIn: true },
+        }),
+      );
+      expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      // Disabled while claudeSigningOut is true: disables BOTH Sign in to Claude and Sign in to Yvoke
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Claude login expired.',
+            authRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          claudeSigningOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Claude' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+
+      rerender(
+        chat({
+          liveTurn: {
+            ...IDLE,
+            error: 'Yvoke Server: Your sign-in has expired.',
+            serverAuthRequired: true,
+          },
+          claudeSignIn: claudeCtrl,
+          serverSignIn: serverCtrl,
+          claudeSigningOut: true,
+        }),
+      );
+      expect((screen.getByRole('button', { name: 'Sign in to Yvoke' }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
   });
 });
 

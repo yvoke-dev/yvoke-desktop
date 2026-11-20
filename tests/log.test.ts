@@ -98,5 +98,36 @@ describe('log — EPIPE stream guard and plain console output', () => {
 
       spy.mockRestore();
     });
+
+    it('redacts OAuth PKCE query/fragment secrets via sanitizeLogContent while preserving code=ENOENT and state=pending', () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      log(
+        'auth',
+        'url=https://claude.ai/oauth/authorize?response_type=code&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE state=pending',
+      );
+      logError(
+        'auth',
+        'callback#code=AUTH_CODE_XYZ&access_token=TOK_123 spawn failed code=ENOENT syncState=error',
+      );
+
+      const printedLog = logSpy.mock.calls[0][0] as string;
+      const printedErr = errSpy.mock.calls[0][0] as string;
+
+      expect(printedLog).toContain('response_type=code');
+      expect(printedLog).toContain('state=[REDACTED]');
+      expect(printedLog).toContain('code_challenge=[REDACTED]');
+      expect(printedLog).toContain('state=pending');
+      expect(printedLog).not.toContain('SECRET_NONCE');
+      expect(printedLog).not.toContain('SECRET_CHALLENGE');
+
+      expect(printedErr).toContain('#code=[REDACTED]');
+      expect(printedErr).toContain('&access_token=[REDACTED]');
+      expect(printedErr).toContain('code=ENOENT');
+      expect(printedErr).toContain('syncState=error');
+      expect(printedErr).not.toContain('AUTH_CODE_XYZ');
+      expect(printedErr).not.toContain('TOK_123');
+    });
   });
 });

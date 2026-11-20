@@ -1,6 +1,13 @@
 import type { Query, SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { describe, expect, it } from 'vitest';
-import { NoReplyError, ResultError, isResultFailure, isResultSuccess, readSingleReply } from '../src/main/agent/singleTurn';
+import {
+  NoReplyError,
+  ResultError,
+  isResultFailure,
+  isResultSuccess,
+  readSingleReply,
+  toResultError,
+} from '../src/main/agent/singleTurn';
 
 function createMockQuery(messages: Partial<SDKMessage>[]): Query {
   return {
@@ -149,6 +156,43 @@ describe('singleTurn', () => {
         { type: 'auth_status' },
       ]);
       await expect(readSingleReply(q, 'login check')).rejects.toThrow(NoReplyError);
+    });
+  });
+
+  describe('toResultError', () => {
+    it('preserves numeric api_error_status across non-success subtypes and joins errors[] / result', () => {
+      const errExec401 = toResultError({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        api_error_status: 401,
+        errors: ['Token expired', 'Re-authentication required'],
+      } as unknown as SDKResultMessage);
+      expect(errExec401).toBeInstanceOf(ResultError);
+      expect(errExec401.status).toBe(401);
+      expect(errExec401.subtype).toBe('error_during_execution');
+      expect(errExec401.message).toBe('Token expired; Re-authentication required');
+
+      const errExecResultFallback = toResultError({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        api_error_status: 500,
+        errors: [],
+        result: 'Internal server error: invalid api key',
+      } as unknown as SDKResultMessage);
+      expect(errExecResultFallback.status).toBe(500);
+      expect(errExecResultFallback.message).toBe('Internal server error: invalid api key');
+
+      const errNullStatus = toResultError({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        api_error_status: null,
+        result: 'Not logged in',
+      } as unknown as SDKResultMessage);
+      expect(errNullStatus.status).toBeUndefined();
+      expect(errNullStatus.message).toBe('Not logged in');
     });
   });
 });

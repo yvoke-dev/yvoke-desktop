@@ -1,15 +1,28 @@
+import http from 'node:http';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Configuration } from '@azure/msal-node';
+import { AuthError, InteractionRequiredAuthError, ServerError, type Configuration } from '@azure/msal-node';
 import type { AppSettings } from '../src/shared/types';
-import { ServerAuth, EXPIRATION_BUFFER_MS, type TokenCachePersistence } from '../src/main/auth/ServerAuth';
+import {
+  CancellableLoopbackClient,
+  EXPIRATION_BUFFER_MS,
+  SERVER_SIGNIN_TIMEOUT_MS,
+  ServerAuth,
+  ServerAuthRequiredError,
+  ServerAuthTransientError,
+  SignInCancelledError,
+  isServerAuthFailure,
+  type TokenCachePersistence,
+} from '../src/main/auth/ServerAuth';
 
 const mockGetAllAccounts = vi.fn();
 const mockAcquireTokenSilent = vi.fn();
 const mockAcquireTokenInteractive = vi.fn();
 const mockRemoveAccount = vi.fn();
 
-vi.mock('@azure/msal-node', () => {
+vi.mock('@azure/msal-node', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@azure/msal-node')>();
   return {
+    ...actual,
     PublicClientApplication: class {
       config: Configuration;
       constructor(config: Configuration) {
@@ -216,7 +229,10 @@ describe('ServerAuth.verifyToken', () => {
     });
 
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
-    await expect(auth.signIn()).resolves.toBe('corp-user@corp.example');
+    await expect(auth.signIn()).resolves.toEqual({
+      status: 'signed_in',
+      account: 'corp-user@corp.example',
+    });
     expect(mockAcquireTokenInteractive).toHaveBeenCalled();
   });
 
@@ -554,7 +570,7 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
   });
 
-  it('4d. Silent refresh failure when cached token is already expired triggers interactive sign-in for auth error', async () => {
+  it('4d. Silent refresh failure when cached token is already expired throws ServerAuthRequiredError without opening browser', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
     mockAcquireTokenSilent.mockResolvedValueOnce({
@@ -565,17 +581,13 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     expect(await auth.getAccessToken()).toBe('expired-token');
 
     mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: Session expired'));
-    mockAcquireTokenInteractive.mockResolvedValueOnce({
-      accessToken: 'fresh-interactive-token',
-      account: { username: 're-authed-user@corp.example' },
-    });
 
-    const token = await auth.getAccessToken();
-    expect(token).toBe('fresh-interactive-token');
-    expect(mockAcquireTokenInteractive).toHaveBeenCalledTimes(1);
+    await expect(auth.getAccessToken()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+    expect(openBrowserMock).not.toHaveBeenCalled();
   });
 
-  it('4e. Invalidation prevents fallback to rejected token on subsequent failure', async () => {
+  it('4e. Invalidation prevents fallback to rejected token on subsequent failure and throws ServerAuthRequiredError without interactive popup', async () => {
     const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
 
     mockAcquireTokenSilent.mockResolvedValueOnce({
@@ -588,17 +600,12 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
     // Explicitly invalidated (e.g. after MCP 401)
     auth.invalidate();
 
-    // Next silent call fails
+    // Next silent call fails -> must NOT fall back to rejected-token and must NOT pop browser
     mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: Revoked'));
-    mockAcquireTokenInteractive.mockResolvedValueOnce({
-      accessToken: 'new-after-invalidation',
-      account: { username: 're-authed@corp.example' },
-    });
 
-    const token = await auth.getAccessToken();
-    expect(token).toBe('new-after-invalidation');
-    expect(token).not.toBe('rejected-token');
-    expect(mockAcquireTokenInteractive).toHaveBeenCalledTimes(1);
+    await expect(auth.getAccessToken()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+    expect(openBrowserMock).not.toHaveBeenCalled();
   });
 
   it('5. Malformed/NaN expiresOn: null, undefined, and invalid Date handled safely without crash', async () => {
@@ -633,6 +640,784 @@ describe('ServerAuth proactive token refresh buffer & resilient offline fallback
       account: cachedAccount,
     });
     expect(await auth.getAccessToken()).toBe('token-nan-expiry');
+  });
+});
+
+function httpRequest(
+  url: string,
+): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        resolve({
+          statusCode: res.statusCode ?? 0,
+          headers: res.headers,
+          body,
+        });
+      });
+    });
+    req.on('error', reject);
+  });
+}
+
+async function waitForRedirectUri(client: CancellableLoopbackClient): Promise<string> {
+  for (let i = 0; i < 100; i++) {
+    try {
+      return client.getRedirectUri();
+    } catch (err) {
+      if (err instanceof AuthError && err.errorCode === 'no_loopback_server_exists') {
+        await new Promise((r) => setTimeout(r, 10));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Timed out waiting for loopback server to listen');
+}
+
+describe('CancellableLoopbackClient real ephemeral HTTP loopback', () => {
+  it('exports SERVER_SIGNIN_TIMEOUT_MS equal to 5 minutes', () => {
+    expect(SERVER_SIGNIN_TIMEOUT_MS).toBe(5 * 60 * 1_000);
+  });
+
+  it('throws AuthError("no_loopback_server_exists") before listening and SignInCancelledError after cancel()', async () => {
+    const client = new CancellableLoopbackClient(10_000);
+    try {
+      client.getRedirectUri();
+      expect.fail('Expected getRedirectUri() to throw before listen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AuthError);
+      expect((err as AuthError).errorCode).toBe('no_loopback_server_exists');
+    }
+
+    const listenPromise = client.listenForAuthCode();
+    client.cancel();
+
+    await expect(listenPromise).rejects.toBeInstanceOf(SignInCancelledError);
+    expect(() => client.getRedirectUri()).toThrow(SignInCancelledError);
+    // closeServer() is idempotent
+    expect(() => client.closeServer()).not.toThrow();
+    expect(() => client.closeServer()).not.toThrow();
+  });
+
+  it('binds 127.0.0.1:0, returns http://localhost:<port>, ignores /favicon.ico (204), stray paths (404), and bare GET / (200), and resolves full query params on callback with 302 redirect', async () => {
+    const client = new CancellableLoopbackClient(10_000);
+    const listenPromise = client.listenForAuthCode(
+      '<html><body>Custom OK</body></html>',
+      '<html><body>Custom ERR</body></html>',
+    );
+    let settled = false;
+    void listenPromise.then(() => {
+      settled = true;
+    });
+
+    try {
+      const redirectUri = await waitForRedirectUri(client);
+      expect(redirectUri).toMatch(/^http:\/\/localhost:\d+$/);
+      const port = Number(new URL(redirectUri).port);
+      const base = `http://127.0.0.1:${port}`;
+
+      // 1. /favicon.ico -> 204, non-settling
+      const fav = await httpRequest(`${base}/favicon.ico`);
+      expect(fav.statusCode).toBe(204);
+      expect(settled).toBe(false);
+
+      // 2. Stray path -> 404, non-settling
+      const stray = await httpRequest(`${base}/random-probe`);
+      expect(stray.statusCode).toBe(404);
+      expect(settled).toBe(false);
+
+      // 3. Bare GET / -> 200 static successTemplate, non-settling
+      const bare = await httpRequest(`${base}/`);
+      expect(bare.statusCode).toBe(200);
+      expect(bare.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(bare.headers['cache-control']).toBe('no-store');
+      expect(bare.body).toBe('<html><body>Custom OK</body></html>');
+      expect(settled).toBe(false);
+
+      // 4. Auth callback with code + client_info + state -> 302 Location: / and settles with all params
+      const cb = await httpRequest(
+        `${base}/?code=AUTH_CODE_123&state=STATE_XYZ&client_info=eyJ1aWQiOiIxIn0`,
+      );
+      expect(cb.statusCode).toBe(302);
+      expect(cb.headers.location).toBe('/');
+      expect(cb.headers['cache-control']).toBe('no-store');
+
+      const response = await listenPromise;
+      expect(response).toEqual({
+        code: 'AUTH_CODE_123',
+        state: 'STATE_XYZ',
+        client_info: 'eyJ1aWQiOiIxIn0',
+      });
+
+      // Server remains open until MSAL calls closeServer() so browser can follow 302 -> GET /
+      const afterRedirect = await httpRequest(`${base}/`);
+      expect(afterRedirect.statusCode).toBe(200);
+      expect(afterRedirect.body).toBe('<html><body>Custom OK</body></html>');
+    } finally {
+      client.closeServer();
+    }
+  });
+
+  it('resolves error query params (error, error_description, suberror) and NEVER reflects XSS query params into HTML', async () => {
+    const client = new CancellableLoopbackClient(10_000);
+    const listenPromise = client.listenForAuthCode();
+
+    try {
+      const redirectUri = await waitForRedirectUri(client);
+      const port = Number(new URL(redirectUri).port);
+      const xssPayload = '<script>alert("xss")</script>';
+      const cb = await httpRequest(
+        `http://127.0.0.1:${port}/?error=access_denied&error_description=${encodeURIComponent(xssPayload)}&suberror=consent_required`,
+      );
+
+      expect(cb.statusCode).toBe(200);
+      expect(cb.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(cb.headers['cache-control']).toBe('no-store');
+      expect(cb.body).not.toContain('<script>');
+      expect(cb.body).not.toContain('alert("xss")');
+      expect(cb.body).not.toContain('access_denied');
+      expect(cb.body).not.toContain('consent_required');
+
+      const response = await listenPromise;
+      expect(response).toEqual({
+        error: 'access_denied',
+        error_description: xssPayload,
+        suberror: 'consent_required',
+      });
+    } finally {
+      client.closeServer();
+    }
+  });
+
+  it('rejects cleanly on bind/server error without crashing process and preserves underlying error/timeout in getRedirectUri()', async () => {
+    // 1. Timeout rejection: getRedirectUri() must throw the timeout error (NOT SignInCancelledError)
+    const timeoutClient = new CancellableLoopbackClient(40);
+    await expect(timeoutClient.listenForAuthCode()).rejects.toThrow(/timed out/i);
+    try {
+      timeoutClient.getRedirectUri();
+      expect.fail('Expected getRedirectUri() to throw timeout error');
+    } catch (err) {
+      expect(err).not.toBeInstanceOf(SignInCancelledError);
+      expect((err as Error).message).toMatch(/timed out/i);
+    }
+
+    // 2. Pre-listen bind/server error event: rejects promise AND getRedirectUri() throws bind error (NOT SignInCancelledError)
+    const errClient = new CancellableLoopbackClient(10_000);
+    const listenPromise = errClient.listenForAuthCode();
+    const internalServer = (errClient as unknown as { server?: http.Server }).server;
+    expect(internalServer).toBeDefined();
+    internalServer!.emit('error', Object.assign(new Error('bind EADDRINUSE'), { code: 'EADDRINUSE' }));
+
+    await expect(listenPromise).rejects.toThrow(/EADDRINUSE/);
+    try {
+      errClient.getRedirectUri();
+      expect.fail('Expected getRedirectUri() to throw bind error');
+    } catch (err) {
+      expect(err).not.toBeInstanceOf(SignInCancelledError);
+      expect((err as Error).message).toMatch(/EADDRINUSE/);
+    }
+    errClient.closeServer();
+  });
+});
+
+describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-flight signIn & race safety', () => {
+  let openBrowserMock: ReturnType<typeof vi.fn<(url: string) => Promise<void>>>;
+
+  const cachedAccount = {
+    homeAccountId: 'home-1',
+    environment: 'login.microsoftonline.com',
+    tenantId: 'test-tenant-id',
+    username: 'corp-user@corp.example',
+    localAccountId: 'local-1',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    openBrowserMock = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined);
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    mockAcquireTokenSilent.mockReset();
+    mockAcquireTokenInteractive.mockReset();
+    mockRemoveAccount.mockReset();
+  });
+
+  it('ServerAuthRequiredError applies single Entra: prefix without double-prefixing', () => {
+    const errDefault = new ServerAuthRequiredError();
+    expect(errDefault).toBeInstanceOf(ServerAuthRequiredError);
+    expect(errDefault.message).toMatch(/^Entra: /);
+    expect(errDefault.message).not.toMatch(/^Entra: Entra:/);
+
+    const errAlready = new ServerAuthRequiredError('Entra: Already prefixed');
+    expect(errAlready.message).toBe('Entra: Already prefixed');
+  });
+
+  it('getAccessToken() never calls acquireTokenInteractive when account is missing or silent fails, preserves ServerAuthRequiredError prototype, and does NOT resurrect cleared account', async () => {
+    mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: refresh token expired'));
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    // First call: hydrates cachedAccount, silent refresh fails -> clears account & throws ServerAuthRequiredError
+    await expect(auth.getAccessToken()).rejects.toSatisfy((err: unknown) => {
+      return err instanceof ServerAuthRequiredError && err.message.startsWith('Entra: ');
+    });
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+    expect(openBrowserMock).not.toHaveBeenCalled();
+
+    // Even though token cache still has [cachedAccount] on disk, status() & next getAccessToken() must NOT resurrect it!
+    expect(await auth.status()).toEqual({ mode: 'entra', signedIn: false, account: undefined });
+    await expect(auth.getAccessToken()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    // getAllAccounts was called only ONCE (not re-queried after hydration for the same key)
+    expect(mockGetAllAccounts).toHaveBeenCalledTimes(1);
+    expect(mockAcquireTokenSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it('getAccessToken(true) blocks stale unexpired cache fallback and passes forceRefresh: true to MSAL', async () => {
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    mockAcquireTokenSilent.mockResolvedValueOnce({
+      accessToken: 'unexpired-token',
+      expiresOn: new Date(Date.now() + 200 * 1000),
+      account: cachedAccount,
+    });
+    expect(await auth.getAccessToken()).toBe('unexpired-token');
+
+    // Forced silent refresh (e.g., after SyncClient 401): even though cached token is unexpired, failure must NOT return it
+    mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: 401 revoked'));
+    await expect(auth.getAccessToken(true)).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(mockAcquireTokenSilent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ forceRefresh: true }),
+    );
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+  });
+
+  it('offline network failure in getAccessToken() clears cachedToken, preserves account, and throws Entra-attributed network error (not ServerAuthRequiredError)', async () => {
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const netErr = Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+    });
+    mockAcquireTokenSilent.mockRejectedValueOnce(netErr);
+
+    await expect(auth.getAccessToken()).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof Error &&
+        !(err instanceof ServerAuthRequiredError) &&
+        err.message.startsWith('Entra: ') &&
+        err.message.includes('ECONNREFUSED')
+      );
+    });
+
+    // Account MUST remain preserved while offline so UI does not claim signed-out
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+  });
+
+  it('dev mode signIn() resolves immediately with dev-mode account without MSAL', async () => {
+    const auth = new ServerAuth(() => testSettings('dev'), null, openBrowserMock);
+    await expect(auth.signIn()).resolves.toEqual({
+      status: 'signed_in',
+      account: 'dev-mode (mock security)',
+    });
+    expect(mockAcquireTokenInteractive).not.toHaveBeenCalled();
+  });
+
+  it('coalesces concurrent signIn() calls into a single interactive attempt and passes CancellableLoopbackClient', async () => {
+    let resolveInteractive!: (val: unknown) => void;
+    mockAcquireTokenInteractive.mockImplementationOnce(
+      (req: { loopbackClient?: unknown }) =>
+        new Promise((resolve) => {
+          expect(req.loopbackClient).toBeInstanceOf(CancellableLoopbackClient);
+          resolveInteractive = resolve;
+        }),
+    );
+
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const p1 = auth.signIn();
+    const p2 = auth.signIn();
+    expect(p1).toBe(p2);
+    expect(mockAcquireTokenInteractive).toHaveBeenCalledTimes(1);
+
+    resolveInteractive({
+      accessToken: 'tok-fresh',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toEqual({ status: 'signed_in', account: 'corp-user@corp.example' });
+    expect(r2).toEqual(r1);
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+  });
+
+  it('cancelSignIn() returns false when idle, true then false when active, removes raced cached account from MSAL cache, and allows immediate follow-up signIn() without late clobber', async () => {
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    expect(auth.cancelSignIn()).toBe(false);
+
+    // Part 1: cancelSignIn() while acquireTokenByCode() is in flight removes raced account from cache
+    let resolveLate1!: (val: unknown) => void;
+    mockAcquireTokenInteractive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLate1 = resolve;
+        }),
+    );
+
+    const signIn1 = auth.signIn();
+    expect(auth.cancelSignIn()).toBe(true);
+    // Second cancelSignIn() must immediately return false (detached)
+    expect(auth.cancelSignIn()).toBe(false);
+
+    resolveLate1({
+      accessToken: 'late-token-1',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+
+    await expect(signIn1).resolves.toEqual({ status: 'cancelled' });
+    expect(mockRemoveAccount).toHaveBeenCalledWith(cachedAccount);
+    expect((auth as unknown as { account: unknown }).account).toBeNull();
+    expect((auth as unknown as { cachedToken: unknown }).cachedToken).toBeNull();
+
+    // Part 2: immediate follow-up signIn() after cancelSignIn() starts a fresh attempt and is NOT clobbered when cancelled attempt settles late
+    mockRemoveAccount.mockClear();
+    const secondAccount = {
+      ...cachedAccount,
+      homeAccountId: 'home-2',
+      username: 'second-user@corp.example',
+    };
+    let resolveCancelledAttempt!: (val: unknown) => void;
+    let resolveFreshAttempt!: (val: unknown) => void;
+    mockAcquireTokenInteractive
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCancelledAttempt = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFreshAttempt = resolve;
+          }),
+      );
+
+    const cancelledRun = auth.signIn();
+    expect(auth.cancelSignIn()).toBe(true);
+    expect(auth.cancelSignIn()).toBe(false);
+
+    // Immediately start fresh sign-in while cancelled attempt is still unresolved
+    const freshRun = auth.signIn();
+    expect(freshRun).not.toBe(cancelledRun);
+    expect(mockAcquireTokenInteractive).toHaveBeenCalledTimes(3);
+
+    // Fresh attempt succeeds first
+    resolveFreshAttempt({
+      accessToken: 'fresh-token-2',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: secondAccount,
+    });
+    await expect(freshRun).resolves.toEqual({
+      status: 'signed_in',
+      account: 'second-user@corp.example',
+    });
+
+    // Now the earlier cancelled attempt settles late — MUST NOT clobber secondAccount or fresh-token-2!
+    resolveCancelledAttempt({
+      accessToken: 'stale-cancelled-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+    await expect(cancelledRun).resolves.toEqual({ status: 'cancelled' });
+    // Stale different account removed, while fresh account & token remain intact
+    expect(mockRemoveAccount).toHaveBeenCalledWith(cachedAccount);
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'second-user@corp.example',
+    });
+    expect(await auth.getAccessToken()).toBe('fresh-token-2');
+
+    // Part 3: if a cancelled attempt resolves late with the SAME homeAccountId as a newer active sign-in, do NOT remove the newer account from cache
+    mockRemoveAccount.mockClear();
+    let resolveCancelledSame!: (val: unknown) => void;
+    let resolveFreshSame!: (val: unknown) => void;
+    mockAcquireTokenInteractive
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCancelledSame = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFreshSame = resolve;
+          }),
+      );
+
+    const authSame = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const cancelledSame = authSame.signIn();
+    expect(authSame.cancelSignIn()).toBe(true);
+    const freshSame = authSame.signIn();
+    resolveFreshSame({
+      accessToken: 'fresh-same-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+    await expect(freshSame).resolves.toEqual({
+      status: 'signed_in',
+      account: 'corp-user@corp.example',
+    });
+    resolveCancelledSame({
+      accessToken: 'stale-same-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+    await expect(cancelledSame).resolves.toEqual({ status: 'cancelled' });
+    expect(mockRemoveAccount).not.toHaveBeenCalled();
+    expect(await authSame.getAccessToken()).toBe('fresh-same-token');
+  });
+
+  it('guards concurrent hydrateAccount() / getAccessToken() / acquireTokenSilentOnly() / signOut() races and purges expired cached accounts on signOut()', async () => {
+    // (a) Concurrent status() + expired getAccessToken() does NOT resurrect the expired account
+    let resolveAccounts!: (accounts: unknown[]) => void;
+    mockGetAllAccounts.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAccounts = resolve;
+        }),
+    );
+    mockAcquireTokenSilent.mockRejectedValueOnce(new Error('InteractionRequiredAuthError: expired'));
+
+    const authA = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const tokenPromise = authA.getAccessToken();
+    const statusPromise = authA.status();
+
+    // Only one coalesced getAllAccounts() call should have fired
+    expect(mockGetAllAccounts).toHaveBeenCalledTimes(1);
+    resolveAccounts([cachedAccount]);
+
+    await expect(tokenPromise).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    await statusPromise;
+    expect(await authA.status()).toEqual({ mode: 'entra', signedIn: false, account: undefined });
+
+    // (c) signOut() after expiry still calls removeAccount on cached accounts even though this.account was cleared to null
+    mockGetAllAccounts.mockResolvedValueOnce([cachedAccount]);
+    await authA.signOut();
+    expect(mockRemoveAccount).toHaveBeenCalledWith(cachedAccount);
+
+    // (b) signOut() racing an in-flight acquireTokenSilent does NOT repopulate this.account or this.cachedToken
+    mockRemoveAccount.mockClear();
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    let resolveSilent!: (val: unknown) => void;
+    let enteredSilent!: () => void;
+    const silentEntered = new Promise<void>((r) => {
+      enteredSilent = r;
+    });
+    mockAcquireTokenSilent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSilent = resolve;
+          enteredSilent();
+        }),
+    );
+
+    const authB = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const inflightToken = authB.getAccessToken();
+    await silentEntered;
+
+    await authB.signOut();
+
+    // In-flight acquireTokenSilent now resolves after signOut()
+    resolveSilent({
+      accessToken: 'stale-post-signout-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+
+    await expect(inflightToken).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect((authB as unknown as { account: unknown }).account).toBeNull();
+    expect((authB as unknown as { cachedToken: unknown }).cachedToken).toBeNull();
+    expect(await authB.status()).toEqual({ mode: 'entra', signedIn: false, account: undefined });
+
+    // (d) signOut() racing an in-flight acquireTokenSilentOnly() throws no-account and does NOT repopulate this.account
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    let resolveSilentOnly!: (val: unknown) => void;
+    let enteredSilentOnly!: () => void;
+    const silentOnlyEntered = new Promise<void>((r) => {
+      enteredSilentOnly = r;
+    });
+    mockAcquireTokenSilent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSilentOnly = resolve;
+          enteredSilentOnly();
+        }),
+    );
+
+    const authC = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const inflightSilentOnly = authC.acquireTokenSilentOnly();
+    await silentOnlyEntered;
+
+    await authC.signOut();
+    resolveSilentOnly({
+      accessToken: 'stale-verify-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+
+    await expect(inflightSilentOnly).rejects.toThrow(/No cached corporate account/i);
+    expect((authC as unknown as { account: unknown }).account).toBeNull();
+  });
+
+  it('signOut() mid-signIn() cancels active signIn, removes late cached account if acquireTokenByCode() resolves, and stays signed out', async () => {
+    mockGetAllAccounts.mockResolvedValue([]);
+    let resolveLate!: (val: unknown) => void;
+    mockAcquireTokenInteractive.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLate = resolve;
+        }),
+    );
+
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const signInPromise = auth.signIn();
+
+    // User clicks sign out while interactive sign-in is in flight
+    await auth.signOut();
+
+    // Late token exchange completes after signOut()
+    resolveLate({
+      accessToken: 'raced-token',
+      expiresOn: new Date(Date.now() + 3600 * 1000),
+      account: cachedAccount,
+    });
+
+    await expect(signInPromise).resolves.toEqual({ status: 'cancelled' });
+    expect(mockRemoveAccount).toHaveBeenCalledWith(cachedAccount);
+    expect(await auth.status()).toEqual({ mode: 'entra', signedIn: false, account: undefined });
+  });
+
+  it('sanitizes OAuth/Bearer secrets from signIn() error messages and returns friendly timeout message', async () => {
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    mockAcquireTokenInteractive.mockRejectedValueOnce(
+      new Error(
+        'AADSTS5000: failed with Authorization: Bearer secret.jwt.payload at https://login.microsoftonline.com/cb?code=SECRET_CODE&state=SECRET_STATE&access_token=TOK123&refresh_token=REF456',
+      ),
+    );
+    const errRes = await auth.signIn();
+    expect(errRes.status).toBe('error');
+    if (errRes.status === 'error') {
+      expect(errRes.message).not.toContain('secret.jwt.payload');
+      expect(errRes.message).not.toContain('SECRET_CODE');
+      expect(errRes.message).not.toContain('SECRET_STATE');
+      expect(errRes.message).not.toContain('TOK123');
+      expect(errRes.message).not.toContain('REF456');
+      expect(errRes.message).toContain('[REDACTED]');
+    }
+
+    // Timeout via loopback client rejection
+    mockAcquireTokenInteractive.mockImplementationOnce(
+      async (req: { loopbackClient: CancellableLoopbackClient }) => {
+        await req.loopbackClient.listenForAuthCode();
+        return { accessToken: 'never', account: cachedAccount };
+      },
+    );
+    const fastTimeoutAuth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock, 30);
+    await expect(fastTimeoutAuth.signIn()).resolves.toEqual({
+      status: 'error',
+      message: 'Sign-in timed out. Please try again.',
+    });
+  });
+
+  it('preserves this.account and throws ServerAuthTransientError on Entra 5xx, ServerError without auth code, MSAL network_error, and AbortError', async () => {
+    const transientErrors: unknown[] = [
+      new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
+      new ServerError('server_error', 'Unexpected upstream error'),
+      new AuthError('network_error', 'Network request failed'),
+      Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
+      Object.assign(new Error('HTTP 429 Too Many Requests'), { statusCode: 429 }),
+    ];
+
+    for (const transientErr of transientErrors) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(transientErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+      await expect(auth.getAccessToken()).rejects.toSatisfy((err: unknown) => {
+        return (
+          err instanceof ServerAuthTransientError &&
+          !(err instanceof ServerAuthRequiredError) &&
+          err.message.startsWith('Entra: ') &&
+          err.cause === transientErr
+        );
+      });
+
+      // Account MUST remain preserved on transient Entra outages
+      expect(await auth.status()).toEqual({
+        mode: 'entra',
+        signedIn: true,
+        account: 'corp-user@corp.example',
+      });
+    }
+  });
+
+  it('clears this.account and throws ServerAuthRequiredError on genuine InteractionRequiredAuthError and grant failures', async () => {
+    const authFailures: unknown[] = [
+      new InteractionRequiredAuthError('interaction_required', 'AADSTS50076 MFA required'),
+      new AuthError('invalid_grant', 'AADSTS700082 refresh token expired'),
+      new AuthError('login_required', 'Login required'),
+      Object.assign(new Error('Bad grant'), { status: 400 }),
+      Object.assign(new Error('Unauthorized'), { statusCode: 401 }),
+    ];
+
+    for (const authErr of authFailures) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(authErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+      await expect(auth.getAccessToken()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+      expect(await auth.status()).toEqual({
+        mode: 'entra',
+        signedIn: false,
+        account: undefined,
+      });
+    }
+  });
+
+  it('verifyToken() reports unreachable on MSAL network_error/AbortError, error on Entra 5xx, and expired on interaction/grant failures', async () => {
+    // 1. MSAL network_error & AbortError -> unreachable
+    for (const netErr of [
+      new AuthError('network_error', 'Network error'),
+      Object.assign(new Error('Aborted'), { name: 'AbortError' }),
+      Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+    ]) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(netErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+      const res = await auth.verifyToken();
+      expect(res.status).toBe('unreachable');
+    }
+
+    // 2. Entra 503 ServerError & ServerAuthTransientError -> error (NOT expired)
+    for (const transientErr of [
+      new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
+      new ServerAuthTransientError(new Error('502 Bad Gateway')),
+    ]) {
+      mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+      mockAcquireTokenSilent.mockRejectedValueOnce(transientErr);
+      const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+      const res = await auth.verifyToken();
+      expect(res.status).toBe('error');
+    }
+
+    // 3. Genuine InteractionRequiredAuthError -> expired
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    mockAcquireTokenSilent.mockRejectedValueOnce(
+      new InteractionRequiredAuthError('consent_required', 'Consent required'),
+    );
+    const authExp = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    const expRes = await authExp.verifyToken();
+    expect(expRes.status).toBe('expired');
+  });
+
+  it('isServerAuthFailure() classifies server auth failures accurately across Entra and dev modes', () => {
+    // Dev mode: ALWAYS false
+    expect(isServerAuthFailure(new ServerAuthRequiredError(), false)).toBe(false);
+    expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, false)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: Session expired'), false)).toBe(false);
+
+    // Entra mode: true cases
+    expect(isServerAuthFailure(new ServerAuthRequiredError(), true)).toBe(true);
+    expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, true)).toBe(true);
+    expect(isServerAuthFailure({ statusCode: 401, message: 'Unauthorized' }, true)).toBe(true);
+    expect(isServerAuthFailure(new Error('Entra: Session expired'), true)).toBe(true);
+
+    // Entra mode: false cases (transient, network, non-401 HTTP, null/undefined)
+    expect(isServerAuthFailure(null, true)).toBe(false);
+    expect(isServerAuthFailure(undefined, true)).toBe(false);
+    expect(isServerAuthFailure(new ServerAuthTransientError(new Error('503')), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: fetch failed'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: 503 Service Unavailable'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: 429 Too Many Requests'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: temporarily_unavailable'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: server_error'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: Request timed out'), true)).toBe(false);
+    expect(isServerAuthFailure({ status: 500, message: 'Entra: 500' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 429, message: 'Entra: throttled' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 403, message: 'Forbidden' }, true)).toBe(false);
+    expect(isServerAuthFailure({ status: 404, message: 'Not found' }, true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Yvoke Backend: 500 Internal Server Error'), true)).toBe(false);
+  });
+
+  it('signOut() restores account and resets hydration when cache.removeAccount fails so status() truthfully reports signedIn: true', async () => {
+    mockGetAllAccounts.mockResolvedValue([cachedAccount]);
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+
+    // Hydrate signed-in state first (sets this.account and this.hydratedKey = key)
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+
+    // Disk cache write fails during removeAccount -> account still exists on disk
+    mockRemoveAccount.mockRejectedValueOnce(new Error('Disk full'));
+    await expect(auth.signOut()).rejects.toThrow('Entra: Disk full');
+
+    // Subsequent status() must truthfully reflect that the account is still signed in on disk
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+  });
+
+  it('signOut() failure where cache was already emptied before throwing reports signedIn: false on subsequent status()', async () => {
+    const secondAccount = {
+      ...cachedAccount,
+      homeAccountId: 'home-2',
+      username: 'second-user@corp.example',
+      localAccountId: 'local-2',
+    };
+    let diskAccounts = [cachedAccount, secondAccount];
+    mockGetAllAccounts.mockImplementation(async () => [...diskAccounts]);
+
+    const auth = new ServerAuth(() => testSettings('entra'), null, openBrowserMock);
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: true,
+      account: 'corp-user@corp.example',
+    });
+
+    // Both accounts are emptied from disk before the final write throws
+    mockRemoveAccount.mockImplementationOnce(async () => {
+      diskAccounts = [secondAccount];
+    });
+    mockRemoveAccount.mockImplementationOnce(async () => {
+      diskAccounts = [];
+      throw new Error('Disk full');
+    });
+
+    await expect(auth.signOut()).rejects.toThrow('Entra: Disk full');
+
+    // Subsequent status() re-hydrates from disk, sees 0 accounts, and truthfully reports signedIn: false
+    expect(await auth.status()).toEqual({
+      mode: 'entra',
+      signedIn: false,
+      account: undefined,
+    });
   });
 });
 

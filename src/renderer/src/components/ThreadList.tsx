@@ -4,8 +4,6 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
-  LockIcon,
-  LogOutIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -122,8 +120,7 @@ export function ThreadList(props: {
   appVersion: string;
   activeThreadId: string | null;
   auth: AuthStatus | null;
-  /** Rows only show a model badge when they deviate from this. */
-  defaultModel: string;
+  serverAuthRequired?: boolean;
   settingsOpen: boolean;
   /** Looks up message-content matches in the local index; titles are filtered here. */
   searchContent?: (query: string) => Promise<ThreadSearchHit[]>;
@@ -131,22 +128,24 @@ export function ThreadList(props: {
   onCreate: () => void;
   onDelete: (threadId: string) => void;
   onOpenSettings: () => void;
-  onSignOut?: () => void;
+  onOpenAccounts?: () => void;
 }): React.JSX.Element {
   const {
     threads,
     appVersion,
     activeThreadId,
     auth,
-    defaultModel,
+    serverAuthRequired = false,
     settingsOpen,
     searchContent,
     onOpen,
     onCreate,
     onDelete,
     onOpenSettings,
-    onSignOut,
+    onOpenAccounts,
   } = props;
+  const serverNeedsSignIn =
+    auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired);
   const [query, setQuery] = useState('');
   /** Content matches for `hitsQuery`; titles filter instantly below, without waiting for these. */
   const [hits, setHits] = useState<{ query: string; byThread: Map<string, ThreadSearchHit> }>({
@@ -279,6 +278,7 @@ export function ThreadList(props: {
                     className={`thread-item ${thread.id === activeThreadId && !settingsOpen ? 'active' : ''}`}
                     onClick={() => onOpen(thread.id)}
                     onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         onOpen(thread.id);
@@ -286,8 +286,25 @@ export function ThreadList(props: {
                     }}
                   >
                     <div className="thread-content">
-                      <div className="thread-title" data-tip={thread.title}>
-                        {thread.title}
+                      <div className="thread-header">
+                        <div className="thread-title" data-tip={thread.title}>
+                          {thread.title}
+                        </div>
+                        <button
+                          type="button"
+                          className="icon-button thread-delete"
+                          data-tip="Delete conversation"
+                          aria-label="Delete conversation"
+                          onKeyDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Delete "${thread.title}"? This removes it from the server too.`)) {
+                              onDelete(thread.id);
+                            }
+                          }}
+                        >
+                          <TrashIcon size={14} />
+                        </button>
                       </div>
                       {contentHits.get(thread.id) && (
                         <div className="thread-snippet" title={contentHits.get(thread.id)?.snippet}>
@@ -296,7 +313,6 @@ export function ThreadList(props: {
                       )}
                       <div className="thread-meta">
                         <span>{time}</span>
-                        {thread.orchestratorProfile && <span>· multi-agent</span>}
                         {thread.syncState !== 'synced' && (
                           <span
                             className={`sync-dot ${thread.syncState}`}
@@ -307,24 +323,6 @@ export function ThreadList(props: {
                         )}
                       </div>
                     </div>
-                    {/* The model is the same on nearly every row — it only earns space when it isn't. */}
-                    {thread.model && thread.model !== defaultModel && (
-                      <span className="model-badge" data-tip={`Model: ${thread.model}`}>
-                        {thread.model}
-                      </span>
-                    )}
-                    <button
-                      className="icon-button thread-delete"
-                      data-tip="Delete conversation"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (window.confirm(`Delete "${thread.title}"? This removes it from the server too.`)) {
-                          onDelete(thread.id);
-                        }
-                      }}
-                    >
-                      <TrashIcon size={14} />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -339,33 +337,69 @@ export function ThreadList(props: {
 
       <div className="thread-list-footer">
         <div className="footer-info">
-          <div className="account-chip" data-tip={auth?.claudeAccount ?? auth?.server.account ?? ''}>
-            {auth?.claudeAccount ?? (auth?.server.signedIn ? auth.server.account : 'Not signed in')}
-          </div>
-          <div className="footer-sub-meta">
-            {auth && (
-              <span
-                className="account-mode"
-                data-tip={
-                  auth.server.mode === 'dev'
-                    ? 'Server running with mock security (APP_SECURITY_MOCK)'
-                    : 'Authenticated via Microsoft Entra'
-                }
-              >
-                <LockIcon size={10} />
-                {auth.server.mode === 'dev' ? 'dev' : 'Entra'}
+          <button
+            type="button"
+            className="footer-account-btn"
+            data-tip="Manage accounts"
+            onClick={onOpenAccounts ?? onOpenSettings}
+          >
+            <span className="account-chip">
+              <span className="account-status-row">
+                <span
+                  className={`account-status-dot ${
+                    !auth ? 'is-muted' : serverNeedsSignIn ? 'is-warn' : 'is-ok'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="account-status-service">Yvoke</span>
+                <span className="account-status-value account-mode">
+                  {!auth
+                    ? 'Checking…'
+                    : auth.server.mode === 'dev'
+                      ? 'dev'
+                      : serverNeedsSignIn
+                        ? 'Sign in needed'
+                        : (auth.server.account ?? 'Signed in')}
+                </span>
               </span>
-            )}
-            {appVersion && <span className="app-version">· v{appVersion}</span>}
-          </div>
+              <span className="account-status-row">
+                <span
+                  className={`account-status-dot ${
+                    auth?.claude === 'ok'
+                      ? 'is-ok'
+                      : auth?.claude === 'missing'
+                        ? 'is-warn'
+                        : 'is-muted'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="account-status-service">Claude</span>
+                <span className="account-status-value">
+                  {!auth
+                    ? 'Checking…'
+                    : auth.claude === 'ok'
+                      ? (auth.claudeAccount ?? 'Signed in')
+                      : auth.claude === 'missing'
+                        ? 'Sign in needed'
+                        : 'Checking…'}
+                </span>
+              </span>
+            </span>
+          </button>
+          {appVersion && (
+            <div className="footer-sub-meta">
+              <span className="app-version">v{appVersion}</span>
+            </div>
+          )}
         </div>
         <div className="footer-actions">
-          {auth?.server.signedIn && auth.server.mode === 'entra' && onSignOut && (
-            <button className="icon-button" data-tip="Sign out of Entra" onClick={onSignOut}>
-              <LogOutIcon size={16} />
-            </button>
-          )}
-          <button className="icon-button" data-tip="Settings" onClick={onOpenSettings}>
+          <button
+            type="button"
+            className="icon-button"
+            data-tip="Settings"
+            aria-label="Settings"
+            onClick={onOpenSettings}
+          >
             <SettingsIcon size={16} />
           </button>
         </div>

@@ -106,8 +106,9 @@ export function tagAttributedError(source: ErrorSource, error: unknown): string 
 }
 
 /**
- * Sanitizes sensitive credentials and tokens (Bearer JWTs, Anthropic API keys)
- * from text before it is written to disk logs or telemetry.
+ * Sanitizes sensitive credentials, tokens (Bearer JWTs, Anthropic API keys), and
+ * URL-delimited OAuth PKCE parameters from text before it is written to disk logs or
+ * returned in diagnostic messages.
  */
 export function sanitizeLogContent(text: string): string {
   if (typeof text !== 'string') {
@@ -116,33 +117,77 @@ export function sanitizeLogContent(text: string): string {
 
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[REDACTED]');
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-[REDACTED]')
+    .replace(
+      /([?&#](?:code|state|code_challenge|code_verifier|access_token|refresh_token|id_token)=)[^&#\s"']+/gi,
+      '$1[REDACTED]',
+    );
 }
 
+const NETWORK_SYSCALL_CODES = [
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ECONNRESET',
+  'EPIPE',
+  'ECONNABORTED',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+] as const;
+
+const NETWORK_ERROR_CODES = [
+  'network_error',
+  'no_network_connectivity',
+  'endpoints_resolution_error',
+] as const;
+
 /**
- * Whether an error is the network failing rather than the peer refusing. Node's undici reports
- * the syscall on `cause`, not in `message`, so both are checked.
+ * Whether an error is the network failing rather than the peer refusing. Node's undici and MSAL
+ * often report the syscall/network code on `cause` or `errorCode`, not in `message`, so all are checked.
  *
  * This lives here because all three callers — the Entra silent refresh, the sync request path and
  * the connection probe — must agree: the same outage classified as "expired" in one place and
  * "unreachable" in another sends the user to re-authenticate against a server that is merely down.
  */
 export function isNetworkError(error: unknown): boolean {
-  const codes = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNRESET', 'EPIPE'];
   const seen = new Set<unknown>();
   let cursor: unknown = error;
 
   while (cursor && !seen.has(cursor)) {
     seen.add(cursor);
-    const code = (cursor as { code?: unknown }).code;
-    if (typeof code === 'string' && codes.includes(code)) {
+    if (typeof cursor === 'object') {
+      const rec = cursor as { code?: unknown; errorCode?: unknown; name?: unknown; cause?: unknown };
+      if (typeof rec.code === 'string' && (NETWORK_SYSCALL_CODES as readonly string[]).includes(rec.code)) {
+        return true;
+      }
+      if (
+        typeof rec.errorCode === 'string' &&
+        (NETWORK_ERROR_CODES as readonly string[]).includes(rec.errorCode)
+      ) {
+        return true;
+      }
+      if (rec.name === 'AbortError') {
+        return true;
+      }
+    }
+    const message =
+      cursor instanceof Error
+        ? cursor.message
+        : typeof cursor === 'string'
+          ? cursor
+          : typeof cursor === 'object' && typeof (cursor as { message?: unknown }).message === 'string'
+            ? (cursor as { message: string }).message
+            : '';
+    if (
+      message.includes('fetch failed') ||
+      NETWORK_SYSCALL_CODES.some((c) => message.includes(c)) ||
+      /network_error|no_network_connectivity|endpoints_resolution_error|request timeout/i.test(message)
+    ) {
       return true;
     }
-    const message = cursor instanceof Error ? cursor.message : String(cursor ?? '');
-    if (message.includes('fetch failed') || codes.some((c) => message.includes(c))) {
-      return true;
-    }
-    cursor = (cursor as { cause?: unknown }).cause;
+    cursor = typeof cursor === 'object' ? (cursor as { cause?: unknown }).cause : undefined;
   }
   return false;
 }

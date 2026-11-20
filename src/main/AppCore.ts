@@ -8,6 +8,9 @@ import type {
   AuthVerificationResponse,
   ChatMessage,
   CitationRef,
+  ClaudeCodeSubmitResult,
+  ClaudeSignInResult,
+  ClaudeSignOutResult,
   FeedbackRequest,
   ImageAttachment,
   LoginVerificationResult,
@@ -17,6 +20,7 @@ import type {
   PlaybookValidation,
   PlaybookValidationRequest,
   SendMessageRequest,
+  ServerSignInResult,
   SyncEvent,
   ThreadMeta,
   ThreadsListResult,
@@ -46,8 +50,12 @@ import { PASSES } from './agent/playbookValidation';
 import { validatePlaybookSelection } from './agent/PlaybookValidator';
 import { describeImages } from './agent/ImageDescriptor';
 import { buildRunTrace } from './agent/runTrace';
-import { detectClaudeAccount, detectClaudeCredentials } from './agent/ClaudeAuth';
-import { ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
+import {
+  type ClaudeAuthManager,
+  detectClaudeAccount,
+  detectClaudeCredentials,
+} from './agent/ClaudeAuth';
+import { isServerAuthFailure, ServerAuth, type TokenCachePersistence } from './auth/ServerAuth';
 import { SettingsStore } from './settings/Settings';
 import { SearchIndex } from './store/SearchIndex';
 import { ThreadStore, type StoredChatMessage } from './store/ThreadStore';
@@ -121,6 +129,7 @@ export interface AppCoreDeps {
   openBrowser: (url: string) => Promise<void>;
   tokenCache: TokenCachePersistence | null;
   appVersion?: string;
+  claudeAuth?: ClaudeAuthManager;
 }
 
 const MAX_APP_VERSION_LENGTH = 256;
@@ -207,6 +216,7 @@ export class AppCore {
   readonly syncQueue: SyncQueue;
   readonly agent: AgentService;
   readonly mcpPrompts: McpPrompts;
+  readonly claudeAuth?: ClaudeAuthManager;
 
   private profilesCache: { at: number; profiles: OrchestratorProfile[] } | null = null;
   private promptsCache: { at: number; prompts: McpPromptInfo[] } | null = null;
@@ -271,6 +281,7 @@ export class AppCore {
   private emptySweepPromise: Promise<void> | null = null;
 
   constructor(private readonly deps: AppCoreDeps) {
+    this.claudeAuth = deps.claudeAuth;
     this.appVersion =
       deps.appVersion !== undefined ? normalizeAppVersion(deps.appVersion) : readPackageAppVersion();
     this.settings = new SettingsStore(deps.userDataDir);
@@ -323,6 +334,7 @@ export class AppCore {
           this.pendingRuns.delete(lid);
         }
       },
+      isEntraMode: () => !this.serverAuth.isDevMode(),
     });
 
     // Purge any tombstoned or malformed thread IDs from sync-queue.json FIRST so deleted
@@ -365,6 +377,9 @@ export class AppCore {
       getSettings: () => this.settings.get(),
       mcpAuthProvider,
       emit: (event) => {
+        if ((event.kind === 'error' || event.kind === 'turn-complete') && event.authRequired) {
+          this.claudeAuth?.invalidateStatusCache();
+        }
         deps.emitAgentEvent(event);
         if (event.kind === 'turn-complete' || event.kind === 'error') {
           const settledId = event.threadId;
@@ -383,6 +398,12 @@ export class AppCore {
       sandboxDir: sandboxDirFor(deps.userDataDir),
       mcpPrompts: this.mcpPrompts,
       getOrchestratorProfile: (name) => this.resolveOrchestratorProfile(name),
+      ...(this.claudeAuth
+        ? {
+            isClaudeMissing: async () => (await this.claudeAuth!.getStatus()).claude === 'missing',
+            getClaudeAccount: async () => (await this.claudeAuth!.getStatus()).claudeAccount,
+          }
+        : {}),
     });
     // Local content search. Deliberately not awaited: the sweep only re-reads logs that changed
     // since last run, and until it lands the sidebar still searches titles.
@@ -2290,10 +2311,13 @@ export class AppCore {
       return {
         threads,
         serverReachable: true,
+        serverAuthRequired: false,
         pendingSyncCount: pendingAtReturn,
       };
     } catch (err) {
-      logError('sync', 'listThreads failed:', err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      logError('sync', 'listThreads failed:', msg);
+      const isAuthFailure = isServerAuthFailure(err, !this.serverAuth.isDevMode());
       const pendingAtReturn = this.totalPendingSyncCount();
       const threads = this.threads
         .list()
@@ -2319,7 +2343,8 @@ export class AppCore {
 
       return {
         threads,
-        serverReachable: false,
+        serverReachable: isAuthFailure ? true : false,
+        serverAuthRequired: isAuthFailure,
         pendingSyncCount: pendingAtReturn,
       };
     }
@@ -2657,14 +2682,96 @@ export class AppCore {
     await this.threads.setFeedback(threadId, request.messageLocalId, request.rating, request.comment?.trim() || undefined);
   }
 
-  // --- auth ---------------------------------------------------------------------
+  // --- settings & auth ----------------------------------------------------------
 
-  async authStatus(): Promise<AuthStatus> {
+  updateSettings(update: Partial<AppSettings>): AppSettings {
+    const next = this.settings.set(update);
+    this.mcpPrompts.reset();
+    this.promptsCache = null;
+    this.profilesCache = null;
+    if (this.syncQueue.pendingCount() > 0) {
+      void this.syncQueue.flush();
+    }
+    return next;
+  }
+
+  async serverSignIn(): Promise<ServerSignInResult> {
+    const result = await this.serverAuth.signIn();
+    if (result.status === 'signed_in') {
+      this.mcpPrompts.reset();
+      this.promptsCache = null;
+      this.profilesCache = null;
+      if (this.syncQueue.pendingCount() > 0) {
+        void this.syncQueue.flush();
+      }
+    }
+    return result;
+  }
+
+  cancelServerSignIn(): boolean {
+    return this.serverAuth.cancelSignIn();
+  }
+
+  async serverSignOut(): Promise<void> {
+    await this.serverAuth.signOut();
+    this.mcpPrompts.reset();
+    this.promptsCache = null;
+    this.profilesCache = null;
+    this.agent.closeIdleSessions();
+  }
+
+  async authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus> {
+    const [claudeState, server] = await Promise.all([
+      this.claudeAuth
+        ? this.claudeAuth.getStatus({ forceRefresh: Boolean(opts?.forceRefresh) })
+        : Promise.resolve({
+            claude: detectClaudeCredentials() === 'missing' ? ('missing' as const) : ('ok' as const),
+            claudeAccount: detectClaudeAccount(),
+          }),
+      this.serverAuth.status(),
+    ]);
     return {
-      claude: detectClaudeCredentials() === 'missing' ? 'missing' : 'ok',
-      claudeAccount: detectClaudeAccount(),
-      server: await this.serverAuth.status(),
+      claude: claudeState.claude,
+      claudeAccount: claudeState.claudeAccount,
+      server,
     };
+  }
+
+  async claudeSignIn(): Promise<ClaudeSignInResult> {
+    if (!this.claudeAuth) {
+      return { status: 'error', message: 'Claude sign-in is unavailable.' };
+    }
+    const result = await this.claudeAuth.signIn();
+    if (result.status === 'signed_in') {
+      this.agent.closeIdleSessions();
+    }
+    return result;
+  }
+
+  async claudeSignOut(): Promise<ClaudeSignOutResult> {
+    if (!this.claudeAuth) {
+      return { status: 'error', message: 'Claude sign-out is unavailable.' };
+    }
+    const result = await this.claudeAuth.signOut();
+    if (result.status === 'signed_out') {
+      this.agent.closeIdleSessions();
+    }
+    return result;
+  }
+
+  cancelClaudeSignIn(): boolean {
+    return this.claudeAuth ? this.claudeAuth.cancelSignIn() : false;
+  }
+
+  async getActiveClaudeSignInUrl(): Promise<string | null> {
+    return this.claudeAuth ? this.claudeAuth.getActiveSignInUrl() : null;
+  }
+
+  async submitClaudeAuthCode(code: unknown): Promise<ClaudeCodeSubmitResult> {
+    if (!this.claudeAuth) {
+      return { accepted: false, message: 'Claude sign-in is unavailable.' };
+    }
+    return this.claudeAuth.submitAuthCode(code);
   }
 
   /**
@@ -2680,6 +2787,7 @@ export class AppCore {
     }
 
     const run = (async (): Promise<AuthVerificationResponse> => {
+      this.claudeAuth?.invalidateStatusCache();
       const [server, claude] = await Promise.all([
         this.verifyServerLogin(),
         this.agent.verifyClaudeCredentials(
@@ -2687,6 +2795,9 @@ export class AppCore {
           this.settings.get().defaultModel,
         ),
       ]);
+      if (claude.status === 'expired' || claude.status === 'missing') {
+        this.claudeAuth?.invalidateStatusCache();
+      }
       return { server, claude };
     })();
 
@@ -2748,6 +2859,8 @@ export class AppCore {
     this.pendingRuns.clear();
     this.failedRuns.length = 0;
     this.agent.closeAll();
+    this.serverAuth.cancelSignIn();
+    this.claudeAuth?.dispose();
     this.syncQueue.dispose();
     this.searchIndex.dispose();
   }

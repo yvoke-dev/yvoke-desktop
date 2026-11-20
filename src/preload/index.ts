@@ -7,12 +7,16 @@ import type {
   AuthVerificationResponse,
   ChatMessage,
   CitationRef,
+  ClaudeCodeSubmitResult,
+  ClaudeSignInResult,
+  ClaudeSignOutResult,
   FeedbackRequest,
   McpPromptInfo,
   OrchestratorProfile,
   PlaybookValidation,
   PlaybookValidationRequest,
   SendMessageRequest,
+  ServerSignInResult,
   SyncEvent,
   ThreadMeta,
   ThreadSearchHit,
@@ -47,10 +51,16 @@ export interface DesktopApi {
   interrupt(threadId: string): Promise<void>;
   submitClarification(threadId: string, toolUseId: string, answer: string): Promise<boolean>;
   submitFeedback(request: FeedbackRequest): Promise<void>;
-  authStatus(): Promise<AuthStatus>;
+  authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus>;
   verifyAuth(): Promise<AuthVerificationResponse>;
-  serverSignIn(): Promise<string | undefined>;
+  serverSignIn(): Promise<ServerSignInResult>;
+  cancelServerSignIn(): Promise<boolean>;
   serverSignOut(): Promise<void>;
+  claudeSignIn(): Promise<ClaudeSignInResult>;
+  cancelClaudeSignIn(): Promise<boolean>;
+  copyClaudeSignInUrl(): Promise<boolean>;
+  submitClaudeAuthCode(code: string): Promise<ClaudeCodeSubmitResult>;
+  claudeSignOut(): Promise<ClaudeSignOutResult>;
   writeClipboardImage(dataUrl: string): Promise<void>;
   openLogsFolder(): Promise<void>;
   onAgentEvent(listener: (event: AgentEvent) => void): () => void;
@@ -78,10 +88,19 @@ const api: DesktopApi = {
   submitClarification: (threadId, toolUseId, answer) =>
     ipcRenderer.invoke(IpcChannels.chatSubmitClarification, threadId, toolUseId, answer),
   submitFeedback: (request) => ipcRenderer.invoke(IpcChannels.feedbackSubmit, request),
-  authStatus: () => ipcRenderer.invoke(IpcChannels.authStatus),
+  authStatus: (opts) =>
+    opts?.forceRefresh === true
+      ? ipcRenderer.invoke(IpcChannels.authStatus, { forceRefresh: true })
+      : ipcRenderer.invoke(IpcChannels.authStatus),
   verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
+  cancelServerSignIn: () => ipcRenderer.invoke(IpcChannels.authCancelSignin),
   serverSignOut: () => ipcRenderer.invoke(IpcChannels.authSignout),
+  claudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeSignin),
+  cancelClaudeSignIn: () => ipcRenderer.invoke(IpcChannels.authClaudeCancel),
+  copyClaudeSignInUrl: () => ipcRenderer.invoke(IpcChannels.authClaudeCopyUrl),
+  submitClaudeAuthCode: (code: string) => ipcRenderer.invoke(IpcChannels.authClaudeSubmitCode, code),
+  claudeSignOut: () => ipcRenderer.invoke(IpcChannels.authClaudeSignout),
   writeClipboardImage: (dataUrl: string) => ipcRenderer.invoke(IpcChannels.clipboardWriteImage, dataUrl),
   openLogsFolder: () => ipcRenderer.invoke(IpcChannels.logsOpenFolder),
   onAgentEvent: (listener) => {

@@ -190,7 +190,7 @@ describe('spec/ modular structure', () => {
     expect(signingIn).toContain('Check Credentials');
 
     expect(settings).toContain('on-demand credential verification checkmarks');
-    expect(settings).toContain('Verifying credentials in the About pane is on-demand.');
+    expect(settings).toContain('Verifying credentials in the Accounts pane is on-demand.');
 
     // Limits are load-bearing: an intentional absence is what no other test can fail on.
     expect(signingIn).toContain('Verifying Claude gives up after 45 seconds');
@@ -202,7 +202,9 @@ describe('spec/ modular structure', () => {
     const settings = readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8');
     const installing = readFileSync(resolve(SPEC_DIR, '08_installing_updating_and_diagnosing.md'), 'utf8');
 
-    expect(settings).toContain('Version, on-demand update check, server address, both sign-in states, and on-demand credential verification checkmarks.');
+    expect(settings).toContain(
+      'Version, on-demand update check, server address, and opening the diagnostic logs folder.',
+    );
     expect(settings).toContain('Checking for updates in the About pane is on-demand.');
 
     expect(installing).toContain('Check for updates');
@@ -454,6 +456,256 @@ describe('spec/ modular structure', () => {
         /\b(AppCore|ThreadStore|SyncClient|SyncQueue|reconcileWithRemote|remoteConversationId|serverId|localId|desktopVersion|404|4xx)\b|GET \/conversations|\.jsonl\b/,
       );
     }
+  });
+
+  it('documents in-app Claude browser sign-in, alternate-browser fallback, Keychain-aware startup checks, and one-click Claude sign-out without contradictions or implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+    const howAnswer = norm(readFileSync(resolve(SPEC_DIR, '02_how_an_answer_is_produced.md'), 'utf8'));
+    const signingIn = norm(readFileSync(resolve(SPEC_DIR, '05_signing_in.md'), 'utf8'));
+    const settings = norm(readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8'));
+
+    // 05_signing_in.md: in-app Claude browser sign-in capabilities, behavior, limits, and non-features
+    expect(signingIn).toContain('Sign in to Claude');
+    expect(signingIn).toContain('Sign out of Claude');
+    expect(signingIn).toContain('startup banner');
+    expect(signingIn).toContain('Accounts pane');
+    expect(signingIn).toContain('conversation sign-in errors');
+    expect(signingIn).toContain('Cancel sign-in');
+    expect(signingIn).toContain('Use another browser');
+    expect(signingIn).toContain('Copy sign-in link');
+    expect(signingIn).toContain('authorization code');
+    expect(signingIn).toContain('returning to the window');
+    expect(signingIn).toContain('without losing conversation memory');
+    expect(signingIn).toContain('Keychain');
+    expect(signingIn).toContain('revoked on the provider side');
+    expect(signingIn).toContain('external helper scripts');
+    expect(signingIn).toContain('organization or subscription-tier details');
+    expect(signingIn).toContain('5 minutes');
+    expect(signingIn).toContain('15 seconds');
+    expect(signingIn).toContain('10 seconds');
+    expect(signingIn).toContain('Signing out of the server clears the cached server account and nothing else.');
+    expect(signingIn).toContain('shared Claude Code credentials on the machine');
+    expect(signingIn).toContain(
+      'Switching directly between multiple Claude accounts or maintaining a second profile from inside the app.',
+    );
+    expect(signingIn).toContain(
+      "checks the bundled Claude tooling's keychain-aware credential status before probing",
+    );
+    expect(signingIn).toContain(
+      'missing or signed-out profiles (including previously used ones) report no credentials without probing',
+    );
+    expect(signingIn).toContain(
+      'Both a failed conversation turn and the on-demand *Check Credentials* action report it as a distinct allowance or rate-limit failure rather than a sign-in error, without offering an inline *Sign in to Claude* control.',
+    );
+
+    // 02_how_an_answer_is_produced.md: bundled tooling manages sign-in while raw tokens stay outside the app
+    expect(howAnswer).toContain('bundled Claude tooling');
+    expect(howAnswer).toContain('raw subscription tokens');
+
+    // 06_settings_and_what_they_change.md: inline Sign in to Claude and Sign out in Accounts pane
+    expect(settings).toContain('Sign in to Claude');
+    expect(settings).toContain('missing or expired');
+    expect(settings).toContain('re-verifies');
+    expect(settings).toContain('also signs out Claude Code on this machine');
+
+    // 01_asking_questions.md: inline Sign in to Claude in conversation error strip
+    expect(askingQuestions).toContain('Sign in to Claude');
+    expect(askingQuestions).toContain('missing or expired Claude sign-in');
+
+    // Negative contradiction guards
+    expect(signingIn).not.toContain('Not in this app.');
+    expect(signingIn).not.toContain('The app cannot sign anybody into Claude');
+    expect(signingIn).not.toContain('A stored credential file is enough for the passive startup status');
+    expect(signingIn).not.toContain(
+      'Where the Claude tooling has been used before but its credential file is absent',
+    );
+    expect(signingIn).not.toContain(
+      'If the tooling has never been used on the machine at all, the check reports no credentials without probing.',
+    );
+    expect(signingIn).not.toContain(
+      'only the on-demand *Check Credentials* action reports it as a distinct',
+    );
+    expect(signingIn).not.toContain(
+      'Signing out of Claude or switching an active Claude account from inside the app.',
+    );
+    expect(signingIn).not.toContain('offers no Claude sign-out');
+    expect(signingIn).not.toContain('for Yvoke only');
+    expect(settings).not.toContain('(Yvoke only)');
+    expect(howAnswer).not.toContain('The app cannot sign in for you; it can only tell you to.');
+    expect(howAnswer).not.toContain('A turn that crashes leaves its runtime process behind.');
+
+    // Spec-purity regex guard: zero internal identifiers, IPC channels, CLI flags, OAuth fields, or filenames
+    const bannedSpecIdentifiers =
+      /\b(ClaudeAuthManager|useClaudeSignIn|ClaudeSignInControls|authRequired|settingSources|api_key_helper|code_challenge|code_verifier|orgId|subscriptionType|ipcMain|ClaudeSignOutResult|claudeSigningOut|claudeSignOutError|CLAUDE_LOGOUT_TIMEOUT_MS|CLAUDE_MISSING_CACHE_TTL_MS)\b|claude auth login|claude auth status|claude auth logout|--claudeai|auth:claude-|oauth\/authorize|clipboard\.writeText|app\.asar/;
+    for (const [name, doc] of [
+      ['01_asking_questions.md', askingQuestions],
+      ['02_how_an_answer_is_produced.md', howAnswer],
+      ['05_signing_in.md', signingIn],
+      ['06_settings_and_what_they_change.md', settings],
+    ] as const) {
+      expect(
+        doc,
+        `${name} must remain pure functional specification prose without Claude sign-in implementation identifiers`,
+      ).not.toMatch(bannedSpecIdentifiers);
+    }
+  });
+
+  it('documents explicit corporate sign-in, Accounts pane separation, dual-status footer, and sign-in-paused sync without stale contradictions or implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+    const whereConversationsLive = norm(readFileSync(resolve(SPEC_DIR, '04_where_conversations_live.md'), 'utf8'));
+    const signingIn = norm(readFileSync(resolve(SPEC_DIR, '05_signing_in.md'), 'utf8'));
+    const settings = norm(readFileSync(resolve(SPEC_DIR, '06_settings_and_what_they_change.md'), 'utf8'));
+
+    // 01_asking_questions.md: inline Sign in to Yvoke recovery on missing/expired corporate sign-in without auto-opening browser
+    expect(askingQuestions).toContain('Sign in to Yvoke');
+    expect(askingQuestions).toContain('missing or expired corporate sign-in');
+    expect(askingQuestions).toContain('without launching a browser automatically');
+
+    // 04_where_conversations_live.md: signed-out vs unreachable distinction, paused sync without dropping queued turns, dual-status sidebar footer
+    expect(whereConversationsLive).toContain('does not report the server as unreachable');
+    expect(whereConversationsLive).toContain('pauses retries while signed out without dropping queued turns');
+    expect(whereConversationsLive).toContain('resumes automatically once you sign back in');
+    expect(whereConversationsLive).toContain('sidebar footer');
+    expect(whereConversationsLive).toContain('Yvoke');
+    expect(whereConversationsLive).toContain('Claude');
+    expect(whereConversationsLive).toContain('Accounts pane');
+
+    // 05_signing_in.md: explicit-click-only corporate sign-in, 3 surfaces, cancel + 5-min timeout + inline errors, dual-status footer, Accounts pane
+    expect(signingIn).toContain('Sign in to Yvoke');
+    expect(signingIn).toContain('never opens a browser automatically');
+    expect(signingIn).toContain('forced silent refresh');
+    expect(signingIn).toContain('top banner');
+    expect(signingIn).toContain('Settings → Accounts');
+    expect(signingIn).toContain('inline on a failed chat turn');
+    expect(signingIn).toContain('Cancel sign-in');
+    expect(signingIn).toContain('5 minutes');
+    expect(signingIn).toContain('inline error');
+    expect(signingIn).toContain('sidebar footer');
+    expect(signingIn).toContain('Signed in');
+    expect(signingIn).toContain('Not signed in');
+    expect(signingIn).toContain('Sign out');
+    expect(signingIn).toContain(
+      'Available in *Settings → Accounts* when signed in with a corporate account.',
+    );
+    expect(signingIn).toContain('Server unreachable');
+    expect(signingIn).toContain('suppressed while corporate sign-in is required');
+    expect(signingIn).toContain(
+      'Silent refresh clears the cached corporate account only when credentials are missing, expired, or require interactive sign-in',
+    );
+    expect(signingIn).toContain(
+      'Transient network errors or identity-provider server errors keep the cached corporate account intact rather than signing you out',
+    );
+    expect(signingIn).toContain('If signing out of Yvoke fails');
+    expect(signingIn).toContain(
+      'an inline error is shown on the Yvoke account row in *Settings → Accounts*, matching Claude sign-out',
+    );
+
+    // 06_settings_and_what_they_change.md: top-level Accounts pane, navigation behavior, focused About pane, read-only footer behavior
+    expect(settings).toContain('| **Accounts** |');
+    const paneOrder = [
+      '| **Server** |',
+      '| **Accounts** |',
+      '| **Models** |',
+      '| **Agents** |',
+      '| **Web search** |',
+      '| **Appearance** |',
+      '| **Advanced** |',
+      '| **About** |',
+    ];
+    const panePositions = paneOrder.map((row) => settings.indexOf(row));
+    expect(panePositions.every((p) => p >= 0), 'all 8 settings panes must appear in the table').toBe(true);
+    expect(panePositions).toEqual([...panePositions].sort((a, b) => a - b));
+    expect(settings).toContain('defaults to *Server*');
+    expect(settings).toContain('opens *Accounts* directly without discarding unsaved edits');
+    expect(settings).toContain('Yvoke account');
+    expect(settings).toContain('Claude account');
+    expect(settings).toContain('Check Credentials');
+    expect(settings).toContain('saved server sign-in mode');
+    expect(settings).toContain('Signing out (or losing active credentials)');
+    expect(settings).toContain('clears any displayed verification result');
+    expect(settings).toContain('Check for Updates');
+    expect(settings).toContain('Open Logs Folder');
+    expect(settings).toContain('Read-only panes (*Accounts* and *About*) show *Close*');
+    expect(settings).toContain('unsaved-changes notice with *Cancel* and *Save*');
+
+    // Negative contradiction guards across every spec chapter
+    const allChapters = chapterFiles();
+    for (const chapter of allChapters) {
+      const text = norm(chapter.content);
+      expect(text, `stale auto-popup statement in ${chapter.filename}`).not.toContain(
+        'the corporate sign-in opens automatically',
+      );
+      expect(text, `stale forced interactive statement in ${chapter.filename}`).not.toContain(
+        'with a forced interactive sign-in',
+      );
+      expect(text, `stale unreachable-when-signed-out statement in ${chapter.filename}`).not.toContain(
+        'Not being signed in is reported as "Server unreachable',
+      );
+      expect(text, `stale silent corporate sign-in error statement in ${chapter.filename}`).not.toContain(
+        'A corporate sign-in that fails or is cancelled in the browser produces no message.',
+      );
+      expect(text, `stale About pane credential verification statement in ${chapter.filename}`).not.toContain(
+        'Verifying credentials in the About pane is on-demand.',
+      );
+      expect(text, `stale Claude Code detection label in ${chapter.filename}`).not.toContain(
+        'Detected from Claude Code',
+      );
+      expect(text, `stale sidebar footer sign-out statement in ${chapter.filename}`).not.toContain(
+        'Available from the sidebar footer',
+      );
+      expect(
+        text,
+        `stale non-network silent refresh clear statement in ${chapter.filename}`,
+      ).not.toContain('for any reason other than a network error');
+    }
+    expect(signingIn).not.toContain('About pane');
+
+    // Spec-purity regex guard: zero internal code, IPC, or CSS identifiers (MSAL and 401 remain allowed)
+    const bannedCorporateAuthIdentifiers =
+      /\b(ServerAuth|ServerAuthRequiredError|ServerAuthTransientError|CancellableLoopbackClient|useServerSignIn|ServerSignInControls|serverAuthRequired|serverSignOutError|isServerAuthFailure|acquireTokenInteractive|acquireTokenSilent|waitForRedirectUri|areSettingsEqual|paneRequest|createOriginGuardedHandle|registerAuthIpc)\b|auth:cancel-signin|auth:signin|auth:signout|footer-account-btn|about-url/;
+    for (const [name, doc] of [
+      ['01_asking_questions.md', askingQuestions],
+      ['04_where_conversations_live.md', whereConversationsLive],
+      ['05_signing_in.md', signingIn],
+      ['06_settings_and_what_they_change.md', settings],
+    ] as const) {
+      expect(
+        doc,
+        `${name} must remain pure functional specification prose without corporate sign-in implementation identifiers`,
+      ).not.toMatch(bannedCorporateAuthIdentifiers);
+    }
+  });
+
+  it('documents minimalist sidebar conversation rows without model badge or multi-agent marker contradictions or implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const askingQuestions = norm(readFileSync(resolve(SPEC_DIR, '01_asking_questions.md'), 'utf8'));
+
+    expect(askingQuestions).toContain(
+      'Each sidebar conversation row shows only its title and last-activity timestamp',
+    );
+    expect(askingQuestions).toContain(
+      "The conversation's agent mode — and model in single-agent mode — remain visible in the composer once opened.",
+    );
+
+    const allChapters = chapterFiles();
+    for (const chapter of allChapters) {
+      const text = norm(chapter.content);
+      expect(text, `stale sidebar model badge statement in ${chapter.filename}`).not.toContain(
+        "The sidebar's model badge",
+      );
+      expect(text, `stale sidebar multi-agent marker statement in ${chapter.filename}`).not.toContain(
+        'multi-agent marker',
+      );
+    }
+
+    expect(
+      askingQuestions,
+      '01_asking_questions.md must remain pure functional specification prose without sidebar row implementation identifiers',
+    ).not.toMatch(
+      /\b(defaultModel|orchestratorProfile|syncState)\b|model-badge|thread-header|thread-meta|thread-snippet|sync-dot/,
+    );
   });
 });
 

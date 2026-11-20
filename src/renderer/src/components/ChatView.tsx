@@ -29,6 +29,8 @@ import {
 } from '../../../shared/types';
 import type { LiveTurn } from '../App';
 import { CitationModal, type CitationState } from './CitationModal';
+import { ClaudeSignInControls, type ClaudeSignInController } from './ClaudeSignInControls';
+import { ServerSignInControls, type ServerSignInController } from './ServerSignInControls';
 import { CopyButton } from './CopyButton';
 import { FeedbackControls } from './FeedbackControls';
 import { Markdown } from './Markdown';
@@ -230,6 +232,10 @@ export function ChatView(props: {
   prompts: McpPromptInfo[];
   profiles: OrchestratorProfile[];
   liveTurn: LiveTurn;
+  claudeSignIn: ClaudeSignInController;
+  serverSignIn: ServerSignInController;
+  signingOut?: boolean;
+  claudeSigningOut?: boolean;
   onSend: (text: string, promptName?: string, images?: ImageAttachment[]) => void;
   onInterrupt: () => void;
   onPatchThread: (update: Partial<ThreadMeta>) => void;
@@ -242,6 +248,10 @@ export function ChatView(props: {
     prompts,
     profiles,
     liveTurn,
+    claudeSignIn,
+    serverSignIn,
+    signingOut = false,
+    claudeSigningOut = false,
     onSend,
     onInterrupt,
     onPatchThread,
@@ -893,7 +903,21 @@ export function ChatView(props: {
               <span className="banner-icon">
                 <AlertIcon size={14} />
               </span>
-              {liveTurn.error}
+              <span className="banner-text">{liveTurn.error}</span>
+              {liveTurn.authRequired && (
+                <ClaudeSignInControls
+                  controller={claudeSignIn}
+                  variant="inline"
+                  disabled={serverSignIn.signingIn || claudeSigningOut || signingOut}
+                />
+              )}
+              {liveTurn.serverAuthRequired && !liveTurn.authRequired && (
+                <ServerSignInControls
+                  controller={serverSignIn}
+                  variant="inline"
+                  disabled={claudeSignIn.signingIn || signingOut || claudeSigningOut}
+                />
+              )}
             </div>
           )}
           {liveTurn.notice && <div className="banner notice">{liveTurn.notice}</div>}

@@ -289,6 +289,7 @@ export interface ThreadMeta {
 export interface ThreadsListResult {
   threads: ThreadMeta[];
   serverReachable: boolean;
+  serverAuthRequired?: boolean;
   pendingSyncCount?: number;
 }
 
@@ -633,10 +634,12 @@ export type AgentEvent =
       durationMs: number;
       isError: boolean;
       errorMessage?: string;
+      authRequired?: boolean;
+      serverAuthRequired?: boolean;
       /** The turn ended because the user pressed Stop, not because of a failure. */
       aborted?: boolean;
     }
-  | { kind: 'error'; threadId: string; message: string; authRequired?: boolean }
+  | { kind: 'error'; threadId: string; message: string; authRequired?: boolean; serverAuthRequired?: boolean }
   | { kind: 'mcp-status'; threadId: string; servers: { name: string; status: string }[] }
   | { kind: 'clarifying-question'; threadId: string; toolUseId: string; question: string; options?: ClarificationOption[] }
   | { kind: 'subagent-start'; threadId: string; toolUseId: string; subagentType: string; question: string }
@@ -679,6 +682,24 @@ export interface AuthStatus {
   claudeAccount?: string;
   server: { mode: 'dev' | 'entra'; signedIn: boolean; account?: string };
 }
+
+export type ClaudeSignInResult =
+  | { status: 'signed_in'; account?: string }
+  | { status: 'cancelled' }
+  | { status: 'error'; message: string };
+
+export type ClaudeSignOutResult =
+  | { status: 'signed_out' }
+  | { status: 'error'; message: string };
+
+export type ServerSignInResult =
+  | { status: 'signed_in'; account?: string }
+  | { status: 'cancelled' }
+  | { status: 'error'; message: string };
+
+export type ClaudeCodeSubmitResult =
+  | { accepted: true }
+  | { accepted: false; message: string };
 
 export type AuthVerificationFailureReason =
   | 'expired'

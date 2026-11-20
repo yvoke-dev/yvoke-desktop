@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SyncEvent } from '../../shared/types';
-import { isAttributedError, sanitizeLogContent, tagAttributedError } from '../../shared/error';
+import {
+  isAttributedError,
+  sanitizeLogContent,
+  tagAttributedError,
+} from '../../shared/error';
+import { isServerAuthFailure } from '../auth/ServerAuth';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -33,6 +38,8 @@ export interface SyncQueueDeps {
   /** Backoff schedule in ms; index = attempts (capped at last entry). */
   backoffMs?: number[];
   setTimeoutFn?: typeof setTimeout;
+  /** Whether the app is currently using corporate Entra auth mode (defaults to true). */
+  isEntraMode?: () => boolean;
 }
 
 const DEFAULT_BACKOFF = [2_000, 5_000, 15_000, 30_000, 60_000];
@@ -486,6 +493,24 @@ export class SyncQueue {
             dropped: true,
           });
           continue;
+        }
+
+        const isEntra = this.deps.isEntraMode ? this.deps.isEntraMode() : true;
+        if (isServerAuthFailure(error, isEntra)) {
+          // Pause retries until explicit serverSignIn() or settings update nudges flush().
+          if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+          }
+          this.persist();
+          this.deps.emit({
+            kind: 'sync-state',
+            threadId: turn.threadId,
+            state: 'error',
+            pendingCount: this.reportedPendingCount(),
+            detail,
+          });
+          return 'backoff';
         }
 
         turn.attempts += 1;

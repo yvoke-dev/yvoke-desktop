@@ -1109,14 +1109,20 @@ describe('Image Attachments & Vision Support', () => {
   describe('AgentService Image Content Block Formation', () => {
     it('pushes image blocks ahead of text to Claude SDK queue', async () => {
       const pushedMessages: any[] = [];
+      let resolveNext: ((r: IteratorResult<unknown>) => void) | null = null;
       const fakeQuery = {
         [Symbol.asyncIterator]: () => ({
-          next: () => Promise.resolve({ value: undefined, done: true }),
+          next: () =>
+            new Promise<IteratorResult<unknown>>((resolve) => {
+              resolveNext = resolve;
+            }),
         }),
         setModel: vi.fn(),
         setMaxThinkingTokens: vi.fn(),
         interrupt: vi.fn(),
-        close: vi.fn(),
+        close: vi.fn(() => {
+          resolveNext?.({ value: undefined, done: true });
+        }),
         setMcpServers: vi.fn().mockResolvedValue({ added: [], removed: [], errors: {} }),
       };
 
@@ -1205,18 +1211,25 @@ describe('Image Attachments & Vision Support', () => {
           text: 'What is in this image?',
         },
       ]);
+      agent.closeAll();
     });
 
     it('omits text block when image message text is empty or whitespace', async () => {
       const pushedMessages: any[] = [];
+      let resolveNext: ((r: IteratorResult<unknown>) => void) | null = null;
       const fakeQuery = {
         [Symbol.asyncIterator]: () => ({
-          next: () => Promise.resolve({ value: undefined, done: true }),
+          next: () =>
+            new Promise<IteratorResult<unknown>>((resolve) => {
+              resolveNext = resolve;
+            }),
         }),
         setModel: vi.fn(),
         setMaxThinkingTokens: vi.fn(),
         interrupt: vi.fn(),
-        close: vi.fn(),
+        close: vi.fn(() => {
+          resolveNext?.({ value: undefined, done: true });
+        }),
         setMcpServers: vi.fn().mockResolvedValue({ added: [], removed: [], errors: {} }),
       };
 
@@ -1296,6 +1309,7 @@ describe('Image Attachments & Vision Support', () => {
           },
         },
       ]);
+      agent.closeAll();
     });
   });
 });

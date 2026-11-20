@@ -3102,7 +3102,8 @@ describe('Startup Conversation & Message Sync Recovery', () => {
       expect(settledBeforeScan).toBe(true);
 
       const offlineRes = await offlinePromise;
-      expect(offlineRes.serverReachable).toBe(false);
+      expect(offlineRes.serverReachable).toBe(true);
+      expect(offlineRes.serverAuthRequired).toBe(true);
       expect(offlineRes.pendingSyncCount).toBe(1); // Pre-scan cached sync-queue.json count
       expect(offlineRes.threads).toEqual([]); // Neither orphan was in index.json before scan
 

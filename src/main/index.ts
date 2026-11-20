@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
-import type { IpcMainInvokeEvent } from 'electron';
 import { IpcChannels } from '../shared/ipc';
 import { assertValidThreadId, DEFAULT_APPEARANCE } from '../shared/types';
 import type {
+  AppSettings,
+  CitationRef,
   FeedbackRequest,
   PlaybookValidationRequest,
   SendMessageRequest,
@@ -13,7 +14,10 @@ import type {
   ThreadMeta,
 } from '../shared/types';
 import { AppCore } from './AppCore';
+import { sandboxDirFor } from './agent/AgentService';
+import { ClaudeAuthManager } from './agent/ClaudeAuth';
 import { fileTokenCache } from './auth/ServerAuth';
+import { createOriginGuardedHandle, registerAuthIpc } from './ipcOrigin';
 import { closeFileLogging, initFileLogging, log, logError, packageVersion } from './log';
 import { createBeforeQuitHandler } from './lifecycle';
 import { UpdateService } from './UpdateService';
@@ -198,28 +202,11 @@ function send(channel: string, payload: unknown): void {
 // content.
 function registerIpc(appCore: AppCore, userDataDir: string): void {
   const origin = appOrigin();
-  const handle = (
-    channel: string,
-    fn: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-  ): void => {
-    ipcMain.handle(channel, (event, ...args) => {
-      let senderOrigin = '';
-      try {
-        senderOrigin = new URL(event.senderFrame?.url ?? '').origin;
-      } catch {
-        senderOrigin = '';
-      }
-      if (senderOrigin !== origin) {
-        throw new Error(`IPC ${channel} rejected: untrusted sender origin`);
-      }
-      return fn(event, ...args);
-    });
-  };
+  const handle = createOriginGuardedHandle(ipcMain, origin);
 
   handle(IpcChannels.settingsGet, () => appCore.settings.get());
-  handle(IpcChannels.settingsSet, (_e, update) => {
-    const next = appCore.settings.set(update);
-    appCore.mcpPrompts.reset(); // server URL / auth may have changed
+  handle(IpcChannels.settingsSet, (_e, update: Partial<AppSettings>) => {
+    const next = appCore.updateSettings(update);
     applyTheme(next.appearance?.theme ?? DEFAULT_APPEARANCE.theme);
     syncWindowChrome();
     return next;
@@ -235,7 +222,7 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
   handle(IpcChannels.playbookValidate, (_e, request: PlaybookValidationRequest) =>
     appCore.validatePlaybook(request),
   );
-  handle(IpcChannels.citationGet, (_e, ref) => appCore.getCitation(ref));
+  handle(IpcChannels.citationGet, (_e, ref: CitationRef) => appCore.getCitation(ref));
 
   const requireThreadId = (value: unknown): string => {
     assertValidThreadId(value);
@@ -274,9 +261,11 @@ function registerIpc(appCore: AppCore, userDataDir: string): void {
     return appCore.submitFeedback(request);
   });
 
-  handle(IpcChannels.authStatus, () => appCore.authStatus());
-  handle(IpcChannels.authSignin, () => appCore.serverAuth.signIn());
-  handle(IpcChannels.authSignout, () => appCore.serverAuth.signOut());
+  registerAuthIpc({
+    handle,
+    appCore,
+    writeClipboardText: (text) => clipboard.writeText(text),
+  });
   handle(IpcChannels.authVerify, () => appCore.verifyAuth());
   handle(IpcChannels.logsOpenFolder, async () => {
     const logsDir = path.join(userDataDir, 'logs');
@@ -335,6 +324,7 @@ if (!gotLock) {
         `mcp-sdk ${packageVersion('@modelcontextprotocol/sdk/client/index.js')} | ` +
         `debug=${!!process.env.ELECTRON_RENDERER_URL || process.env.CLAUDE_DEBUG === '1'} | userData=${userDataDir} | encryptedStore=${canEncrypt}`,
     );
+    const claudeAuth = new ClaudeAuthManager({ sandboxDir: sandboxDirFor(userDataDir) });
     core = new AppCore({
       userDataDir,
       appVersion: app.getVersion(),
@@ -348,6 +338,7 @@ if (!gotLock) {
             (cipher) => safeStorage.decryptString(cipher),
           )
         : null,
+      claudeAuth,
     });
     registerIpc(core, userDataDir);
     // Resolve the theme BEFORE the window is constructed so its backgroundColor is already

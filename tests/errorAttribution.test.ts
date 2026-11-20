@@ -5,6 +5,7 @@ import {
   sanitizeLogContent,
   hasErrorSourcePrefix,
   isAttributedError,
+  isNetworkError,
   isNotFoundError,
   type ErrorSource,
 } from '../src/shared/error';
@@ -222,6 +223,29 @@ describe('errorAttribution', () => {
       expect(sanitizeLogContent(null as unknown as string)).toBe('');
       expect(sanitizeLogContent(undefined as unknown as string)).toBe('');
     });
+
+    it('redacts back-to-back OAuth query and fragment parameters while preserving diagnostic key=value pairs', () => {
+      const oauthLine =
+        'Redirect https://claude.ai/oauth/authorize?response_type=code&code=AUTH_CODE_1&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE&code_verifier=SECRET_VERIFIER#code=FRAG_CODE&state=FRAG_STATE&access_token=ACC_TOK&refresh_token=REF_TOK&id_token=ID_TOK failed: code=ENOENT state=pending syncState=error';
+      const sanitized = sanitizeLogContent(oauthLine);
+
+      expect(sanitized).toBe(
+        'Redirect https://claude.ai/oauth/authorize?response_type=code&code=[REDACTED]&state=[REDACTED]&code_challenge=[REDACTED]&code_verifier=[REDACTED]#code=[REDACTED]&state=[REDACTED]&access_token=[REDACTED]&refresh_token=[REDACTED]&id_token=[REDACTED] failed: code=ENOENT state=pending syncState=error',
+      );
+      expect(sanitized).not.toContain('AUTH_CODE_1');
+      expect(sanitized).not.toContain('SECRET_NONCE');
+      expect(sanitized).not.toContain('SECRET_CHALLENGE');
+      expect(sanitized).not.toContain('SECRET_VERIFIER');
+      expect(sanitized).not.toContain('FRAG_CODE');
+      expect(sanitized).not.toContain('FRAG_STATE');
+      expect(sanitized).not.toContain('ACC_TOK');
+      expect(sanitized).not.toContain('REF_TOK');
+      expect(sanitized).not.toContain('ID_TOK');
+      expect(sanitized).toContain('response_type=code');
+      expect(sanitized).toContain('code=ENOENT');
+      expect(sanitized).toContain('state=pending');
+      expect(sanitized).toContain('syncState=error');
+    });
   });
 
   describe('isNotFoundError', () => {
@@ -253,6 +277,69 @@ describe('errorAttribution', () => {
     it('returns false for null or undefined', () => {
       expect(isNotFoundError(null)).toBe(false);
       expect(isNotFoundError(undefined)).toBe(false);
+    });
+  });
+
+  describe('isNetworkError', () => {
+    it('detects syscall codes directly, in cause chains, and in messages', () => {
+      const codes = [
+        'ECONNREFUSED',
+        'ENOTFOUND',
+        'ETIMEDOUT',
+        'EAI_AGAIN',
+        'ECONNRESET',
+        'EPIPE',
+        'ECONNABORTED',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT',
+      ];
+      for (const code of codes) {
+        expect(isNetworkError(Object.assign(new Error('boom'), { code }))).toBe(true);
+        expect(
+          isNetworkError(new Error('outer', { cause: Object.assign(new Error('inner'), { code }) })),
+        ).toBe(true);
+        expect(isNetworkError(new Error(`request failed with ${code}`))).toBe(true);
+      }
+    });
+
+    it('detects MSAL network errorCode values, AbortError, fetch failed, and request timeout', () => {
+      for (const errorCode of ['network_error', 'no_network_connectivity', 'endpoints_resolution_error']) {
+        expect(isNetworkError(Object.assign(new Error('msal'), { errorCode }))).toBe(true);
+        expect(
+          isNetworkError(
+            new Error('Entra: wrapped', { cause: Object.assign(new Error('inner'), { errorCode }) }),
+          ),
+        ).toBe(true);
+        expect(isNetworkError(new Error(`Entra: ${errorCode}: offline`))).toBe(true);
+      }
+
+      const abortErr = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+      expect(isNetworkError(abortErr)).toBe(true);
+      expect(isNetworkError(new Error('wrapped', { cause: abortErr }))).toBe(true);
+
+      expect(isNetworkError(new Error('fetch failed'))).toBe(true);
+      expect(isNetworkError(new Error('Request timeout while contacting IdP'))).toBe(true);
+    });
+
+    it('returns false for null, undefined, auth/grant errors, and HTTP status errors', () => {
+      expect(isNetworkError(null)).toBe(false);
+      expect(isNetworkError(undefined)).toBe(false);
+      expect(
+        isNetworkError(
+          Object.assign(new Error('InteractionRequiredAuthError: login_required'), {
+            name: 'InteractionRequiredAuthError',
+            errorCode: 'interaction_required',
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isNetworkError(Object.assign(new Error('invalid_grant'), { errorCode: 'invalid_grant' })),
+      ).toBe(false);
+      expect(isNetworkError({ status: 400, message: 'Bad Request' })).toBe(false);
+      expect(isNetworkError({ status: 401, message: 'Unauthorized' })).toBe(false);
+      expect(isNetworkError({ status: 500, message: 'Internal Server Error' })).toBe(false);
+      expect(isNetworkError(new Error('invalid_request'))).toBe(false);
     });
   });
 });
