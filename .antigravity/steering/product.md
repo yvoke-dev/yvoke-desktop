@@ -8,7 +8,7 @@ Yvoke - Desktop is a desktop chat client for Yvoke. The agent loop runs locally 
 - **Preload IPC Wiring**: Electron renderer and main processes communicate securely using a preload script that exposes specific channels using `contextBridge`.
 - **Authentication**:
   - **Claude (Subscription)**: Billed to the user's Anthropic Pro/Max subscription. The app supports in-app browser sign-in via the bundled Claude Code binary (including an alternate-browser link/code fallback) alongside ambient Claude Code credential pickup, and strips `ANTHROPIC_API_KEY` for billing safety.
-  - **Server (Entra ID)**: Connects to the knowledge-base corpus and conversation storage. Bypassed in dev mode (`APP_SECURITY_MOCK=true`) using a static developer token, or uses browser-based corporate Microsoft Entra ID login (MSAL PKCE) in production.
+  - **Server (Entra ID)**: Connects to the knowledge-base corpus and conversation storage. Bypassed in dev mode (`APP_SECURITY_MOCK=true`) using a static developer token, or uses explicit-click browser-based corporate Microsoft Entra ID login (MSAL PKCE) in production — never auto-opening a browser on startup, background sync, polling, or turn failures, with cancellable sign-in controls across the top banner, **Settings → Accounts**, and inline chat turn errors.
 - **Conversation Sync**:
   - Conversations are backed up on the Spring Boot Postgres database.
   - Local `userData` directory holds local thread metadata/history cache, sync queue files, and SDK session states to support session resume and offline capabilities.

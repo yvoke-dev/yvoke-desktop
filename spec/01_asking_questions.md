@@ -104,6 +104,11 @@ behind it, and the work that produced it can be opened and read.
   conversation error in the strip above the transcript is caused by missing or expired Claude sign-in, an
   inline *Sign in to Claude* control appears inside that error banner. Completing sign-in clears the error
   and displays a notice inviting you to send your question again.
+- **A turn that fails because of missing or expired corporate sign-in offers recovery inline.** When a
+  conversation error in the strip above the transcript is caused by missing or expired corporate sign-in
+  (Entra ID), the app fails the turn without launching a browser automatically and displays an inline
+  *Sign in to Yvoke* control inside that error banner. Completing sign-in clears the error, refreshes
+  server state, and displays a notice inviting you to send your question again.
 - **The playbook check never blocks a question.** It fails open at every step: switched off, no
   server, a timeout, an unparseable reply, a suggestion naming a playbook that does not exist — all of
   them send the message as selected. It is an assist, not a gate.

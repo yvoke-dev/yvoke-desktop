@@ -11,7 +11,7 @@ or lose the network mid-conversation.
 | Capability | What happens |
 | --- | --- |
 | **Keep every conversation in the account** | Creating, changing settings and deleting all happen on the server; the local copy follows. Conversations appear in the web app's sidebar marked as coming from the desktop. |
-| **Read old conversations offline** | Everything opened on this machine is cached, so the sidebar and the transcripts still work with no network. A banner says the server is unreachable. |
+| **Read old conversations offline** | Everything opened on this machine is cached, so the sidebar and the transcripts still work with no network or while signed out. A banner says the server is unreachable when the server cannot be reached, whereas missing or expired corporate sign-in shows the corporate sign-in prompt instead. |
 | **Pick a conversation up on another machine** | Opening a conversation with no local copy pulls its messages back from the server and caches them. |
 | **Keep asking while sync is down** | A finished turn is written locally and queued. The queue survives restarts and resumes automatically at startup; a banner counts all waiting turns across every conversation. |
 | **Search what was said, locally** | The sidebar's search runs entirely against the local index; no query and no text ever leaves the machine. |
@@ -52,7 +52,13 @@ or lose the network mid-conversation.
   conversation), that turn is dropped from the active queue for the rest of the session and surfaces a
   sticky dismissible error banner so other turns can continue; because the turn stays in the local
   message log as unsaved on the server, the next app launch attempts it once more. An expired sign-in
-  token instead triggers one silent re-authentication and retry.
+  token instead triggers one forced silent refresh and retry; if interactive sign-in is required, sync
+  pauses without dropping the turn until you sign in again.
+- **Being signed out of the corporate server does not report the server as unreachable, and background sync pauses until you sign back in.**
+  When corporate sign-in is missing or expired, the app suppresses the *Server unreachable* banner and
+  prompts you to sign in instead; the sidebar footer shows both Yvoke and Claude status and opens the
+  Accounts pane when clicked. Background sync pauses retries while signed out without dropping queued
+  turns — keeping the waiting-turn count visible — and resumes automatically once you sign back in.
 - **Durable index and queue files are written atomically, preserved on corruption, and rebuilt from message logs.**
   A corrupt conversation index or sync queue is renamed aside as a `.corrupt` backup rather than
   overwritten (or salvaged item by item when partially readable), a conversation whose message log
@@ -81,10 +87,12 @@ or lose the network mid-conversation.
 - **Search is incremental.** At startup only the logs whose size or timestamp changed are re-read, a
   turn written while the app runs is folded in immediately, and a search typed during startup answers
   from the previous session's index rather than coming back empty.
-- **An empty playbook catalogue keeps retrying in the background.** While the server is unreachable or
-  the playbook catalogue is still empty (for example, if the knowledge-base connection timed out at
-  startup while the conversation list succeeded), the app continues retrying every 10 seconds in the
-  background and reloads the playbook and multi-agent profile catalogues as soon as the server responds.
+- **An empty playbook catalogue keeps retrying in the background while signed in.** While the server is
+  unreachable or the playbook catalogue is still empty (for example, if the knowledge-base connection
+  timed out at startup while the conversation list succeeded), the app continues retrying every 10 seconds
+  in the background — without opening a browser sign-in prompt — and pauses polling while corporate
+  sign-in is required, reloading the playbook and multi-agent profile catalogues as soon as the server
+  responds after sign-in.
 
 ## Limits
 

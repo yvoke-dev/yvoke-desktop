@@ -87,6 +87,7 @@ yvoke-desktop/
 │   │       │   ├── ClaudeSignInControls.tsx
 │   │       │   ├── FeedbackControls.tsx
 │   │       │   ├── Markdown.tsx
+│   │       │   ├── ServerSignInControls.tsx
 │   │       │   ├── SettingsView.tsx
 │   │       │   ├── StatusBanners.tsx
 │   │       │   ├── SubagentCard.tsx

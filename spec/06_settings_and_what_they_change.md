@@ -10,12 +10,13 @@ configuration: whatever ships as the build's defaults, the user can change.
 | Pane | What it sets |
 | --- | --- |
 | **Server** | The server address, which knowledge-base transport to use, and whether the server sign-in is corporate or a development token. |
+| **Accounts** | Yvoke account and Claude account sign-in status, *Sign in to Yvoke*, *Sign out* (Yvoke only), *Sign in to Claude*, and on-demand credential verification checkmarks via *Check Credentials*. |
 | **Models** | Which models the composer offers (rendered with friendly generation labels such as *Sonnet 5.5*), which one new conversations start on, the default thinking level, and the ceiling on how many times the assistant may act per question. |
 | **Agents** | Whether a playbook-carrying message is preflighted; which playbooks are excluded from validation by deployment configuration; whether to show prototype playbooks and prototype multi-agent profiles in their pickers; and for multi-agent mode, the model and thinking level per role, the revision-round and specialist-call budgets, and the per-agent turn ceilings. It also shows the worst-case number of model calls one turn can make. |
 | **Web search** | Whether the assistant may search the web and fetch pages at all, and the exact list of domains it may access. |
 | **Appearance** | Theme, interface density, answer text size, and whether a finished answer's trace starts open. |
 | **Advanced** | The corporate identity registration — tenant, client and scope. Replaced by a note when the server sign-in is set to the development token. |
-| **About** | Version, on-demand update check, server address, both sign-in states, and on-demand credential verification checkmarks. |
+| **About** | Version, on-demand update check, server address, and opening the diagnostic logs folder. |
 
 ## How it behaves
 
@@ -48,14 +49,28 @@ configuration: whatever ships as the build's defaults, the user can change.
   the window is open — including a scheduled evening switch — and takes the native window frame with
   it.
 - **Reduced motion follows the system**, with no control of its own.
-- **Verifying credentials in the About pane is on-demand.** Clicking *Check Credentials* tests whether the corporate or development token is accepted and whether the Claude credentials generate a live reply. It runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
-- **Missing or expired Claude credentials can be fixed inline from the About pane.** Whenever the About
+- **Opening Settings from the gear defaults to *Server*, while clicking the sidebar footer opens *Accounts* directly.**
+  When Settings is already open, clicking the sidebar footer opens *Accounts* directly without discarding
+  unsaved edits in other panes.
+- **The *Accounts* pane reflects the saved server sign-in mode, not unsaved edits.** It displays the
+  *Yvoke account* row, the *Claude account* row, and the on-demand *Check Credentials* button against the
+  active saved configuration, even if you have edited the sign-in mode on the *Server* pane without saving.
+- **Verifying credentials in the Accounts pane is on-demand.** Clicking *Check Credentials* tests whether the
+  corporate or development token is accepted and whether the Claude credentials generate a live reply. It
+  runs in the background without modifying settings on disk or interrupting ongoing chat conversations.
+- **Missing or expired credentials can be fixed inline from the Accounts pane.** Whenever the Accounts
   pane shows missing Claude credentials — or *Check Credentials* reports them as missing or expired — an
-  inline *Sign in to Claude* control appears directly on the *Claude account* row. Completing sign-in
-  clears the stale failure state and, if a verification result was already shown, automatically
-  re-verifies credentials so the checkmark updates in place.
-- **A verification result describes the settings as they were saved.** Editing the server address, the sign-in mode or the default model clears the result rather than relabelling it, so a checkmark never appears beside a configuration that was not the one tested.
+  inline *Sign in to Claude* control appears directly on the *Claude account* row. Likewise, when signed
+  out or expired in corporate mode, *Sign in to Yvoke* appears directly on the *Yvoke account* row (and
+  *Sign out* appears when signed in). Completing sign-in clears the stale failure state and, if a
+  verification result was already shown, automatically re-verifies credentials so the checkmark updates
+  in place.
+- **A verification result describes the settings as they were saved.** Signing out (or losing active credentials), as well as editing the server address, the sign-in mode, or the default model, clears any displayed verification result rather than relabelling it, so a checkmark never appears beside a signed-out account or an untested configuration.
+- **The *About* pane focuses on build version, *Check for Updates*, the server address, and *Open Logs Folder*.**
 - **Checking for updates in the About pane is on-demand.** Clicking *Check for Updates* queries GitHub releases via IPC through the main process. If the build is up to date, an indicator appears in green; if a newer version exists, the latest version tag appears in orange with a link to the release on GitHub. Network failures and rate limits are surfaced inline without interrupting settings navigation or ongoing chat turns.
+- **Read-only panes (*Accounts* and *About*) show *Close* when no settings have been edited.** When edits
+  exist on other panes, their footer switches to an unsaved-changes notice with *Cancel* and *Save* so
+  pending edits are never obscured while checking accounts or build details.
 
 ## Limits
 
@@ -80,8 +95,11 @@ configuration: whatever ships as the build's defaults, the user can change.
   the runtime drops the value instead of honouring it.
 - **The specialist-call budget is not enforced** — see chapter 3. It reaches the lead as an instruction,
   not a limit.
-- **Edits are discarded without warning.** Clicking the settings button a second time, or any
-  conversation in the sidebar, throws away every pending change across every pane with no prompt.
+- **Closing Settings discards edits without a confirmation prompt.** Switching to *Accounts* from the
+  sidebar footer while Settings is open keeps pending edits intact (and surfaces an unsaved-changes notice
+  in the footer), whereas clicking *Cancel*, clicking the settings gear button a second time, or selecting
+  any conversation in the sidebar discards every pending change across every pane with no confirmation
+  dialog.
 - **Nothing here can be locked down.** There is no managed-policy channel, no read-only setting and no
   way for IT to pin the server address, forbid the development token, or fix the model list.
 - **There is no reset, no export and no import.** A settings file gone wrong is repaired by editing it
@@ -99,5 +117,5 @@ configuration: whatever ships as the build's defaults, the user can change.
 - Any setting that changes what the assistant *knows*. Knowledge areas, versions, playbooks and
   profiles are all server-side.
 - Turning off local caching, or choosing where it lives.
-- An unsaved-changes prompt.
+- An unsaved-changes confirmation dialog before leaving Settings.
 
