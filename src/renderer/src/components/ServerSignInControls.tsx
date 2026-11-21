@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React from 'react';
+import { useBrowserSignInFlow } from './useBrowserSignInFlow';
 
 export interface ServerSignInController {
   signingIn: boolean;
@@ -14,166 +15,32 @@ export interface UseServerSignInOptions {
   onSignedIn?: (account?: string) => void | Promise<void>;
 }
 
-function formatSignInError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  const trimmed = message.trim();
-  return trimmed.length > 0 ? trimmed : 'Sign-in failed. Please try again.';
-}
-
 export function useServerSignIn(options?: UseServerSignInOptions): ServerSignInController {
-  const [signingIn, setSigningIn] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [successCount, setSuccessCount] = useState(0);
-
-  const mountedRef = useRef(true);
-  const onSignedInRef = useRef(options?.onSignedIn);
-  onSignedInRef.current = options?.onSignedIn;
-
-  const attemptIdRef = useRef(0);
-  const signingInRef = useRef(false);
-  const cancellingRef = useRef(false);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const clearError = useCallback(() => {
-    setError(null);
-  }, []);
-
-  const startSignIn = useCallback(async () => {
-    if (signingInRef.current) return;
-    const attemptId = ++attemptIdRef.current;
-    signingInRef.current = true;
-    cancellingRef.current = false;
-
-    setSigningIn(true);
-    setCancelling(false);
-    setError(null);
-
-    try {
-      const result = await window.api.serverSignIn();
-      if (!mountedRef.current) {
-        signingInRef.current = false;
-        cancellingRef.current = false;
-        return;
-      }
-      if (attemptIdRef.current !== attemptId) return;
-
-      attemptIdRef.current += 1;
-      signingInRef.current = false;
-      cancellingRef.current = false;
-
-      if (result.status === 'signed_in') {
-        setSigningIn(false);
-        setCancelling(false);
-        setError(null);
-        setSuccessCount((c) => c + 1);
-        try {
-          const maybePromise = onSignedInRef.current?.(result.account);
-          if (maybePromise && typeof (maybePromise as Promise<unknown>).catch === 'function') {
-            void (maybePromise as Promise<unknown>).catch(() => undefined);
-          }
-        } catch {
-          // Keep sign-in state clean if callback throws synchronously.
-        }
-      } else if (result.status === 'cancelled') {
-        setSigningIn(false);
-        setCancelling(false);
-        setError(null);
-      } else {
-        setSigningIn(false);
-        setCancelling(false);
-        setError(result.message);
-      }
-    } catch (err) {
-      if (!mountedRef.current) {
-        signingInRef.current = false;
-        cancellingRef.current = false;
-        return;
-      }
-      if (attemptIdRef.current !== attemptId) return;
-
-      attemptIdRef.current += 1;
-      signingInRef.current = false;
-      cancellingRef.current = false;
-      setSigningIn(false);
-      setCancelling(false);
-      setError(formatSignInError(err));
-    }
-  }, []);
-
-  const cancelSignIn = useCallback(async () => {
-    if (!signingInRef.current || cancellingRef.current) return;
-    const cancelAttemptId = attemptIdRef.current;
-    cancellingRef.current = true;
-    setCancelling(true);
-
-    try {
-      const cancelled = await window.api.cancelServerSignIn();
-      if (!mountedRef.current) {
-        cancellingRef.current = false;
-        return;
-      }
-      cancellingRef.current = false;
-      if (attemptIdRef.current !== cancelAttemptId) {
-        setCancelling(false);
-        return;
-      }
-
-      signingInRef.current = false;
-
-      if (cancelled) {
-        attemptIdRef.current += 1;
-        setCancelling(false);
-        setSigningIn(false);
-        setError(null);
-      } else {
-        // Session already settled in main — reconcile busy flags without invalidating an
-        // about-to-land startSignIn resolution or wiping an error it sets.
-        setCancelling(false);
-        setSigningIn(false);
-      }
-    } catch (err) {
-      if (!mountedRef.current) {
-        cancellingRef.current = false;
-        return;
-      }
-      cancellingRef.current = false;
-      if (attemptIdRef.current !== cancelAttemptId) {
-        setCancelling(false);
-        return;
-      }
-      setCancelling(false);
-      setError(formatSignInError(err));
-    }
-  }, []);
+  const flow = useBrowserSignInFlow({
+    start: () => window.api.serverSignIn(),
+    cancel: () => window.api.cancelServerSignIn(),
+    onSignedIn: options?.onSignedIn,
+  });
 
   return {
-    signingIn,
-    cancelling,
-    error,
-    successCount,
-    startSignIn,
-    cancelSignIn,
-    clearError,
+    signingIn: flow.signingIn,
+    cancelling: flow.cancelling,
+    error: flow.error,
+    successCount: flow.successCount,
+    startSignIn: flow.startSignIn,
+    cancelSignIn: flow.cancelSignIn,
+    clearError: flow.clearError,
   };
 }
 
 export interface ServerSignInControlsProps {
-  controller?: ServerSignInController;
+  controller: ServerSignInController;
   variant?: 'banner' | 'settings' | 'inline';
   disabled?: boolean;
 }
 
 export function ServerSignInControls(props: ServerSignInControlsProps): React.JSX.Element {
-  const { variant = 'inline', disabled = false } = props;
-  const fallbackController = useServerSignIn();
-  const ctrl = props.controller ?? fallbackController;
+  const { controller: ctrl, variant = 'inline', disabled = false } = props;
 
   const idleButtonClass =
     variant === 'banner'

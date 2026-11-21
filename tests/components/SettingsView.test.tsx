@@ -494,7 +494,6 @@ describe('SettingsView', () => {
         });
       const serverSignIn = vi.fn().mockResolvedValue({ status: 'signed_in', account: 'signed-in@corp.com' });
       const cancelServerSignIn = vi.fn().mockResolvedValue(true);
-      const onAuthChange = vi.fn();
       (window as unknown as { api: unknown }).api = { verifyAuth, serverSignIn, cancelServerSignIn };
 
       function EntraSignInHarness(): React.JSX.Element {
@@ -505,7 +504,6 @@ describe('SettingsView', () => {
             auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
             claudeSignIn={makeClaudeSignInStub()}
             serverSignIn={ctrl}
-            onAuthChange={onAuthChange}
             onSave={vi.fn()}
             onClose={vi.fn()}
           />
@@ -535,12 +533,13 @@ describe('SettingsView', () => {
       expect(signInBtn).toBeTruthy();
       expect(signInBtn.className).toContain('cred-inline-btn');
 
-      // Click inline sign in
+      // Click inline sign in -> re-verifies active verification result automatically
       fireEvent.click(signInBtn);
 
       await waitFor(() => {
         expect(serverSignIn).toHaveBeenCalledTimes(1);
-        expect(onAuthChange).toHaveBeenCalledTimes(1);
+        expect(verifyAuth).toHaveBeenCalledTimes(2);
+        expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
       });
     });
 
@@ -1076,7 +1075,7 @@ describe('SettingsView', () => {
       expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it('prevSuccessCountRef guard: calls verifyAuth and onAuthChange 0 times on mount when successCount >= 1, 0 verifyAuth calls when verification is null, and 1 verifyAuth call when verification is non-null', async () => {
+    it('prevSuccessCountRef guard: calls verifyAuth 0 times on mount when successCount >= 1, 0 verifyAuth calls when verification is null, and 1 verifyAuth call when verification is non-null', async () => {
       const verifyAuth = vi
         .fn()
         .mockResolvedValueOnce({
@@ -1088,35 +1087,30 @@ describe('SettingsView', () => {
           claude: { status: 'ok', account: 'fresh@corp.com' },
         });
       (window as unknown as { api: unknown }).api = { verifyAuth };
-      const onAuthChange = vi.fn();
 
-      // 1. Mount when successCount is ALREADY 2 -> 0 verifyAuth calls and 0 onAuthChange calls!
+      // 1. Mount when successCount is ALREADY 2 -> 0 verifyAuth calls!
       const { rerender } = render(
         <SettingsView
           settings={settings}
           auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
           claudeSignIn={makeClaudeController({ successCount: 2 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
       openPane('Accounts');
       expect(verifyAuth).toHaveBeenCalledTimes(0);
-      expect(onAuthChange).toHaveBeenCalledTimes(0);
 
-      // 2. Increment successCount (2 -> 3) while mounted with verification === null -> calls onAuthChange 1x, verifyAuth 0x
+      // 2. Increment successCount (2 -> 3) while mounted with verification === null -> verifyAuth 0x
       rerender(
         <SettingsView
           settings={settings}
           auth={{ claude: 'ok', claudeAccount: 'fresh@corp.com', server: { mode: 'dev', signedIn: true } }}
           claudeSignIn={makeClaudeController({ successCount: 3 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      expect(onAuthChange).toHaveBeenCalledTimes(1);
       expect(verifyAuth).toHaveBeenCalledTimes(0);
 
       // 3. Run Check Credentials so verification !== null (shows 'Claude expired')
@@ -1124,18 +1118,16 @@ describe('SettingsView', () => {
       await waitFor(() => expect(screen.getByText(/Claude expired/)).toBeTruthy());
       expect(verifyAuth).toHaveBeenCalledTimes(1);
 
-      // 4. Increment successCount (3 -> 4) while mounted with verification !== null -> clears stale badge, calls onAuthChange (+1) & verifyAuth (+1)
+      // 4. Increment successCount (3 -> 4) while mounted with verification !== null -> clears stale badge & calls verifyAuth (+1)
       rerender(
         <SettingsView
           settings={settings}
           auth={{ claude: 'ok', claudeAccount: 'fresh@corp.com', server: { mode: 'dev', signedIn: true } }}
           claudeSignIn={makeClaudeController({ successCount: 4 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      expect(onAuthChange).toHaveBeenCalledTimes(2);
       await waitFor(() => {
         expect(verifyAuth).toHaveBeenCalledTimes(2);
         expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
@@ -1419,21 +1411,18 @@ describe('SettingsView', () => {
           claude: { status: 'ok', account: 'claude@corp.com' },
         });
       (window as unknown as { api: unknown }).api = { verifyAuth };
-      const onAuthChange = vi.fn();
 
       const { rerender } = render(
         <SettingsView
           settings={settings}
           auth={{ claude: 'ok', server: { mode: 'entra', signedIn: false } }}
           serverSignIn={makeServerController({ successCount: 2 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
       openPane('Accounts');
       expect(verifyAuth).toHaveBeenCalledTimes(0);
-      expect(onAuthChange).toHaveBeenCalledTimes(0);
 
       // Increment successCount while verification === null -> 0 verifyAuth calls
       rerender(
@@ -1441,12 +1430,10 @@ describe('SettingsView', () => {
           settings={settings}
           auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
           serverSignIn={makeServerController({ successCount: 3 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      expect(onAuthChange).toHaveBeenCalledTimes(1);
       expect(verifyAuth).toHaveBeenCalledTimes(0);
 
       // Verify once so verification !== null
@@ -1460,7 +1447,6 @@ describe('SettingsView', () => {
           settings={settings}
           auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true, account: 'alice@corp.com' } }}
           serverSignIn={makeServerController({ successCount: 4 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
@@ -2408,37 +2394,32 @@ describe('SettingsView', () => {
           claude: { status: 'ok', account: 'claude@corp.com' },
         });
       (window as unknown as { api: unknown }).api = { verifyAuth };
-      const onAuthChange = vi.fn();
 
-      // 1. Mount guard: both start > 0 -> 0 onAuthChange, 0 verifyAuth
+      // 1. Mount guard: both start > 0 -> 0 verifyAuth
       const { rerender } = render(
         <RawSettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
           auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
           claudeSignIn={makeClaudeSignInStub({ successCount: 2 })}
           serverSignIn={makeServerSignInStub({ successCount: 3 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
       openPane('Accounts');
-      expect(onAuthChange).toHaveBeenCalledTimes(0);
       expect(verifyAuth).toHaveBeenCalledTimes(0);
 
-      // 2. verification === null guard: simultaneous increment calls onAuthChange 1x, verifyAuth 0x
+      // 2. verification === null guard: simultaneous increment calls verifyAuth 0x
       rerender(
         <RawSettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
           auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
           claudeSignIn={makeClaudeSignInStub({ successCount: 3 })}
           serverSignIn={makeServerSignInStub({ successCount: 4 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      expect(onAuthChange).toHaveBeenCalledTimes(1);
       expect(verifyAuth).toHaveBeenCalledTimes(0);
 
       // 3. Establish verification !== null via Check Credentials
@@ -2446,7 +2427,7 @@ describe('SettingsView', () => {
       await waitFor(() => expect(screen.getByText(/Claude expired/)).toBeTruthy());
       expect(verifyAuth).toHaveBeenCalledTimes(1);
 
-      // 4. Simultaneous increment on BOTH controllers -> exactly 1 verifyAuth() (+1 -> total 2) and 1 onAuthChange() (+1 -> total 2)!
+      // 4. Simultaneous increment on BOTH controllers -> exactly 1 verifyAuth() (+1 -> total 2)!
       rerender(
         <RawSettingsView
           settings={{ ...settings, serverAuthMode: 'entra' }}
@@ -2457,14 +2438,57 @@ describe('SettingsView', () => {
           }}
           claudeSignIn={makeClaudeSignInStub({ successCount: 4 })}
           serverSignIn={makeServerSignInStub({ successCount: 5 })}
-          onAuthChange={onAuthChange}
           onSave={vi.fn()}
           onClose={vi.fn()}
         />,
       );
-      expect(onAuthChange).toHaveBeenCalledTimes(2);
       await waitFor(() => expect(screen.getAllByText('✓ Verified')).toHaveLength(2));
       expect(verifyAuth).toHaveBeenCalledTimes(2);
+    });
+
+    it('Wave 22 (#6): notifies onActivePaneChange on open, nav switches, and paneRequest updates', () => {
+      const onActivePaneChange = vi.fn();
+      const { rerender } = render(
+        <RawSettingsView
+          settings={settings}
+          auth={{ claude: 'ok', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          onActivePaneChange={onActivePaneChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+
+      // Initial mount lands on default 'Server'
+      expect(onActivePaneChange).toHaveBeenLastCalledWith('Server');
+
+      // Nav click to Accounts
+      openPane('Accounts');
+      expect(onActivePaneChange).toHaveBeenLastCalledWith('Accounts');
+
+      // Nav click away to Models
+      openPane('Models');
+      expect(onActivePaneChange).toHaveBeenLastCalledWith('Models');
+
+      // External paneRequest jumps directly back to Accounts
+      rerender(
+        <RawSettingsView
+          settings={settings}
+          auth={{ claude: 'ok', server: { mode: 'dev', signedIn: true } }}
+          claudeSignIn={makeClaudeSignInStub()}
+          serverSignIn={makeServerSignInStub()}
+          paneRequest={{ pane: 'Accounts', seq: 1 }}
+          onActivePaneChange={onActivePaneChange}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(onActivePaneChange).toHaveBeenLastCalledWith('Accounts');
+
+      // Nav click back to Server
+      openPane('Server');
+      expect(onActivePaneChange).toHaveBeenLastCalledWith('Server');
     });
   });
 });

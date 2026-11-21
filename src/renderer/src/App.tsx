@@ -5,6 +5,7 @@ import type {
   AgentEvent,
   AppSettings,
   AuthStatus,
+  AuthStatusOptions,
   ChatMessage,
   ClarificationOption,
   ImageAttachment,
@@ -66,6 +67,7 @@ export default function App(): React.JSX.Element {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [droppedSyncError, setDroppedSyncError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeSettingsPane, setActiveSettingsPane] = useState<SettingsPane | null>(null);
   const [paneRequest, setPaneRequest] = useState<{ pane: SettingsPane; seq: number } | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [serverSignOutError, setServerSignOutError] = useState<string | null>(null);
@@ -224,13 +226,17 @@ export default function App(): React.JSX.Element {
   const fetchAuthStatus = useCallback(
     async (
       authoritative = false,
-      opts?: { forceRefresh?: boolean },
+      opts?: AuthStatusOptions,
     ): Promise<AuthStatus | null> => {
       const epoch = authoritative ? ++authEpochRef.current : authEpochRef.current;
       try {
+        const payload: AuthStatusOptions = {
+          ...(opts?.forceRefresh === true ? { forceRefresh: true } : {}),
+          ...(opts?.refreshClaude === false ? { refreshClaude: false } : {}),
+        };
         const status =
-          opts?.forceRefresh === true
-            ? await window.api.authStatus({ forceRefresh: true })
+          Object.keys(payload).length > 0
+            ? await window.api.authStatus(payload)
             : await window.api.authStatus();
         if (!applyAuthStatus(status, epoch)) return null;
         return status;
@@ -293,7 +299,7 @@ export default function App(): React.JSX.Element {
    * check failed — exactly when `refreshThreads()` is still reporting unreachable.
    */
   const refreshServer = useCallback(async () => {
-    void fetchAuthStatus(false).then((status) => {
+    void fetchAuthStatus(false, { refreshClaude: false }).then((status) => {
       if (!status || !mountedRef.current) return;
       if (status.claude === 'ok') {
         clearClaudeErrorRef.current?.();
@@ -674,7 +680,7 @@ export default function App(): React.JSX.Element {
               setServerAuthRequired(true);
               serverAuthRequiredRef.current = true;
             }
-            void fetchAuthStatus(false);
+            void fetchAuthStatus(false, event.authRequired ? undefined : { refreshClaude: false });
           }
           void refreshThreads();
           break;
@@ -696,7 +702,7 @@ export default function App(): React.JSX.Element {
               seen: onScreen,
             },
           }));
-          void fetchAuthStatus(false);
+          void fetchAuthStatus(false, event.authRequired ? undefined : { refreshClaude: false });
           break;
         }
         case 'review-enforced': {
@@ -759,7 +765,7 @@ export default function App(): React.JSX.Element {
           } else {
             setSyncError(event.detail ?? 'Sync failed — retrying.');
           }
-          void fetchAuthStatus(false);
+          void fetchAuthStatus(false, { refreshClaude: false });
         } else if (event.acked || event.state === 'synced' || event.pendingCount === 0) {
           setSyncError(null);
         }
@@ -997,29 +1003,34 @@ export default function App(): React.JSX.Element {
   const closeSettings = useCallback(() => {
     showSettingsRef.current = false;
     setShowSettings(false);
+    setActiveSettingsPane(null);
     setPaneRequest(null);
     setClaudeSignOutError(null);
     setServerSignOutError(null);
   }, []);
 
-  const openSettings = useCallback((targetPane?: SettingsPane) => {
-    if (targetPane) {
-      paneSeqRef.current += 1;
-      setPaneRequest({ pane: targetPane, seq: paneSeqRef.current });
-      showSettingsRef.current = true;
-      setShowSettings(true);
-    } else {
-      const next = !showSettingsRef.current;
-      if (next) {
-        setPaneRequest(null);
+  const openSettings = useCallback(
+    (targetPane?: SettingsPane) => {
+      if (targetPane) {
+        paneSeqRef.current += 1;
+        setPaneRequest({ pane: targetPane, seq: paneSeqRef.current });
+        setActiveSettingsPane(targetPane);
+        showSettingsRef.current = true;
+        setShowSettings(true);
       } else {
-        setClaudeSignOutError(null);
-        setServerSignOutError(null);
+        const next = !showSettingsRef.current;
+        if (next) {
+          setPaneRequest(null);
+          setActiveSettingsPane('Server');
+          showSettingsRef.current = true;
+          setShowSettings(true);
+        } else {
+          closeSettings();
+        }
       }
-      showSettingsRef.current = next;
-      setShowSettings(next);
-    }
-  }, []);
+    },
+    [closeSettings],
+  );
 
   const handleSignOut = useCallback(async () => {
     if (
@@ -1193,6 +1204,18 @@ export default function App(): React.JSX.Element {
   // its control cluster over the right end, and both need the gutter reserved in CSS.
   const platformClass =
     window.api.platform === 'darwin' ? 'mac' : window.api.platform === 'win32' ? 'win' : '';
+  const suppressClaudeBanner =
+    (showSettings && activeSettingsPane === 'Accounts') ||
+    (!showSettings &&
+      Boolean(activeThread) &&
+      Boolean(liveTurn.error) &&
+      Boolean(liveTurn.authRequired));
+  const suppressServerSignInBanner =
+    (showSettings && activeSettingsPane === 'Accounts' && auth?.server.mode === 'entra') ||
+    (!showSettings &&
+      Boolean(activeThread) &&
+      Boolean(liveTurn.error) &&
+      Boolean(liveTurn.serverAuthRequired && !liveTurn.authRequired));
 
   return (
     <div className="app">
@@ -1228,6 +1251,8 @@ export default function App(): React.JSX.Element {
           claudeSignIn={claudeSignIn}
           serverSignIn={serverSignIn}
           serverAuthRequired={serverAuthRequired}
+          suppressClaudeBanner={suppressClaudeBanner}
+          suppressServerSignInBanner={suppressServerSignInBanner}
           signingOut={signingOut}
           claudeSigningOut={claudeSigningOut}
           serverReachable={serverReachable}
@@ -1248,11 +1273,11 @@ export default function App(): React.JSX.Element {
             claudeSignIn={claudeSignIn}
             serverSignIn={serverSignIn}
             paneRequest={paneRequest}
+            onActivePaneChange={setActiveSettingsPane}
             signingOut={signingOut}
             serverSignOutError={serverSignOutError}
             claudeSigningOut={claudeSigningOut}
             claudeSignOutError={claudeSignOutError}
-            onAuthChange={() => void refreshServer()}
             onSignOut={() => void handleSignOut()}
             onClearServerSignOutError={clearServerSignOutError}
             onClaudeSignOut={() => void handleClaudeSignOut()}

@@ -2313,7 +2313,7 @@ describe('App conversation switching with in-progress turn', () => {
 
     it('propagates authRequired: true and refreshes authStatus() when turn-complete arrives with isError: true and authRequired: true', async () => {
       const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
-      render(<App />);
+      const { container } = render(<App />);
       await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
       fireEvent.click(screen.getByText('First Conversation'));
       await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
@@ -2336,10 +2336,22 @@ describe('App conversation switching with in-progress turn', () => {
         authRequired: true,
       });
 
+      const banners = container.querySelector('.banners') as HTMLElement;
       await waitFor(() => {
         expect(api.authStatus.mock.calls.length).toBeGreaterThan(initialAuthCalls);
-        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
-        expect(screen.getAllByRole('button', { name: 'Sign in to Claude' }).length).toBe(2);
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(chatNotices).not.toBeNull();
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).queryByText(/Connect Claude:/i)).toBeNull();
+        expect(screen.getAllByRole('button', { name: 'Sign in to Claude' })).toHaveLength(1);
+      });
+
+      // Switching to another thread without an inline authRequired error restores the top Connect Claude banner
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => {
+        expect(within(banners).getByText(/Connect Claude:/i)).toBeTruthy();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
       });
     });
 
@@ -2438,7 +2450,7 @@ describe('App conversation switching with in-progress turn', () => {
         server: { mode: 'dev', signedIn: true },
       });
 
-      render(<App />);
+      const { container } = render(<App />);
       await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
       fireEvent.click(screen.getByText('First Conversation'));
       await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
@@ -2466,13 +2478,18 @@ describe('App conversation switching with in-progress turn', () => {
         message: 'Yvoke Backend: Corpus index offline',
         authRequired: false,
       });
-      await waitFor(() =>
+      const banners = container.querySelector('.banners') as HTMLElement;
+      await waitFor(() => {
         expect(
           screen.getByText(
             'Claude: Your Claude login is missing or expired. Click Sign in to Claude to continue.',
           ),
-        ).toBeTruthy(),
-      );
+        ).toBeTruthy();
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(screen.getAllByRole('alert')).toHaveLength(1);
+      });
 
       // 3. User signs in externally via terminal and alt-tabs back -> window 'focus' observes claude === 'ok'
       api.authStatus = vi.fn().mockResolvedValue({
@@ -2510,7 +2527,11 @@ describe('App conversation switching with in-progress turn', () => {
         message: 'Claude: Login expired.',
         authRequired: true,
       });
-      await waitFor(() => expect(screen.getByText(/Connect Claude:/i)).toBeTruthy());
+      await waitFor(() => {
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      });
 
       // Hold post-signin authStatus pending so we inspect the optimistic setAuth state from onSignedIn(undefined)
       const neverAuth = new Promise<AuthStatus>(() => undefined);
@@ -2520,8 +2541,12 @@ describe('App conversation switching with in-progress turn', () => {
         account: undefined,
       });
 
-      fireEvent.click(screen.getAllByRole('button', { name: 'Sign in to Claude' })[0]);
-      await waitFor(() => expect(screen.queryByText(/Connect Claude:/i)).toBeNull());
+      const thread2Notices = container.querySelector('.chat-notices') as HTMLElement;
+      fireEvent.click(within(thread2Notices).getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() => {
+        expect(screen.getByText('Signed in to Claude — send your question again.')).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+      });
 
       // Open Settings -> Accounts and verify 'stale-expired@old.com' was cleared to 'Signed in'
       fireEvent.click(document.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
@@ -2731,12 +2756,14 @@ describe('App conversation switching with in-progress turn', () => {
         });
         await waitFor(() => expect(signOutBtn.disabled).toBe(false));
 
-        // Second attempt succeeds -> refreshes auth and shows Sign in to Yvoke in both banner and Accounts pane
+        // Second attempt succeeds -> refreshes auth and shows Sign in to Yvoke in Accounts pane while suppressing duplicate top banner
+        const banners = container.querySelector('.banners') as HTMLElement;
         fireEvent.click(signOutBtn);
         await waitFor(() => {
           expect(api.serverSignOut).toHaveBeenCalledTimes(2);
           expect(within(accountsPane).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
-          expect(screen.getAllByRole('button', { name: 'Sign in to Yvoke' }).length).toBeGreaterThanOrEqual(2);
+          expect(within(banners).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+          expect(screen.getAllByRole('button', { name: 'Sign in to Yvoke' })).toHaveLength(1);
         });
       } finally {
         warnSpy.mockRestore();
@@ -2941,6 +2968,7 @@ describe('App conversation switching with in-progress turn', () => {
       expect(claudeBtn.textContent).toBe('Sign out');
 
       // 2. Outcome B: error status + partial logout (authStatus returns claude: 'missing') -> clears error & flips UI cleanly!
+      const banners = container.querySelector('.banners') as HTMLElement;
       fireEvent.click(claudeBtn);
       expect(api.claudeSignOut).toHaveBeenCalledTimes(2);
       claudeState = 'missing';
@@ -2949,7 +2977,8 @@ describe('App conversation switching with in-progress turn', () => {
         resolveSignOut2({ status: 'error', message: 'Subprocess exited non-zero after clearing keychain' });
       });
       await waitFor(() => {
-        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+        expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
         expect(within(accountsPane).queryByRole('alert')).toBeNull();
       });
       expect(within(accountsPane).queryByRole('button', { name: 'Sign out of Claude' })).toBeNull();
@@ -2964,7 +2993,10 @@ describe('App conversation switching with in-progress turn', () => {
           return { status: 'signed_in', account: 'fresh@yvoke.dev' };
         });
       fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' }));
-      await waitFor(() => expect(within(accountsPane).getByRole('alert').textContent).toBe('Stale sign-in error'));
+      await waitFor(() => {
+        expect(within(accountsPane).getByRole('alert').textContent).toBe('Stale sign-in error');
+        expect(screen.getAllByRole('alert')).toHaveLength(1);
+      });
       fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' }));
       await waitFor(() =>
         expect(within(accountsPane).getByRole('button', { name: 'Sign out of Claude' })).toBeTruthy(),
@@ -3036,8 +3068,9 @@ describe('App conversation switching with in-progress turn', () => {
         resolveSignOut4({ status: 'signed_out' });
       });
       await waitFor(() => {
-        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+        expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
         expect(within(accountsPane).getByText('Not signed in')).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
       });
       expect(within(accountsPane).queryByRole('alert')).toBeNull();
 
@@ -3110,10 +3143,12 @@ describe('App conversation switching with in-progress turn', () => {
       expect(resolveStalePreSignOutAuth).toBeTypeOf('function');
 
       // Click Sign out of Claude -> completes and transitions UI to signed out
+      const banners = container.querySelector('.banners') as HTMLElement;
       fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign out of Claude' }));
       await waitFor(() => {
-        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+        expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
         expect(within(accountsPane).getByText('Not signed in')).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
       });
 
       // Now resolve the STALE pre-signout authStatus() with { claude: 'ok', claudeAccount: 'stale@corp.com' }
@@ -3125,9 +3160,10 @@ describe('App conversation switching with in-progress turn', () => {
         });
       });
 
-      // Stale status MUST have been discarded: Connect Claude banner & Not signed in remain intact!
-      expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
+      // Stale status MUST have been discarded: Accounts Sign in to Claude & Not signed in remain intact (and top banner stays suppressed while Accounts is open)!
+      expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
       expect(within(accountsPane).getByText('Not signed in')).toBeTruthy();
+      expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
       expect(document.body.textContent).not.toContain('stale@corp.com');
     });
 
@@ -3165,10 +3201,14 @@ describe('App conversation switching with in-progress turn', () => {
               resolvePostSignOutAuth = resolve;
             }),
         );
+        const banners = container.querySelector('.banners') as HTMLElement;
         await act(async () => {
           resolveSignOut({ status: 'signed_out' });
         });
-        await waitFor(() => expect(screen.getByText(/Connect Claude:/i)).toBeTruthy());
+        await waitFor(() => {
+          expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+          expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        });
         expect(api.authStatus).toHaveBeenCalledTimes(1);
 
         // Window focus while claudeSigningOut is STILL true (even though auth.claude === 'missing') MUST NOT call authStatus!
@@ -3295,11 +3335,12 @@ describe('App conversation switching with in-progress turn', () => {
       const accountsPane = container.querySelector('.settings-pane') as HTMLElement;
       fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign out of Claude' }));
 
-      // Sign-out flips auth.claude -> 'missing' (rendering Sign in to Claude in banner & Accounts),
+      // Sign-out flips auth.claude -> 'missing' (rendering Sign in to Claude in Accounts while suppressing duplicate top banner),
       // and Stale sign-in error must have been cleared by handleClaudeSignOut!
+      const banners = container.querySelector('.banners') as HTMLElement;
       await waitFor(() => {
-        expect(screen.getByText(/Connect Claude:/i)).toBeTruthy();
         expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
       });
       expect(screen.queryByText('Stale sign-in error')).toBeNull();
     });
@@ -3436,12 +3477,14 @@ describe('App conversation switching with in-progress turn', () => {
         );
 
         // 5. Inner try/catch on success: post-success authStatus() throws -> optimistic signed-out state stays, ZERO bogus alert!
+        const banners = container.querySelector('.banners') as HTMLElement;
         api.serverSignOut = vi.fn().mockResolvedValueOnce(undefined);
         api.authStatus.mockRejectedValueOnce(new Error('Post-signout authStatus transient failure'));
         fireEvent.click(within(pane).getByRole('button', { name: 'Sign out of Yvoke' }));
         await waitFor(() => {
           expect(within(pane).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
-          expect(screen.getAllByRole('button', { name: 'Sign in to Yvoke' }).length).toBeGreaterThanOrEqual(2);
+          expect(within(banners).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+          expect(screen.getAllByRole('button', { name: 'Sign in to Yvoke' })).toHaveLength(1);
         });
         expect(within(pane).queryByRole('alert')).toBeNull();
 
@@ -3604,15 +3647,15 @@ describe('App conversation switching with in-progress turn', () => {
         // Mount called authStatus with 0 args
         expect(api.authStatus.mock.calls[0]).toHaveLength(0);
 
-        // 10s poll calls refreshServer -> authStatus() with 0 args (and does NOT stall if authStatus is slow)
+        // 10s poll calls refreshServer -> authStatus({ refreshClaude: false }) (skips Claude CLI spawn)
         const callsBeforePoll = api.authStatus.mock.calls.length;
         await act(async () => {
           await vi.advanceTimersByTimeAsync(10_000);
         });
         await waitFor(() => expect(api.authStatus.mock.calls.length).toBeGreaterThan(callsBeforePoll));
-        expect(api.authStatus.mock.calls[callsBeforePoll]).toHaveLength(0);
+        expect(api.authStatus.mock.calls[callsBeforePoll]).toEqual([{ refreshClaude: false }]);
 
-        // Agent error & Sync error call authStatus() with 0 args
+        // Non-Claude agent error & Sync error call authStatus({ refreshClaude: false })
         const callsBeforeEvents = api.authStatus.mock.calls.length;
         emitAgent({ kind: 'error', threadId: 'thread-1', message: 'Network hiccup' });
         act(() => {
@@ -3621,8 +3664,8 @@ describe('App conversation switching with in-progress turn', () => {
           }
         });
         await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(callsBeforeEvents + 2));
-        expect(api.authStatus.mock.calls[callsBeforeEvents]).toHaveLength(0);
-        expect(api.authStatus.mock.calls[callsBeforeEvents + 1]).toHaveLength(0);
+        expect(api.authStatus.mock.calls[callsBeforeEvents]).toEqual([{ refreshClaude: false }]);
+        expect(api.authStatus.mock.calls[callsBeforeEvents + 1]).toEqual([{ refreshClaude: false }]);
 
         // Window 'focus' while auth.claude === 'missing' MUST pass { forceRefresh: true }!
         const callsBeforeFocus = api.authStatus.mock.calls.length;
@@ -3956,6 +3999,340 @@ describe('App conversation switching with in-progress turn', () => {
       } finally {
         process.off('unhandledRejection', onUnhandled);
         errorSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('Wave 22: Banner suppression (#6), single post-signin refresh (#7) & renderer authStatus routing (#10-renderer)', () => {
+    it('#6: enforces cross-auth independence and dual-flag precedence between StatusBanners and inline ChatView turn errors', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'missing',
+        server: { mode: 'entra', signedIn: false },
+      });
+      api.listThreads = vi.fn().mockResolvedValue({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: false,
+        serverAuthRequired: true,
+      });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      const banners = container.querySelector('.banners') as HTMLElement;
+
+      // Before opening any thread with a turn error, BOTH top banners are visible and red Server unreachable is hidden
+      await waitFor(() => {
+        expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      });
+      expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+
+      // Open thread-1
+      fireEvent.click(screen.getByText('First Conversation'));
+      await waitFor(() => expect(screen.getByText('Pick a playbook')).toBeTruthy());
+
+      // 1. Cross-auth (Claude only): thread-1 has ONLY authRequired: true -> Claude top banner suppressed, Entra top banner REMAINS visible
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-1',
+        message: 'Claude: Login expired.',
+        authRequired: true,
+        serverAuthRequired: false,
+      });
+      await waitFor(() => {
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(chatNotices).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+        expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+      });
+
+      // 2. Cross-auth (Entra only): thread-2 has ONLY serverAuthRequired: true -> Entra top banner suppressed (NO bogus red Server unreachable!), Claude top banner REMAINS visible
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Entra: Corporate token expired.',
+        authRequired: false,
+        serverAuthRequired: true,
+      });
+      fireEvent.click(screen.getByText('Second Conversation'));
+      await waitFor(() => {
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+        expect(within(chatNotices).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+      });
+
+      // 3. Dual-flag precedence: active thread has BOTH authRequired: true AND serverAuthRequired: true
+      //    ChatView renders Claude inline (precedence), so Claude top banner is suppressed while Server top banner REMAINS visible!
+      emitAgent({
+        kind: 'error',
+        threadId: 'thread-2',
+        message: 'Claude: Both logins expired.',
+        authRequired: true,
+        serverAuthRequired: true,
+      });
+      await waitFor(() => {
+        const chatNotices = container.querySelector('.chat-notices') as HTMLElement;
+        expect(within(chatNotices).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(chatNotices).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+        expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+      });
+    });
+
+    it('#6: syncs Settings activeSettingsPane across gear toggle, pane switches, and paneRequest without stale Accounts suppression', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+      api.authStatus = vi.fn().mockResolvedValue({
+        claude: 'missing',
+        server: { mode: 'entra', signedIn: false },
+      });
+      api.listThreads = vi.fn().mockResolvedValue({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: false,
+        serverAuthRequired: true,
+      });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+      const banners = container.querySelector('.banners') as HTMLElement;
+      const gearBtn = container.querySelector('[data-tip="Settings"]') as HTMLButtonElement;
+      const accountsFooterBtn = container.querySelector('button.footer-account-btn') as HTMLButtonElement;
+
+      // 1. Open Settings via gear -> lands on Server -> BOTH top banners stay visible
+      fireEvent.click(gearBtn);
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Server' })).toBeTruthy());
+      expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+
+      // 2. Click sidebar footer -> jumps to Accounts via paneRequest -> BOTH top banners suppressed, single controls in Accounts, zero bogus Server unreachable
+      fireEvent.click(accountsFooterBtn);
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy());
+      const accountsPane = container.querySelector('.settings-pane') as HTMLElement;
+      await waitFor(() => {
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+        expect(within(banners).queryByText(/Server unreachable:/i)).toBeNull();
+        expect(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(accountsPane).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      });
+
+      // 3. Switch pane inside Settings from Accounts -> Models -> BOTH top banners restore immediately
+      fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+      await waitFor(() => {
+        expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+        expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      });
+
+      // 4. Jump back to Accounts (suppressed), toggle Settings OFF via gear (restores), then reopen via gear (Server — MUST NOT retain stale Accounts suppression!)
+      fireEvent.click(accountsFooterBtn);
+      await waitFor(() => {
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Claude' })).toBeNull();
+        expect(within(banners).queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+      });
+
+      fireEvent.click(gearBtn);
+      await waitFor(() => expect(screen.queryByRole('heading', { name: 'Accounts' })).toBeNull());
+      expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+
+      fireEvent.click(gearBtn);
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Server' })).toBeTruthy());
+      expect(within(banners).getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(within(banners).getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+    });
+
+    it('#7: fires refreshServer() exactly once (listThreads +1, listPrompts +1) after Claude or Entra sign-in in Settings -> Accounts, and re-runs verifyAuth once when previously checked', async () => {
+      const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+      let claudeSignedIn = false;
+      let serverSignedIn = false;
+
+      api.getSettings = vi.fn().mockResolvedValue({ ...sampleSettings(), serverAuthMode: 'entra' });
+      api.authStatus = vi.fn().mockImplementation(async () => ({
+        claude: claudeSignedIn ? 'ok' : 'missing',
+        ...(claudeSignedIn ? { claudeAccount: 'claude@yvoke.dev' } : {}),
+        server: {
+          mode: 'entra',
+          signedIn: serverSignedIn,
+          ...(serverSignedIn ? { account: 'alice@corp.com' } : {}),
+        },
+      }));
+      api.listThreads = vi.fn().mockImplementation(async () => ({
+        threads: storedThreads.map((t) => ({ ...t })),
+        serverReachable: serverSignedIn,
+        serverAuthRequired: !serverSignedIn,
+      }));
+      api.listPrompts = vi.fn().mockImplementation(async () => (serverSignedIn ? PROMPTS : []));
+      api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
+      api.verifyAuth = vi.fn().mockImplementation(async () => ({
+        server: serverSignedIn
+          ? { status: 'ok', account: 'alice@corp.com' }
+          : { status: 'missing', message: 'Not signed in' },
+        claude: claudeSignedIn
+          ? { status: 'ok', account: 'claude@yvoke.dev' }
+          : { status: 'missing', message: 'Not signed in' },
+      }));
+      api.serverSignIn = vi.fn().mockImplementation(async () => {
+        serverSignedIn = true;
+        return { status: 'signed_in', account: 'alice@corp.com' };
+      });
+      api.claudeSignIn = vi.fn().mockImplementation(async () => {
+        claudeSignedIn = true;
+        return { status: 'signed_in', account: 'claude@yvoke.dev' };
+      });
+
+      const { container } = render(<App />);
+      await waitFor(() => expect(screen.getByText('First Conversation')).toBeTruthy());
+
+      // Open Settings -> Accounts
+      fireEvent.click(container.querySelector('button.footer-account-btn') as HTMLButtonElement);
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Accounts' })).toBeTruthy());
+      const accountsPane = container.querySelector('.settings-pane') as HTMLElement;
+
+      // 1. Complete Entra sign-in in Accounts (without prior Check Credentials):
+      //    listThreads +1, listPrompts +1 (NEVER +2!), verifyAuth +0
+      const threadsBeforeServer = api.listThreads.mock.calls.length;
+      const promptsBeforeServer = api.listPrompts.mock.calls.length;
+      fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() =>
+        expect(within(accountsPane).getByRole('button', { name: 'Sign out of Yvoke' })).toBeTruthy(),
+      );
+      await waitFor(() => {
+        expect(api.listThreads).toHaveBeenCalledTimes(threadsBeforeServer + 1);
+        expect(api.listPrompts).toHaveBeenCalledTimes(promptsBeforeServer + 1);
+      });
+      expect(api.verifyAuth).toHaveBeenCalledTimes(0);
+
+      // 2. Run Check Credentials so verification !== null, then complete Claude sign-in in Accounts:
+      //    verifyAuth re-runs 1x (+1 -> total 2), while listThreads +1 AND listPrompts +1 (NEVER +2!)
+      fireEvent.click(within(accountsPane).getByRole('button', { name: 'Check Credentials' }));
+      await waitFor(() => expect(api.verifyAuth).toHaveBeenCalledTimes(1));
+
+      const threadsBeforeClaude = api.listThreads.mock.calls.length;
+      const promptsBeforeClaude = api.listPrompts.mock.calls.length;
+      fireEvent.click(within(accountsPane).getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() => {
+        expect(api.verifyAuth).toHaveBeenCalledTimes(2);
+        expect(screen.getAllByText('✓ Verified')).toHaveLength(2);
+      });
+      expect(api.listThreads).toHaveBeenCalledTimes(threadsBeforeClaude + 1);
+      expect(api.listPrompts).toHaveBeenCalledTimes(promptsBeforeClaude + 1);
+    });
+
+    it('#10-renderer: routes authStatus options accurately across mount, Retry connection, Settings Save, 10s poll, sync error, agent error/turn-complete (authRequired vs serverAuthRequired), and window focus', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const api = (window as unknown as { api: Record<string, ReturnType<typeof vi.fn>> }).api;
+        api.authStatus = vi.fn().mockResolvedValue({
+          claude: 'missing',
+          server: { mode: 'dev', signedIn: true },
+        });
+        api.listThreads = vi.fn().mockResolvedValue({
+          threads: storedThreads.map((t) => ({ ...t })),
+          serverReachable: false,
+          serverAuthRequired: false,
+        });
+        api.listPrompts = vi.fn().mockResolvedValue([]);
+        api.listOrchestratorProfiles = vi.fn().mockResolvedValue([]);
+
+        const { container } = render(<App />);
+        await waitFor(() => expect(screen.getByText(/Server unreachable:/i)).toBeTruthy());
+
+        // 1. Mount: 0 args (full Claude probe)
+        expect(api.authStatus).toHaveBeenCalledTimes(1);
+        expect(api.authStatus.mock.calls[0]).toEqual([]);
+
+        // 2. Retry connection (refreshServer): { refreshClaude: false }
+        let before = api.authStatus.mock.calls.length;
+        fireEvent.click(screen.getByRole('button', { name: 'Retry connection' }));
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 3. Settings Save (refreshServer): { refreshClaude: false }
+        fireEvent.click(container.querySelector('[data-tip="Settings"]') as HTMLButtonElement);
+        await waitFor(() => expect(screen.getByRole('heading', { name: 'Server' })).toBeTruthy());
+        before = api.authStatus.mock.calls.length;
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 4. 10s outage poll (refreshServer): { refreshClaude: false }
+        before = api.authStatus.mock.calls.length;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10_000);
+        });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 5. sync-state error: { refreshClaude: false }
+        before = api.authStatus.mock.calls.length;
+        act(() => {
+          for (const l of syncListeners) {
+            l({ kind: 'sync-state', threadId: 'thread-1', state: 'error', pendingCount: 1, detail: '503' });
+          }
+        });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 6. Agent error with authRequired: false: { refreshClaude: false }
+        before = api.authStatus.mock.calls.length;
+        emitAgent({ kind: 'error', threadId: 'thread-1', message: 'Backend 502', authRequired: false });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 7. Agent error with authRequired: true: 0 args (full Claude probe)
+        before = api.authStatus.mock.calls.length;
+        emitAgent({ kind: 'error', threadId: 'thread-1', message: 'Claude expired', authRequired: true });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([]);
+
+        // 8. turn-complete with isError: true, serverAuthRequired: true, authRequired: false: { refreshClaude: false }
+        before = api.authStatus.mock.calls.length;
+        emitAgent({
+          kind: 'turn-complete',
+          threadId: 'thread-1',
+          message: { localId: 'tc-srv', role: 'assistant', content: '', createdAt: '' },
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          durationMs: 50,
+          isError: true,
+          errorMessage: 'Entra expired',
+          authRequired: false,
+          serverAuthRequired: true,
+        });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ refreshClaude: false }]);
+
+        // 9. turn-complete with isError: true, authRequired: true: 0 args (full Claude probe)
+        before = api.authStatus.mock.calls.length;
+        emitAgent({
+          kind: 'turn-complete',
+          threadId: 'thread-1',
+          message: { localId: 'tc-claude', role: 'assistant', content: '', createdAt: '' },
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          durationMs: 50,
+          isError: true,
+          errorMessage: 'Claude expired',
+          authRequired: true,
+        });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([]);
+
+        // 10. Window 'focus' while auth.claude === 'missing': { forceRefresh: true }
+        before = api.authStatus.mock.calls.length;
+        act(() => {
+          window.dispatchEvent(new Event('focus'));
+        });
+        await waitFor(() => expect(api.authStatus.mock.calls.length).toBe(before + 1));
+        expect(api.authStatus.mock.calls[before]).toEqual([{ forceRefresh: true }]);
+      } finally {
+        vi.useRealTimers();
       }
     });
   });

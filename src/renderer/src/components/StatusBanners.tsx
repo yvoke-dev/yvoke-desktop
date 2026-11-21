@@ -9,6 +9,8 @@ export function StatusBanners(props: {
   claudeSignIn: ClaudeSignInController;
   serverSignIn: ServerSignInController;
   serverAuthRequired?: boolean;
+  suppressClaudeBanner?: boolean;
+  suppressServerSignInBanner?: boolean;
   signingOut?: boolean;
   claudeSigningOut?: boolean;
   serverReachable: boolean;
@@ -23,6 +25,8 @@ export function StatusBanners(props: {
     claudeSignIn,
     serverSignIn,
     serverAuthRequired = false,
+    suppressClaudeBanner = false,
+    suppressServerSignInBanner = false,
     signingOut = false,
     claudeSigningOut = false,
     serverReachable,
@@ -32,10 +36,12 @@ export function StatusBanners(props: {
     onDismissDroppedSyncError,
     onRetryServer,
   } = props;
-  const showClaudeBanner = auth?.claude === 'missing' || Boolean(claudeSignIn.signingIn);
-  const showServerSignInBanner =
+  const needsClaudeSignIn = auth?.claude === 'missing' || Boolean(claudeSignIn.signingIn);
+  const needsServerSignIn =
     (auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired)) ||
     Boolean(serverSignIn.signingIn);
+  const showClaudeBanner = needsClaudeSignIn && !suppressClaudeBanner;
+  const showServerSignInBanner = needsServerSignIn && !suppressServerSignInBanner;
 
   return (
     <div className="banners">
@@ -71,7 +77,7 @@ export function StatusBanners(props: {
           />
         </div>
       )}
-      {!serverReachable && !showServerSignInBanner && (
+      {!serverReachable && !needsServerSignIn && (
         <div className="banner error">
           <span className="banner-icon">
             <AlertIcon size={14} />

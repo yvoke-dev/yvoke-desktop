@@ -1,4 +1,9 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useId, useRef, useState } from 'react';
+import {
+  formatSignInError,
+  useBrowserSignInFlow,
+  type BrowserSignInResetReason,
+} from './useBrowserSignInFlow';
 
 export interface ClaudeSignInController {
   signingIn: boolean;
@@ -20,30 +25,19 @@ export interface ClaudeSignInController {
 }
 
 export interface UseClaudeSignInOptions {
-  onSignedIn?: (account?: string) => void;
+  onSignedIn?: (account?: string) => void | Promise<void>;
 }
 
 const COPY_FEEDBACK_MS = 1_500;
 const UNAVAILABLE_URL_MESSAGE = 'Sign-in link is not available. Cancel sign-in and try again.';
 
 export function useClaudeSignIn(options?: UseClaudeSignInOptions): ClaudeSignInController {
-  const [signingIn, setSigningIn] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [copyingUrl, setCopyingUrl] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [altBrowserOpen, setAltBrowserOpen] = useState(false);
   const [codeDraft, setCodeDraftState] = useState('');
   const [submittingCode, setSubmittingCode] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [successCount, setSuccessCount] = useState(0);
 
-  const mountedRef = useRef(true);
-  const onSignedInRef = useRef(options?.onSignedIn);
-  onSignedInRef.current = options?.onSignedIn;
-
-  const attemptIdRef = useRef(0);
-  const signingInRef = useRef(false);
-  const cancellingRef = useRef(false);
   const copyingUrlRef = useRef(false);
   const submittingCodeRef = useRef(false);
   const codeDraftRef = useRef('');
@@ -56,165 +50,48 @@ export function useClaudeSignIn(options?: UseClaudeSignInOptions): ClaudeSignInC
     }
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
+  const flow = useBrowserSignInFlow({
+    start: () => window.api.claudeSignIn(),
+    cancel: () => window.api.cancelClaudeSignIn(),
+    onSignedIn: options?.onSignedIn,
+    onBeforeStart: () => {
       clearCopiedTimer();
-    };
-  }, [clearCopiedTimer]);
+      submittingCodeRef.current = false;
+      codeDraftRef.current = '';
+      setSubmittingCode(false);
+      setAltBrowserOpen(false);
+      setCodeDraftState('');
+      setCopiedUrl(false);
+    },
+    onReset: (reason: BrowserSignInResetReason) => {
+      if (reason === 'unmounted') {
+        submittingCodeRef.current = false;
+        return;
+      }
+      submittingCodeRef.current = false;
+      clearCopiedTimer();
+      setSubmittingCode(false);
+      setAltBrowserOpen(false);
+      setCopiedUrl(false);
+      if (reason === 'signed_in' || reason === 'cancelled') {
+        codeDraftRef.current = '';
+        setCodeDraftState('');
+      }
+    },
+    onUnmount: clearCopiedTimer,
+  });
+
+  const { attemptIdRef, mountedRef, signingInRef, cancellingRef, setError } = flow;
 
   const setCodeDraft = useCallback((value: string) => {
     codeDraftRef.current = value;
     setCodeDraftState(value);
   }, []);
 
-  const clearError = useCallback(() => {
-    setError(null);
-  }, []);
-
   const toggleAltBrowser = useCallback(() => {
     if (!signingInRef.current || cancellingRef.current) return;
     setAltBrowserOpen((open) => !open);
-  }, []);
-
-  const startSignIn = useCallback(async () => {
-    if (signingInRef.current) return;
-    const attemptId = ++attemptIdRef.current;
-    clearCopiedTimer();
-    signingInRef.current = true;
-    cancellingRef.current = false;
-    submittingCodeRef.current = false;
-    codeDraftRef.current = '';
-
-    setSigningIn(true);
-    setCancelling(false);
-    setSubmittingCode(false);
-    setAltBrowserOpen(false);
-    setCodeDraftState('');
-    setCopiedUrl(false);
-    setError(null);
-
-    try {
-      const result = await window.api.claudeSignIn();
-      if (!mountedRef.current) {
-        signingInRef.current = false;
-        cancellingRef.current = false;
-        submittingCodeRef.current = false;
-        return;
-      }
-      if (attemptIdRef.current !== attemptId) return;
-
-      attemptIdRef.current += 1;
-      signingInRef.current = false;
-      cancellingRef.current = false;
-      submittingCodeRef.current = false;
-      clearCopiedTimer();
-
-      if (result.status === 'signed_in') {
-        codeDraftRef.current = '';
-        setSigningIn(false);
-        setCancelling(false);
-        setSubmittingCode(false);
-        setAltBrowserOpen(false);
-        setCodeDraftState('');
-        setCopiedUrl(false);
-        setError(null);
-        setSuccessCount((c) => c + 1);
-        onSignedInRef.current?.(result.account);
-      } else if (result.status === 'cancelled') {
-        setSigningIn(false);
-        setCancelling(false);
-        setSubmittingCode(false);
-        setAltBrowserOpen(false);
-        setCopiedUrl(false);
-        setError(null);
-      } else {
-        setSigningIn(false);
-        setCancelling(false);
-        setSubmittingCode(false);
-        setAltBrowserOpen(false);
-        setCopiedUrl(false);
-        setError(result.message);
-      }
-    } catch (err) {
-      if (!mountedRef.current) {
-        signingInRef.current = false;
-        cancellingRef.current = false;
-        submittingCodeRef.current = false;
-        return;
-      }
-      if (attemptIdRef.current !== attemptId) return;
-
-      attemptIdRef.current += 1;
-      signingInRef.current = false;
-      cancellingRef.current = false;
-      submittingCodeRef.current = false;
-      clearCopiedTimer();
-      setSigningIn(false);
-      setCancelling(false);
-      setSubmittingCode(false);
-      setAltBrowserOpen(false);
-      setCopiedUrl(false);
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [clearCopiedTimer]);
-
-  const cancelSignIn = useCallback(async () => {
-    if (!signingInRef.current || cancellingRef.current) return;
-    const cancelAttemptId = attemptIdRef.current;
-    cancellingRef.current = true;
-    setCancelling(true);
-
-    try {
-      const cancelled = await window.api.cancelClaudeSignIn();
-      if (!mountedRef.current) {
-        cancellingRef.current = false;
-        return;
-      }
-      cancellingRef.current = false;
-      if (attemptIdRef.current !== cancelAttemptId) {
-        setCancelling(false);
-        return;
-      }
-
-      signingInRef.current = false;
-      submittingCodeRef.current = false;
-      clearCopiedTimer();
-
-      if (cancelled) {
-        attemptIdRef.current += 1;
-        codeDraftRef.current = '';
-        setCancelling(false);
-        setSigningIn(false);
-        setSubmittingCode(false);
-        setAltBrowserOpen(false);
-        setCodeDraftState('');
-        setCopiedUrl(false);
-        setError(null);
-      } else {
-        // Session already settled in main — reconcile busy flags without invalidating an
-        // about-to-land startSignIn resolution or wiping an error it sets.
-        setCancelling(false);
-        setSigningIn(false);
-        setSubmittingCode(false);
-        setAltBrowserOpen(false);
-        setCopiedUrl(false);
-      }
-    } catch (err) {
-      if (!mountedRef.current) {
-        cancellingRef.current = false;
-        return;
-      }
-      cancellingRef.current = false;
-      if (attemptIdRef.current !== cancelAttemptId) {
-        setCancelling(false);
-        return;
-      }
-      setCancelling(false);
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [clearCopiedTimer]);
+  }, [signingInRef, cancellingRef]);
 
   const copySignInUrl = useCallback(async () => {
     if (!signingInRef.current || copyingUrlRef.current || cancellingRef.current) return;
@@ -261,9 +138,9 @@ export function useClaudeSignIn(options?: UseClaudeSignInOptions): ClaudeSignInC
       clearCopiedTimer();
       setCopyingUrl(false);
       setCopiedUrl(false);
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatSignInError(err));
     }
-  }, [clearCopiedTimer]);
+  }, [attemptIdRef, cancellingRef, clearCopiedTimer, mountedRef, setError, signingInRef]);
 
   const submitAuthCode = useCallback(async () => {
     const currentDraft = codeDraftRef.current;
@@ -311,40 +188,38 @@ export function useClaudeSignIn(options?: UseClaudeSignInOptions): ClaudeSignInC
         return;
       }
       setSubmittingCode(false);
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatSignInError(err));
     }
-  }, []);
+  }, [attemptIdRef, cancellingRef, mountedRef, setError, signingInRef]);
 
   return {
-    signingIn,
-    cancelling,
+    signingIn: flow.signingIn,
+    cancelling: flow.cancelling,
     copyingUrl,
     copiedUrl,
     altBrowserOpen,
     codeDraft,
     submittingCode,
-    error,
-    successCount,
-    startSignIn,
-    cancelSignIn,
+    error: flow.error,
+    successCount: flow.successCount,
+    startSignIn: flow.startSignIn,
+    cancelSignIn: flow.cancelSignIn,
     toggleAltBrowser,
     copySignInUrl,
     setCodeDraft,
     submitAuthCode,
-    clearError,
+    clearError: flow.clearError,
   };
 }
 
 export interface ClaudeSignInControlsProps {
-  controller?: ClaudeSignInController;
+  controller: ClaudeSignInController;
   variant?: 'banner' | 'inline';
   disabled?: boolean;
 }
 
 export function ClaudeSignInControls(props: ClaudeSignInControlsProps): React.JSX.Element {
-  const { variant = 'inline', disabled = false } = props;
-  const fallbackController = useClaudeSignIn();
-  const ctrl = props.controller ?? fallbackController;
+  const { controller: ctrl, variant = 'inline', disabled = false } = props;
 
   const baseId = useId();
   const panelId = `${baseId}-alt-panel`;

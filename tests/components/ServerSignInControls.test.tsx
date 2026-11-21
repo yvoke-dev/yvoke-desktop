@@ -7,6 +7,7 @@ import {
   useServerSignIn,
   type ServerSignInController,
 } from '../../src/renderer/src/components/ServerSignInControls';
+import { makeServerSignInStub } from './signInStubs';
 import type { ServerSignInResult } from '../../src/shared/types';
 
 function deferred<T>(): {
@@ -309,6 +310,73 @@ describe('ServerSignInControls & useServerSignIn', () => {
       });
       expect(screen.queryByRole('alert')).toBeNull();
       expect(captured.current?.cancelling).toBe(false);
+    });
+  });
+
+  describe('Wave 22 (#11 & #13-hook): required controller & useBrowserSignInFlow edge cases', () => {
+    it('#11: renders directly with required controller even when window.api is undefined (zero hidden fallback hook)', () => {
+      // Compile-time pin: omitting required `controller` must be a TypeScript error.
+      const _omitControllerTypePin = (): React.JSX.Element => (
+        // @ts-expect-error controller prop is required on ServerSignInControls
+        <ServerSignInControls variant="inline" />
+      );
+      expect(typeof _omitControllerTypePin).toBe('function');
+
+      (window as unknown as { api?: unknown }).api = undefined;
+      const stub = makeServerSignInStub();
+      const { container } = render(<ServerSignInControls controller={stub} variant="inline" />);
+
+      const btn = screen.getByRole('button', { name: 'Sign in to Yvoke' });
+      expect(btn).toBeTruthy();
+      expect(container.querySelectorAll('[style]')).toHaveLength(0);
+      fireEvent.click(btn);
+      expect(stub.startSignIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('#13-hook: normalizes whitespace/non-Error rejections, recovers from synchronous onSignedIn throw, and keeps stable callback identities', async () => {
+      const captured: ServerSignInController[] = [];
+
+      function IdentityHarness(props: {
+        tick: number;
+        onSignedIn?: (account?: string) => void | Promise<void>;
+      }): React.JSX.Element {
+        const ctrl = useServerSignIn({ onSignedIn: props.onSignedIn });
+        captured.push(ctrl);
+        return <ServerSignInControls controller={ctrl} variant="inline" />;
+      }
+
+      const { rerender } = render(<IdentityHarness tick={0} onSignedIn={() => undefined} />);
+      rerender(<IdentityHarness tick={1} onSignedIn={() => undefined} />);
+
+      expect(captured.length).toBeGreaterThanOrEqual(2);
+      expect(captured[0].startSignIn).toBe(captured[1].startSignIn);
+      expect(captured[0].cancelSignIn).toBe(captured[1].cancelSignIn);
+      expect(captured[0].clearError).toBe(captured[1].clearError);
+
+      // 1. Whitespace-only Error rejection falls back to default message
+      serverSignInMock.mockRejectedValueOnce(new Error('   '));
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() =>
+        expect(screen.getByRole('alert').textContent).toBe('Sign-in failed. Please try again.'),
+      );
+
+      // 2. Non-Error string rejection surfaces verbatim
+      serverSignInMock.mockRejectedValueOnce('boom');
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('boom'));
+
+      // 3. Synchronous throw inside onSignedIn does NOT wedge signingIn
+      const syncThrow = vi.fn(() => {
+        throw new Error('Sync server callback failure');
+      });
+      rerender(<IdentityHarness tick={2} onSignedIn={syncThrow} />);
+      serverSignInMock.mockResolvedValueOnce({ status: 'signed_in', account: 'alice@corp.com' });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Yvoke' }));
+      await waitFor(() => expect(syncThrow).toHaveBeenCalledTimes(1));
+      expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+      expect(captured[captured.length - 1].signingIn).toBe(false);
+      expect(captured[captured.length - 1].successCount).toBe(1);
+      expect(screen.queryByRole('alert')).toBeNull();
     });
   });
 });

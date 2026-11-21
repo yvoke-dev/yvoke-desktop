@@ -390,7 +390,7 @@ export interface SettingsViewProps {
   claudeSignIn: ClaudeSignInController;
   serverSignIn: ServerSignInController;
   paneRequest?: { pane: SettingsPane; seq: number } | null;
-  onAuthChange?: () => void;
+  onActivePaneChange?: (pane: SettingsPane) => void;
   onSignOut?: () => void | Promise<void>;
   signingOut?: boolean;
   serverSignOutError?: string | null;
@@ -421,8 +421,8 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
   const prevClaudeStatusRef = useRef(props.auth?.claude);
   const verificationRef = useRef(verification);
   verificationRef.current = verification;
-  const onAuthChangeRef = useRef(props.onAuthChange);
-  onAuthChangeRef.current = props.onAuthChange;
+  const onActivePaneChangeRef = useRef(props.onActivePaneChange);
+  onActivePaneChangeRef.current = props.onActivePaneChange;
   const clearClaudeErrorRef = useRef(props.claudeSignIn.clearError);
   clearClaudeErrorRef.current = props.claudeSignIn.clearError;
   const clearServerErrorRef = useRef(props.serverSignIn.clearError);
@@ -480,6 +480,10 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     setPane(props.paneRequest.pane);
   }, [props.paneRequest]);
 
+  useEffect(() => {
+    onActivePaneChangeRef.current?.(pane);
+  }, [pane]);
+
   const reverifyCredentials = (): void => {
     const seq = ++verifySeqRef.current;
     setVerification(null);
@@ -521,7 +525,6 @@ export function SettingsView(props: SettingsViewProps): React.JSX.Element {
     if (!claudeChanged && !serverChanged) return;
     prevClaudeSuccessRef.current = props.claudeSignIn.successCount;
     prevServerSuccessRef.current = props.serverSignIn.successCount;
-    onAuthChangeRef.current?.();
     if (verificationRef.current === null) return;
     reverifyCredentials();
   }, [props.claudeSignIn.successCount, props.serverSignIn.successCount]);

@@ -7,6 +7,7 @@ import {
   useClaudeSignIn,
   type ClaudeSignInController,
 } from '../../src/renderer/src/components/ClaudeSignInControls';
+import { makeClaudeSignInStub } from './signInStubs';
 import type { ClaudeCodeSubmitResult, ClaudeSignInResult } from '../../src/shared/types';
 
 function deferred<T>(): {
@@ -454,6 +455,116 @@ describe('ClaudeSignInControls & useClaudeSignIn', () => {
         await pendingSubmit.promise;
       });
       expect(screen.queryByRole('alert')).toBeNull();
+    });
+  });
+
+  describe('Wave 22 (#11 & #13-hook): required controller & useBrowserSignInFlow edge cases', () => {
+    it('#11: renders directly with required controller even when window.api is undefined (zero hidden fallback hook)', () => {
+      // Compile-time pin: omitting required `controller` must be a TypeScript error.
+      const _omitControllerTypePin = (): React.JSX.Element => (
+        // @ts-expect-error controller prop is required on ClaudeSignInControls
+        <ClaudeSignInControls variant="inline" />
+      );
+      expect(typeof _omitControllerTypePin).toBe('function');
+
+      (window as unknown as { api?: unknown }).api = undefined;
+      const stub = makeClaudeSignInStub();
+      const { container } = render(<ClaudeSignInControls controller={stub} variant="inline" />);
+
+      const btn = screen.getByRole('button', { name: 'Sign in to Claude' });
+      expect(btn).toBeTruthy();
+      expect(container.querySelectorAll('[style]')).toHaveLength(0);
+      fireEvent.click(btn);
+      expect(stub.startSignIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('#13-hook: normalizes whitespace/non-Error rejections, recovers from synchronous onSignedIn throw, keeps stable callback identities, and ignores late copySignInUrl after cancel or completion', async () => {
+      const captured: ClaudeSignInController[] = [];
+
+      function IdentityHarness(props: {
+        tick: number;
+        onSignedIn?: (account?: string) => void;
+      }): React.JSX.Element {
+        const ctrl = useClaudeSignIn({ onSignedIn: props.onSignedIn });
+        captured.push(ctrl);
+        return <ClaudeSignInControls controller={ctrl} variant="inline" />;
+      }
+
+      const { rerender } = render(<IdentityHarness tick={0} onSignedIn={() => undefined} />);
+      rerender(<IdentityHarness tick={1} onSignedIn={() => undefined} />);
+
+      // Callback identities remain stable across re-renders with new inline option closures
+      expect(captured.length).toBeGreaterThanOrEqual(2);
+      expect(captured[0].startSignIn).toBe(captured[1].startSignIn);
+      expect(captured[0].cancelSignIn).toBe(captured[1].cancelSignIn);
+      expect(captured[0].clearError).toBe(captured[1].clearError);
+
+      // 1. Whitespace-only Error rejection falls back to default message
+      claudeSignInMock.mockRejectedValueOnce(new Error('   '));
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() =>
+        expect(screen.getByRole('alert').textContent).toBe('Sign-in failed. Please try again.'),
+      );
+
+      // 2. Non-Error string rejection surfaces verbatim
+      claudeSignInMock.mockRejectedValueOnce('boom');
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('boom'));
+
+      // 3. Synchronous throw inside onSignedIn does NOT wedge signingIn
+      const syncThrow = vi.fn(() => {
+        throw new Error('Sync callback failure');
+      });
+      rerender(<IdentityHarness tick={2} onSignedIn={syncThrow} />);
+      claudeSignInMock.mockResolvedValueOnce({ status: 'signed_in', account: 'alice@yvoke.dev' });
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      await waitFor(() => expect(syncThrow).toHaveBeenCalledTimes(1));
+      expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy();
+      expect(captured[captured.length - 1].signingIn).toBe(false);
+      expect(captured[captured.length - 1].successCount).toBe(1);
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      // 4a. Late copySignInUrl resolving true AFTER cancelSignIn(true) is ignored
+      rerender(<IdentityHarness tick={3} onSignedIn={() => undefined} />);
+      const login1 = deferred<ClaudeSignInResult>();
+      const copy1 = deferred<boolean>();
+      claudeSignInMock.mockReturnValueOnce(login1.promise);
+      copyClaudeSignInUrlMock.mockReturnValueOnce(copy1.promise);
+      cancelClaudeSignInMock.mockResolvedValueOnce(true);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Use another browser' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Copy sign-in link' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel sign-in' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Sign in to Claude' })).toBeTruthy());
+
+      await act(async () => {
+        copy1.resolve(true);
+        await copy1.promise;
+      });
+      expect(screen.queryByText('Copied')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      // 4b. Late copySignInUrl rejecting AFTER startSignIn completion is ignored
+      const login2 = deferred<ClaudeSignInResult>();
+      const copy2 = deferred<boolean>();
+      claudeSignInMock.mockReturnValueOnce(login2.promise);
+      copyClaudeSignInUrlMock.mockReturnValueOnce(copy2.promise);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Sign in to Claude' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Use another browser' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Copy sign-in link' }));
+
+      await act(async () => {
+        login2.resolve({ status: 'signed_in', account: 'alice@yvoke.dev' });
+        await login2.promise;
+      });
+      await act(async () => {
+        copy2.reject(new Error('Late clipboard error after sign-in'));
+        await copy2.promise.catch(() => undefined);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.queryByText('Copied')).toBeNull();
     });
   });
 });

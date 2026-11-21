@@ -330,4 +330,80 @@ describe('StatusBanners', () => {
     expect(errorBanner?.textContent).toContain('Turn rejected by server (HTTP 400).');
     expect(infoBanner?.textContent).toContain('2 turns waiting to sync to the server — Temporary timeout');
   });
+
+  it('Wave 22 (#6): suppresses Claude and Server sign-in banners without revealing bogus red Server unreachable when Entra sign-in is required, while preserving red Server unreachable in dev mode', () => {
+    const { rerender } = render(
+      <StatusBanners
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeSignInStub({ signingIn: true })}
+        serverSignIn={makeServerSignInStub()}
+        suppressClaudeBanner={true}
+        suppressServerSignInBanner={false}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+
+    // Claude banner suppressed (even while signingIn), Entra banner visible, red Server unreachable suppressed
+    expect(screen.queryByText(/Connect Claude:/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel sign-in' })).toBeNull();
+    expect(screen.getByText(/Server sign-in required:/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sign in to Yvoke' })).toBeTruthy();
+    expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
+
+    // Suppressing Server sign-in banner when Entra sign-in is required MUST NOT reveal bogus red Server unreachable
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'missing', server: { mode: 'entra', signedIn: false } }}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
+        suppressClaudeBanner={true}
+        suppressServerSignInBanner={true}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+    expect(screen.queryByText(/Connect Claude:/i)).toBeNull();
+    expect(screen.queryByText(/Server sign-in required:/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sign in to Yvoke' })).toBeNull();
+    expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
+
+    // Same when auth.server.signedIn is stale-true but serverAuthRequired is true
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'ok', server: { mode: 'entra', signedIn: true } }}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
+        serverAuthRequired={true}
+        suppressServerSignInBanner={true}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+    expect(screen.queryByText(/Server sign-in required:/i)).toBeNull();
+    expect(screen.queryByText(/Server unreachable:/i)).toBeNull();
+
+    // In dev mode with serverReachable={false} and suppressClaudeBanner={true}, red Server unreachable STILL renders
+    rerender(
+      <StatusBanners
+        auth={{ claude: 'missing', server: { mode: 'dev', signedIn: true } }}
+        claudeSignIn={makeClaudeSignInStub()}
+        serverSignIn={makeServerSignInStub()}
+        suppressClaudeBanner={true}
+        suppressServerSignInBanner={false}
+        serverReachable={false}
+        pendingSync={0}
+        syncError={null}
+        onRetryServer={() => undefined}
+      />,
+    );
+    expect(screen.queryByText(/Connect Claude:/i)).toBeNull();
+    expect(screen.getByText(/Server unreachable:/i)).toBeTruthy();
+  });
 });
