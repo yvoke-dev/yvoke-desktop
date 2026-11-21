@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppCore } from '../src/main/AppCore';
+import { ServerAuthRequiredError } from '../src/main/auth/ServerAuth';
 import { serializeAssistantContent } from '../src/main/store/messageCodec';
 import { ThreadStore } from '../src/main/store/ThreadStore';
 import { SyncApiError, type ConversationDto, type MessageDto } from '../src/main/sync/SyncClient';
@@ -3090,7 +3091,7 @@ describe('Startup Conversation & Message Sync Recovery', () => {
       await scanGate;
       return origReadRaw(id);
     });
-    vi.spyOn(core.syncClient, 'listConversations').mockRejectedValueOnce(new Error('Entra: Sign-in required'));
+    vi.spyOn(core.syncClient, 'listConversations').mockRejectedValueOnce(new ServerAuthRequiredError());
 
     try {
       let settledBeforeScan = false;
@@ -3102,7 +3103,8 @@ describe('Startup Conversation & Message Sync Recovery', () => {
       expect(settledBeforeScan).toBe(true);
 
       const offlineRes = await offlinePromise;
-      expect(offlineRes.serverReachable).toBe(false);
+      expect(offlineRes.serverReachable).toBe(true);
+      expect(offlineRes.serverAuthRequired).toBe(true);
       expect(offlineRes.pendingSyncCount).toBe(1); // Pre-scan cached sync-queue.json count
       expect(offlineRes.threads).toEqual([]); // Neither orphan was in index.json before scan
 

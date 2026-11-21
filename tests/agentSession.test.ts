@@ -1484,8 +1484,11 @@ describe('completeTurn error handling with isResultFailure', () => {
     expect(completeEvents).toHaveLength(1);
     const complete = completeEvents[0] as Extract<AgentEvent, { kind: 'turn-complete' }>;
     expect(complete.isError).toBe(true);
+    expect(complete.authRequired).toBe(true);
     expect(complete.message.content).toBe('');
-    expect(complete.errorMessage).toBe('Claude: Not logged in · Please run /login');
+    expect(complete.errorMessage).toBe(
+      'Claude: Claude session expired or not signed in. Sign in to Claude to continue.',
+    );
     expect(onTurnPersist).not.toHaveBeenCalled();
 
     svc.closeAll();
@@ -1524,8 +1527,9 @@ describe('completeTurn error handling with isResultFailure', () => {
     expect(completeEvents).toHaveLength(1);
     const complete = completeEvents[0] as Extract<AgentEvent, { kind: 'turn-complete' }>;
     expect(complete.isError).toBe(true);
+    expect(complete.authRequired).toBe(false);
     expect(complete.message.content).toBe('');
-    expect(complete.errorMessage).toBe('Claude: error_during_execution');
+    expect(complete.errorMessage).toBe('Claude: Process crashed unexpectedly');
     expect(onTurnPersist).not.toHaveBeenCalled();
 
     svc.closeAll();

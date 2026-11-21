@@ -104,16 +104,6 @@ export const TrashIcon = (p: IconProps): React.JSX.Element =>
     p,
   );
 
-export const LogOutIcon = (p: IconProps): React.JSX.Element =>
-  svg(
-    <>
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-      <path d="m16 17 5-5-5-5" />
-      <path d="M21 12H9" />
-    </>,
-    p,
-  );
-
 export const CloseIcon = (p: IconProps): React.JSX.Element =>
   svg(<path d="M18 6 6 18M6 6l12 12" />, p);
 

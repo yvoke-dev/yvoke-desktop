@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { ServerAuthRequiredError } from '../src/main/auth/ServerAuth';
 import { SyncApiError, SyncClient } from '../src/main/sync/SyncClient';
 import type { OrchestratorRunPayload } from '../src/shared/types';
 
@@ -189,7 +190,7 @@ describe('SyncClient.verifyConnection', () => {
     expect(result).toEqual({ status: 'ok' });
     expect(getTokenMock).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/areas',
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer passed-token-xyz',
@@ -239,7 +240,7 @@ describe('SyncClient.verifyConnection', () => {
     const result = await client.verifyConnection('test-token');
     expect(result).toEqual({ status: 'ok' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://server.example/api/chat/v1/areas',
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({
@@ -247,6 +248,51 @@ describe('SyncClient.verifyConnection', () => {
         }),
       }),
     );
+  });
+
+  it('accepts 200 empty array [], reports 404 as error, and rejects 200 {} or SSO HTML as expired on /conversations?limit=1&offset=0', async () => {
+    const emptyListFetch = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }));
+    const emptyClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: emptyListFetch as unknown as typeof fetch,
+    });
+    expect(await emptyClient.verifyConnection('test-token')).toEqual({ status: 'ok' });
+    expect(emptyListFetch).toHaveBeenCalledWith(
+      'https://server.example/api/chat/v1/conversations?limit=1&offset=0',
+      expect.objectContaining({ method: 'GET' }),
+    );
+
+    const notFoundClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () => new Response('Not Found', { status: 404 })) as unknown as typeof fetch,
+    });
+    const res404 = await notFoundClient.verifyConnection('test-token');
+    expect(res404.status).toBe('error');
+    if (res404.status === 'error') {
+      expect(res404.message).toMatch(/404/);
+    }
+
+    const objectBodyClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch,
+    });
+    const resObj = await objectBodyClient.verifyConnection('test-token');
+    expect(resObj.status).toBe('expired');
+
+    const ssoHtmlClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => 'test-token',
+      fetchFn: (async () =>
+        new Response('<!DOCTYPE html><html><body>Sign in</body></html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' },
+        })) as unknown as typeof fetch,
+    });
+    const resHtml = await ssoHtmlClient.verifyConnection('test-token');
+    expect(resHtml.status).toBe('expired');
   });
 });
 
@@ -564,6 +610,43 @@ describe('SyncClient full 9-endpoint contract & error handling', () => {
 
     await expect(genericTokenErrClient.listConversations()).rejects.toThrow('Yvoke Backend: keychain locked');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves ServerAuthRequiredError prototype verbatim on initial token failure and on 401 forced silent refresh failure without re-wrapping as Yvoke Backend', async () => {
+    const fetchMock = vi.fn();
+    const initialAuthErrClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken: async () => {
+        throw new ServerAuthRequiredError();
+      },
+      fetchFn: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(initialAuthErrClient.listConversations()).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof ServerAuthRequiredError &&
+        err.message.startsWith('Entra: ') &&
+        !err.message.startsWith('Yvoke Backend:')
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // 401 triggers exactly one getToken(true) forced silent refresh; if that throws ServerAuthRequiredError, preserve it verbatim
+    const getToken = vi
+      .fn<(forceRefresh?: boolean) => Promise<string>>()
+      .mockResolvedValueOnce('stale-token')
+      .mockRejectedValueOnce(new ServerAuthRequiredError());
+    const fetch401 = vi.fn().mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
+    const retryClient = new SyncClient({
+      getBaseUrl: () => 'https://server.example',
+      getToken,
+      fetchFn: fetch401 as unknown as typeof fetch,
+    });
+
+    await expect(retryClient.listConversations()).rejects.toBeInstanceOf(ServerAuthRequiredError);
+    expect(getToken).toHaveBeenNthCalledWith(1, false);
+    expect(getToken).toHaveBeenNthCalledWith(2, true);
+    expect(fetch401).toHaveBeenCalledTimes(1);
   });
 });
 

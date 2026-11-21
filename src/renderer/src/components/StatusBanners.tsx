@@ -1,60 +1,83 @@
 import React from 'react';
 import type { AuthStatus } from '../../../shared/types';
+import { ClaudeSignInControls, type ClaudeSignInController } from './ClaudeSignInControls';
+import { ServerSignInControls, type ServerSignInController } from './ServerSignInControls';
 import { AlertIcon, InfoIcon } from './icons';
 
 export function StatusBanners(props: {
   auth: AuthStatus | null;
+  claudeSignIn: ClaudeSignInController;
+  serverSignIn: ServerSignInController;
+  serverAuthRequired?: boolean;
+  suppressClaudeBanner?: boolean;
+  suppressServerSignInBanner?: boolean;
+  signingOut?: boolean;
+  claudeSigningOut?: boolean;
   serverReachable: boolean;
   pendingSync: number;
   syncError: string | null;
   droppedSyncError?: string | null;
   onDismissDroppedSyncError?: () => void;
-  onServerSignIn: () => void;
-  onRetryAuth: () => void;
   onRetryServer: () => void;
 }): React.JSX.Element | null {
   const {
     auth,
+    claudeSignIn,
+    serverSignIn,
+    serverAuthRequired = false,
+    suppressClaudeBanner = false,
+    suppressServerSignInBanner = false,
+    signingOut = false,
+    claudeSigningOut = false,
     serverReachable,
     pendingSync,
     syncError,
     droppedSyncError,
     onDismissDroppedSyncError,
-    onServerSignIn,
-    onRetryAuth,
     onRetryServer,
   } = props;
+  const needsClaudeSignIn = auth?.claude === 'missing' || Boolean(claudeSignIn.signingIn);
+  const needsServerSignIn =
+    (auth?.server.mode === 'entra' && (!auth.server.signedIn || serverAuthRequired)) ||
+    Boolean(serverSignIn.signingIn);
+  const showClaudeBanner = needsClaudeSignIn && !suppressClaudeBanner;
+  const showServerSignInBanner = needsServerSignIn && !suppressServerSignInBanner;
+
   return (
     <div className="banners">
-      {auth?.claude === 'missing' && (
+      {showClaudeBanner && (
         <div className="banner warn">
           <span className="banner-icon">
             <AlertIcon size={14} />
           </span>
-          <span>
-            <strong>Connect Claude:</strong> no Claude Code credentials found. Run <code>claude /login</code> in a
-            terminal (your Claude Pro/Max account — the same login as Claude Desktop), then retry.
+          <span className="banner-text">
+            <strong>Connect Claude:</strong> sign in with your Claude Pro or Max account in your
+            browser to ask questions.
           </span>
-          <button className="small banner-action" onClick={onRetryAuth}>
-            Retry sign-in
-          </button>
+          <ClaudeSignInControls
+            controller={claudeSignIn}
+            variant="banner"
+            disabled={serverSignIn.signingIn || claudeSigningOut || signingOut}
+          />
         </div>
       )}
-      {auth?.server.mode === 'entra' && !auth.server.signedIn && (
+      {showServerSignInBanner && (
         <div className="banner warn">
           <span className="banner-icon">
             <AlertIcon size={14} />
           </span>
-          <span>
+          <span className="banner-text">
             <strong>Server sign-in required:</strong> sign in with your corporate account to load and save
             conversations.
           </span>
-          <button className="primary small banner-action" onClick={onServerSignIn}>
-            Sign in
-          </button>
+          <ServerSignInControls
+            controller={serverSignIn}
+            variant="banner"
+            disabled={claudeSignIn.signingIn || signingOut || claudeSigningOut}
+          />
         </div>
       )}
-      {!serverReachable && (
+      {!serverReachable && !needsServerSignIn && (
         <div className="banner error">
           <span className="banner-icon">
             <AlertIcon size={14} />

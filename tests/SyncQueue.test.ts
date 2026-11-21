@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { SyncEvent } from '../src/shared/types';
+import { ServerAuthRequiredError, ServerAuthTransientError } from '../src/main/auth/ServerAuth';
 import { SyncApiError, type SyncClient } from '../src/main/sync/SyncClient';
 import { SyncQueue, type QueuedTurn, type SyncQueueDeps } from '../src/main/sync/SyncQueue';
 
@@ -1112,6 +1113,198 @@ describe('SyncQueue durability (Correctness Property 5)', () => {
 
         expect(events.filter((e) => e.kind === 'sync-state' && e.acked === true)).toEqual([]);
         expect(events).toEqual([]);
+        q.dispose();
+      }
+    });
+
+    it('pauses retry backoff ONLY on ServerAuthRequiredError in Entra mode, while scheduling exponential backoff on SyncApiError(401), untyped Entra errors, network errors, and 500s', async () => {
+      // 1. ServerAuthRequiredError in Entra mode: clears prior retry timer, preserves attempts, arms 0 retries, drains after sign-in
+      {
+        events = [];
+        let scheduledTimers = 0;
+        const dropped: QueuedTurn[] = [];
+        let phase: 'net' | 'auth' | 'ok' = 'net';
+
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              if (phase === 'net') throw new Error('ECONNREFUSED');
+              if (phase === 'auth') throw new ServerAuthRequiredError();
+              return { ids: ['srv-u', 'srv-a'] };
+            }),
+            {
+              isEntraMode: () => true,
+              onTurnDropped: (t) => dropped.push(t),
+              setTimeoutFn: ((fn: () => void) => {
+                scheduledTimers += 1;
+                return setTimeout(fn, 60_000);
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+
+        // First hit a transient network error -> arms 1 retry timer, attempts becomes 1
+        q.enqueue(turn('t-auth-pause-required', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect((q as unknown as { timer: unknown }).timer).not.toBeNull();
+        expect((q as unknown as { queue: QueuedTurn[] }).queue[0].attempts).toBe(1);
+
+        // Next flush hits ServerAuthRequiredError -> clears prior timer, arms 0 new timers, leaves attempts unchanged
+        events = [];
+        phase = 'auth';
+        await q.flush();
+        expect((q as unknown as { timer: unknown }).timer).toBeNull();
+        expect(scheduledTimers).toBe(1);
+        expect((q as unknown as { queue: QueuedTurn[] }).queue[0].attempts).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        expect(dropped).toHaveLength(0);
+        expect(
+          events.some((e) => e.kind === 'sync-state' && e.state === 'error' && e.dropped === undefined),
+        ).toBe(true);
+
+        // Once user signs in and explicit flush() is called, queued turn drains cleanly
+        phase = 'ok';
+        await q.flush();
+        expect(q.pendingCount()).toBe(0);
+        q.dispose();
+      }
+
+      // 2. Backend SyncApiError(401) and untyped Entra: errors MUST schedule exponential backoff (never pause permanently or drop)
+      const backoffAuthErrors: Array<{ label: string; error: Error }> = [
+        { label: 'SyncApiError(401)', error: new SyncApiError(401, 'Yvoke Backend: Unauthorized') },
+        {
+          label: 'untyped Entra error',
+          error: new Error('Entra: Authentication session expired or invalid. Please sign in again.'),
+        },
+      ];
+
+      for (const { label, error } of backoffAuthErrors) {
+        events = [];
+        let scheduledTimers = 0;
+        const dropped: QueuedTurn[] = [];
+        let shouldFail = true;
+
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              if (shouldFail) throw error;
+              return { ids: ['srv-u', 'srv-a'] };
+            }),
+            {
+              isEntraMode: () => true,
+              onTurnDropped: (t) => dropped.push(t),
+              setTimeoutFn: ((fn: () => void) => {
+                scheduledTimers += 1;
+                return setTimeout(fn, 60_000);
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+
+        q.enqueue(turn(`t-backoff-${label}`, 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect((q as unknown as { queue: QueuedTurn[] }).queue[0].attempts).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        expect(dropped).toHaveLength(0);
+        expect(
+          events.some((e) => e.kind === 'sync-state' && e.state === 'error' && e.dropped === undefined),
+        ).toBe(true);
+
+        // Second consecutive failure increments attempts to 2 and schedules another backoff timer
+        await q.flush();
+        expect(scheduledTimers).toBe(2);
+        expect((q as unknown as { queue: QueuedTurn[] }).queue[0].attempts).toBe(2);
+        expect(q.pendingCount()).toBe(1);
+        expect(dropped).toHaveLength(0);
+
+        // Recovers cleanly once transient 401 clears
+        shouldFail = false;
+        await q.flush();
+        expect(q.pendingCount()).toBe(0);
+        q.dispose();
+      }
+
+      // 3. Network error prefixed with Entra: (e.g. Entra: fetch failed) and 500 MUST still schedule backoff retry
+      for (const retriable of [
+        new Error('Entra: fetch failed'),
+        new SyncApiError(500, 'Yvoke Backend: 500 Internal Server Error'),
+      ]) {
+        let scheduledTimers = 0;
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw retriable;
+            }),
+            {
+              setTimeoutFn: (() => {
+                scheduledTimers += 1;
+                return 0 as unknown as ReturnType<typeof setTimeout>;
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn('t-retriable', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        q.dispose();
+      }
+    });
+
+    it('schedules backoff retry (does not pause) on ServerAuthTransientError, Entra 503, and in dev mode (isEntraMode: () => false) even on 401/ServerAuthRequiredError', async () => {
+      // 1. Entra mode + transient Entra errors -> retry scheduled (NOT paused)
+      for (const transient of [
+        new ServerAuthTransientError(new Error('503 Service Unavailable')),
+        new Error('Entra: 503 Service Unavailable'),
+      ]) {
+        let scheduledTimers = 0;
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw transient;
+            }),
+            {
+              isEntraMode: () => true,
+              setTimeoutFn: (() => {
+                scheduledTimers += 1;
+                return 0 as unknown as ReturnType<typeof setTimeout>;
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn('t-entra-transient', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect(q.pendingCount()).toBe(1);
+        q.dispose();
+      }
+
+      // 2. Dev mode (isEntraMode: () => false) + 401 / ServerAuthRequiredError -> retry scheduled (NOT paused)
+      for (const err of [
+        new SyncApiError(401, 'Yvoke Backend: Unauthorized'),
+        new ServerAuthRequiredError(),
+      ]) {
+        let scheduledTimers = 0;
+        const q = new SyncQueue(
+          customDeps(
+            fakeClient(async () => {
+              throw err;
+            }),
+            {
+              isEntraMode: () => false,
+              setTimeoutFn: (() => {
+                scheduledTimers += 1;
+                return 0 as unknown as ReturnType<typeof setTimeout>;
+              }) as unknown as typeof setTimeout,
+            },
+          ),
+        );
+        q.enqueue(turn('t-dev-retry', 1));
+        await q.flush();
+        expect(scheduledTimers).toBe(1);
+        expect(q.pendingCount()).toBe(1);
         q.dispose();
       }
     });

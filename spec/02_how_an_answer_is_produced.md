@@ -22,8 +22,9 @@ server.
 
 ## How it behaves
 
-- **The model runs on this machine, on the user's own Claude subscription.** The app never handles
-  those credentials: it picks up whatever the Claude tooling on the machine has already signed in, and
+- **The model runs on this machine, on the user's own Claude subscription.** The bundled Claude tooling
+  manages sign-in (either started from inside the app or picked up from an existing login on the machine)
+  while raw subscription tokens stay outside the app: Yvoke never sees, stores, or transmits them, and
   removes any pay-per-token API key from the environment the model runs in, so an inherited one cannot
   silently move the billing off the subscription.
 - **Playbook instructions come from the server, on every new session, with no fallback and no cache.**
@@ -150,8 +151,6 @@ server.
 - **Three conversations stay warm, softly.** Sending in a fourth closes the least recently used *idle*
   one — but if all three are mid-answer, nothing is evicted and a fourth session starts anyway.
 - **Mid-turn token expiry is unhandled.** MCP authentication headers are updated when a turn starts, not during tool execution. An exceptionally long turn or multi-stage review round exceeding the token's remaining buffer can lose knowledge-base access mid-answer.
-- **A turn that crashes leaves its runtime process behind.** The session is dropped without being shut
-  down; only a clean close reclaims it.
 - **The computation tool runs pure JavaScript in an isolated in-memory sandbox** — expressions or scripts up to 10,000 characters, bounded by a 1-second execution timeout and a 32,000-character output cap. Because the sandbox runs in-process on the application's JavaScript heap without a separate per-call memory quota, the timeout bounds CPU time only, not memory allocation. Standard ECMAScript built-ins (`Math`, `Date`, `Intl`, `JSON`, `Array`, `Object`, `Map`, `Set`, `RegExp`, `BigInt`, `console`) are available, while dynamic code generation from strings or WebAssembly (`eval`, `Function`, `WebAssembly`), timers, network, filesystem and host process access are disabled.
 - **Nothing checks that a cited passage supports the sentence it is attached to.** The citation check
   the assistant can run confirms a source exists; it never reads it.
@@ -167,7 +166,7 @@ server.
 - Opening a shell, running machine commands or arbitrary processes, or reading files on the machine. Beyond the isolated in-memory computation sandbox, there is no path to the host system.
 - Answering without the server. The knowledge base, the playbooks and the profiles are all
   remote, so an offline app can read old conversations but cannot answer a new question.
-- Answering without a Claude sign-in. The app cannot sign in for you; it can only tell you to.
+- Answering without a Claude sign-in.
 - Choosing a model per message, or any model other than those listed in Settings.
 - Editing playbooks from the app. Playbooks are server-managed and read-only here.
 - Cancelling a playbook check once it has started.

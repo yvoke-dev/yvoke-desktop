@@ -100,6 +100,15 @@ behind it, and the work that produced it can be opened and read.
   screenful of playbooks, a refusal at the foot of the pane read as nothing having happened. The
   strip is there only while it has something to say, and scrolls internally rather than growing, so
   a long error cannot crowd out the conversation.
+- **A turn that fails because of missing or expired Claude sign-in offers recovery inline.** When a
+  conversation error in the strip above the transcript is caused by missing or expired Claude sign-in, an
+  inline *Sign in to Claude* control appears inside that error banner. Completing sign-in clears the error
+  and displays a notice inviting you to send your question again.
+- **A turn that fails because of missing or expired corporate sign-in offers recovery inline.** When a
+  conversation error in the strip above the transcript is caused by missing or expired corporate sign-in
+  (Entra ID), the app fails the turn without launching a browser automatically and displays an inline
+  *Sign in to Yvoke* control inside that error banner. Completing sign-in clears the error, refreshes
+  server state, and displays a notice inviting you to send your question again.
 - **The playbook check never blocks a question.** It fails open at every step: switched off, no
   server, a timeout, an unparseable reply, a suggestion naming a playbook that does not exist — all of
   them send the message as selected. It is an assist, not a gate.
@@ -132,8 +141,10 @@ behind it, and the work that produced it can be opened and read.
   opens pre-filled with whatever was said last time.
 - **An answer cannot be rated until it has synced**, because feedback is stored against the server's
   id for that message. Until then it is refused with a message asking the user to try again shortly.
-- **The sidebar's model badge only appears when it differs** from the default model, and the
-  multi-agent marker only when a profile is selected — a row that matches the norm says nothing.
+- **Each sidebar conversation row shows only its title and last-activity timestamp** (plus a subtle
+  sync indicator when unsynced or failed, and a matching excerpt while searching). The
+  conversation's agent mode — and model in single-agent mode — remain visible in the composer once
+  opened.
 - **Creating and deleting both need the server, and a failure is silent.** *New conversation* pressed
   while signed out or offline does nothing at all: no row, no banner, no message. A delete whose
   server call fails behaves the same way, leaving the conversation in place.
