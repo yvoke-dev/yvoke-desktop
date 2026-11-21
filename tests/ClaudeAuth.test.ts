@@ -1197,6 +1197,461 @@ describe('ClaudeAuthManager', () => {
       expect(allLogs).not.toContain('/oauth/authorize');
     });
 
+    it('captures a late single-line plain-text OAuth URL after the 10s wait window, logs once, and locks against duplicate plain-text and OSC-8 overwrites', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.useFakeTimers();
+
+      const mgr = createManager();
+      const signInP = mgr.signIn();
+      const child = spawned[0].child;
+
+      const initialUrlP = mgr.getActiveSignInUrl();
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      expect(await initialUrlP).toBeNull();
+
+      const lateUrl =
+        'https://claude.ai/oauth/authorize?client_id=cid_late&code_challenge=CHAL_LATE&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_SINGLE';
+      child.emitStdout(`${lateUrl}\n`);
+
+      // Calling getActiveSignInUrl() during the 40ms settle window awaits and resolves with the exact URL
+      const duringSettleP = mgr.getActiveSignInUrl();
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+      expect(await duringSettleP).toBe(lateUrl);
+
+      const urlReadyLogs = () =>
+        logSpy.mock.calls
+          .flat()
+          .map(String)
+          .filter((msg) => msg.includes('Claude browser sign-in started (fallback OAuth URL ready)'));
+      expect(urlReadyLogs()).toHaveLength(1);
+
+      // Subsequent duplicate plain-text URL and valid OSC-8 URL must not overwrite or log again
+      const dupPlain =
+        'https://claude.ai/oauth/authorize?client_id=cid_dup&code_challenge=CHAL_DUP&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=DUP_PLAIN';
+      const dupOsc =
+        'https://claude.ai/oauth/authorize?client_id=cid_osc&code_challenge=CHAL_OSC&redirect_uri=http%3A%2F%2Flocalhost%3A3%2Fcb&state=DUP_OSC';
+      child.emitStdout(`${dupPlain}\n\n`);
+      child.emitStdout(`\x1b]8;;${dupOsc}\x07Sign in\x1b]8;;\x07\n`);
+
+      expect(await mgr.getActiveSignInUrl()).toBe(lateUrl);
+      expect(urlReadyLogs()).toHaveLength(1);
+
+      mgr.cancelSignIn();
+      await signInP;
+    });
+
+    it('reassembles a late wrapped multiline plain-text OAuth URL after 10s across chunks and locks via settle timer without a prompt line', async () => {
+      vi.useFakeTimers();
+
+      const mgr = createManager();
+      const signInP = mgr.signIn();
+      const child = spawned[0].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      expect(await mgr.getActiveSignInUrl()).toBeNull();
+
+      child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_wrap&code_challenge=CHAL_W&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_A\n',
+      );
+      const midSettleP = mgr.getActiveSignInUrl();
+      let resolvedEarly = false;
+      void midSettleP.then(() => {
+        resolvedEarly = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(Math.floor(CLAUDE_URL_CONTINUATION_SETTLE_MS / 2));
+      expect(resolvedEarly).toBe(false);
+
+      child.emitStdout('LATE_B\n');
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+
+      const expectedUrl =
+        'https://claude.ai/oauth/authorize?client_id=cid_wrap&code_challenge=CHAL_W&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_ALATE_B';
+      expect(await midSettleP).toBe(expectedUrl);
+
+      // After settle timer locks urlLocked and clears pendingUrl, a stray single-token line must neither append nor be swallowed
+      child.emitStdout('STRAY_TOKEN_AFTER_SETTLE\n');
+      expect(await mgr.getActiveSignInUrl()).toBe(expectedUrl);
+
+      child.finish(1);
+      const res = await signInP;
+      expect(res.status).toBe('error');
+      if (res.status === 'error') {
+        expect(res.message).toContain('STRAY_TOKEN_AFTER_SETTLE');
+      }
+    });
+
+    it('captures a late multi-chunk OAuth URL whose first line is missing state without locking prematurely', async () => {
+      vi.useFakeTimers();
+
+      const mgr = createManager();
+      const signInP = mgr.signIn();
+      const child = spawned[0].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+
+      child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_inc&code_challenge=CHAL_INC&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb\n',
+      );
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS * 2);
+      expect(await mgr.getActiveSignInUrl()).toBeNull();
+
+      child.emitStdout('&state=LATE_COMP\n');
+      const completeP = mgr.getActiveSignInUrl();
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+      const expectedUrl =
+        'https://claude.ai/oauth/authorize?client_id=cid_inc&code_challenge=CHAL_INC&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_COMP';
+      expect(await completeP).toBe(expectedUrl);
+
+      // Locked against subsequent duplicate URL
+      child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_other&code_challenge=CHAL_O&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=OTHER\n\n',
+      );
+      expect(await mgr.getActiveSignInUrl()).toBe(expectedUrl);
+
+      mgr.cancelSignIn();
+      await signInP;
+    });
+
+    it('handles wrapped OAuth URLs straddling the 10s boundary for both valid line 1 and incomplete line 1 without leaking truncated URLs', async () => {
+      vi.useFakeTimers();
+
+      // (a) Valid line 1 at 9_990ms -> 10_000ms resolves initial waiter to null -> continuation at 10_010ms settles complete URL and locks
+      const mgr1 = createManager();
+      const signInP1 = mgr1.signIn();
+      const child1 = spawned[0].child;
+      const initialP1 = mgr1.getActiveSignInUrl();
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS - 10);
+      child1.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_s1&code_challenge=CHAL_S1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=STRAD_A\n',
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await initialP1).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(5);
+      const straddleP1 = mgr1.getActiveSignInUrl();
+
+      await vi.advanceTimersByTimeAsync(5);
+      child1.emitStdout('STRAD_B\n');
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+
+      const expected1 =
+        'https://claude.ai/oauth/authorize?client_id=cid_s1&code_challenge=CHAL_S1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=STRAD_ASTRAD_B';
+      expect(await straddleP1).toBe(expected1);
+
+      // Locked against duplicate URL and stray token
+      child1.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_dup&code_challenge=CHAL_D&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=DUP\n\n',
+      );
+      child1.emitStdout('STRAY_AFTER_STRADDLE\n');
+      expect(await mgr1.getActiveSignInUrl()).toBe(expected1);
+      child1.finish(1);
+      const res1 = await signInP1;
+      expect(res1.status).toBe('error');
+      if (res1.status === 'error') {
+        expect(res1.message).toContain('STRAY_AFTER_STRADDLE');
+      }
+
+      // (b) Incomplete line 1 (missing state) at 9_990ms -> 10_000ms resolves initial waiter to null -> &state=STRAD_LATE at 10_010ms settles & locks
+      const mgr2 = createManager();
+      const signInP2 = mgr2.signIn();
+      const child2 = spawned[1].child;
+      const initialP2 = mgr2.getActiveSignInUrl();
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS - 10);
+      child2.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_s2&code_challenge=CHAL_S2&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb\n',
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await initialP2).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(10);
+      child2.emitStdout('&state=STRAD_LATE\n');
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+
+      const expected2 =
+        'https://claude.ai/oauth/authorize?client_id=cid_s2&code_challenge=CHAL_S2&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=STRAD_LATE';
+      expect(await mgr2.getActiveSignInUrl()).toBe(expected2);
+
+      child2.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid_dup2&code_challenge=CHAL_D2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=DUP2\n\n',
+      );
+      expect(await mgr2.getActiveSignInUrl()).toBe(expected2);
+
+      mgr2.cancelSignIn();
+      await signInP2;
+    });
+
+    it('rejects disallowed/incomplete late URLs without latching urlLocked, and allows late valid OSC-8 to lock out later plain-text URLs', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.useFakeTimers();
+
+      // (a) Disallowed and incomplete late URLs do not lock out a subsequent valid late URL
+      const mgr1 = createManager();
+      const p1 = mgr1.signIn();
+      const child1 = spawned[0].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      child1.emitStdout(
+        'http://claude.ai/oauth/authorize?client_id=c&code_challenge=CH&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=HTTP_BAD\n',
+      );
+      child1.emitStdout(
+        'https://evil.example/oauth/authorize?client_id=c&code_challenge=CH&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=EVIL_BAD\n',
+      );
+      child1.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c&code_challenge=CH&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb\n\n',
+      );
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS * 2);
+      expect(await mgr1.getActiveSignInUrl()).toBeNull();
+
+      const validLateUrl =
+        'https://claude.ai/oauth/authorize?client_id=c_ok&code_challenge=CH_OK&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_OK';
+      child1.emitStdout(`${validLateUrl}\n`);
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+      expect(await mgr1.getActiveSignInUrl()).toBe(validLateUrl);
+
+      mgr1.cancelSignIn();
+      await p1;
+
+      // (b) Late valid OSC-8 URL after 10s captures immediately, logs once, and locks out a later plain-text URL
+      logSpy.mockClear();
+      const mgr2 = createManager();
+      const p2 = mgr2.signIn();
+      const child2 = spawned[1].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      const lateOscUrl =
+        'https://claude.ai/oauth/authorize?client_id=c_osc&code_challenge=CH_OSC&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=LATE_OSC';
+      child2.emitStdout(`\x1b]8;;${lateOscUrl}\x07Sign in\x1b]8;;\x07\n`);
+      expect(await mgr2.getActiveSignInUrl()).toBe(lateOscUrl);
+
+      child2.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c_plain&code_challenge=CH_P&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=LATE_PLAIN\n\n',
+      );
+      expect(await mgr2.getActiveSignInUrl()).toBe(lateOscUrl);
+
+      const urlReadyLogs = logSpy.mock.calls
+        .flat()
+        .map(String)
+        .filter((msg) => msg.includes('Claude browser sign-in started (fallback OAuth URL ready)'));
+      expect(urlReadyLogs).toHaveLength(1);
+
+      mgr2.cancelSignIn();
+      await p2;
+    });
+
+    it('suppresses late wrapped duplicate OAuth URL secrets across stdout and stderr and clears pendingUrl on post-lock non-newline prompts', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.useFakeTimers();
+
+      // (a) Separate stdout and stderr runs with wrapped duplicate URLs after a late URL locks
+      for (const stream of ['stdout', 'stderr'] as const) {
+        const mgr = createManager();
+        const p = mgr.signIn();
+        const child = spawned[spawned.length - 1].child;
+        const emit = (s: string) => (stream === 'stdout' ? child.emitStdout(s) : child.emitStderr(s));
+
+        await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+        const origUrl =
+          'https://claude.ai/oauth/authorize?client_id=orig&code_challenge=ORIG_SECRET_CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=ORIG_SECRET_STATE';
+        emit(`${origUrl}\n`);
+        await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+        expect(await mgr.getActiveSignInUrl()).toBe(origUrl);
+
+        emit('Browser launch failed\n');
+        emit(
+          'https://claude.ai/oauth/authorize?client_id=dup&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&code_challenge=\n',
+        );
+        emit('DUP_SECRET_CHAL_NO_KEY\n');
+        emit('&state=DUP_SECRET_STATE\n');
+        emit('DUP_UNFLUSHED_TAIL');
+        child.finish(1);
+
+        const res = await p;
+        expect(res.status).toBe('error');
+        if (res.status === 'error') {
+          expect(res.message).toContain('Browser launch failed');
+          for (const secret of [
+            'ORIG_SECRET_CHAL',
+            'ORIG_SECRET_STATE',
+            'DUP_SECRET_CHAL_NO_KEY',
+            'DUP_SECRET_STATE',
+            'DUP_UNFLUSHED_TAIL',
+            '/oauth/authorize',
+          ]) {
+            expect(res.message).not.toContain(secret);
+          }
+        }
+      }
+
+      const allLogs = [
+        ...logSpy.mock.calls.flat().map(String),
+        ...errSpy.mock.calls.flat().map(String),
+      ].join('\n');
+      for (const secret of [
+        'ORIG_SECRET_CHAL',
+        'ORIG_SECRET_STATE',
+        'DUP_SECRET_CHAL_NO_KEY',
+        'DUP_SECRET_STATE',
+        'DUP_UNFLUSHED_TAIL',
+        '/oauth/authorize',
+      ]) {
+        expect(allLogs).not.toContain(secret);
+      }
+
+      // (b) Separate run: post-lock duplicate URL + non-newline prompt clears pendingUrl before urlLocked return;
+      //     evicting the prompt from the 65_536-char buffer ensures a later single-token error is only retained
+      //     if scheduleOrCommitPendingUrl cleared pendingUrl on the prompt chunk.
+      const mgrPrompt = createManager();
+      const pPrompt = mgrPrompt.signIn();
+      const childPrompt = spawned[spawned.length - 1].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      const origPromptUrl =
+        'https://claude.ai/oauth/authorize?client_id=orig&code_challenge=C1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=S1';
+      childPrompt.emitStdout(`${origPromptUrl}\n`);
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+      expect(await mgrPrompt.getActiveSignInUrl()).toBe(origPromptUrl);
+
+      childPrompt.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=dup&code_challenge=DUP_PROMPT_C&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=DUP_PROMPT_S\nPaste code > ',
+      );
+      childPrompt.emitStdout(' '.repeat(70_000));
+      childPrompt.emitStdout('ECONNREFUSED\n');
+      childPrompt.finish(1);
+
+      const resPrompt = await pPrompt;
+      expect(resPrompt.status).toBe('error');
+      if (resPrompt.status === 'error') {
+        expect(resPrompt.message).toContain('ECONNREFUSED');
+        expect(resPrompt.message).not.toContain('DUP_PROMPT_C');
+        expect(resPrompt.message).not.toContain('DUP_PROMPT_S');
+        expect(resPrompt.message).not.toContain('/oauth/authorize');
+      }
+    });
+
+    it('resolves pending late getActiveSignInUrl() immediately on cancelSignIn(), dispose(), and finish(1) without hanging or phantom logs', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.useFakeTimers();
+
+      const countUrlReadyLogs = () =>
+        logSpy.mock.calls
+          .flat()
+          .map(String)
+          .filter((msg) => msg.includes('Claude browser sign-in started (fallback OAuth URL ready)'))
+          .length;
+
+      // (a) cancelSignIn() while late settle timer is active
+      const mgr1 = createManager();
+      const p1 = mgr1.signIn();
+      const child1 = spawned[0].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      child1.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c1&code_challenge=CH1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=CANCEL_PEND\n',
+      );
+      const pendingUrl1 = mgr1.getActiveSignInUrl();
+      expect(mgr1.cancelSignIn()).toBe(true);
+      expect(await pendingUrl1).toBeNull();
+      expect(await p1).toEqual({ status: 'cancelled' });
+
+      // Post-cancel chunk must not re-arm urlSettleTimer or emit phantom ready log
+      child1.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c1b&code_challenge=CH1B&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=POST_CANCEL\n\n',
+      );
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS * 2);
+      expect(countUrlReadyLogs()).toBe(0);
+      expect(await mgr1.getActiveSignInUrl()).toBeNull();
+
+      // (b) dispose() while late settle timer is active
+      logSpy.mockClear();
+      const mgr2 = createManager();
+      const p2 = mgr2.signIn();
+      const child2 = spawned[1].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      child2.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c2&code_challenge=CH2&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=DISPOSE_PEND\n',
+      );
+      const pendingUrl2 = mgr2.getActiveSignInUrl();
+      mgr2.dispose();
+      expect(await pendingUrl2).toBeNull();
+      expect(await p2).toEqual({ status: 'cancelled' });
+
+      child2.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c2b&code_challenge=CH2B&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=POST_DISPOSE\n\n',
+      );
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS * 2);
+      expect(countUrlReadyLogs()).toBe(0);
+      expect(await mgr2.getActiveSignInUrl()).toBeNull();
+
+      // (c) finish(1) while late settle timer is active flushes trailing candidateOAuthUrl without phantom "sign-in started" log
+      logSpy.mockClear();
+      const mgr3 = createManager();
+      const p3 = mgr3.signIn();
+      const child3 = spawned[2].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      child3.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=c3&code_challenge=CH3&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=EOF_PART1\n',
+      );
+      const pendingUrl3 = mgr3.getActiveSignInUrl();
+      child3.emitStdout('EOF_PART2');
+      child3.finish(1);
+
+      expect(await pendingUrl3).toBe(
+        'https://claude.ai/oauth/authorize?client_id=c3&code_challenge=CH3&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=EOF_PART1EOF_PART2',
+      );
+      expect((await p3).status).toBe('error');
+      expect(countUrlReadyLogs()).toBe(0);
+      expect(await mgr3.getActiveSignInUrl()).toBeNull();
+
+      // (d) finish(1) with trailing non-continuation diagnostic ('Error:', no '\n') after pending URL emits zero phantom "sign-in started" logs
+      logSpy.mockClear();
+      const mgr4 = createManager();
+      const p4 = mgr4.signIn();
+      const child4 = spawned[3].child;
+
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS + 200);
+      const eofErrUrl =
+        'https://claude.ai/oauth/authorize?client_id=c4&code_challenge=CH4&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=EOF_ERR';
+      child4.emitStdout(`${eofErrUrl}\n`);
+      const pendingUrl4 = mgr4.getActiveSignInUrl();
+      child4.emitStdout('Error:');
+      child4.finish(1);
+
+      expect(await pendingUrl4).toBe(eofErrUrl);
+      const res4 = await p4;
+      expect(res4.status).toBe('error');
+      if (res4.status === 'error') {
+        expect(res4.message).toContain('Error:');
+      }
+      expect(countUrlReadyLogs()).toBe(0);
+      expect(await mgr4.getActiveSignInUrl()).toBeNull();
+
+      // (e) finish(1) with newline-free OSC-8 OAuth URL preserves URL capture without emitting a phantom "sign-in started" log
+      logSpy.mockClear();
+      const mgr5 = createManager();
+      const p5 = mgr5.signIn();
+      const child5 = spawned[4].child;
+
+      const waiter5 = mgr5.getActiveSignInUrl();
+      const oscEofUrl =
+        'https://claude.ai/oauth/authorize?client_id=c5&code_challenge=CH5&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=OSC_EOF';
+      child5.emitStdout(`\x1b]8;;${oscEofUrl}\x07Sign in\x1b]8;;\x07`);
+      child5.finish(1);
+
+      expect(await waiter5).toBe(oscEofUrl);
+      expect((await p5).status).toBe('error');
+      expect(countUrlReadyLogs()).toBe(0);
+      expect(await mgr5.getActiveSignInUrl()).toBeNull();
+    });
+
     it('preserves fresh statusCache after successful signIn() for CLAUDE_STATUS_CACHE_TTL_MS while still invalidating on failed, false-positive, or cancelled signIn()', async () => {
       // 1. Successful signIn() preserves the fresh statusCache from post-exit getStatus({ forceRefresh: true })
       const mgrOk = createManager();

@@ -452,6 +452,8 @@ interface ActiveLoginState {
   urlWindowClosed: boolean;
   urlReadyPromise: Promise<string | null>;
   resolveUrlReady: (url: string | null) => void;
+  pendingUrlSettlePromise: Promise<string | null> | null;
+  resolvePendingUrlSettle: ((url: string | null) => void) | null;
   codeSubmitting: boolean;
   codeSubmitted: boolean;
   codeExchangeTimer?: ReturnType<typeof setTimeout>;
@@ -752,6 +754,8 @@ export class ClaudeAuthManager {
       urlWindowClosed: false,
       urlReadyPromise,
       resolveUrlReady,
+      pendingUrlSettlePromise: null,
+      resolvePendingUrlSettle: null,
       codeSubmitting: false,
       codeSubmitted: false,
       startCodeExchangeTimer: (ms: number) => {
@@ -790,8 +794,11 @@ export class ClaudeAuthManager {
     loginTimer.unref?.();
 
     let urlSettleTimer: ReturnType<typeof setTimeout> | undefined;
+    let urlLocked = false;
+    let candidateOAuthUrl: string | null = null;
 
     const clearLoginTimers = (): void => {
+      urlLocked = true;
       clearTimeout(urlTimer);
       clearTimeout(loginTimer);
       if (urlSettleTimer) {
@@ -805,6 +812,12 @@ export class ClaudeAuthManager {
       if (!loginState.urlWindowClosed) {
         loginState.urlWindowClosed = true;
         loginState.resolveUrlReady(loginState.oauthUrl);
+      }
+      if (loginState.resolvePendingUrlSettle) {
+        const resolveSettle = loginState.resolvePendingUrlSettle;
+        loginState.resolvePendingUrlSettle = null;
+        loginState.pendingUrlSettlePromise = null;
+        resolveSettle(loginState.oauthUrl);
       }
     };
 
@@ -837,23 +850,31 @@ export class ClaudeAuthManager {
     let stderrBuffer = '';
     let diagnosticTail = '';
     let stdoutDiagnosticTail = '';
-    let authoritativeUrlCommitted = false;
     const pendingUrl: Record<'stdout' | 'stderr', string | null> = {
       stdout: null,
       stderr: null,
     };
 
     const commitUrlReady = (url: string): void => {
+      if (urlLocked) return;
+      urlLocked = true;
+      loginState.oauthUrl = url;
       if (urlSettleTimer) {
         clearTimeout(urlSettleTimer);
         urlSettleTimer = undefined;
+      }
+      if (loginState.resolvePendingUrlSettle) {
+        const resolveSettle = loginState.resolvePendingUrlSettle;
+        loginState.resolvePendingUrlSettle = null;
+        loginState.pendingUrlSettlePromise = null;
+        resolveSettle(url);
       }
       if (!loginState.urlWindowClosed) {
         loginState.urlWindowClosed = true;
         clearTimeout(urlTimer);
         loginState.resolveUrlReady(url);
-        log('auth', 'Claude browser sign-in started (fallback OAuth URL ready)');
       }
+      log('auth', 'Claude browser sign-in started (fallback OAuth URL ready)');
     };
 
     const appendBoundedTail = (current: string, cleanLine: string): string => {
@@ -874,14 +895,23 @@ export class ClaudeAuthManager {
       }
     };
 
-    const handleCompleteLine = (rawLine: string, stream: 'stdout' | 'stderr'): void => {
+    const handleCompleteLine = (
+      rawLine: string,
+      stream: 'stdout' | 'stderr',
+      isEof = false,
+    ): void => {
       const oscUrl = extractOsc8OAuthUrl(rawLine);
       if (oscUrl) {
         pendingUrl[stream] = null;
-        if (!authoritativeUrlCommitted) {
-          authoritativeUrlCommitted = true;
-          loginState.oauthUrl = oscUrl;
-          commitUrlReady(oscUrl);
+        if (!urlLocked) {
+          if (isEof) {
+            if (!this.disposed && !cancelled) {
+              loginState.oauthUrl = oscUrl;
+              urlLocked = true;
+            }
+          } else {
+            commitUrlReady(oscUrl);
+          }
         }
         if (stream === 'stderr') {
           const strippedOsc = stripAnsiAndOsc8(rawLine).trim();
@@ -899,10 +929,10 @@ export class ClaudeAuthManager {
       if (pendingUrl[stream] !== null) {
         if (isOAuthUrlContinuation(trimmed, pendingUrl[stream].length)) {
           pendingUrl[stream] += trimmed;
-          if (!authoritativeUrlCommitted && !loginState.urlWindowClosed) {
+          if (!urlLocked) {
             const validated = validateClaudeOAuthUrl(pendingUrl[stream]);
             if (validated) {
-              loginState.oauthUrl = validated;
+              candidateOAuthUrl = validated;
             }
           }
           // Suppress wrapped URL continuation fragments from both stdout and stderr diagnostics.
@@ -910,25 +940,26 @@ export class ClaudeAuthManager {
         }
         pendingUrl[stream] = null;
         if (
-          !authoritativeUrlCommitted &&
-          loginState.oauthUrl &&
+          !isEof &&
+          !urlLocked &&
+          candidateOAuthUrl &&
           pendingUrl.stdout === null &&
           pendingUrl.stderr === null
         ) {
-          commitUrlReady(loginState.oauthUrl);
+          commitUrlReady(candidateOAuthUrl);
         }
       }
 
       const urlMatch = findOAuthUrlPrefixInLine(trimmedEnd);
       if (urlMatch) {
-        if (!authoritativeUrlCommitted && !loginState.urlWindowClosed) {
+        if (!urlLocked) {
           const validated = validateClaudeOAuthUrl(urlMatch.url);
           if (validated) {
-            loginState.oauthUrl = validated;
+            candidateOAuthUrl = validated;
           }
           if (urlMatch.runsToEnd) {
             pendingUrl[stream] = urlMatch.url;
-          } else if (validated) {
+          } else if (validated && !isEof) {
             commitUrlReady(validated);
           }
         } else if (urlMatch.runsToEnd) {
@@ -950,9 +981,6 @@ export class ClaudeAuthManager {
       stream: 'stdout' | 'stderr',
       trailingBuffer: string,
     ): void => {
-      if (authoritativeUrlCommitted || loginState.urlWindowClosed) {
-        return;
-      }
       if (pendingUrl[stream] !== null) {
         const strippedTrailing = stripAnsiAndOsc8(trailingBuffer).trimStart();
         if (
@@ -962,19 +990,27 @@ export class ClaudeAuthManager {
           pendingUrl[stream] = null;
         }
       }
-      if (loginState.oauthUrl) {
+      if (urlLocked) {
+        return;
+      }
+      if (candidateOAuthUrl) {
         if (pendingUrl.stdout === null && pendingUrl.stderr === null) {
-          commitUrlReady(loginState.oauthUrl);
+          commitUrlReady(candidateOAuthUrl);
         } else {
           if (urlSettleTimer) {
             clearTimeout(urlSettleTimer);
+          }
+          if (!loginState.pendingUrlSettlePromise) {
+            loginState.pendingUrlSettlePromise = new Promise<string | null>((res) => {
+              loginState.resolvePendingUrlSettle = res;
+            });
           }
           urlSettleTimer = setTimeout(() => {
             urlSettleTimer = undefined;
             pendingUrl.stdout = null;
             pendingUrl.stderr = null;
-            if (loginState.oauthUrl) {
-              commitUrlReady(loginState.oauthUrl);
+            if (!urlLocked && candidateOAuthUrl) {
+              commitUrlReady(candidateOAuthUrl);
             }
           }, CLAUDE_URL_CONTINUATION_SETTLE_MS);
           urlSettleTimer.unref?.();
@@ -983,6 +1019,7 @@ export class ClaudeAuthManager {
     };
 
     child.stdout?.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
       stdoutBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       let nl = stdoutBuffer.indexOf('\n');
       while (nl !== -1) {
@@ -998,6 +1035,7 @@ export class ClaudeAuthManager {
     });
 
     child.stderr?.on('data', (chunk: Buffer | string) => {
+      if (settled) return;
       stderrBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       let nl = stderrBuffer.indexOf('\n');
       while (nl !== -1) {
@@ -1021,15 +1059,18 @@ export class ClaudeAuthManager {
     child.once('close', (code: number | null) => {
       if (settled) return;
       if (stderrBuffer.trim().length > 0) {
-        handleCompleteLine(stderrBuffer, 'stderr');
+        handleCompleteLine(stderrBuffer, 'stderr', true);
         stderrBuffer = '';
       }
       if (stdoutBuffer.trim().length > 0) {
-        handleCompleteLine(stdoutBuffer, 'stdout');
+        handleCompleteLine(stdoutBuffer, 'stdout', true);
         stdoutBuffer = '';
       }
       pendingUrl.stdout = null;
       pendingUrl.stderr = null;
+      if (!this.disposed && !cancelled && !urlLocked && candidateOAuthUrl) {
+        loginState.oauthUrl = candidateOAuthUrl;
+      }
       if (this.disposed || cancelled) {
         settle({ status: 'cancelled' });
         return;
@@ -1099,10 +1140,13 @@ export class ClaudeAuthManager {
     if (!login || login.child.exitCode !== null) {
       return null;
     }
-    if (login.urlWindowClosed) {
+    if (!login.urlWindowClosed) {
+      return login.urlReadyPromise;
+    }
+    if (login.oauthUrl !== null) {
       return login.oauthUrl;
     }
-    return login.urlReadyPromise;
+    return login.pendingUrlSettlePromise ?? null;
   }
 
   async submitAuthCode(code: unknown): Promise<ClaudeCodeSubmitResult> {
