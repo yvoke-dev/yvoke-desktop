@@ -16,7 +16,6 @@ import type {
   ServerSignInResult,
 } from '../../shared/types';
 import {
-  hasErrorSourcePrefix,
   isNetworkError,
   sanitizeLogContent,
   tagAttributedError,
@@ -78,14 +77,6 @@ const INTERACTION_OR_GRANT_ERROR_CODES = new Set([
   'ui_not_allowed',
 ]);
 
-const NON_GRANT_ERROR_CODES = new Set([
-  'invalid_request',
-  'temporarily_unavailable',
-  'service_unavailable',
-  'server_error',
-  'request_timeout',
-]);
-
 function readHttpStatus(obj: unknown): number | undefined {
   if (typeof obj !== 'object' || obj === null) return undefined;
   const rec = obj as { status?: unknown; statusCode?: unknown };
@@ -128,13 +119,6 @@ function isInteractionOrGrantFailure(err: unknown): boolean {
       if (rec.name === 'InteractionRequiredAuthError') {
         return true;
       }
-      const status = readHttpStatus(cursor);
-      if (
-        (status === 400 || status === 401) &&
-        (!errorCode || !NON_GRANT_ERROR_CODES.has(errorCode))
-      ) {
-        return true;
-      }
     }
     const msg =
       cursor instanceof Error
@@ -164,19 +148,7 @@ function isInteractionOrGrantFailure(err: unknown): boolean {
  * Uses structural HTTP status inspection so `ServerAuth` never imports `SyncClient`.
  */
 export function isServerAuthFailure(error: unknown, isEntraMode: boolean): boolean {
-  if (
-    !isEntraMode ||
-    !error ||
-    error instanceof ServerAuthTransientError ||
-    isNetworkError(error)
-  ) {
-    return false;
-  }
-  if (error instanceof ServerAuthRequiredError) {
-    return true;
-  }
-  // Claude ResultError carries its own `status` (e.g. 401 from Anthropic) — never a server auth failure.
-  if (error instanceof Error && error.name === 'ResultError') {
+  if (!isEntraMode || !error || isNetworkError(error)) {
     return false;
   }
 
@@ -184,6 +156,16 @@ export function isServerAuthFailure(error: unknown, isEntraMode: boolean): boole
   let cursor: unknown = error;
   while (cursor && !seen.has(cursor)) {
     seen.add(cursor);
+    if (cursor instanceof ServerAuthTransientError) {
+      return false;
+    }
+    // Claude ResultError carries its own `status` (e.g. 401 from Anthropic) — never a server auth failure.
+    if (cursor instanceof Error && cursor.name === 'ResultError') {
+      return false;
+    }
+    if (cursor instanceof ServerAuthRequiredError) {
+      return true;
+    }
     const status = readHttpStatus(cursor);
     if (status === 401) {
       return true;
@@ -195,19 +177,6 @@ export function isServerAuthFailure(error: unknown, isEntraMode: boolean): boole
       return false;
     }
     cursor = typeof cursor === 'object' ? (cursor as { cause?: unknown }).cause : undefined;
-  }
-
-  const msg =
-    error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-  if (hasErrorSourcePrefix(msg, 'Entra')) {
-    if (
-      /\b(5\d{2}|429)\b|temporarily_unavailable|service_unavailable|server_error|timed?\s*out/i.test(
-        msg,
-      )
-    ) {
-      return false;
-    }
-    return true;
   }
 
   return false;
@@ -520,7 +489,6 @@ export class ServerAuth implements McpAuthProvider {
   private forceNextRefresh = false;
   private activeHydration: { key: string; promise: Promise<void> } | null = null;
   private activeSignIn: Promise<ServerSignInResult> | null = null;
-  private activeLoopback: CancellableLoopbackClient | null = null;
   private cancelActiveAttempt: (() => void) | null = null;
   private signInGeneration = 0;
   private latestSignedInGen = 0;
@@ -771,7 +739,6 @@ export class ServerAuth implements McpAuthProvider {
       attemptCancelled = true;
       loopback.cancel();
     };
-    this.activeLoopback = loopback;
     this.cancelActiveAttempt = markCancelled;
 
     const run = (async (): Promise<ServerSignInResult> => {
@@ -857,9 +824,6 @@ export class ServerAuth implements McpAuthProvider {
         if (this.activeSignIn === run) {
           this.activeSignIn = null;
         }
-        if (this.activeLoopback === loopback) {
-          this.activeLoopback = null;
-        }
         if (this.cancelActiveAttempt === markCancelled) {
           this.cancelActiveAttempt = null;
         }
@@ -877,7 +841,6 @@ export class ServerAuth implements McpAuthProvider {
     }
     const cancelFn = this.cancelActiveAttempt;
     this.activeSignIn = null;
-    this.activeLoopback = null;
     this.cancelActiveAttempt = null;
     this.signInGeneration += 1;
     cancelFn?.();

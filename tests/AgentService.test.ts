@@ -907,6 +907,30 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     ).rejects.toThrow('Yvoke Backend: 503 Service Unavailable');
     expect('serverAuthRequired' in events[0]).toBe(false);
     svcBackend.closeAll();
+
+    // 5. Entra mode + untyped Entra: prose error (e.g. unexpected PCA construction error) -> serverAuthRequired MUST be omitted
+    events = [];
+    const svcEntraProse = createService(makeThread({ id: 't-sa-prose' }), {
+      getSettings: entraSettings,
+      mcpAuthProvider: {
+        headers: async () => {
+          throw new Error('Entra: unexpected PCA construction failure');
+        },
+      } as never,
+    });
+    await expect(
+      svcEntraProse.sendMessage(makeThread({ id: 't-sa-prose' }), 'Q', { playbook: 'oim-full' }),
+    ).rejects.toThrow('Entra: unexpected PCA construction failure');
+    expect(events).toEqual([
+      {
+        kind: 'error',
+        threadId: 't-sa-prose',
+        message: 'Entra: unexpected PCA construction failure',
+        authRequired: false,
+      },
+    ]);
+    expect('serverAuthRequired' in events[0]).toBe(false);
+    svcEntraProse.closeAll();
   });
 
   it('fetches mcpAuthProvider.headers() AFTER missing/locked playbook guards and BEFORE single-agent mcpPrompts loading and orchestrator profile lookup', async () => {
@@ -1370,8 +1394,11 @@ describe('AgentService turn auth propagation, consume() teardown & closeIdleSess
     svcBackendProse.closeAll();
   });
 
-  it('unifies claudeBinaryPath() with resolveClaudeBinaryPath()', () => {
-    expect(claudeBinaryPath()).toBe(resolveClaudeBinaryPath());
+  it('unifies and memoizes claudeBinaryPath() with resolveClaudeBinaryPath()', () => {
+    const first = claudeBinaryPath();
+    const second = claudeBinaryPath();
+    expect(first).toBe(resolveClaudeBinaryPath());
+    expect(second).toBe(first);
   });
 
   it('emits 0 error or turn-complete events when closeThread() closes an active busy turn, and clears pendingUser and reviewState on exit', async () => {

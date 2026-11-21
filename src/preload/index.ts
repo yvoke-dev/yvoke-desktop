@@ -4,6 +4,7 @@ import type {
   AgentEvent,
   AppSettings,
   AuthStatus,
+  AuthStatusOptions,
   AuthVerificationResponse,
   ChatMessage,
   CitationRef,
@@ -51,7 +52,7 @@ export interface DesktopApi {
   interrupt(threadId: string): Promise<void>;
   submitClarification(threadId: string, toolUseId: string, answer: string): Promise<boolean>;
   submitFeedback(request: FeedbackRequest): Promise<void>;
-  authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus>;
+  authStatus(opts?: AuthStatusOptions): Promise<AuthStatus>;
   verifyAuth(): Promise<AuthVerificationResponse>;
   serverSignIn(): Promise<ServerSignInResult>;
   cancelServerSignIn(): Promise<boolean>;
@@ -88,10 +89,15 @@ const api: DesktopApi = {
   submitClarification: (threadId, toolUseId, answer) =>
     ipcRenderer.invoke(IpcChannels.chatSubmitClarification, threadId, toolUseId, answer),
   submitFeedback: (request) => ipcRenderer.invoke(IpcChannels.feedbackSubmit, request),
-  authStatus: (opts) =>
-    opts?.forceRefresh === true
-      ? ipcRenderer.invoke(IpcChannels.authStatus, { forceRefresh: true })
-      : ipcRenderer.invoke(IpcChannels.authStatus),
+  authStatus: (opts) => {
+    const payload: AuthStatusOptions = {
+      ...(opts?.forceRefresh === true ? { forceRefresh: true } : {}),
+      ...(opts?.refreshClaude === false ? { refreshClaude: false } : {}),
+    };
+    return Object.keys(payload).length > 0
+      ? ipcRenderer.invoke(IpcChannels.authStatus, payload)
+      : ipcRenderer.invoke(IpcChannels.authStatus);
+  },
   verifyAuth: () => ipcRenderer.invoke(IpcChannels.authVerify),
   serverSignIn: () => ipcRenderer.invoke(IpcChannels.authSignin),
   cancelServerSignIn: () => ipcRenderer.invoke(IpcChannels.authCancelSignin),

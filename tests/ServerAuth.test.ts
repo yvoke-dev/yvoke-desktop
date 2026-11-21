@@ -13,6 +13,8 @@ import {
   isServerAuthFailure,
   type TokenCachePersistence,
 } from '../src/main/auth/ServerAuth';
+import { SyncApiError } from '../src/main/sync/SyncClient';
+import { ResultError } from '../src/main/agent/singleTurn';
 
 const mockGetAllAccounts = vi.fn();
 const mockAcquireTokenSilent = vi.fn();
@@ -1241,13 +1243,31 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
     });
   });
 
-  it('preserves this.account and throws ServerAuthTransientError on Entra 5xx, ServerError without auth code, MSAL network_error, and AbortError', async () => {
+  it('preserves this.account and throws ServerAuthTransientError on Entra 5xx, ServerError without auth code, MSAL network_error, AbortError, uncoded 400/401, and config errors', async () => {
+    const circular: Error & { cause?: unknown } = new Error('cycle');
+    circular.cause = circular;
+
     const transientErrors: unknown[] = [
       new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
       new ServerError('server_error', 'Unexpected upstream error'),
       new AuthError('network_error', 'Network request failed'),
       Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }),
       Object.assign(new Error('HTTP 429 Too Many Requests'), { statusCode: 429 }),
+      Object.assign(new Error('Bad request from proxy'), { status: 400 }),
+      Object.assign(new Error('Unauthorized proxy'), { statusCode: 401 }),
+      new AuthError('invalid_client', 'AADSTS700016 invalid client'),
+      new AuthError('unauthorized_client', 'Client is not authorized'),
+      new AuthError('AADSTS7000218', 'Request body must contain client_assertion'),
+      // 5xx/429 precedence over interaction/grant codes and prose
+      Object.assign(new Error('invalid_grant'), { status: 503, errorCode: 'invalid_grant' }),
+      Object.assign(new Error('InteractionRequiredAuthError'), { statusCode: 429 }),
+      Object.assign(new Error('login_required'), {
+        errorCode: 'login_required',
+        cause: { status: 502 },
+      }),
+      // Nested non-grant cause & circular cause
+      new Error('wrapped', { cause: new AuthError('invalid_client', 'bad client') }),
+      circular,
     ];
 
     for (const transientErr of transientErrors) {
@@ -1264,7 +1284,7 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
         );
       });
 
-      // Account MUST remain preserved on transient Entra outages
+      // Account MUST remain preserved on transient/config Entra failures
       expect(await auth.status()).toEqual({
         mode: 'entra',
         signedIn: true,
@@ -1278,8 +1298,9 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
       new InteractionRequiredAuthError('interaction_required', 'AADSTS50076 MFA required'),
       new AuthError('invalid_grant', 'AADSTS700082 refresh token expired'),
       new AuthError('login_required', 'Login required'),
-      Object.assign(new Error('Bad grant'), { status: 400 }),
-      Object.assign(new Error('Unauthorized'), { statusCode: 401 }),
+      new Error('wrapped grant failure', {
+        cause: new AuthError('invalid_grant', 'AADSTS700082 expired'),
+      }),
     ];
 
     for (const authErr of authFailures) {
@@ -1296,7 +1317,7 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
     }
   });
 
-  it('verifyToken() reports unreachable on MSAL network_error/AbortError, error on Entra 5xx, and expired on interaction/grant failures', async () => {
+  it('verifyToken() reports unreachable on MSAL network_error/AbortError, error on Entra 5xx/config/uncoded 400-401, and expired on interaction/grant failures', async () => {
     // 1. MSAL network_error & AbortError -> unreachable
     for (const netErr of [
       new AuthError('network_error', 'Network error'),
@@ -1310,10 +1331,15 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
       expect(res.status).toBe('unreachable');
     }
 
-    // 2. Entra 503 ServerError & ServerAuthTransientError -> error (NOT expired)
+    // 2. Entra 503 ServerError, ServerAuthTransientError, config errors, & uncoded 400/401 -> error (NOT expired)
     for (const transientErr of [
       new ServerError('temporarily_unavailable', '503 Service Unavailable', '', undefined, 503),
       new ServerAuthTransientError(new Error('502 Bad Gateway')),
+      new AuthError('invalid_client', 'Invalid client'),
+      new AuthError('unauthorized_client', 'Unauthorized client'),
+      new AuthError('AADSTS7000218', 'Missing client_assertion'),
+      Object.assign(new Error('Bad request'), { status: 400 }),
+      Object.assign(new Error('Unauthorized proxy'), { statusCode: 401 }),
     ]) {
       mockGetAllAccounts.mockResolvedValue([cachedAccount]);
       mockAcquireTokenSilent.mockRejectedValueOnce(transientErr);
@@ -1332,22 +1358,48 @@ describe('ServerAuth zero auto-popups, hydrateAccount non-resurrection, single-f
     expect(expRes.status).toBe('expired');
   });
 
-  it('isServerAuthFailure() classifies server auth failures accurately across Entra and dev modes', () => {
+  it('isServerAuthFailure() classifies server auth failures strictly via typed errors and HTTP 401 across cause chains (never plain Entra prose)', () => {
     // Dev mode: ALWAYS false
     expect(isServerAuthFailure(new ServerAuthRequiredError(), false)).toBe(false);
     expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, false)).toBe(false);
+    expect(isServerAuthFailure(new Error('outer', { cause: new SyncApiError(401, 'Unauthorized') }), false)).toBe(false);
     expect(isServerAuthFailure(new Error('Entra: Session expired'), false)).toBe(false);
 
-    // Entra mode: true cases
+    // Entra mode: true cases (typed ServerAuthRequiredError or HTTP 401, directly or in cause chain)
     expect(isServerAuthFailure(new ServerAuthRequiredError(), true)).toBe(true);
+    expect(isServerAuthFailure(new Error('outer', { cause: new ServerAuthRequiredError() }), true)).toBe(true);
     expect(isServerAuthFailure({ status: 401, message: 'Yvoke Backend: Unauthorized' }, true)).toBe(true);
     expect(isServerAuthFailure({ statusCode: 401, message: 'Unauthorized' }, true)).toBe(true);
-    expect(isServerAuthFailure(new Error('Entra: Session expired'), true)).toBe(true);
+    expect(isServerAuthFailure(new Error('outer', { cause: new SyncApiError(401, 'Unauthorized') }), true)).toBe(true);
 
-    // Entra mode: false cases (transient, network, non-401 HTTP, null/undefined)
+    // Entra mode: false cases (plain Entra: prose, wrapped transient/ResultError, non-401 HTTP, circular, primitives)
+    const circular: Error & { cause?: unknown } = new Error('cycle');
+    circular.cause = circular;
+
     expect(isServerAuthFailure(null, true)).toBe(false);
     expect(isServerAuthFailure(undefined, true)).toBe(false);
+    expect(isServerAuthFailure('', true)).toBe(false);
+    expect(isServerAuthFailure(401, true)).toBe(false);
+    expect(isServerAuthFailure({}, true)).toBe(false);
+    expect(isServerAuthFailure(circular, true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: Session expired'), true)).toBe(false);
+    expect(isServerAuthFailure(new Error('Entra: unexpected PCA construction failure'), true)).toBe(false);
     expect(isServerAuthFailure(new ServerAuthTransientError(new Error('503')), true)).toBe(false);
+    expect(
+      isServerAuthFailure(
+        new Error('outer', { cause: new ServerAuthTransientError(Object.assign(new Error('401'), { status: 401 })) }),
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      isServerAuthFailure(
+        new Error('outer', { cause: new ResultError('Unauthorized', 'success', 401) }),
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      isServerAuthFailure(new Error('outer', { cause: Object.assign(new Error('503'), { status: 503 }) }), true),
+    ).toBe(false);
     expect(isServerAuthFailure(new Error('Entra: fetch failed'), true)).toBe(false);
     expect(isServerAuthFailure(new Error('Entra: 503 Service Unavailable'), true)).toBe(false);
     expect(isServerAuthFailure(new Error('Entra: 429 Too Many Requests'), true)).toBe(false);

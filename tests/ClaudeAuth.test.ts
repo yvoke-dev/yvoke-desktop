@@ -13,6 +13,7 @@ import {
   CLAUDE_MISSING_CACHE_TTL_MS,
   CLAUDE_STATUS_CACHE_TTL_MS,
   CLAUDE_STATUS_TIMEOUT_MS,
+  CLAUDE_URL_CONTINUATION_SETTLE_MS,
   ClaudeAuthManager,
   LOGIN_INSTRUCTIONS,
   classifyClaudeFailure,
@@ -538,10 +539,11 @@ describe('ClaudeAuthManager', () => {
 
       const loginChild = spawned[0].child;
       loginChild.emitStdout(
-        'Opening browser...\nhttps://claude.ai/oauth/authorize?client_id=abc&response_type=code&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE\n',
+        'Opening browser...\nhttps://claude.ai/oauth/authorize?client_id=abc&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE\n',
       );
+      loginChild.emitStdout('Waiting for browser sign-in...\n');
       expect(await mgr.getActiveSignInUrl()).toBe(
-        'https://claude.ai/oauth/authorize?client_id=abc&response_type=code&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE',
+        'https://claude.ai/oauth/authorize?client_id=abc&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&state=SECRET_NONCE&code_challenge=SECRET_CHALLENGE',
       );
 
       loginChild.finish(0);
@@ -586,9 +588,11 @@ describe('ClaudeAuthManager', () => {
       const urlWaiter = mgr.getActiveSignInUrl();
       spawned[0].child.emitStdout('\x1b[36mOpen \x1b]8;;https://claude.com/cai/oauth/auth');
       // Not yet newline-terminated -> still waiting, not truncated
-      spawned[0].child.emitStdout('orize?state=NONCE1&code_challenge=CHAL1\x07Click here\x1b]8;;\x07\x1b[0m\r\n');
+      spawned[0].child.emitStdout(
+        'orize?client_id=cid1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=NONCE1&code_challenge=CHAL1\x07Click here\x1b]8;;\x07\x1b[0m\r\n',
+      );
       expect(await urlWaiter).toBe(
-        'https://claude.com/cai/oauth/authorize?state=NONCE1&code_challenge=CHAL1',
+        'https://claude.com/cai/oauth/authorize?client_id=cid1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=NONCE1&code_challenge=CHAL1',
       );
       expect(mgr.cancelSignIn()).toBe(true);
       expect(await p1).toEqual({ status: 'cancelled' });
@@ -596,10 +600,10 @@ describe('ClaudeAuthManager', () => {
       // 2. ST (\x1b\\) OSC-8 hyperlink on console.anthropic.com
       const p2 = mgr.signIn();
       spawned[1].child.emitStdout(
-        '\x1b]8;id=link1;https://console.anthropic.com/oauth/authorize?state=NONCE2\x1b\\Sign in\x1b]8;;\x1b\\\n',
+        '\x1b]8;id=link1;https://console.anthropic.com/oauth/authorize?client_id=cid2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&code_challenge=CHAL2&state=NONCE2\x1b\\Sign in\x1b]8;;\x1b\\\n',
       );
       expect(await mgr.getActiveSignInUrl()).toBe(
-        'https://console.anthropic.com/oauth/authorize?state=NONCE2',
+        'https://console.anthropic.com/oauth/authorize?client_id=cid2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&code_challenge=CHAL2&state=NONCE2',
       );
       mgr.cancelSignIn();
       await p2;
@@ -792,10 +796,10 @@ describe('ClaudeAuthManager', () => {
       const mgr1 = createManager();
       const p1 = mgr1.signIn();
       spawned[0].child.emitStdout(
-        'https://claude.ai/oauth/authorize?state=FIRST_SECRET&code_challenge=CHAL1\n',
+        'https://claude.ai/oauth/authorize?client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=FIRST_SECRET&code_challenge=CHAL1\n',
       );
       spawned[0].child.emitStdout(
-        'https://claude.ai/oauth/authorize?state=SECOND_SECRET&code_challenge=CHAL2\n',
+        'https://claude.ai/oauth/authorize?client_id=c2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=SECOND_SECRET&code_challenge=CHAL2\n',
       );
       spawned[0].child.emitStdout(
         '\x1b[31mCallback server failed to bind port 54545 with Bearer SECRET_STDOUT_JWT\x1b[0m',
@@ -962,19 +966,363 @@ describe('ClaudeAuthManager', () => {
 
       // Head URL followed by 70,000 chars WITHOUT newline -> exceeds 65_536 cap, so head must be dropped
       loginChild.emitStdout(
-        `https://claude.ai/oauth/authorize?state=DROPPED_HEAD ${'X'.repeat(70_000)}`,
+        `https://claude.ai/oauth/authorize?client_id=cid&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&code_challenge=CHAL&state=DROPPED_HEAD ${'X'.repeat(70_000)}`,
       );
       loginChild.emitStdout('tail-end\n');
-      loginChild.emitStdout('https://claude.ai/oauth/authorize?state=BOUNDED_FRESH\n');
+      loginChild.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&code_challenge=CHAL&state=BOUNDED_FRESH\n',
+      );
+      loginChild.emitStdout('\n');
 
       // Also emit >70,000 newline-free chars on stderr without OOM or crash
       loginChild.emitStderr('E'.repeat(70_000));
 
       expect(await mgrLogin.getActiveSignInUrl()).toBe(
-        'https://claude.ai/oauth/authorize?state=BOUNDED_FRESH',
+        'https://claude.ai/oauth/authorize?client_id=cid&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&code_challenge=CHAL&state=BOUNDED_FRESH',
       );
       mgrLogin.cancelSignIn();
       await signInPromise;
+    });
+
+    it('rejects OAuth URLs missing or blanking required PKCE params (client_id, code_challenge, state, redirect_uri) and locks authoritative OSC-8 against plain-text overwrite', async () => {
+      vi.useFakeTimers();
+
+      // 1. Missing/blank/whitespace required PKCE params (plain text and OSC-8) -> rejected
+      const mgr1 = createManager();
+      const p1 = mgr1.signIn();
+      const incompleteUrls = [
+        // Missing each required parameter individually
+        'https://claude.ai/oauth/authorize?code_challenge=CHAL&state=ST&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&state=ST&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&state=ST',
+        // Empty parameter values
+        'https://claude.ai/oauth/authorize?client_id=&code_challenge=CHAL&state=ST&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=&state=ST&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&state=&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&state=ST&redirect_uri=',
+        // Whitespace-only parameter values
+        'https://claude.ai/oauth/authorize?client_id=%20&code_challenge=CHAL&state=ST&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&state=%20%09&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb',
+        // OSC-8 missing redirect_uri
+        '\x1b]8;;https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&state=ST\x07Click\x1b]8;;\x07',
+      ];
+      for (const bad of incompleteUrls) {
+        spawned[0].child.emitStdout(`${bad}\n\n`);
+      }
+      const urlWaiter1 = mgr1.getActiveSignInUrl();
+      await vi.advanceTimersByTimeAsync(CLAUDE_LOGIN_URL_TIMEOUT_MS);
+      expect(await urlWaiter1).toBeNull();
+      mgr1.cancelSignIn();
+      await p1;
+
+      // 2. Valid OSC-8 commits immediately and locks out later plain-text continuation/overwrites
+      const mgr2 = createManager();
+      const p2 = mgr2.signIn();
+      const oscUrl =
+        'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL_OSC&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=OSC_STATE';
+      spawned[1].child.emitStdout(`\x1b]8;;${oscUrl}\x07Open link\x1b]8;;\x07\n`);
+      // Follow-up token-like stdout line must NOT be appended or swallowed as continuation
+      spawned[1].child.emitStdout('CONTINUATION_SHOULD_NOT_APPEND\n');
+      expect(await mgr2.getActiveSignInUrl()).toBe(oscUrl);
+      spawned[1].child.finish(1);
+      const res2 = await p2;
+      expect(res2.status).toBe('error');
+      if (res2.status === 'error') {
+        expect(res2.message).toContain('CONTINUATION_SHOULD_NOT_APPEND');
+      }
+    });
+
+    it('reassembles multiline wrapped OAuth URLs across single chunk, multi-chunk settle window, incomplete line 1, and EOF flush without corrupting state', async () => {
+      vi.useFakeTimers();
+
+      // (a) Single data chunk with 3-line wrapped URL (including split state=ABC\nDEF_TAIL\n)
+      const mgrA = createManager();
+      const pA = mgrA.signIn();
+      spawned[0].child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid1&code_challenge=CHAL\n' +
+          '_PART2&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=ABC\n' +
+          'DEF_TAIL\n' +
+          '\n',
+      );
+      expect(await mgrA.getActiveSignInUrl()).toBe(
+        'https://claude.ai/oauth/authorize?client_id=cid1&code_challenge=CHAL_PART2&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=ABCDEF_TAIL',
+      );
+      mgrA.cancelSignIn();
+      await pA;
+
+      // (b) Split across 2 separate data chunks within CLAUDE_URL_CONTINUATION_SETTLE_MS
+      const mgrB = createManager();
+      const pB = mgrB.signIn();
+      const urlWaiterB = mgrB.getActiveSignInUrl();
+      let resolvedEarlyB = false;
+      void urlWaiterB.then(() => {
+        resolvedEarlyB = true;
+      });
+      spawned[1].child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid2&code_challenge=CHAL2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=ABC\n',
+      );
+      // Advance half the settle window — must still be waiting for continuation chunk
+      await vi.advanceTimersByTimeAsync(Math.floor(CLAUDE_URL_CONTINUATION_SETTLE_MS / 2));
+      expect(resolvedEarlyB).toBe(false);
+
+      spawned[1].child.emitStdout('DEF_TAIL\n');
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS);
+      expect(await urlWaiterB).toBe(
+        'https://claude.ai/oauth/authorize?client_id=cid2&code_challenge=CHAL2&redirect_uri=http%3A%2F%2Flocalhost%3A2%2Fcb&state=ABCDEF_TAIL',
+      );
+      mgrB.cancelSignIn();
+      await pB;
+
+      // (c) Incomplete line 1 (missing state) in chunk 1 + &state=XYZ in chunk 2 stays pending across settle window
+      const mgrC = createManager();
+      const pC = mgrC.signIn();
+      const urlWaiterC = mgrC.getActiveSignInUrl();
+      let resolvedEarlyC = false;
+      void urlWaiterC.then(() => {
+        resolvedEarlyC = true;
+      });
+      spawned[2].child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid3&code_challenge=CHAL3&redirect_uri=http%3A%2F%2Flocalhost%3A3%2Fcb\n',
+      );
+      await vi.advanceTimersByTimeAsync(CLAUDE_URL_CONTINUATION_SETTLE_MS * 3);
+      expect(resolvedEarlyC).toBe(false);
+
+      spawned[2].child.emitStdout('&state=XYZ\n\n');
+      expect(await urlWaiterC).toBe(
+        'https://claude.ai/oauth/authorize?client_id=cid3&code_challenge=CHAL3&redirect_uri=http%3A%2F%2Flocalhost%3A3%2Fcb&state=XYZ',
+      );
+      mgrC.cancelSignIn();
+      await pC;
+
+      // (d) Trailing fragment without \n flushed on close
+      const mgrD = createManager();
+      const pD = mgrD.signIn();
+      const urlWaiterD = mgrD.getActiveSignInUrl();
+      spawned[3].child.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=cid4&code_challenge=CHAL4&redirect_uri=http%3A%2F%2Flocalhost%3A4%2Fcb\n',
+      );
+      spawned[3].child.emitStdout('&state=EOF_TAIL');
+      spawned[3].child.finish(1);
+      expect(await urlWaiterD).toBe(
+        'https://claude.ai/oauth/authorize?client_id=cid4&code_challenge=CHAL4&redirect_uri=http%3A%2F%2Flocalhost%3A4%2Fcb&state=EOF_TAIL',
+      );
+      await pD;
+    });
+
+    it('closes pendingUrl on sentence-punctuated status lines, prose, hostile URLs, isolates streams, and caps length at 4096 chars', async () => {
+      vi.useFakeTimers();
+
+      // 1. Sentence-punctuated single-word status lines, prose, and hostile URLs never corrupt state
+      const nonContinuations = [
+        'Waiting...',
+        'Done!',
+        'Error:',
+        'Cancelled.',
+        'Paste code here >',
+        'https://evil.example/steal',
+      ];
+      for (const terminator of nonContinuations) {
+        const mgr = createManager();
+        const p = mgr.signIn();
+        const child = spawned[spawned.length - 1].child;
+        const base =
+          'https://claude.ai/oauth/authorize?client_id=cid&code_challenge=CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=CLEAN_STATE';
+        child.emitStdout(`${base}\n${terminator}\n`);
+        expect(await mgr.getActiveSignInUrl()).toBe(base);
+        mgr.cancelSignIn();
+        await p;
+      }
+
+      // 2. Interleaved stderr warning between stdout line 1 and line 2 does NOT break stdout reassembly
+      const mgrIso = createManager();
+      const pIso = mgrIso.signIn();
+      const isoChild = spawned[spawned.length - 1].child;
+      isoChild.emitStdout(
+        'https://claude.ai/oauth/authorize?client_id=iso&code_challenge=CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=ISO_\n',
+      );
+      isoChild.emitStderr('Warning: opening default browser...\n');
+      isoChild.emitStdout('TAIL\n\n');
+      expect(await mgrIso.getActiveSignInUrl()).toBe(
+        'https://claude.ai/oauth/authorize?client_id=iso&code_challenge=CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=ISO_TAIL',
+      );
+      mgrIso.cancelSignIn();
+      await pIso;
+
+      // 3. Length cap > 4096 stops appending cleanly
+      const mgrCap = createManager();
+      const pCap = mgrCap.signIn();
+      const capChild = spawned[spawned.length - 1].child;
+      const validBase =
+        'https://claude.ai/oauth/authorize?client_id=cap&code_challenge=CHAL&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&state=CAP_OK';
+      capChild.emitStdout(`${validBase}\n${'A'.repeat(4_100)}\n`);
+      expect(await mgrCap.getActiveSignInUrl()).toBe(validBase);
+      mgrCap.cancelSignIn();
+      await pCap;
+    });
+
+    it('suppresses wrapped OAuth URL continuation fragments from both stdout and stderr diagnostics and logs on failure', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      for (const stream of ['stdout', 'stderr'] as const) {
+        const mgr = createManager();
+        const p = mgr.signIn();
+        const child = spawned[spawned.length - 1].child;
+        const emit = (s: string) => (stream === 'stdout' ? child.emitStdout(s) : child.emitStderr(s));
+
+        emit('https://claude.ai/oauth/authorize?client_id=cid&redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcb&code_challenge=\n');
+        emit('SECRET_CHAL_FRAGMENT_NO_KEY\n');
+        emit('&state=SECRET_STATE_LINE3\n');
+        emit('SECRET_UNFLUSHED_TAIL');
+        child.finish(1);
+
+        const res = await p;
+        expect(res.status).toBe('error');
+        if (res.status === 'error') {
+          expect(res.message).not.toContain('SECRET_CHAL_FRAGMENT_NO_KEY');
+          expect(res.message).not.toContain('SECRET_STATE_LINE3');
+          expect(res.message).not.toContain('SECRET_UNFLUSHED_TAIL');
+          expect(res.message).not.toContain('/oauth/authorize');
+        }
+      }
+
+      const allLogs = [
+        ...logSpy.mock.calls.flat().map(String),
+        ...errSpy.mock.calls.flat().map(String),
+      ].join('\n');
+      expect(allLogs).not.toContain('SECRET_CHAL_FRAGMENT_NO_KEY');
+      expect(allLogs).not.toContain('SECRET_STATE_LINE3');
+      expect(allLogs).not.toContain('SECRET_UNFLUSHED_TAIL');
+      expect(allLogs).not.toContain('/oauth/authorize');
+    });
+
+    it('preserves fresh statusCache after successful signIn() for CLAUDE_STATUS_CACHE_TTL_MS while still invalidating on failed, false-positive, or cancelled signIn()', async () => {
+      // 1. Successful signIn() preserves the fresh statusCache from post-exit getStatus({ forceRefresh: true })
+      const mgrOk = createManager();
+      const loginOk = mgrOk.signIn();
+      expect(spawned).toHaveLength(1);
+      spawned[0].child.finish(0);
+
+      await Promise.resolve();
+      expect(spawned).toHaveLength(2);
+      spawned[1].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'fresh@yvoke.ai' }),
+      );
+      spawned[1].child.finish(0);
+      expect(await loginOk).toEqual({ status: 'signed_in', account: 'fresh@yvoke.ai' });
+
+      // Within CLAUDE_STATUS_CACHE_TTL_MS -> 0 extra spawns
+      nowMs += CLAUDE_STATUS_CACHE_TTL_MS - 1;
+      expect(await mgrOk.getStatus()).toEqual({ claude: 'ok', claudeAccount: 'fresh@yvoke.ai' });
+      expect(spawned).toHaveLength(2);
+
+      // Past CLAUDE_STATUS_CACHE_TTL_MS -> re-spawns
+      nowMs += 2;
+      const afterTtl = mgrOk.getStatus();
+      expect(spawned).toHaveLength(3);
+      spawned[2].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'fresh@yvoke.ai' }),
+      );
+      spawned[2].child.finish(0);
+      expect(await afterTtl).toEqual({ claude: 'ok', claudeAccount: 'fresh@yvoke.ai' });
+
+      // 2. Failed signIn (exit 1), false-positive exit 0 (loggedIn: false), and cancelled signIn invalidate cache
+      for (const outcome of ['exit1', 'falsePositive', 'cancelled'] as const) {
+        const mgr = createManager();
+        // Prime cache first
+        const prime = mgr.getStatus();
+        const primeChild = spawned[spawned.length - 1].child;
+        primeChild.emitStdout(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'a@b.c' }));
+        primeChild.finish(0);
+        await prime;
+
+        const beforeCount = spawned.length;
+        const p = mgr.signIn();
+        const loginChild = spawned[spawned.length - 1].child;
+        if (outcome === 'exit1') {
+          loginChild.finish(1);
+          expect((await p).status).toBe('error');
+        } else if (outcome === 'falsePositive') {
+          loginChild.finish(0);
+          await Promise.resolve();
+          const verifyChild = spawned[spawned.length - 1].child;
+          verifyChild.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+          verifyChild.finish(0);
+          expect((await p).status).toBe('error');
+        } else {
+          mgr.cancelSignIn();
+          expect((await p).status).toBe('cancelled');
+        }
+
+        // Next getStatus() MUST spawn a fresh probe
+        const countBeforeProbe = spawned.length;
+        expect(countBeforeProbe).toBeGreaterThan(beforeCount);
+        const probe = mgr.getStatus();
+        expect(spawned.length).toBe(countBeforeProbe + 1);
+        spawned[spawned.length - 1].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
+        spawned[spawned.length - 1].child.finish(0);
+        await probe;
+      }
+    });
+
+    it('exposes getCachedStatus() with defensive copy, TTL survival, explicit invalidation/dispose clearing, and fallback sign-in sync', async () => {
+      const mgr = createManager();
+
+      // 1. Before any confirmed probe -> null
+      expect(mgr.getCachedStatus()).toBeNull();
+
+      // 2. After fallback/corrupt probe -> still null
+      const corruptP = mgr.getStatus();
+      spawned[0].child.emitStdout('{{{not-json');
+      spawned[0].child.finish(0);
+      await corruptP;
+      expect(mgr.getCachedStatus()).toBeNull();
+
+      // 3. After confirmed probe -> returns defensive copy and survives TTL expiry (> 30s) without spawning
+      const okP = mgr.getStatus();
+      spawned[1].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'cached@yvoke.ai' }),
+      );
+      spawned[1].child.finish(0);
+      await okP;
+
+      const snap1 = mgr.getCachedStatus();
+      expect(snap1).toEqual({ claude: 'ok', claudeAccount: 'cached@yvoke.ai' });
+      snap1!.claude = 'missing';
+      snap1!.claudeAccount = 'mutated@evil.example';
+      expect(mgr.getCachedStatus()).toEqual({ claude: 'ok', claudeAccount: 'cached@yvoke.ai' });
+
+      // Past 30s TTL -> still returns lastConfirmedState with 0 spawns
+      nowMs += CLAUDE_STATUS_CACHE_TTL_MS + 60_000;
+      const countBefore = spawned.length;
+      expect(mgr.getCachedStatus()).toEqual({ claude: 'ok', claudeAccount: 'cached@yvoke.ai' });
+      expect(spawned).toHaveLength(countBefore);
+
+      // 4. invalidateStatusCache() -> returns null so explicit invalidations trigger one fresh probe
+      mgr.invalidateStatusCache();
+      expect(mgr.getCachedStatus()).toBeNull();
+
+      // 5. Fallback-resolved signIn() (post-exit getStatus falls back to disk credentials with allowCache: false)
+      //    still updates lastConfirmedState so getCachedStatus() returns { claude: 'ok', ... }
+      fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(homeDir, '.claude', '.credentials.json'), '{}');
+      fs.writeFileSync(
+        path.join(homeDir, '.claude.json'),
+        JSON.stringify({ oauthAccount: { emailAddress: 'disk-login@yvoke.ai' } }),
+      );
+      const fbLogin = mgr.signIn();
+      spawned[spawned.length - 1].child.finish(0);
+      await Promise.resolve();
+      // Post-exit status probe outputs corrupt JSON -> falls back to disk credentials -> claude: 'ok'
+      spawned[spawned.length - 1].child.emitStdout('corrupt');
+      spawned[spawned.length - 1].child.finish(0);
+      expect(await fbLogin).toEqual({ status: 'signed_in', account: 'disk-login@yvoke.ai' });
+      expect(mgr.getCachedStatus()).toEqual({ claude: 'ok', claudeAccount: 'disk-login@yvoke.ai' });
+
+      // 6. dispose() -> returns null
+      mgr.dispose();
+      expect(mgr.getCachedStatus()).toBeNull();
     });
   });
 
@@ -1095,13 +1443,113 @@ describe('ClaudeAuthManager', () => {
       spawned[1].child.finish(0);
       expect(await signOutPromise).toEqual({ status: 'signed_out' });
 
-      // Next getStatus() must spawn a fresh probe (0 cache hit)
-      const statusAfter = mgr.getStatus();
+      // Immediate getStatus() after signOut() returns seeded { claude: 'missing' } with 0 extra spawns
+      expect(await mgr.getStatus()).toEqual({ claude: 'missing' });
+      expect(spawned).toHaveLength(2);
+
+      // forceRefresh: true (or advancing past CLAUDE_MISSING_CACHE_TTL_MS) spawns fresh probe #3
+      const statusAfter = mgr.getStatus({ forceRefresh: true });
       expect(spawned).toHaveLength(3);
       expect(spawned[2].args).toEqual(['auth', 'status', '--json']);
       spawned[2].child.emitStdout(JSON.stringify({ loggedIn: false, authMethod: 'none' }));
       spawned[2].child.finish(0);
       expect(await statusAfter).toEqual({ claude: 'missing' });
+    });
+
+    it('keeps post-signout status as missing when a subsequent probe times out on ~/.claude (cred === unknown), and recovers cleanly on external re-login or signIn()', async () => {
+      vi.useFakeTimers();
+      // ~/.claude exists without .credentials.json -> detectClaudeCredentials() === 'unknown' (e.g. macOS Keychain)
+      fs.mkdirSync(path.join(homeDir, '.claude'), { recursive: true });
+      fs.writeFileSync(
+        path.join(homeDir, '.claude.json'),
+        JSON.stringify({ oauthAccount: { emailAddress: 'stale@yvoke.ai' } }),
+      );
+
+      // (c) Never-confirmed cold start with cred === 'unknown' + probe timeout still falls back to { claude: 'ok' }
+      const coldMgr = createManager();
+      const coldP = coldMgr.getStatus();
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await coldP).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+
+      // After signOut() exits 0, subsequent probe timeout MUST stay { claude: 'missing' } (never flip back to 'ok')
+      const mgr = createManager();
+      const outP = mgr.signOut();
+      spawned[spawned.length - 1].child.finish(0);
+      expect(await outP).toEqual({ status: 'signed_out' });
+
+      // Post-TTL probe timeout stays 'missing'
+      nowMs += CLAUDE_MISSING_CACHE_TTL_MS + 1;
+      const postTtlTimeout = mgr.getStatus();
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await postTtlTimeout).toEqual({ claude: 'missing' });
+
+      // forceRefresh probe timeout also stays 'missing'
+      const forcedTimeout = mgr.getStatus({ forceRefresh: true });
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await forcedTimeout).toEqual({ claude: 'missing' });
+
+      // (a) External re-login (.credentials.json created -> cred === 'ok') + probe timeout recovers to 'ok'
+      fs.writeFileSync(path.join(homeDir, '.claude', '.credentials.json'), '{}');
+      const extTimeout = mgr.getStatus({ forceRefresh: true });
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await extTimeout).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+      fs.rmSync(path.join(homeDir, '.claude', '.credentials.json'));
+
+      // (b) Fresh signIn() (confirmed loggedIn: true) resets lastConfirmedState to 'ok' so subsequent timeout returns 'ok'
+      const login1 = mgr.signIn();
+      spawned[spawned.length - 1].child.finish(0);
+      await Promise.resolve();
+      spawned[spawned.length - 1].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'relogged@yvoke.ai' }),
+      );
+      spawned[spawned.length - 1].child.finish(0);
+      expect(await login1).toEqual({ status: 'signed_in', account: 'relogged@yvoke.ai' });
+
+      const timeoutAfterLogin1 = mgr.getStatus({ forceRefresh: true });
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await timeoutAfterLogin1).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+
+      // (b2) Fallback-resolved signIn() (allowCache === false) after signOut() also resets lastConfirmedState to 'ok'
+      const out2 = mgr.signOut();
+      spawned[spawned.length - 1].child.finish(0);
+      expect(await out2).toEqual({ status: 'signed_out' });
+
+      fs.writeFileSync(path.join(homeDir, '.claude', '.credentials.json'), '{}');
+      const login2 = mgr.signIn();
+      spawned[spawned.length - 1].child.finish(0);
+      await Promise.resolve();
+      // Post-exit probe fails with corrupt JSON -> fallbackStatus sees .credentials.json -> signed_in
+      spawned[spawned.length - 1].child.emitStdout('not-json');
+      spawned[spawned.length - 1].child.finish(0);
+      expect(await login2).toEqual({ status: 'signed_in', account: 'stale@yvoke.ai' });
+      fs.rmSync(path.join(homeDir, '.claude', '.credentials.json'));
+
+      const timeoutAfterFallbackLogin = mgr.getStatus({ forceRefresh: true });
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await timeoutAfterFallbackLogin).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+
+      // (d) Failed signOut(), dispose() during signOut(), and late pre-signout probeStatus never poison state
+      const mgrFail = createManager();
+      const primeFail = mgrFail.getStatus();
+      spawned[spawned.length - 1].child.emitStdout(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'still-in@yvoke.ai' }),
+      );
+      spawned[spawned.length - 1].child.finish(0);
+      await primeFail;
+
+      const failedOut = mgrFail.signOut();
+      spawned[spawned.length - 1].child.finish(1);
+      expect((await failedOut).status).toBe('error');
+      // Still not poisoned to 'missing' -> timeout on cred === 'unknown' returns 'ok'
+      const timeoutAfterFailedOut = mgrFail.getStatus({ forceRefresh: true });
+      await vi.advanceTimersByTimeAsync(CLAUDE_STATUS_TIMEOUT_MS);
+      expect(await timeoutAfterFailedOut).toEqual({ claude: 'ok', claudeAccount: 'stale@yvoke.ai' });
+
+      const mgrDisp = createManager();
+      const dispOut = mgrDisp.signOut();
+      mgrDisp.dispose();
+      expect((await dispOut).status).toBe('error');
+      expect(mgrDisp.getCachedStatus()).toBeNull();
     });
 
     it('handles entry failures (disposed, null binary, mkdirSync throw, sync spawn throw) cleanly and recovers latch', async () => {

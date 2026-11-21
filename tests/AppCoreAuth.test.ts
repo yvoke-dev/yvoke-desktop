@@ -191,6 +191,7 @@ describe('AppCore integration with ClaudeAuthManager', () => {
   function makeFakeClaudeAuth() {
     return {
       getStatus: vi.fn().mockResolvedValue({ claude: 'ok' as const, claudeAccount: 'claude@yvoke.ai' }),
+      getCachedStatus: vi.fn().mockReturnValue({ claude: 'ok' as const, claudeAccount: 'claude@yvoke.ai' }),
       invalidateStatusCache: vi.fn(),
       signIn: vi.fn().mockResolvedValue({ status: 'signed_in' as const, account: 'claude@yvoke.ai' }),
       signOut: vi.fn().mockResolvedValue({ status: 'signed_out' as const }),
@@ -396,11 +397,16 @@ describe('AppCore server auth lifecycle, listThreads 4-way matrix & updateSettin
     expect(authRes2.serverReachable).toBe(true);
     expect(authRes2.serverAuthRequired).toBe(true);
 
-    // 2c. Entra mode + non-network Entra: error -> serverReachable: true, serverAuthRequired: true
+    // 2c. Entra mode + untyped Entra: prose error (e.g. unexpected PCA construction error) -> serverReachable: false, serverAuthRequired: false
     listSpy.mockRejectedValueOnce(new Error('Entra: Session expired'));
     const authRes3 = await core.listThreads();
-    expect(authRes3.serverReachable).toBe(true);
-    expect(authRes3.serverAuthRequired).toBe(true);
+    expect(authRes3.serverReachable).toBe(false);
+    expect(authRes3.serverAuthRequired).toBe(false);
+
+    listSpy.mockRejectedValueOnce(new Error('Entra: unexpected PCA construction failure'));
+    const authRes4 = await core.listThreads();
+    expect(authRes4.serverReachable).toBe(false);
+    expect(authRes4.serverAuthRequired).toBe(false);
 
     // 3. Entra mode + network error (including Entra: fetch failed) -> serverReachable: false, serverAuthRequired: false
     listSpy.mockRejectedValueOnce(new Error('Entra: fetch failed'));
@@ -441,10 +447,11 @@ describe('AppCore server auth lifecycle, listThreads 4-way matrix & updateSettin
     await core.waitForStartupTasks();
   });
 
-  it('authStatus({ forceRefresh: true }) forwards forceRefresh and verifyAuth() invalidates claudeAuth cache BEFORE running verifyClaudeCredentials', async () => {
+  it('authStatus({ forceRefresh: true }) forwards forceRefresh, authStatus({ refreshClaude: false }) uses cached Claude status with live server status, and verifyAuth() invalidates claudeAuth cache BEFORE running verifyClaudeCredentials', async () => {
     const order: string[] = [];
     const claudeAuth = {
       getStatus: vi.fn().mockResolvedValue({ claude: 'ok' as const, claudeAccount: 'u@yvoke.ai' }),
+      getCachedStatus: vi.fn().mockReturnValue({ claude: 'ok' as const, claudeAccount: 'cached@yvoke.ai' }),
       invalidateStatusCache: vi.fn(() => {
         order.push('invalidateStatusCache');
       }),
@@ -469,6 +476,51 @@ describe('AppCore server auth lifecycle, listThreads 4-way matrix & updateSettin
 
       await coreWithClaude.authStatus();
       expect(claudeAuth.getStatus).toHaveBeenLastCalledWith({ forceRefresh: false });
+
+      // refreshClaude: false uses getCachedStatus() without spawning getStatus() and returns live serverAuth.status()
+      claudeAuth.getStatus.mockClear();
+      claudeAuth.getCachedStatus.mockClear();
+      const serverStatusSpy = vi
+        .spyOn(coreWithClaude.serverAuth, 'status')
+        .mockResolvedValueOnce({ mode: 'entra', signedIn: false })
+        .mockResolvedValueOnce({ mode: 'entra', signedIn: true, account: 'live@corp.example' });
+
+      const cachedRes1 = await coreWithClaude.authStatus({ refreshClaude: false });
+      expect(claudeAuth.getStatus).not.toHaveBeenCalled();
+      expect(claudeAuth.getCachedStatus).toHaveBeenCalledTimes(1);
+      expect(cachedRes1).toEqual({
+        claude: 'ok',
+        claudeAccount: 'cached@yvoke.ai',
+        server: { mode: 'entra', signedIn: false },
+      });
+
+      const cachedRes2 = await coreWithClaude.authStatus({ refreshClaude: false });
+      expect(claudeAuth.getStatus).not.toHaveBeenCalled();
+      expect(cachedRes2).toEqual({
+        claude: 'ok',
+        claudeAccount: 'cached@yvoke.ai',
+        server: { mode: 'entra', signedIn: true, account: 'live@corp.example' },
+      });
+      serverStatusSpy.mockRestore();
+
+      // When getCachedStatus() returns null, refreshClaude: false falls back to getStatus({ forceRefresh: false })
+      claudeAuth.getCachedStatus.mockReturnValueOnce(null);
+      const fallbackRes = await coreWithClaude.authStatus({ refreshClaude: false });
+      expect(claudeAuth.getStatus).toHaveBeenCalledTimes(1);
+      expect(claudeAuth.getStatus).toHaveBeenLastCalledWith({ forceRefresh: false });
+      expect(fallbackRes.claudeAccount).toBe('u@yvoke.ai');
+
+      // forceRefresh: true takes precedence over refreshClaude: false
+      claudeAuth.getStatus.mockClear();
+      claudeAuth.getCachedStatus.mockClear();
+      await coreWithClaude.authStatus({ forceRefresh: true, refreshClaude: false });
+      expect(claudeAuth.getStatus).toHaveBeenCalledTimes(1);
+      expect(claudeAuth.getStatus).toHaveBeenCalledWith({ forceRefresh: true });
+      expect(claudeAuth.getCachedStatus).not.toHaveBeenCalled();
+
+      // Without claudeAuth configured, authStatus({ refreshClaude: false }) works cleanly
+      const noClaudeRes = await core.authStatus({ refreshClaude: false });
+      expect(noClaudeRes.server).toBeDefined();
 
       coreWithClaude.settings.set({ serverBaseUrl: '' });
       vi.spyOn(coreWithClaude.agent, 'verifyClaudeCredentials').mockImplementation(async () => {

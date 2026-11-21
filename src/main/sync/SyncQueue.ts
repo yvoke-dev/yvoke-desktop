@@ -6,7 +6,7 @@ import {
   sanitizeLogContent,
   tagAttributedError,
 } from '../../shared/error';
-import { isServerAuthFailure } from '../auth/ServerAuth';
+import { ServerAuthRequiredError } from '../auth/ServerAuth';
 import { SyncApiError, type NewMessagePayload, type SyncClient } from './SyncClient';
 
 export interface QueuedTurn {
@@ -496,7 +496,7 @@ export class SyncQueue {
         }
 
         const isEntra = this.deps.isEntraMode ? this.deps.isEntraMode() : true;
-        if (isServerAuthFailure(error, isEntra)) {
+        if (isEntra && error instanceof ServerAuthRequiredError) {
           // Pause retries until explicit serverSignIn() or settings update nudges flush().
           if (this.timer) {
             clearTimeout(this.timer);

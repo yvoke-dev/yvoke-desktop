@@ -1,5 +1,13 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { IpcChannels } from '../src/shared/ipc';
+import type {
+  AuthStatusOptions,
+  BrowserSignInResult,
+  ClaudeSignInResult,
+  ServerSignInResult,
+} from '../src/shared/types';
 import { createOriginGuardedHandle, registerAuthIpc } from '../src/main/ipcOrigin';
 import type { DesktopApi } from '../src/preload/index';
 
@@ -134,7 +142,7 @@ describe('createOriginGuardedHandle & registerAuthIpc boundary validation', () =
     expect(appCore.claudeSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it('validates authStatus opts strictly so only { forceRefresh: true } enables forceRefresh', async () => {
+  it('validates authStatus opts strictly for forceRefresh and refreshClaude while stripping tainted/unknown keys', async () => {
     const { appCore, invoke } = setup();
     const trustedFrame = { url: 'http://localhost:5173/index.html' };
 
@@ -145,11 +153,19 @@ describe('createOriginGuardedHandle & registerAuthIpc boundary validation', () =
       true,
       'true',
       1,
+      [],
+      [{ refreshClaude: false }],
       {},
       { forceRefresh: false },
       { forceRefresh: 1 },
       { forceRefresh: 'true' },
       { forceRefresh: {} },
+      { refreshClaude: true },
+      { refreshClaude: 'false' },
+      { refreshClaude: 0 },
+      { refreshClaude: null },
+      { refreshClaude: [] },
+      { forceRefresh: false, extra: 'evil' },
     ]) {
       appCore.authStatus.mockClear();
       await invoke(IpcChannels.authStatus, trustedFrame, nonTrueOpt);
@@ -159,6 +175,18 @@ describe('createOriginGuardedHandle & registerAuthIpc boundary validation', () =
     appCore.authStatus.mockClear();
     await invoke(IpcChannels.authStatus, trustedFrame, { forceRefresh: true });
     expect(appCore.authStatus).toHaveBeenCalledWith({ forceRefresh: true });
+
+    appCore.authStatus.mockClear();
+    await invoke(IpcChannels.authStatus, trustedFrame, { refreshClaude: false, extra: 'evil' });
+    expect(appCore.authStatus).toHaveBeenCalledWith({ forceRefresh: false, refreshClaude: false });
+
+    appCore.authStatus.mockClear();
+    await invoke(IpcChannels.authStatus, trustedFrame, {
+      forceRefresh: true,
+      refreshClaude: false,
+      extra: 'evil',
+    });
+    expect(appCore.authStatus).toHaveBeenCalledWith({ forceRefresh: true, refreshClaude: false });
   });
 
   it('allows packaged file:// apps (origin === "null") while still rejecting missing/empty/foreign origins', async () => {
@@ -296,6 +324,36 @@ describe('preload DesktopApi auth methods', () => {
       });
       expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authStatus, { forceRefresh: true });
 
+      invokeMock.mockResolvedValueOnce({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
+      await exposedApi!.authStatus({ refreshClaude: false });
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authStatus, { refreshClaude: false });
+
+      invokeMock.mockResolvedValueOnce({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
+      await exposedApi!.authStatus({ forceRefresh: true, refreshClaude: false });
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authStatus, {
+        forceRefresh: true,
+        refreshClaude: false,
+      });
+
+      // Default/non-triggering booleans and tainted values strip to 0 extra args
+      invokeMock.mockResolvedValueOnce({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
+      await exposedApi!.authStatus({ forceRefresh: false, refreshClaude: true });
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authStatus);
+
+      invokeMock.mockResolvedValueOnce({ claude: 'ok', server: { mode: 'dev', signedIn: true } });
+      await exposedApi!.authStatus({
+        forceRefresh: 'yes',
+        refreshClaude: 'no',
+        extra: 'evil',
+      } as unknown as AuthStatusOptions);
+      expect(invokeMock).toHaveBeenLastCalledWith(IpcChannels.authStatus);
+
+      // Type-level check: ClaudeSignInResult and ServerSignInResult alias BrowserSignInResult
+      const browserRes: BrowserSignInResult = { status: 'signed_in', account: 'u@yvoke.ai' };
+      const claudeRes: ClaudeSignInResult = browserRes;
+      const serverRes: ServerSignInResult = browserRes;
+      expect(claudeRes).toBe(serverRes);
+
       invokeMock.mockResolvedValueOnce({ status: 'signed_in', account: 'u@yvoke.ai' });
       await expect(exposedApi!.claudeSignIn()).resolves.toEqual({
         status: 'signed_in',
@@ -333,5 +391,16 @@ describe('preload DesktopApi auth methods', () => {
       vi.doUnmock('electron');
       vi.resetModules();
     }
+  });
+
+  it('wires cached claudeBinaryPath into ClaudeAuthManager in src/main/index.ts', () => {
+    const mainIndexSrc = fs.readFileSync(
+      path.resolve(__dirname, '../src/main/index.ts'),
+      'utf8',
+    );
+    expect(mainIndexSrc).toMatch(/import\s+\{[^}]*\bclaudeBinaryPath\b[^}]*\}\s+from\s+['"]\.\/agent\/AgentService['"]/);
+    expect(mainIndexSrc).toMatch(
+      /new\s+ClaudeAuthManager\(\s*\{[\s\S]*?resolveBinary\s*:\s*claudeBinaryPath\b[\s\S]*?\}\s*\)/,
+    );
   });
 });

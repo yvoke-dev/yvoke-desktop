@@ -11,7 +11,6 @@ import {
   sanitizeLogContent,
   tagAttributedError,
 } from '../../shared/error';
-import { ServerAuthRequiredError } from '../auth/ServerAuth';
 
 
 /** How long the connection probe waits before calling the server unreachable. */
@@ -105,9 +104,6 @@ export class SyncClient {
     try {
       token = await this.deps.getToken(retried);
     } catch (err) {
-      if (err instanceof ServerAuthRequiredError) {
-        throw err;
-      }
       const msg = err instanceof Error ? err.message : String(err);
       if (hasErrorSourcePrefix(msg, 'Entra')) {
         throw err;

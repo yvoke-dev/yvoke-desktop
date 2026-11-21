@@ -5,6 +5,7 @@ import type {
   AgentEvent,
   AppSettings,
   AuthStatus,
+  AuthStatusOptions,
   AuthVerificationResponse,
   ChatMessage,
   CitationRef,
@@ -2720,14 +2721,21 @@ export class AppCore {
     this.agent.closeIdleSessions();
   }
 
-  async authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus> {
+  async authStatus(opts?: AuthStatusOptions): Promise<AuthStatus> {
+    const forceRefresh = opts?.forceRefresh === true;
+    const cachedClaude =
+      !forceRefresh && opts?.refreshClaude === false && this.claudeAuth
+        ? this.claudeAuth.getCachedStatus()
+        : null;
     const [claudeState, server] = await Promise.all([
-      this.claudeAuth
-        ? this.claudeAuth.getStatus({ forceRefresh: Boolean(opts?.forceRefresh) })
-        : Promise.resolve({
-            claude: detectClaudeCredentials() === 'missing' ? ('missing' as const) : ('ok' as const),
-            claudeAccount: detectClaudeAccount(),
-          }),
+      cachedClaude !== null
+        ? Promise.resolve(cachedClaude)
+        : this.claudeAuth
+          ? this.claudeAuth.getStatus({ forceRefresh })
+          : Promise.resolve({
+              claude: detectClaudeCredentials() === 'missing' ? ('missing' as const) : ('ok' as const),
+              claudeAccount: detectClaudeAccount(),
+            }),
       this.serverAuth.status(),
     ]);
     return {

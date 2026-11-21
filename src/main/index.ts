@@ -14,7 +14,7 @@ import type {
   ThreadMeta,
 } from '../shared/types';
 import { AppCore } from './AppCore';
-import { sandboxDirFor } from './agent/AgentService';
+import { claudeBinaryPath, sandboxDirFor } from './agent/AgentService';
 import { ClaudeAuthManager } from './agent/ClaudeAuth';
 import { fileTokenCache } from './auth/ServerAuth';
 import { createOriginGuardedHandle, registerAuthIpc } from './ipcOrigin';
@@ -324,7 +324,10 @@ if (!gotLock) {
         `mcp-sdk ${packageVersion('@modelcontextprotocol/sdk/client/index.js')} | ` +
         `debug=${!!process.env.ELECTRON_RENDERER_URL || process.env.CLAUDE_DEBUG === '1'} | userData=${userDataDir} | encryptedStore=${canEncrypt}`,
     );
-    const claudeAuth = new ClaudeAuthManager({ sandboxDir: sandboxDirFor(userDataDir) });
+    const claudeAuth = new ClaudeAuthManager({
+      sandboxDir: sandboxDirFor(userDataDir),
+      resolveBinary: claudeBinaryPath,
+    });
     core = new AppCore({
       userDataDir,
       appVersion: app.getVersion(),

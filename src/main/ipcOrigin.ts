@@ -1,6 +1,7 @@
 import { IpcChannels } from '../shared/ipc';
 import type {
   AuthStatus,
+  AuthStatusOptions,
   ClaudeCodeSubmitResult,
   ClaudeSignInResult,
   ClaudeSignOutResult,
@@ -54,7 +55,7 @@ export function createOriginGuardedHandle<TEvent extends IpcEventLike = IpcEvent
 }
 
 export interface AuthIpcTarget {
-  authStatus(opts?: { forceRefresh?: boolean }): Promise<AuthStatus>;
+  authStatus(opts?: AuthStatusOptions): Promise<AuthStatus>;
   serverSignIn(): Promise<ServerSignInResult>;
   cancelServerSignIn(): Promise<boolean> | boolean;
   serverSignOut(): Promise<void>;
@@ -75,11 +76,17 @@ export function registerAuthIpc<TEvent extends IpcEventLike = IpcEventLike>(deps
   writeClipboardText: (text: string) => void;
 }): void {
   deps.handle(IpcChannels.authStatus, (_event, opts?: unknown) => {
+    const isRecord = opts !== null && typeof opts === 'object' && !Array.isArray(opts);
     const forceRefresh =
-      opts !== null &&
-      typeof opts === 'object' &&
-      (opts as { forceRefresh?: unknown }).forceRefresh === true;
-    return deps.appCore.authStatus({ forceRefresh });
+      isRecord && (opts as { forceRefresh?: unknown }).forceRefresh === true;
+    const refreshClaude =
+      isRecord && (opts as { refreshClaude?: unknown }).refreshClaude === false
+        ? false
+        : undefined;
+    return deps.appCore.authStatus({
+      forceRefresh,
+      ...(refreshClaude === false ? { refreshClaude: false } : {}),
+    });
   });
   deps.handle(IpcChannels.authSignin, () => deps.appCore.serverSignIn());
   deps.handle(IpcChannels.authCancelSignin, async () =>

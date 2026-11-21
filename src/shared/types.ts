@@ -676,6 +676,11 @@ export interface FeedbackRequest {
   comment?: string;
 }
 
+export interface AuthStatusOptions {
+  forceRefresh?: boolean;
+  refreshClaude?: boolean;
+}
+
 export interface AuthStatus {
   claude: 'unknown' | 'ok' | 'missing';
   /** Email of the signed-in Claude account, when Claude Code has recorded one. */
@@ -683,19 +688,18 @@ export interface AuthStatus {
   server: { mode: 'dev' | 'entra'; signedIn: boolean; account?: string };
 }
 
-export type ClaudeSignInResult =
+export type BrowserSignInResult =
   | { status: 'signed_in'; account?: string }
   | { status: 'cancelled' }
   | { status: 'error'; message: string };
+
+export type ClaudeSignInResult = BrowserSignInResult;
 
 export type ClaudeSignOutResult =
   | { status: 'signed_out' }
   | { status: 'error'; message: string };
 
-export type ServerSignInResult =
-  | { status: 'signed_in'; account?: string }
-  | { status: 'cancelled' }
-  | { status: 'error'; message: string };
+export type ServerSignInResult = BrowserSignInResult;
 
 export type ClaudeCodeSubmitResult =
   | { accepted: true }
