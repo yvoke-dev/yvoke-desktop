@@ -58,6 +58,10 @@ other, and the app is useless without both.
 - **Being signed out or expired in corporate mode is distinguished from *Server unreachable*.** The
   *Server unreachable* banner is suppressed while corporate sign-in is required, so a missing or expired
   corporate login shows the corporate sign-in prompt instead of misreporting a network outage.
+- **Sign-in controls are shown in one place at a time.** When *Settings → Accounts* is open or the
+  active conversation is already showing an inline sign-in error, the matching top sign-in banner stays
+  hidden so sign-in controls and error messages are not duplicated, while *Server unreachable* remains
+  suppressed whenever corporate sign-in is required.
 - **The token cache is encrypted with the operating system's keystore** where one is available.
 - **The server address must be secure.** Anything other than `https` is refused when a user saves it,
   with plain `http` allowed only for a local address.

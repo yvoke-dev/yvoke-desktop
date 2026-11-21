@@ -93,7 +93,8 @@ yvoke-desktop/
 │   │       │   ├── StatusBanners.tsx
 │   │       │   ├── SubagentCard.tsx
 │   │       │   ├── ThreadList.tsx
-│   │       │   └── ToolCallCard.tsx
+│   │       │   ├── ToolCallCard.tsx
+│   │       │   └── useBrowserSignInFlow.ts # Shared browser sign-in lifecycle hook used by ClaudeSignInControls and ServerSignInControls
 │   │       ├── App.tsx     # Main application container
 │   │       ├── env.d.ts    # Renderer-side typescript definitions
 │   │       ├── main.tsx    # React mount entry point

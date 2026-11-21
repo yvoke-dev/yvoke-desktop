@@ -664,7 +664,7 @@ describe('spec/ modular structure', () => {
 
     // Spec-purity regex guard: zero internal code, IPC, or CSS identifiers (MSAL and 401 remain allowed)
     const bannedCorporateAuthIdentifiers =
-      /\b(ServerAuth|ServerAuthRequiredError|ServerAuthTransientError|CancellableLoopbackClient|useServerSignIn|ServerSignInControls|serverAuthRequired|serverSignOutError|isServerAuthFailure|acquireTokenInteractive|acquireTokenSilent|waitForRedirectUri|areSettingsEqual|paneRequest|createOriginGuardedHandle|registerAuthIpc)\b|auth:cancel-signin|auth:signin|auth:signout|footer-account-btn|about-url/;
+      /\b(ServerAuth|ServerAuthRequiredError|ServerAuthTransientError|CancellableLoopbackClient|useServerSignIn|ServerSignInControls|useBrowserSignInFlow|BrowserSignInResult|AuthStatusOptions|serverAuthRequired|serverSignOutError|isServerAuthFailure|acquireTokenInteractive|acquireTokenSilent|waitForRedirectUri|areSettingsEqual|paneRequest|createOriginGuardedHandle|registerAuthIpc)\b|auth:cancel-signin|auth:signin|auth:signout|footer-account-btn|about-url/;
     for (const [name, doc] of [
       ['01_asking_questions.md', askingQuestions],
       ['04_where_conversations_live.md', whereConversationsLive],
@@ -676,6 +676,24 @@ describe('spec/ modular structure', () => {
         `${name} must remain pure functional specification prose without corporate sign-in implementation identifiers`,
       ).not.toMatch(bannedCorporateAuthIdentifiers);
     }
+  });
+
+  it('documents single-surface sign-in banner suppression in 05_signing_in.md without implementation leakage', () => {
+    const norm = (s: string) => s.replace(/\s+/g, ' ');
+    const signingIn = norm(readFileSync(resolve(SPEC_DIR, '05_signing_in.md'), 'utf8'));
+
+    expect(signingIn).toContain('Sign-in controls are shown in one place at a time.');
+    expect(signingIn).toContain(
+      'When *Settings → Accounts* is open or the active conversation is already showing an inline sign-in error, the matching top sign-in banner stays hidden',
+    );
+    expect(signingIn).toContain(
+      'while *Server unreachable* remains suppressed whenever corporate sign-in is required.',
+    );
+
+    expect(
+      signingIn,
+      '05_signing_in.md must not leak shared browser sign-in hook or auth status option identifiers',
+    ).not.toMatch(/\b(useBrowserSignInFlow|BrowserSignInResult|AuthStatusOptions)\b/);
   });
 
   it('documents minimalist sidebar conversation rows without model badge or multi-agent marker contradictions or implementation leakage', () => {
