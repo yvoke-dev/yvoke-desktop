@@ -478,5 +478,297 @@ export function applyMicroFade(
   return result;
 }
 
+export interface AlignSegmentAudioParams {
+  audio: SynthesizeResult;
+  audioCursorSec: number;
+  segStartEffectiveSec: number;
+  segEndEffectiveSec: number;
+  sampleRate?: number;
+}
+
+export interface AlignSegmentAudioResult {
+  alignedAudio: SynthesizeResult;
+  nextAudioCursorSec: number;
+  speechStartEffectiveSec: number;
+  speechEndEffectiveSec: number;
+}
+
+/**
+ * Aligns a single segment's synthesized PCM audio onto an effective video timeline.
+ * Prepends leading silence for any inter-segment gap and appends trailing silence
+ * when the visual segment outlasts the spoken narration.
+ */
+export function alignSegmentAudioToTimeline({
+  audio,
+  audioCursorSec,
+  segStartEffectiveSec,
+  segEndEffectiveSec,
+  sampleRate = 24000,
+}: AlignSegmentAudioParams): AlignSegmentAudioResult {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+    throw new RangeError(`sampleRate must be a finite number > 0, got ${sampleRate}`);
+  }
+  if (!Number.isFinite(audioCursorSec) || audioCursorSec < 0) {
+    throw new RangeError(`audioCursorSec must be a finite number >= 0, got ${audioCursorSec}`);
+  }
+  if (!Number.isFinite(segStartEffectiveSec) || segStartEffectiveSec < 0) {
+    throw new RangeError(
+      `segStartEffectiveSec must be a finite number >= 0, got ${segStartEffectiveSec}`,
+    );
+  }
+  if (!Number.isFinite(segEndEffectiveSec) || segEndEffectiveSec < 0) {
+    throw new RangeError(
+      `segEndEffectiveSec must be a finite number >= 0, got ${segEndEffectiveSec}`,
+    );
+  }
+  if (segEndEffectiveSec < segStartEffectiveSec) {
+    throw new RangeError(
+      `segEndEffectiveSec (${segEndEffectiveSec}) must be >= segStartEffectiveSec (${segStartEffectiveSec})`,
+    );
+  }
+
+  const speechDurationSec = calculateAudioDuration(audio.pcmBuffer.length, sampleRate);
+  const leadingPcm = createSilencePcm(Math.max(0, segStartEffectiveSec - audioCursorSec), sampleRate);
+  const actualLeadingSec = calculateAudioDuration(leadingPcm.length, sampleRate);
+  const speechStartEffectiveSec = audioCursorSec + actualLeadingSec;
+  const speechEndEffectiveSec = speechStartEffectiveSec + speechDurationSec;
+  const trailingPcm = createSilencePcm(
+    Math.max(0, segEndEffectiveSec - speechEndEffectiveSec),
+    sampleRate,
+  );
+  const alignedPcm = Buffer.concat([leadingPcm, audio.pcmBuffer, trailingPcm]);
+  const alignedDurationSec = calculateAudioDuration(alignedPcm.length, sampleRate);
+
+  return {
+    alignedAudio: {
+      pcmBuffer: alignedPcm,
+      wavBuffer: pcmToWav(alignedPcm, sampleRate),
+      durationSeconds: alignedDurationSec,
+    },
+    nextAudioCursorSec: audioCursorSec + alignedDurationSec,
+    speechStartEffectiveSec,
+    speechEndEffectiveSec,
+  };
+}
+
+export interface TimelineSubtitleCue {
+  startTimeMs: number;
+  endTimeMs: number;
+  text: string;
+}
+
+export interface TimelineSyncControllerOptions {
+  initialSilencePcm: Buffer;
+  sampleRate?: number;
+  skipTts: boolean;
+  nowSec: () => number;
+  waitSec: (sec: number) => Promise<void>;
+  remapSec: (rawSec: number) => number;
+}
+
+export interface RunSegmentParams {
+  segAudioMap: Map<string, SynthesizeResult>;
+  key: string;
+  defaultDurationSec: number;
+  actionFn: () => Promise<void> | void;
+  narrationText?: string;
+}
+
+export interface RunSceneWithPaddingParams {
+  sceneIdx: number;
+  targetDurationSec: number;
+  sceneNarration?: string;
+  actionFn: () => Promise<void> | void;
+  buildSceneAudio: () => void;
+  getSceneAudio: () => SynthesizeResult | undefined;
+  setSceneAudio: (audio: SynthesizeResult) => void;
+}
+
+export interface TimelineSyncController {
+  getAudioCursorSec(): number;
+  getSubtitleCues(): TimelineSubtitleCue[];
+  runSegment(params: RunSegmentParams): Promise<void>;
+  runSceneWithPadding(
+    params: RunSceneWithPaddingParams,
+  ): Promise<{ startMs: number; endMs: number }>;
+}
+
+/**
+ * Pure, Node-safe controller that keeps audio PCM duration and subtitle cue timestamps
+ * locked to the effective (post-acceleration) video timeline across scenes and segments.
+ */
+export function createTimelineSyncController(
+  options: TimelineSyncControllerOptions,
+): TimelineSyncController {
+  const sampleRate = options.sampleRate ?? 24000;
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+    throw new RangeError(`sampleRate must be a finite number > 0, got ${sampleRate}`);
+  }
+
+  let audioCursorSec = calculateAudioDuration(options.initialSilencePcm.length, sampleRate);
+  let alignedSegmentCount = 0;
+  const subtitleCues: TimelineSubtitleCue[] = [];
+
+  return {
+    getAudioCursorSec(): number {
+      return audioCursorSec;
+    },
+
+    getSubtitleCues(): TimelineSubtitleCue[] {
+      return subtitleCues.map((cue) => ({ ...cue }));
+    },
+
+    async runSegment({
+      segAudioMap,
+      key,
+      defaultDurationSec,
+      actionFn,
+      narrationText,
+    }: RunSegmentParams): Promise<void> {
+      const segStartRawSec = options.nowSec();
+      await actionFn();
+      const segStartEffectiveSec = options.remapSec(segStartRawSec);
+
+      const existingAudio = options.skipTts ? undefined : segAudioMap.get(key);
+      const segSec = existingAudio
+        ? calculateAudioDuration(existingAudio.pcmBuffer.length, sampleRate)
+        : defaultDurationSec;
+      const expectedSpeechStartSec = existingAudio
+        ? Math.max(segStartEffectiveSec, audioCursorSec)
+        : segStartEffectiveSec;
+      const remainingSec = expectedSpeechStartSec + segSec - options.remapSec(options.nowSec());
+      if (remainingSec > 0) {
+        await options.waitSec(remainingSec);
+      }
+
+      const segEndRawSec = options.nowSec();
+      const segEndEffectiveSec = Math.max(segStartEffectiveSec, options.remapSec(segEndRawSec));
+
+      if (existingAudio) {
+        const {
+          alignedAudio,
+          nextAudioCursorSec,
+          speechStartEffectiveSec,
+          speechEndEffectiveSec,
+        } = alignSegmentAudioToTimeline({
+          audio: existingAudio,
+          audioCursorSec,
+          segStartEffectiveSec,
+          segEndEffectiveSec,
+          sampleRate,
+        });
+        segAudioMap.set(key, alignedAudio);
+        audioCursorSec = nextAudioCursorSec;
+        alignedSegmentCount += 1;
+
+        if (narrationText) {
+          const startTimeMs = Math.round(speechStartEffectiveSec * 1000);
+          const endTimeMs = Math.max(startTimeMs + 100, Math.round(speechEndEffectiveSec * 1000));
+          subtitleCues.push({ startTimeMs, endTimeMs, text: narrationText });
+        }
+      } else if (narrationText) {
+        const startTimeMs = Math.round(segStartEffectiveSec * 1000);
+        const endTimeMs = Math.max(startTimeMs + 100, Math.round(segEndEffectiveSec * 1000));
+        subtitleCues.push({ startTimeMs, endTimeMs, text: narrationText });
+      }
+    },
+
+    async runSceneWithPadding({
+      sceneIdx,
+      targetDurationSec,
+      sceneNarration,
+      actionFn,
+      buildSceneAudio,
+      getSceneAudio,
+      setSceneAudio,
+    }: RunSceneWithPaddingParams): Promise<{ startMs: number; endMs: number }> {
+      const initialCueCount = subtitleCues.length;
+      const initialAlignedCount = alignedSegmentCount;
+      const sceneStartRawSec = options.nowSec();
+      await actionFn();
+      buildSceneAudio();
+
+      let fallbackSpeechRange: { startSec: number; endSec: number } | undefined;
+      const sceneAudio = getSceneAudio();
+      if (!options.skipTts && sceneAudio && alignedSegmentCount === initialAlignedCount) {
+        const sceneStartEffectiveSec = options.remapSec(sceneStartRawSec);
+        const speechDurationSec = calculateAudioDuration(sceneAudio.pcmBuffer.length, sampleRate);
+        const expectedSpeechStartSec = Math.max(sceneStartEffectiveSec, audioCursorSec);
+        const remainingSec =
+          expectedSpeechStartSec + speechDurationSec - options.remapSec(options.nowSec());
+        if (remainingSec > 0) {
+          await options.waitSec(remainingSec);
+        }
+
+        const sceneEndEffectiveSec = Math.max(
+          sceneStartEffectiveSec,
+          options.remapSec(options.nowSec()),
+        );
+        const aligned = alignSegmentAudioToTimeline({
+          audio: sceneAudio,
+          audioCursorSec,
+          segStartEffectiveSec: sceneStartEffectiveSec,
+          segEndEffectiveSec: sceneEndEffectiveSec,
+          sampleRate,
+        });
+        setSceneAudio(aligned.alignedAudio);
+        audioCursorSec = aligned.nextAudioCursorSec;
+        fallbackSpeechRange = {
+          startSec: aligned.speechStartEffectiveSec,
+          endSec: aligned.speechEndEffectiveSec,
+        };
+      } else if (!options.skipTts && sceneAudio) {
+        const nowEffectiveSec = options.remapSec(options.nowSec());
+        if (audioCursorSec > nowEffectiveSec) {
+          await options.waitSec(audioCursorSec - nowEffectiveSec);
+        }
+
+        const finalEffectiveSec = options.remapSec(options.nowSec());
+        if (finalEffectiveSec > audioCursorSec) {
+          const gapSilence = createSilencePcm(finalEffectiveSec - audioCursorSec, sampleRate);
+          const paddedPcm = Buffer.concat([sceneAudio.pcmBuffer, gapSilence]);
+          setSceneAudio({
+            pcmBuffer: paddedPcm,
+            wavBuffer: pcmToWav(paddedPcm, sampleRate),
+            durationSeconds: calculateAudioDuration(paddedPcm.length, sampleRate),
+          });
+          audioCursorSec += calculateAudioDuration(gapSilence.length, sampleRate);
+        }
+      } else {
+        const effectiveSceneElapsedSec = Math.max(
+          0,
+          options.remapSec(options.nowSec()) - options.remapSec(sceneStartRawSec),
+        );
+        const minPadding = options.skipTts ? (sceneIdx === 0 ? 5.5 : 4.0) : 0;
+        const paddingWaitSec = Math.max(
+          minPadding,
+          Math.max(0, (options.skipTts ? targetDurationSec : 0) - effectiveSceneElapsedSec),
+        );
+        if (paddingWaitSec > 0) {
+          await options.waitSec(paddingWaitSec);
+        }
+      }
+
+      const sceneEndRawSec = options.nowSec();
+      if (subtitleCues.length === initialCueCount && sceneNarration) {
+        const startSec = fallbackSpeechRange
+          ? fallbackSpeechRange.startSec
+          : options.remapSec(sceneStartRawSec);
+        const endSec = fallbackSpeechRange
+          ? fallbackSpeechRange.endSec
+          : options.remapSec(sceneEndRawSec);
+        const startTimeMs = Math.round(startSec * 1000);
+        const endTimeMs = Math.max(startTimeMs + 100, Math.round(endSec * 1000));
+        subtitleCues.push({ startTimeMs, endTimeMs, text: sceneNarration });
+      }
+
+      return {
+        startMs: Math.round(sceneStartRawSec * 1000),
+        endMs: Math.round(sceneEndRawSec * 1000),
+      };
+    },
+  };
+}
+
 
 

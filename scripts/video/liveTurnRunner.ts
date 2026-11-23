@@ -74,9 +74,24 @@ export async function typeInComposer(
 }
 
 /**
+ * Builds an anchored title regex matching an exact playbook name and optional version badge
+ * (e.g. "oim-db-history" or "oim-db-history v2"), rejecting prefix/suffix/description matches.
+ */
+export function buildPlaybookTitlePattern(playbookName: string): RegExp {
+  const trimmed = playbookName.trim();
+  if (trimmed.length === 0) {
+    throw new RangeError('playbookName must be a non-empty string.');
+  }
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*${escaped}(?:\\s+v\\d+)?\\s*$`);
+}
+
+/**
  * Selects a specified playbook in the UI, opening the picker if necessary.
  */
 export async function selectPlaybook(page: Page, playbookName: string): Promise<void> {
+  const titlePattern = buildPlaybookTitlePattern(playbookName);
+
   // Check if picker rows are already visible
   let pickerRows = page.locator('.picker-row, .picker-list button');
   let rowCount = await pickerRows.count();
@@ -99,21 +114,33 @@ export async function selectPlaybook(page: Page, playbookName: string): Promise<
     rowCount = await pickerRows.count();
   }
 
-  // Find matching playbook row
-  const matchingRow = asFirst(
+  // Primary match: strictly scoped to .picker-row-title so description or suffix decoys never match
+  const primaryMatch = asFirst(
     page
-      .locator('.picker-row, .chip, [role="option"], .picker-list button')
-      .filter({ hasText: playbookName }),
+      .locator('button.picker-row, .picker-row')
+      .filter({ has: page.locator('.picker-row-title', { hasText: titlePattern }) }),
   );
 
-  const matchCount = await matchingRow.count();
-  if (matchCount === 0) {
-    throw new PlaybookNotFoundError(
-      `Playbook "${playbookName}" not found in picker list. Available count: ${rowCount}.`,
-    );
+  if ((await primaryMatch.count()) > 0) {
+    await primaryMatch.click();
+    return;
   }
 
-  await matchingRow.click();
+  // Anchored fallback strictly when primary match count is 0
+  const fallbackMatch = asFirst(
+    page
+      .locator('.chip, [role="option"], .picker-list button')
+      .filter({ hasText: titlePattern }),
+  );
+
+  if ((await fallbackMatch.count()) > 0) {
+    await fallbackMatch.click();
+    return;
+  }
+
+  throw new PlaybookNotFoundError(
+    `Playbook "${playbookName}" not found in picker list. Available count: ${rowCount}.`,
+  );
 }
 
 /**
@@ -124,7 +151,9 @@ export async function selectAgentMode(
   mode: 'single' | 'orchestrator',
 ): Promise<void> {
   const selectLocator = asFirst(
-    page.locator('select.composer-select, select[aria-label="Agent mode"]'),
+    page.locator(
+      'select.composer-select[aria-label="Agent mode"], select[aria-label="Agent mode"]',
+    ),
   );
 
   const count = await selectLocator.count();
@@ -180,6 +209,28 @@ export async function dispatchTurn(page: Page): Promise<void> {
   await page.keyboard.press(modifier);
 }
 
+export interface TraceBarContainer {
+  querySelectorAll(
+    selector: string,
+  ): Iterable<{ click?: () => void }> | ArrayLike<{ click?: () => void }>;
+}
+
+/**
+ * Collapses all currently expanded trace bars within a container by invoking click once per button.
+ * Returns the number of buttons clicked. Safe when elements lack a callable .click method.
+ */
+export function collapseExpandedTraceBars(root: TraceBarContainer): number {
+  const buttons = Array.from(root.querySelectorAll('button.trace-bar[aria-expanded="true"]'));
+  let clicked = 0;
+  for (const btn of buttons) {
+    if (typeof btn?.click === 'function') {
+      btn.click();
+      clicked++;
+    }
+  }
+  return clicked;
+}
+
 export interface WaitForTurnOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -213,20 +264,27 @@ export async function waitForTurnCompletion(
   while (true) {
     // 0a. Auto-collapse any visible expanded trace bar
     if (autoCollapseTrace) {
-      if (typeof (page as any).evaluate === 'function') {
-        await (page as any).evaluate(() => {
-          const expanded = document.querySelectorAll('button.trace-bar[aria-expanded="true"]');
-          expanded.forEach((btn: any) => btn?.click?.());
-        }).catch(() => {});
-      }
-      const expandedTrace = asFirst(
-        page.locator('button.trace-bar[aria-expanded="true"]'),
-      );
-      if ((await asCount(expandedTrace)) > 0) {
-        const isTraceVis =
-          typeof expandedTrace.isVisible === 'function' ? await expandedTrace.isVisible() : true;
-        if (isTraceVis && typeof expandedTrace.click === 'function') {
-          await expandedTrace.click().catch(() => {});
+      if (typeof page.evaluate === 'function') {
+        await page
+          .evaluate(() => {
+            const expanded = document.querySelectorAll('button.trace-bar[aria-expanded="true"]');
+            for (const btn of Array.from(expanded)) {
+              if (typeof (btn as { click?: () => void })?.click === 'function') {
+                (btn as { click: () => void }).click();
+              }
+            }
+          })
+          .catch(() => {});
+      } else {
+        const expandedTrace = asFirst(
+          page.locator('button.trace-bar[aria-expanded="true"]'),
+        );
+        if ((await asCount(expandedTrace)) > 0) {
+          const isTraceVis =
+            typeof expandedTrace.isVisible === 'function' ? await expandedTrace.isVisible() : true;
+          if (isTraceVis && typeof expandedTrace.click === 'function') {
+            await expandedTrace.click().catch(() => {});
+          }
         }
       }
     }
