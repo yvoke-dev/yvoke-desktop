@@ -10,12 +10,22 @@ import {
   padSynthesizeResult,
   extractPcmFromAudioBuffer,
   applyMicroFade,
+  combineSynthesizeResults,
+  alignSegmentAudioToTimeline,
+  createTimelineSyncController,
   type SynthesizeResult,
+  type AlignSegmentAudioParams,
+  type AlignSegmentAudioResult,
+  type TimelineSyncControllerOptions,
+  type TimelineSubtitleCue,
+  type TimelineSyncController,
   InvalidPcmDataError,
   TtsSynthesisError,
   TtsQuotaExceededError,
   TtsAuthenticationError,
 } from '../scripts/video/tts';
+import { generateSrt, remapTimestamp } from '../scripts/video/subtitles';
+import type { AccelerationInterval } from '../scripts/video/stitch';
 
 describe('videoTts', () => {
   describe('RIFF/WAVE header creation', () => {
@@ -525,6 +535,669 @@ describe('videoTts', () => {
       expect(faded.readInt16LE(50 * 2)).toBe(3000);
       // Last sample should be 0
       expect(faded.readInt16LE(99 * 2)).toBe(0);
+    });
+  });
+
+  describe('alignSegmentAudioToTimeline', () => {
+    const makeAudio = (durationSec: number, fillByte: number, sampleRate = 24000): SynthesizeResult => {
+      const byteLength = Math.round(durationSec * sampleRate * 2);
+      const pcmBuffer = Buffer.alloc(byteLength, fillByte);
+      return {
+        pcmBuffer,
+        wavBuffer: pcmToWav(pcmBuffer, sampleRate),
+        durationSeconds: calculateAudioDuration(pcmBuffer.length, sampleRate),
+      };
+    };
+
+    it('throws RangeError across invalid numeric validation matrix', () => {
+      const audio = makeAudio(1.0, 0x11);
+      const base: AlignSegmentAudioParams = {
+        audio,
+        audioCursorSec: 1.0,
+        segStartEffectiveSec: 1.5,
+        segEndEffectiveSec: 2.5,
+        sampleRate: 24000,
+      };
+
+      // Invalid sampleRate
+      for (const badRate of [0, -24000, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(() => alignSegmentAudioToTimeline({ ...base, sampleRate: badRate })).toThrow(RangeError);
+      }
+
+      // Invalid audioCursorSec
+      for (const badCursor of [-0.001, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(() => alignSegmentAudioToTimeline({ ...base, audioCursorSec: badCursor })).toThrow(RangeError);
+      }
+
+      // Invalid segStartEffectiveSec
+      for (const badStart of [-0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => alignSegmentAudioToTimeline({ ...base, segStartEffectiveSec: badStart })).toThrow(RangeError);
+      }
+
+      // Invalid segEndEffectiveSec
+      for (const badEnd of [-0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => alignSegmentAudioToTimeline({ ...base, segEndEffectiveSec: badEnd })).toThrow(RangeError);
+      }
+
+      // Inverted window: segEndEffectiveSec < segStartEffectiveSec
+      expect(() =>
+        alignSegmentAudioToTimeline({
+          ...base,
+          segStartEffectiveSec: 3.0,
+          segEndEffectiveSec: 2.5,
+        }),
+      ).toThrow(RangeError);
+    });
+
+    it('throws InvalidPcmDataError when audio.pcmBuffer has odd byte length', () => {
+      const oddBuffer = Buffer.alloc(101, 0x22);
+      const malformed: SynthesizeResult = {
+        pcmBuffer: oddBuffer,
+        wavBuffer: Buffer.alloc(44),
+        durationSeconds: 0.002,
+      };
+
+      expect(() =>
+        alignSegmentAudioToTimeline({
+          audio: malformed,
+          audioCursorSec: 0,
+          segStartEffectiveSec: 0,
+          segEndEffectiveSec: 1,
+        }),
+      ).toThrow(InvalidPcmDataError);
+    });
+
+    it('computes speech duration strictly from pcmBuffer.length, ignoring stale audio.durationSeconds metadata', () => {
+      const pcmBuffer = Buffer.alloc(48000, 0x33); // Exactly 1.0s at 24kHz
+      const staleAudio: SynthesizeResult = {
+        pcmBuffer,
+        wavBuffer: pcmToWav(pcmBuffer, 24000),
+        durationSeconds: 99.5, // Wildly stale/wrong metadata
+      };
+
+      const res: AlignSegmentAudioResult = alignSegmentAudioToTimeline({
+        audio: staleAudio,
+        audioCursorSec: 0,
+        segStartEffectiveSec: 0,
+        segEndEffectiveSec: 1.5,
+      });
+
+      expect(res.speechStartEffectiveSec).toBe(0);
+      expect(res.speechEndEffectiveSec).toBe(1.0);
+      expect(res.alignedAudio.durationSeconds).toBe(1.5);
+      expect(res.nextAudioCursorSec).toBe(1.5);
+      expect(res.alignedAudio.pcmBuffer.length).toBe(72000); // 1.0s speech + 0.5s trailing silence
+    });
+
+    it('clamps cleanly on clock jitter when segStartEffectiveSec < audioCursorSec without dropping audio or moving subtitle earlier', () => {
+      const audio = makeAudio(1.0, 0x44);
+
+      const res = alignSegmentAudioToTimeline({
+        audio,
+        audioCursorSec: 5.2,
+        segStartEffectiveSec: 5.0, // Earlier than audioCursorSec due to jitter
+        segEndEffectiveSec: 6.5,
+      });
+
+      // Speech starts at audioCursorSec (5.2), never earlier; zero leading silence, no audio dropped
+      expect(res.speechStartEffectiveSec).toBeCloseTo(5.2, 10);
+      expect(res.speechEndEffectiveSec).toBeCloseTo(6.2, 10);
+      expect(res.nextAudioCursorSec).toBeCloseTo(6.5, 10);
+      expect(res.alignedAudio.pcmBuffer.subarray(0, 48000).equals(audio.pcmBuffer)).toBe(true);
+      // Trailing silence covers 6.5 - 6.2 = 0.3s (14400 bytes)
+      expect(res.alignedAudio.pcmBuffer.length).toBe(48000 + 14400);
+      expect(res.alignedAudio.pcmBuffer.subarray(48000).every((b) => b === 0)).toBe(true);
+    });
+
+    it('preserves full speech without truncating when speech is longer than the segment window', () => {
+      const audio = makeAudio(1.2, 0x55); // 57600 bytes
+
+      const res = alignSegmentAudioToTimeline({
+        audio,
+        audioCursorSec: 1.0,
+        segStartEffectiveSec: 1.5,
+        segEndEffectiveSec: 2.0, // Window ends at 2.0, but speech ends at 2.7
+      });
+
+      expect(res.speechStartEffectiveSec).toBeCloseTo(1.5, 10);
+      expect(res.speechEndEffectiveSec).toBeCloseTo(2.7, 10);
+      expect(res.nextAudioCursorSec).toBeCloseTo(2.7, 10);
+      // 0.5s leading silence (24000 bytes) + full 1.2s speech (57600 bytes) + 0 trailing
+      expect(res.alignedAudio.pcmBuffer.length).toBe(24000 + 57600);
+      expect(res.alignedAudio.pcmBuffer.subarray(24000).equals(audio.pcmBuffer)).toBe(true);
+    });
+
+    it('produces exact byte-level PCM layout and WAV header for custom sampleRate = 16000', () => {
+      const sampleRate = 16000;
+      const audio = makeAudio(0.5, 0x7a, sampleRate); // 16000 bytes
+
+      const res = alignSegmentAudioToTimeline({
+        audio,
+        audioCursorSec: 1.0,
+        segStartEffectiveSec: 1.25, // +0.25s leading = 8000 bytes
+        segEndEffectiveSec: 2.25,   // +0.5s trailing = 16000 bytes
+        sampleRate,
+      });
+
+      expect(res.speechStartEffectiveSec).toBe(1.25);
+      expect(res.speechEndEffectiveSec).toBe(1.75);
+      expect(res.nextAudioCursorSec).toBe(2.25);
+      expect(res.alignedAudio.durationSeconds).toBe(1.25);
+
+      const pcm = res.alignedAudio.pcmBuffer;
+      expect(pcm.length).toBe(8000 + 16000 + 16000);
+      expect(pcm.subarray(0, 8000).every((b) => b === 0)).toBe(true);
+      expect(pcm.subarray(8000, 24000).every((b) => b === 0x7a)).toBe(true);
+      expect(pcm.subarray(24000, 40000).every((b) => b === 0)).toBe(true);
+
+      const wav = res.alignedAudio.wavBuffer;
+      expect(wav.length).toBe(44 + pcm.length);
+      expect(wav.toString('ascii', 0, 4)).toBe('RIFF');
+      expect(wav.readUInt32LE(4)).toBe(36 + pcm.length);
+      expect(wav.toString('ascii', 8, 12)).toBe('WAVE');
+      expect(wav.readUInt32LE(24)).toBe(16000); // SampleRate
+      expect(wav.readUInt32LE(28)).toBe(32000); // ByteRate = 16000 * 1 * 2
+      expect(wav.readUInt32LE(40)).toBe(pcm.length);
+      expect(wav.subarray(44).equals(pcm)).toBe(true);
+    });
+
+    it('handles zero-duration and empty PCM boundaries cleanly', () => {
+      const emptyAudio: SynthesizeResult = {
+        pcmBuffer: Buffer.alloc(0),
+        wavBuffer: pcmToWav(Buffer.alloc(0)),
+        durationSeconds: 0,
+      };
+
+      const zeroWin = alignSegmentAudioToTimeline({
+        audio: emptyAudio,
+        audioCursorSec: 2.0,
+        segStartEffectiveSec: 2.0,
+        segEndEffectiveSec: 2.0,
+      });
+
+      expect(zeroWin.alignedAudio.pcmBuffer.length).toBe(0);
+      expect(zeroWin.alignedAudio.wavBuffer.length).toBe(44);
+      expect(zeroWin.alignedAudio.durationSeconds).toBe(0);
+      expect(zeroWin.speechStartEffectiveSec).toBe(2.0);
+      expect(zeroWin.speechEndEffectiveSec).toBe(2.0);
+      expect(zeroWin.nextAudioCursorSec).toBe(2.0);
+
+      const silenceWin = alignSegmentAudioToTimeline({
+        audio: emptyAudio,
+        audioCursorSec: 1.0,
+        segStartEffectiveSec: 1.5,
+        segEndEffectiveSec: 2.0,
+      });
+
+      expect(silenceWin.alignedAudio.pcmBuffer.length).toBe(48000); // 0.5s leading + 0.5s trailing
+      expect(silenceWin.alignedAudio.durationSeconds).toBe(1.0);
+      expect(silenceWin.nextAudioCursorSec).toBe(2.0);
+    });
+  });
+
+  describe('createTimelineSyncController', () => {
+    const makeAudio = (durationSec: number, fillByte: number, sampleRate = 24000): SynthesizeResult => {
+      const pcmBuffer = Buffer.alloc(Math.round(durationSec * sampleRate * 2), fillByte);
+      return {
+        pcmBuffer,
+        wavBuffer: pcmToWav(pcmBuffer, sampleRate),
+        durationSeconds: calculateAudioDuration(pcmBuffer.length, sampleRate),
+      };
+    };
+
+    it('validates sampleRate and initialSilencePcm byte alignment on creation', () => {
+      const baseOpts: TimelineSyncControllerOptions = {
+        initialSilencePcm: createSilencePcm(0.5),
+        skipTts: false,
+        nowSec: () => 0.5,
+        waitSec: async () => {},
+        remapSec: (s) => s,
+      };
+
+      expect(() => createTimelineSyncController({ ...baseOpts, sampleRate: 0 })).toThrow(RangeError);
+      expect(() => createTimelineSyncController({ ...baseOpts, sampleRate: -16000 })).toThrow(RangeError);
+      expect(() => createTimelineSyncController({ ...baseOpts, sampleRate: Number.NaN })).toThrow(RangeError);
+      expect(() =>
+        createTimelineSyncController({ ...baseOpts, initialSilencePcm: Buffer.alloc(5) }),
+      ).toThrow(InvalidPcmDataError);
+    });
+
+    it('maintains sample-accurate A/V sync across multi-scene drift, jitter, gaps, 10x acceleration, and fallback narration', async () => {
+      // Quantized initial silence
+      const initialSilencePcm = createSilencePcm(1.2345);
+      let rawClockSec = 1.2345;
+      const accelerationIntervals: AccelerationInterval[] = [];
+      const remapSec = (raw: number) => remapTimestamp(raw, accelerationIntervals);
+
+      // Scripted wait jitter sequence:
+      // wait 1 (Scene 1 seg1): overshoot +45ms
+      // wait 2 (Scene 1 seg2): early wakeup -15ms
+      // wait 3 (Scene 1 scene padding after early wakeup): exact 0ms
+      // wait 4 (Scene 2 seg1 after 10x acceleration): exact 0ms
+      const waitJitterSec = [0.045, -0.015, 0, 0];
+      const waitCalls: number[] = [];
+
+      const controller: TimelineSyncController = createTimelineSyncController({
+        initialSilencePcm,
+        sampleRate: 24000,
+        skipTts: false,
+        nowSec: () => rawClockSec,
+        waitSec: async (sec: number) => {
+          waitCalls.push(sec);
+          const jitter = waitJitterSec.shift() ?? 0;
+          rawClockSec += Math.max(0, sec + jitter);
+        },
+        remapSec,
+      });
+
+      expect(controller.getAudioCursorSec()).toBe(calculateAudioDuration(initialSilencePcm.length, 24000));
+
+      const scene1Map = new Map<string, SynthesizeResult>([
+        ['s1_a', makeAudio(2.0, 0x11)],
+        ['s1_b', makeAudio(1.5, 0x22)],
+      ]);
+      const scene2Map = new Map<string, SynthesizeResult>([
+        ['s2_turn', makeAudio(2.5, 0x33)],
+      ]);
+      const sceneAudios: (SynthesizeResult | undefined)[] = [undefined, undefined, undefined];
+
+      // --- Scene 1: 2 segments with overshoot (+45ms), inter-segment gap (+320ms), early wakeup (-15ms), and trailing scene gap ---
+      const scene1Timing = await controller.runSceneWithPadding({
+        sceneIdx: 0,
+        targetDurationSec: 5.0,
+        sceneNarration: 'Scene 1 fallback (unused)',
+        actionFn: async () => {
+          await controller.runSegment({
+            segAudioMap: scene1Map,
+            key: 's1_a',
+            defaultDurationSec: 2.0,
+            actionFn: async () => {
+              rawClockSec += 0.4; // Visual action takes 0.4s -> waits 1.6s, overshoots +45ms
+            },
+            narrationText: 'Scene one part A.',
+          });
+
+          // Inter-segment un-narrated gap (+320ms)
+          rawClockSec += 0.32;
+
+          await controller.runSegment({
+            segAudioMap: scene1Map,
+            key: 's1_b',
+            defaultDurationSec: 1.5,
+            actionFn: async () => {
+              rawClockSec += 0.3; // Visual action takes 0.3s -> waits 1.2s, wakes early -15ms
+            },
+            narrationText: 'Scene one part B.',
+          });
+
+          // Note: after early wakeup (-15ms), audioCursorSec > nowEffectiveSec!
+          // runSceneWithPadding will wait out the remaining 15ms so speech isn't cut off.
+        },
+        buildSceneAudio: () => {
+          sceneAudios[0] = combineSynthesizeResults([
+            scene1Map.get('s1_a')!,
+            scene1Map.get('s1_b')!,
+          ]);
+        },
+        getSceneAudio: () => sceneAudios[0],
+        setSceneAudio: (a) => {
+          sceneAudios[0] = a;
+        },
+      });
+
+      expect(scene1Timing.endMs).toBeGreaterThan(scene1Timing.startMs);
+      // Verify scene 1 waited for the remaining ~15ms after early wakeup
+      expect(waitCalls[2]).toBeCloseTo(0.015, 3);
+
+      // Inter-scene visual transition pause (+250ms)
+      rawClockSec += 0.25;
+
+      // --- Scene 2: Mid-segment 10x acceleration (10s raw -> 1.0s effective) with 2.5s 1x speech ---
+      await controller.runSceneWithPadding({
+        sceneIdx: 1,
+        targetDurationSec: 4.0,
+        sceneNarration: 'Scene 2 fallback (unused)',
+        actionFn: async () => {
+          await controller.runSegment({
+            segAudioMap: scene2Map,
+            key: 's2_turn',
+            defaultDurationSec: 2.5,
+            actionFn: async () => {
+              const accelStart = rawClockSec;
+              rawClockSec += 10.0; // 10s live turn wait
+              accelerationIntervals.push({
+                startSec: accelStart,
+                endSec: rawClockSec,
+                speedFactor: 10,
+              });
+            },
+            narrationText: 'Running multi-agent analysis.',
+          });
+
+          // Post-segment visual settle (+180ms) before scene end -> absorbed by scene trailing gapSilence
+          rawClockSec += 0.18;
+        },
+        buildSceneAudio: () => {
+          sceneAudios[1] = combineSynthesizeResults([scene2Map.get('s2_turn')!]);
+        },
+        getSceneAudio: () => sceneAudios[1],
+        setSceneAudio: (a) => {
+          sceneAudios[1] = a;
+        },
+      });
+
+      // --- Scene 3: No segments, fallback scene-level narration cue must be remapped to effective coordinates ---
+      const scene3StartRaw = rawClockSec;
+      await controller.runSceneWithPadding({
+        sceneIdx: 2,
+        targetDurationSec: 2.0,
+        sceneNarration: 'Closing summary.',
+        actionFn: async () => {
+          rawClockSec += 1.0;
+        },
+        buildSceneAudio: () => {
+          // No audio for scene 3 -> uses scene fallback cue path
+        },
+        getSceneAudio: () => sceneAudios[2],
+        setSceneAudio: (a) => {
+          sceneAudios[2] = a;
+        },
+      });
+
+      // 1. Verify total PCM duration matches final effective video duration at end of Scene 2 (last TTS scene)
+      const totalTtsPcm = Buffer.concat([
+        initialSilencePcm,
+        sceneAudios[0]!.pcmBuffer,
+        sceneAudios[1]!.pcmBuffer,
+      ]);
+      const totalTtsDurationSec = calculateAudioDuration(totalTtsPcm.length, 24000);
+      const effectiveAtScene2End = remapSec(scene3StartRaw);
+      expect(totalTtsDurationSec).toBe(controller.getAudioCursorSec());
+      expect(Math.abs(totalTtsDurationSec - effectiveAtScene2End)).toBeLessThanOrEqual(1 / 24000);
+
+      // 2. Verify 1x subtitle duration preserved on Scene 2 despite 10x acceleration
+      const cues: TimelineSubtitleCue[] = controller.getSubtitleCues();
+      expect(cues).toHaveLength(4);
+      const s2Cue = cues[2];
+      expect(s2Cue.text).toBe('Running multi-agent analysis.');
+      expect(s2Cue.endTimeMs - s2Cue.startTimeMs).toBe(2500);
+
+      // 3. Verify fallback cue for Scene 3 is in effective (remapped) coordinates, NOT raw coordinates
+      const s3Cue = cues[3];
+      expect(s3Cue.text).toBe('Closing summary.');
+      expect(s3Cue.startTimeMs).toBe(Math.round(remapSec(scene3StartRaw) * 1000));
+      expect(s3Cue.startTimeMs).toBeLessThan(Math.round(scene3StartRaw * 1000) - 8000); // 9s saved by 10x accel
+
+      // 4. Verify SRT generation succeeds and returned array is defensively copied
+      const srt = generateSrt(cues);
+      expect(srt).toContain('Scene one part A.');
+      expect(srt).toContain('Running multi-agent analysis.');
+      expect(srt).toContain('Closing summary.');
+      cues.push({ startTimeMs: 0, endTimeMs: 1, text: 'mutated' });
+      expect(controller.getSubtitleCues()).toHaveLength(4);
+    });
+
+    it('handles --skip-tts with 0ms action so cues pass generateSrt without InvalidCueError and applies minPadding', async () => {
+      let rawClockSec = 0;
+      const waitCalls: number[] = [];
+
+      const controller = createTimelineSyncController({
+        initialSilencePcm: Buffer.alloc(0),
+        skipTts: true,
+        nowSec: () => rawClockSec,
+        waitSec: async (sec: number) => {
+          waitCalls.push(sec);
+          rawClockSec += sec;
+        },
+        remapSec: (s) => s,
+      });
+
+      const emptyMap = new Map<string, SynthesizeResult>();
+
+      await controller.runSceneWithPadding({
+        sceneIdx: 0,
+        targetDurationSec: 3.0,
+        sceneNarration: 'Scene 0 fallback',
+        actionFn: async () => {
+          // 0ms action with defaultDurationSec = 0 -> start === end before 100ms floor
+          await controller.runSegment({
+            segAudioMap: emptyMap,
+            key: 'zero_ms',
+            defaultDurationSec: 0,
+            actionFn: async () => {},
+            narrationText: 'Instant step.',
+          });
+        },
+        buildSceneAudio: () => {},
+        getSceneAudio: () => undefined,
+        setSceneAudio: () => {},
+      });
+
+      // Scene 0 in skipTts uses minPadding = 5.5
+      expect(waitCalls).toContain(5.5);
+
+      await controller.runSceneWithPadding({
+        sceneIdx: 1,
+        targetDurationSec: 2.0,
+        sceneNarration: 'Scene 1 fallback narration.',
+        actionFn: async () => {},
+        buildSceneAudio: () => {},
+        getSceneAudio: () => undefined,
+        setSceneAudio: () => {},
+      });
+
+      // Scene > 0 in skipTts uses minPadding = 4.0
+      expect(waitCalls).toContain(4.0);
+
+      const cues = controller.getSubtitleCues();
+      expect(cues).toHaveLength(2);
+      expect(cues[0].endTimeMs - cues[0].startTimeMs).toBeGreaterThanOrEqual(100);
+      expect(cues[1].text).toBe('Scene 1 fallback narration.');
+
+      const srt = generateSrt(cues);
+      expect(srt).toContain('Instant step.');
+      expect(srt).toContain('Scene 1 fallback narration.');
+    });
+
+    it('aligns non-segmented monolithic sceneAudio and syncs seamlessly with a subsequent segmented scene', async () => {
+      const initialSilencePcm = createSilencePcm(0.5);
+      let rawClockSec = 0.5;
+      const waitCalls: number[] = [];
+
+      const controller = createTimelineSyncController({
+        initialSilencePcm,
+        sampleRate: 24000,
+        skipTts: false,
+        nowSec: () => rawClockSec,
+        waitSec: async (sec: number) => {
+          waitCalls.push(sec);
+          // Inject +30ms wait overshoot on the monolithic scene wait
+          const overshoot = waitCalls.length === 1 ? 0.03 : 0;
+          rawClockSec += sec + overshoot;
+        },
+        remapSec: (s) => s,
+      });
+
+      // Inter-scene pause before monolithic scene 1 (+250ms)
+      rawClockSec += 0.25;
+
+      const sceneAudios: (SynthesizeResult | undefined)[] = [
+        makeAudio(2.0, 0x61), // Monolithic 2.0s audio for Scene 1 (no runSegment calls)
+        undefined,
+      ];
+      const scene2Map = new Map<string, SynthesizeResult>([
+        ['s2_seg1', makeAudio(1.5, 0x62)],
+      ]);
+
+      // Scene 1: monolithic sceneAudio (no runSegment called)
+      await controller.runSceneWithPadding({
+        sceneIdx: 0,
+        targetDurationSec: 3.0,
+        sceneNarration: 'Monolithic intro narration.',
+        actionFn: async () => {
+          rawClockSec += 0.4; // Visual action takes 0.4s < 2.0s audio -> must wait 1.6s
+        },
+        buildSceneAudio: () => {},
+        getSceneAudio: () => sceneAudios[0],
+        setSceneAudio: (a) => {
+          sceneAudios[0] = a;
+        },
+      });
+
+      // Should have waited 1.6s for the monolithic audio to finish
+      expect(waitCalls[0]).toBeCloseTo(1.6, 5);
+
+      // Inter-scene gap (+200ms) before segmented Scene 2
+      rawClockSec += 0.2;
+
+      // Scene 2: segmented scene following the monolithic scene
+      await controller.runSceneWithPadding({
+        sceneIdx: 1,
+        targetDurationSec: 2.0,
+        sceneNarration: 'Scene 2 fallback (unused)',
+        actionFn: async () => {
+          await controller.runSegment({
+            segAudioMap: scene2Map,
+            key: 's2_seg1',
+            defaultDurationSec: 1.5,
+            actionFn: async () => {
+              rawClockSec += 0.5;
+            },
+            narrationText: 'Segmented follow-up.',
+          });
+        },
+        buildSceneAudio: () => {
+          sceneAudios[1] = combineSynthesizeResults([scene2Map.get('s2_seg1')!]);
+        },
+        getSceneAudio: () => sceneAudios[1],
+        setSceneAudio: (a) => {
+          sceneAudios[1] = a;
+        },
+      });
+
+      // Total PCM across initialSilence + monolithic scene 1 + segmented scene 2 matches rawClockSec within 1/24000s
+      const totalPcm = Buffer.concat([
+        initialSilencePcm,
+        sceneAudios[0]!.pcmBuffer,
+        sceneAudios[1]!.pcmBuffer,
+      ]);
+      const totalPcmDurationSec = calculateAudioDuration(totalPcm.length, 24000);
+      expect(totalPcmDurationSec).toBeCloseTo(controller.getAudioCursorSec(), 12);
+      expect(Math.abs(totalPcmDurationSec - rawClockSec)).toBeLessThanOrEqual(1 / 24000);
+
+      // Fallback cue for Scene 1 matches the aligned speech window [0.75s, 2.75s] (2000ms), NOT stretched by overshoot
+      const cues = controller.getSubtitleCues();
+      expect(cues).toHaveLength(2);
+      expect(cues[0]).toEqual({
+        startTimeMs: 750,
+        endTimeMs: 2750,
+        text: 'Monolithic intro narration.',
+      });
+      expect(cues[1].text).toBe('Segmented follow-up.');
+      expect(cues[1].endTimeMs - cues[1].startTimeMs).toBe(1500);
+    });
+
+    it('honors skipTts: true inside runSegment without mutating a populated segAudioMap or advancing audioCursorSec', async () => {
+      let rawClockSec = 1.0;
+      const waitCalls: number[] = [];
+      const initialSilencePcm = createSilencePcm(1.0);
+
+      const controller = createTimelineSyncController({
+        initialSilencePcm,
+        sampleRate: 24000,
+        skipTts: true,
+        nowSec: () => rawClockSec,
+        waitSec: async (sec: number) => {
+          waitCalls.push(sec);
+          rawClockSec += sec;
+        },
+        remapSec: (s) => s,
+      });
+
+      const originalAudio = makeAudio(3.0, 0x77);
+      const populatedMap = new Map<string, SynthesizeResult>([['seg_a', originalAudio]]);
+
+      await controller.runSegment({
+        segAudioMap: populatedMap,
+        key: 'seg_a',
+        defaultDurationSec: 0.5,
+        actionFn: async () => {
+          rawClockSec += 0.1;
+        },
+        narrationText: 'Skip TTS segment.',
+      });
+
+      // Must ignore segAudioMap entry (3.0s) and wait only defaultDurationSec - elapsed (0.4s)
+      expect(waitCalls).toEqual([expect.closeTo(0.4, 5)]);
+      expect(populatedMap.get('seg_a')).toBe(originalAudio);
+      expect(controller.getAudioCursorSec()).toBe(1.0);
+      expect(controller.getSubtitleCues()).toEqual([
+        { startTimeMs: 1000, endTimeMs: 1500, text: 'Skip TTS segment.' },
+      ]);
+    });
+
+    it('accounts for prior-segment audioCursorSec overrun in runSegment wait target after early wakeup', async () => {
+      let rawClockSec = 0;
+      const waitCalls: number[] = [];
+      let firstWait = true;
+
+      const controller = createTimelineSyncController({
+        initialSilencePcm: Buffer.alloc(0),
+        sampleRate: 24000,
+        skipTts: false,
+        nowSec: () => rawClockSec,
+        waitSec: async (sec: number) => {
+          waitCalls.push(sec);
+          if (firstWait) {
+            firstWait = false;
+            // Wake up 400ms early so audioCursorSec (2.0s) outruns rawClockSec (1.6s)
+            rawClockSec += Math.max(0, sec - 0.4);
+          } else {
+            rawClockSec += sec;
+          }
+        },
+        remapSec: (s) => s,
+      });
+
+      const segMap = new Map<string, SynthesizeResult>([
+        ['seg_1', makeAudio(2.0, 0x11)],
+        ['seg_2', makeAudio(1.0, 0x22)],
+      ]);
+
+      // Seg 1: starts at 0.0s, action 0.5s, waits 1.5s -> wakes early at 1.6s; audioCursorSec = 2.0s
+      await controller.runSegment({
+        segAudioMap: segMap,
+        key: 'seg_1',
+        defaultDurationSec: 2.0,
+        actionFn: async () => {
+          rawClockSec += 0.5;
+        },
+        narrationText: 'First segment.',
+      });
+
+      expect(rawClockSec).toBeCloseTo(1.6, 5);
+      expect(controller.getAudioCursorSec()).toBeCloseTo(2.0, 5);
+
+      // Seg 2: starts at 1.6s (< audioCursorSec 2.0s), action 0.1s -> nowSec = 1.7s
+      // Speech starts at 2.0s and lasts 1.0s (ends 3.0s) -> must wait 3.0 - 1.7 = 1.3s!
+      await controller.runSegment({
+        segAudioMap: segMap,
+        key: 'seg_2',
+        defaultDurationSec: 1.0,
+        actionFn: async () => {
+          rawClockSec += 0.1;
+        },
+        narrationText: 'Second segment.',
+      });
+
+      expect(waitCalls[1]).toBeCloseTo(1.3, 5);
+      expect(rawClockSec).toBeCloseTo(3.0, 5);
+      expect(controller.getAudioCursorSec()).toBeCloseTo(3.0, 5);
+      expect(controller.getSubtitleCues()[1]).toEqual({
+        startTimeMs: 2000,
+        endTimeMs: 3000,
+        text: 'Second segment.',
+      });
     });
   });
 });

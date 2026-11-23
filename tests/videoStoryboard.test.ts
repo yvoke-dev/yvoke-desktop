@@ -6,8 +6,12 @@ import {
   parseTimeRange,
   renderStoryboardMarkdown,
   generateStoryboardSrt,
+  getSceneSegments,
+  getSegmentNarration,
+  getSegmentDuration,
   MalformedTimeRangeError,
   type StoryboardBeat,
+  type SceneSegment,
 } from '../scripts/video/storyboard';
 
 describe('videoStoryboard', () => {
@@ -76,28 +80,112 @@ describe('videoStoryboard', () => {
       expect(beat.turnConfig?.prompt).toContain('teams/confluence');
     });
 
-    it('has continuous, unbroken timeline from 00:00 to 03:50 (230s total)', () => {
+    it('has continuous, unbroken timeline from 00:00 to 04:10 (250s total across 32 sub-beats)', () => {
       let expectedStart = 0;
+      let totalSubBeats = 0;
       for (const beat of STORYBOARD_BEATS) {
         const { startSec, endSec } = parseTimeRange(beat.timeRange);
         expect(startSec).toBe(expectedStart);
         expect(endSec).toBeGreaterThan(startSec);
         expectedStart = endSec;
+        totalSubBeats += beat.subBeats?.length ?? 0;
       }
-      expect(expectedStart).toBe(230); // 3 minutes 50 seconds
+      expect(expectedStart).toBe(250); // 4 minutes 10 seconds
+      expect(totalSubBeats).toBe(32);
     });
 
-    it('defines rich subBeats for every single beat', () => {
+    it('defines rich subBeats with unique non-empty keys and narration parity for every beat', () => {
       for (const beat of STORYBOARD_BEATS) {
         expect(beat.subBeats).toBeDefined();
         expect(beat.subBeats!.length).toBeGreaterThanOrEqual(3);
+        const seenKeys = new Set<string>();
         for (const sub of beat.subBeats!) {
           expect(sub.subId).toMatch(new RegExp(`^${beat.id}\\.\\d+$`));
+          expect(typeof sub.key).toBe('string');
+          expect(sub.key.trim().length).toBeGreaterThan(0);
+          expect(seenKeys.has(sub.key)).toBe(false);
+          seenKeys.add(sub.key);
           expect(sub.narration.length).toBeGreaterThan(0);
           expect(sub.visualAction.length).toBeGreaterThan(0);
           expect(sub.uiTarget).toBeDefined();
           expect(sub.visualState).toBeDefined();
         }
+        expect(beat.narration).toBe(beat.subBeats!.map((s) => s.narration).join(' '));
+      }
+    });
+
+    it('matches current UI architecture in Scene 1.4, Scene 2 (8 sub-beats), Scene 3, Scene 4.3, Scene 5.1, and Scene 7', () => {
+      const scene1 = STORYBOARD_BEATS[0];
+      expect(scene1.visualAction).toContain('Today, This Week, Last Week, Earlier');
+      const s1_2 = scene1.subBeats![1];
+      expect(s1_2.visualAction).toContain('Today, This Week, Last Week, Earlier');
+      const s1_4 = scene1.subBeats![3];
+      expect(s1_4.key).toBe('profile');
+      expect(s1_4.narration).toContain('Yvoke and Claude accounts');
+      expect(s1_4.uiTarget).toBe(
+        '.thread-list-footer, button.footer-account-btn, .account-status-row, .app-version, button[data-tip="Settings"]',
+      );
+
+      const scene2 = STORYBOARD_BEATS[1];
+      expect(scene2.subBeats).toHaveLength(8);
+      expect(scene2.subBeats!.map((s) => s.key)).toEqual([
+        'intro',
+        'server',
+        'accounts',
+        'models',
+        'agents',
+        'webSearch',
+        'appearance',
+        'about',
+      ]);
+      const s2Accounts = scene2.subBeats![2];
+      expect(s2Accounts.uiTarget).toContain('.check-credentials-btn');
+      expect(s2Accounts.uiTarget).toContain('.cred-badge.verified');
+      const s2Models = scene2.subBeats![3];
+      expect(s2Models.visualState).toContain('Haiku 5.5');
+      expect(s2Models.visualState).not.toMatch(/Sonnet selected/i);
+      const s2Agents = scene2.subBeats![4];
+      expect(s2Agents.uiTarget).toContain('.settings-domain-list');
+      expect(s2Agents.visualAction).toContain('oim-full');
+      const s2WebSearch = scene2.subBeats![5];
+      expect(s2WebSearch.uiTarget).toContain('.settings-domain-list li');
+      const s2Appearance = scene2.subBeats![6];
+      expect(s2Appearance.uiTarget).toContain('.theme-choices, .seg');
+      const s2About = scene2.subBeats![7];
+      expect(s2About.uiTarget).toContain('.check-updates-btn');
+      expect(s2About.uiTarget).toContain('.open-logs-btn');
+      expect(s2About.uiTarget).toContain('Close');
+      expect(s2About.uiTarget).not.toContain('.check-credentials-btn');
+      expect(s2About.uiTarget).not.toContain('Cancel');
+
+      const scene4 = STORYBOARD_BEATS[3];
+      expect(scene4.subBeats![2].visualAction).toContain('Switch to oim-db-history');
+
+      const scene7 = STORYBOARD_BEATS[6];
+      expect(scene7.subBeats![0].uiTarget).toBe('select.composer-select[aria-label="Agent mode"]');
+      expect(scene7.subBeats![3].uiTarget).toBe(
+        '.subagent-card .verdict-badge.approved, .message.assistant .markdown table',
+      );
+      expect(scene7.subBeats![3].visualState).toContain('"Approved"');
+    });
+
+    it('contains zero stale selectors or outdated UI copy across all beats and sub-beats', () => {
+      const bannedTokens = [
+        '.account-chip',
+        '.account-mode',
+        'v1.2.2',
+        'Previous 7 days',
+        '.domain-row',
+        '.density-choice',
+        '.markdown-body',
+        'Switch to Database History',
+        'Approved by Reviewer',
+        'data-tip*="agent"',
+        'data-tip*="Multi-agent"',
+      ];
+      const serialized = JSON.stringify(STORYBOARD_BEATS);
+      for (const token of bannedTokens) {
+        expect(serialized).not.toContain(token);
       }
     });
 
@@ -183,19 +271,87 @@ describe('videoStoryboard', () => {
   describe('generateStoryboardSrt', () => {
     it('generates sequential valid SRT subtitles from storyboard beats', () => {
       const srt = generateStoryboardSrt(STORYBOARD_BEATS);
-      expect(srt).toContain('1\n00:00:00,000 --> 00:00:20,000');
-      expect(srt).toContain('2\n00:00:20,000 --> 00:00:48,000');
-      expect(srt).toContain('3\n00:00:48,000 --> 00:01:10,000');
-      expect(srt).toContain('4\n00:01:10,000 --> 00:01:45,000');
-      expect(srt).toContain('5\n00:01:45,000 --> 00:02:20,000');
-      expect(srt).toContain('6\n00:02:20,000 --> 00:02:55,000');
-      expect(srt).toContain('7\n00:02:55,000 --> 00:03:50,000');
+      expect(srt).toContain('1\n00:00:00,000 --> 00:00:22,000');
+      expect(srt).toContain('2\n00:00:22,000 --> 00:01:03,000');
+      expect(srt).toContain('3\n00:01:03,000 --> 00:01:27,000');
+      expect(srt).toContain('4\n00:01:27,000 --> 00:02:01,000');
+      expect(srt).toContain('5\n00:02:01,000 --> 00:02:40,000');
+      expect(srt).toContain('6\n00:02:40,000 --> 00:03:15,000');
+      expect(srt).toContain('7\n00:03:15,000 --> 00:04:10,000');
     });
 
     it('matches spoken narration in SRT cues', () => {
       const srt = generateStoryboardSrt(STORYBOARD_BEATS);
       expect(srt).toContain(STORYBOARD_BEATS[0].narration);
       expect(srt).toContain(STORYBOARD_BEATS[6].narration);
+    });
+  });
+
+  describe('getSceneSegments, getSegmentNarration, getSegmentDuration', () => {
+    it('derives SceneSegment arrays for all 7 scenes summing to 250s total', () => {
+      let totalSec = 0;
+      for (const beat of STORYBOARD_BEATS) {
+        const segs: SceneSegment[] = getSceneSegments(beat.id);
+        expect(segs).toHaveLength(beat.subBeats!.length);
+        for (const seg of segs) {
+          expect(getSegmentNarration(segs, seg.key)).toBe(seg.narration);
+          expect(getSegmentDuration(segs, seg.key)).toBe(seg.durationSec);
+          expect(seg.durationSec).toBeGreaterThan(0);
+          totalSec += seg.durationSec;
+        }
+      }
+      expect(totalSec).toBe(250);
+    });
+
+    it('throws descriptive errors for unknown sceneId, empty/missing subBeats, duplicate/empty keys, and unknown segment keys', () => {
+      expect(() => getSceneSegments('scene-999')).toThrow(/scene-999/);
+
+      const noSubBeats: StoryboardBeat[] = [
+        {
+          id: 'empty-scene',
+          timeRange: '00:00 -> 00:05',
+          title: 'Empty',
+          narration: 'None',
+          visualAction: 'None',
+          execution: 'real_app_ui',
+        },
+      ];
+      expect(() => getSceneSegments('empty-scene', noSubBeats)).toThrow(/no subBeats/i);
+
+      const dupKeys: StoryboardBeat[] = [
+        {
+          id: 'dup-scene',
+          timeRange: '00:00 -> 00:06',
+          title: 'Dup',
+          narration: 'A B',
+          visualAction: 'Test',
+          execution: 'real_app_ui',
+          subBeats: [
+            { subId: 'dup-scene.1', key: 'same', timeRange: '00:00 -> 00:03', narration: 'A', visualAction: 'A' },
+            { subId: 'dup-scene.2', key: 'same', timeRange: '00:03 -> 00:06', narration: 'B', visualAction: 'B' },
+          ],
+        },
+      ];
+      expect(() => getSceneSegments('dup-scene', dupKeys)).toThrow(/duplicate.*same/i);
+
+      const emptyKey: StoryboardBeat[] = [
+        {
+          id: 'blank-key-scene',
+          timeRange: '00:00 -> 00:03',
+          title: 'Blank',
+          narration: 'A',
+          visualAction: 'Test',
+          execution: 'real_app_ui',
+          subBeats: [
+            { subId: 'blank-key-scene.1', key: '   ', timeRange: '00:00 -> 00:03', narration: 'A', visualAction: 'A' },
+          ],
+        },
+      ];
+      expect(() => getSceneSegments('blank-key-scene', emptyKey)).toThrow(/empty.*key/i);
+
+      const s1 = getSceneSegments('scene-1');
+      expect(() => getSegmentNarration(s1, 'nonexistent')).toThrow(/nonexistent/);
+      expect(() => getSegmentDuration(s1, 'nonexistent')).toThrow(/nonexistent/);
     });
   });
 

@@ -82,31 +82,39 @@ The test harness and Electron main process recognize the following environment v
 
 ## Automated Demo Video Generation
 
-The repository includes an automated demonstration video generation harness powered by Playwright, Google AI Studio Gemini 2.0 Audio, and FFmpeg:
+The repository includes an automated 7-scene demonstration video generation harness powered by Playwright, Gemini TTS, and FFmpeg:
 
 ```bash
 npm run demo:video
 ```
 
-### Execution Modes
+### Execution Modes & CLI Options
 1. **AI Narration Mode (Default)**:
-   - Requires `GEMINI_API_KEY` set in the environment.
-   - Synthesizes studio-quality voiceover via Google AI Studio's Gemini 2.0 Audio API (`Aoede` voice preset).
-   - Automatically parses raw 24kHz 16-bit mono PCM into standard RIFF WAV files, calculates exact durations mathematically, and aligns Playwright screen choreography with narration pauses.
-2. **Silent Capture Mode**:
-   - Run without credentials using `--skip-tts`:
+   - Requires `GEMINI_API_KEY` set in the environment (or `.env` / `.env.local`).
+   - Synthesizes voiceover via Gemini TTS (`Puck` default voice; model defaults to `GEMINI_TTS_MODEL` or the bundled TTS model) and caches pure 24kHz 16-bit mono PCM segments under `os.tmpdir()/yvoke-tts-cache`.
+   - Aligns synthesized PCM segments and effective-timeline SRT subtitles to Playwright wall-clock choreography via `createTimelineSyncController`.
+   - Writes timestamped MP4 output (`artifacts/yvoke-desktop-demo-<YYYYMMDD-HHMMSS>.mp4`) plus a matching sidecar `.srt` subtitle file (overridable via `--output <path>`).
+2. **Silent & Offline Modes**:
+   - Skip TTS synthesis (no `GEMINI_API_KEY` required):
      ```bash
      npm run demo:video -- --skip-tts
      ```
-   - Executes the complete 4-scene choreography with calibrated baseline timing (2.5s–3.5s per scene) and produces a video without audio.
+   - Skip the live backend probe and run with offline fallbacks (`--skip-backend` or `--offline`):
+     ```bash
+     npm run demo:video -- --skip-tts --skip-backend
+     ```
+3. **Scene & Model Controls**:
+   - Select specific scenes or presets: `--scene <1..7>`, `--scenes <csv|all|without-settings|without-settings-and-clarification>`, `--skip-scene <csv>`, `--max-scenes <N>`.
+   - Override backend URL: `--backend-url <url>` (defaults to `YVOKE_SERVER` / `YVOKE_SERVER_URL` / `http://localhost:8080`).
+   - Override model/thinking settings: `--model`, `--thinking`, `--mas-model`, `--orchestrator-model`, `--orchestrator-thinking`, `--specialist-model`, `--specialist-thinking`, `--reviewer-model`, `--reviewer-thinking`.
 
 ### Prerequisites
-- **FFmpeg**: Required for audio/video multiplexing (`brew install ffmpeg` on macOS or `choco install ffmpeg` on Windows). If FFmpeg is absent, the harness preserves raw WebM video and audio files in `artifacts/` with an actionable notice.
+- **FFmpeg**: Required for audio/video multiplexing (`brew install ffmpeg` on macOS or `choco install ffmpeg` on Windows). If FFmpeg is absent, the harness preserves raw WebM video and WAV audio files in `artifacts/` with an actionable notice.
 - **Application Build**: The runner performs an automatic preflight check for `out/main/index.js` (managed automatically by `npm run demo:video`, which runs `electron-vite build` first).
 
 ### Architectural & Isolation Guarantees
-- **Profile Isolation**: The runner launches Electron into an isolated ephemeral temporary directory in `os.tmpdir()` (`yvoke-demo-*`). Production user profiles are never accessed or mutated.
-- **Loopback Containment**: The seeded environment configures `serverAuthMode: "dev"` and `serverBaseUrl: "http://127.0.0.1:0"`. Zero network calls are dispatched to external company endpoints.
-- **Visual Cursor Overlay**: Injects an animated cursor with click ripple animations via Playwright CDP (`addInitScript`), creating a natural human walkthrough experience.
-- **Resilient Teardown**: Signal traps (`SIGINT`, `SIGTERM`) and a 5-second SIGKILL timeout fallback ensure no orphan Electron processes or stale temp files remain.
+- **Profile Isolation & Read-Only Thread Cloning**: The runner launches Electron into an isolated ephemeral temporary directory in `os.tmpdir()` (`yvoke-demo-video-*`). When cloning local conversation history for background sidebar context, it copies thread files read-only into the temp directory (or falls back to synthetic background threads); the user's production profile is never mutated.
+- **Live Backend vs. Offline Mode**: By default, the seeded profile points to `http://localhost:8080` (`serverAuthMode: "dev"`) to execute live model turns against a local backend. Passing `--skip-backend` / `--offline` skips the backend preflight probe and exercises UI fallbacks without requiring a running server.
+- **Visual Cursor Overlay**: Injects an animated cursor overlay via `page.evaluate` (`injectDemoCursor` in `scripts/video/cursor.ts`), creating a natural walkthrough experience.
+- **Resilient Teardown**: Signal traps (`SIGINT`, `SIGTERM`) and a 5-second `SIGKILL` timeout fallback ensure no orphan Electron processes or stale temp directories remain.
 

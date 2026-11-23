@@ -564,9 +564,11 @@ describe('videoOrchestratorPreflight', () => {
       // Scene 2: Settings Walkthrough
       expect(SCENE_NARRATIONS[1]).toMatch(/settings/i);
       expect(SCENE_NARRATIONS[1]).toMatch(/server/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/accounts/i);
       expect(SCENE_NARRATIONS[1]).toMatch(/models/i);
       expect(SCENE_NARRATIONS[1]).toMatch(/agents/i);
       expect(SCENE_NARRATIONS[1]).toMatch(/appearance/i);
+      expect(SCENE_NARRATIONS[1]).toMatch(/diagnostic logs/i);
 
       // Scene 3: New Conversation, Playbooks & Composer
       expect(SCENE_NARRATIONS[2]).toMatch(/new conversation/i);
@@ -601,6 +603,7 @@ describe('videoOrchestratorPreflight', () => {
       expect(SCENE_2_SEGMENTS.map((s) => s.key)).toEqual([
         'intro',
         'server',
+        'accounts',
         'models',
         'agents',
         'webSearch',
@@ -634,10 +637,26 @@ describe('videoOrchestratorPreflight', () => {
       expect(SCENE_NARRATIONS[6]).toBe(SCENE_7_SEGMENTS.map((s) => s.narration).join(' '));
     });
 
-    it('synchronizes SCENE_NARRATIONS strictly with declarative STORYBOARD_BEATS', async () => {
-      const { SCENE_NARRATIONS } = await import('../scripts/generate-demo-video');
-      const { STORYBOARD_BEATS } = await import('../scripts/video/storyboard');
+    it('synchronizes SCENE_NARRATIONS and SCENE_1..7_SEGMENTS strictly with STORYBOARD_BEATS', async () => {
+      const {
+        SCENE_1_SEGMENTS,
+        SCENE_2_SEGMENTS,
+        SCENE_3_SEGMENTS,
+        SCENE_4_SEGMENTS,
+        SCENE_5_SEGMENTS,
+        SCENE_6_SEGMENTS,
+        SCENE_7_SEGMENTS,
+        SCENE_NARRATIONS,
+      } = await import('../scripts/generate-demo-video');
+      const { STORYBOARD_BEATS, getSceneSegments } = await import('../scripts/video/storyboard');
       expect(SCENE_NARRATIONS).toEqual(STORYBOARD_BEATS.map((b) => b.narration));
+      expect(SCENE_1_SEGMENTS).toEqual(getSceneSegments('scene-1'));
+      expect(SCENE_2_SEGMENTS).toEqual(getSceneSegments('scene-2'));
+      expect(SCENE_3_SEGMENTS).toEqual(getSceneSegments('scene-3'));
+      expect(SCENE_4_SEGMENTS).toEqual(getSceneSegments('scene-4'));
+      expect(SCENE_5_SEGMENTS).toEqual(getSceneSegments('scene-5'));
+      expect(SCENE_6_SEGMENTS).toEqual(getSceneSegments('scene-6'));
+      expect(SCENE_7_SEGMENTS).toEqual(getSceneSegments('scene-7'));
     });
   });
 
@@ -664,8 +683,9 @@ describe('videoOrchestratorPreflight', () => {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
       expect(settings.serverBaseUrl).toBe('http://localhost:9090');
       expect(settings.serverAuthMode).toBe('dev');
-      expect(settings.authMode).toBe('dev');
-      expect(settings.devToken).toBe('dev-demo-token');
+      expect(settings.authMode).toBeUndefined();
+      expect(settings.devToken).toBeUndefined();
+      expect(settings.playbookValidationExcludedPlaybooks).toEqual(['oim-full']);
       expect(settings.mcpTransport).toBe('http');
       expect(settings.defaultModel).toBe('haiku');
       expect(settings.defaultThinkingLevel).toBe('high');
@@ -775,6 +795,131 @@ describe('videoOrchestratorPreflight', () => {
         endSec: 25.0,
         speedFactor: 2,
       });
+    });
+  });
+
+  describe('installAutoCollapseTraceObserver', () => {
+    it('serializes cleanly with zero outer closures, single-clicks expanded trace bars, respects pause/re-entrancy, and cleans up observer/interval/timeout idempotently', async () => {
+      const { installAutoCollapseTraceObserver } = await import('../scripts/generate-demo-video');
+
+      // Reconstruct the function strictly from .toString() via new Function() (mirrors Playwright page.evaluate serialization)
+      const serializedInstaller = new Function(
+        'env',
+        `return (${installAutoCollapseTraceObserver.toString()})(env);`,
+      ) as (env: unknown) => void;
+
+      let mutationCb: (() => void) | null = null;
+      let intervalCb: (() => void) | null = null;
+      let timeoutCb: (() => void) | null = null;
+      let nextIntervalId = 100;
+      let nextTimeoutId = 200;
+
+      const disconnectSpy = vi.fn();
+      const observeSpy = vi.fn();
+      const clearIntervalSpy = vi.fn();
+      const clearTimeoutSpy = vi.fn();
+
+      class FakeMutationObserver {
+        constructor(cb: () => void) {
+          mutationCb = cb;
+        }
+        observe(target: unknown, opts: Record<string, unknown>): void {
+          observeSpy(target, opts);
+        }
+        disconnect(): void {
+          disconnectSpy();
+        }
+      }
+
+      const btn1Click = vi.fn();
+      const btn1Dispatch = vi.fn();
+      const btn2Click = vi.fn();
+      let expandedButtons: Array<{ click?: () => void; dispatchEvent?: (e: unknown) => void }> = [
+        { click: btn1Click, dispatchEvent: btn1Dispatch },
+        {}, // missing .click must be skipped safely
+        { click: btn2Click },
+      ];
+
+      const fakeWin: { __autoCollapseTrace?: boolean; __stopAutoCollapseTrace?: () => void } = {};
+      const fakeDoc = {
+        body: { nodeName: 'BODY' },
+        querySelectorAll: vi.fn((selector: string) =>
+          selector === 'button.trace-bar[aria-expanded="true"]' ? expandedButtons : [],
+        ),
+      };
+
+      const env = {
+        win: fakeWin,
+        doc: fakeDoc,
+        MutationObserverCtor: FakeMutationObserver,
+        setIntervalFn: vi.fn((fn: () => void, ms: number) => {
+          expect(ms).toBe(100);
+          intervalCb = fn;
+          return ++nextIntervalId;
+        }),
+        clearIntervalFn: clearIntervalSpy,
+        setTimeoutFn: vi.fn((fn: () => void, ms: number) => {
+          expect(ms).toBe(30);
+          timeoutCb = fn;
+          return ++nextTimeoutId;
+        }),
+        clearTimeoutFn: clearTimeoutSpy,
+      };
+
+      // 1. Install serialized observer
+      serializedInstaller(env);
+      expect(fakeWin.__autoCollapseTrace).toBe(true);
+      expect(typeof fakeWin.__stopAutoCollapseTrace).toBe('function');
+      expect(observeSpy).toHaveBeenCalledTimes(1);
+      expect(mutationCb).toBeTypeOf('function');
+      expect(intervalCb).toBeTypeOf('function');
+
+      // 2. Trigger via MutationObserver -> single-click ONLY (0 dispatchEvent calls!)
+      mutationCb!();
+      expect(btn1Click).toHaveBeenCalledTimes(1);
+      expect(btn1Dispatch).toHaveBeenCalledTimes(0);
+      expect(btn2Click).toHaveBeenCalledTimes(1);
+
+      // 3. Re-entrancy guard blocks nested clicks while 30ms timeout is pending
+      intervalCb!();
+      expect(btn1Click).toHaveBeenCalledTimes(1);
+
+      // 4. After 30ms timer completes, pausing via __autoCollapseTrace = false suppresses collapsing
+      timeoutCb!();
+      fakeWin.__autoCollapseTrace = false;
+      mutationCb!();
+      expect(btn1Click).toHaveBeenCalledTimes(1);
+
+      // 5. Re-enabling resumes collapsing and arms a pending 30ms reset timeout
+      fakeWin.__autoCollapseTrace = true;
+      intervalCb!();
+      expect(btn1Click).toHaveBeenCalledTimes(2);
+      expect(btn2Click).toHaveBeenCalledTimes(2);
+
+      // 6. Calling __stopAutoCollapseTrace() cleans up observer, interval, AND pending 30ms timeout idempotently
+      fakeWin.__stopAutoCollapseTrace!();
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      expect(clearIntervalSpy).toHaveBeenCalledWith(101);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(202);
+
+      // Repeat call is a safe no-op
+      fakeWin.__stopAutoCollapseTrace!();
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+
+      // 7. Re-installing calls previous stop handler cleanly (idempotent re-install)
+      const prevStop = vi.fn();
+      fakeWin.__stopAutoCollapseTrace = prevStop;
+      serializedInstaller(env);
+      expect(prevStop).toHaveBeenCalledTimes(1);
+      expect(observeSpy).toHaveBeenCalledTimes(2);
+
+      // Stop second instance
+      expandedButtons = [];
+      fakeWin.__stopAutoCollapseTrace!();
+      expect(disconnectSpy).toHaveBeenCalledTimes(2);
+      expect(clearIntervalSpy).toHaveBeenCalledWith(102);
     });
   });
 });
