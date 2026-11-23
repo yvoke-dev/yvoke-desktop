@@ -1,21 +1,22 @@
 /**
- * Orchestrator runner for automated Yvoke demo video generation.
+ * Orchestrator runner for automated Yvoke Desktop demo video generation.
  *
  * Automates:
- * 1. Preflight checks for build artifacts, backend connectivity, Claude CLI, and API key.
- * 2. Pre-seeding a temporary isolated userDataDir with 4 rich threads (Playbook validation, Search hints, Clarifications/Citations, MAS Orchestrator).
- * 3. Headed Playwright Electron launch at 1280x720 (720p HD) with video recording.
- * 4. 6-scene choreography matching approved ASDD plan:
- *    - Part I: Educational Architecture Intro (3 cards: Playbooks & Source Scoping, Single vs Multi-Agent OIM MAS, Prompting Best Practices)
- *    - Part II: Live Conversations:
- *      - Scene 2: Playbook Validation Catch
- *      - Scene 3: Multi-Turn Follow-Up & Search Hints
- *      - Scene 4: Clarifying Questions & Citations
- *      - Scene 5: Multi-Agent System (MAS) with Reviewer Gate
- *      - Scene 6: Sub-10ms Instant Search & Dark/Light Theme Toggle
- * 5. Dynamic pacing, audio synthesis via Gemini TTS, and SRT subtitles generation.
- * 6. Video stitching with sidechain audio ducking and ambient background music.
- * 7. Resilient teardown with 5s SIGKILL fallback and signal traps.
+ * 1. Preflight checks for build artifacts, backend connectivity, Claude CLI, and GEMINI_API_KEY.
+ * 2. Seeding an isolated ephemeral userDataDir (`yvoke-demo-video-*`) with local dev settings
+ *    and optional read-only cloning of local conversation threads (or synthetic background threads).
+ * 3. Headed Playwright Electron launch at 1280x720 (720p HD) with video recording and demo cursor injection.
+ * 4. 7-scene live walkthrough calibrated to measured Gemini TTS (`Puck`) durations (`00:00 -> 04:10`, 250s):
+ *    - Scene 1: App & Sidebar Overview (dual Yvoke & Claude account footer, instant search)
+ *    - Scene 2: Settings Walkthrough (Server, Accounts, Models, Agents, Web search, Appearance, About)
+ *    - Scene 3: Main Window, Inline Playbook Picker & Composer
+ *    - Scene 4: Live Query 1 — Playbook Validation Recommendation
+ *    - Scene 5: Live Query 2 — Follow-Up, Citations & Search Hints (`oim-full`)
+ *    - Scene 6: Live Query 3 — Clarifying Questions & Trace Inspection
+ *    - Scene 7: Live Query 4 — Multi-Agent System (MAS) & Reviewer Gate
+ * 5. Wall-clock-anchored, sample-exact audio/video/subtitle synchronization via `createTimelineSyncController`.
+ * 6. FFmpeg MP4 stitching with optional sidechain ducking, 10x live-turn acceleration, and sidecar SRT output.
+ * 7. Resilient teardown with signal traps and a 5-second SIGKILL fallback.
  */
 if (typeof process.loadEnvFile === 'function') {
   try {
@@ -34,45 +35,139 @@ import {
   checkBuildArtifacts,
   checkGeminiApiKey,
 } from './video/preflight';
-import {
-  injectPresentationOverlay,
-  showPresentationSlide,
-  unmountPresentationOverlay,
-} from './video/presentation';
 import { injectDemoCursor, glideMouse } from './video/cursor';
 import {
   stitchVideoAndAudio,
   FfmpegNotFoundError,
   type AccelerationInterval,
 } from './video/stitch';
-import { STORYBOARD_BEATS, parseTimeRange } from './video/storyboard';
+import {
+  STORYBOARD_BEATS,
+  parseTimeRange,
+  getSceneSegments,
+  getSegmentNarration,
+  getSegmentDuration,
+  type SceneSegment,
+} from './video/storyboard';
 import {
   typeInComposer,
   selectPlaybook,
   selectAgentMode,
   dispatchTurn,
   waitForTurnCompletion,
+  buildPlaybookTitlePattern,
 } from './video/liveTurnRunner';
 import {
   synthesizeSpeech,
   pcmToWav,
   combineSynthesizeResults,
-  padSynthesizeResult,
   createSilencePcm,
+  createTimelineSyncController,
   type SynthesizeResult,
 } from './video/tts';
-import {
-  generateSrt,
-  remapTimestamp,
-  remapSubtitleCues,
-  type SubtitleCue,
-} from './video/subtitles';
+import { generateSrt, remapTimestamp } from './video/subtitles';
 
 // Ambient types for browser-context functions executed inside page.evaluate()
 declare const document: any;
 declare const window: any;
 declare const MutationObserver: any;
-declare const MouseEvent: any;
+
+export interface AutoCollapseTraceWindow {
+  __autoCollapseTrace?: boolean;
+  __stopAutoCollapseTrace?: () => void;
+}
+
+export interface AutoCollapseTraceDocument {
+  body: unknown;
+  querySelectorAll(
+    selector: string,
+  ): Iterable<{ click?: () => void }> | ArrayLike<{ click?: () => void }>;
+}
+
+export interface AutoCollapseTraceObserverLike {
+  observe(target: unknown, options: Record<string, unknown>): void;
+  disconnect(): void;
+}
+
+export interface AutoCollapseTraceEnv {
+  win?: AutoCollapseTraceWindow;
+  doc?: AutoCollapseTraceDocument;
+  MutationObserverCtor?: new (callback: () => void) => AutoCollapseTraceObserverLike;
+  setIntervalFn?: (fn: () => void, ms: number) => unknown;
+  clearIntervalFn?: (id: unknown) => void;
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (id: unknown) => void;
+}
+
+/**
+ * Self-contained browser-context installer for the global auto-collapse trace observer.
+ * Zero outer-scope references so Playwright `appPage.evaluate(installAutoCollapseTraceObserver)`
+ * serializes cleanly. Single-clicks expanded trace bars and exposes idempotent `__stopAutoCollapseTrace()`.
+ */
+export function installAutoCollapseTraceObserver(env?: AutoCollapseTraceEnv): void {
+  const w: AutoCollapseTraceWindow = env?.win ?? window;
+  const doc: AutoCollapseTraceDocument = env?.doc ?? document;
+  const MO = env?.MutationObserverCtor ?? MutationObserver;
+  const setInt: (fn: () => void, ms: number) => unknown =
+    env?.setIntervalFn ?? ((fn, ms) => setInterval(fn, ms));
+  const clrInt: (id: unknown) => void =
+    env?.clearIntervalFn ?? ((id) => clearInterval(id as ReturnType<typeof setInterval>));
+  const setTo: (fn: () => void, ms: number) => unknown =
+    env?.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+  const clrTo: (id: unknown) => void =
+    env?.clearTimeoutFn ?? ((id) => clearTimeout(id as ReturnType<typeof setTimeout>));
+
+  if (typeof w.__stopAutoCollapseTrace === 'function') {
+    w.__stopAutoCollapseTrace();
+  }
+
+  w.__autoCollapseTrace = true;
+  let isCollapsing = false;
+  let stopped = false;
+  let resetTimer: unknown = null;
+
+  const collapse = (): void => {
+    if (stopped || !w.__autoCollapseTrace || isCollapsing) return;
+    const expandedButtons = Array.from(
+      doc.querySelectorAll('button.trace-bar[aria-expanded="true"]'),
+    );
+    if (expandedButtons.length > 0) {
+      isCollapsing = true;
+      for (const btn of expandedButtons) {
+        if (typeof btn?.click === 'function') {
+          btn.click();
+        }
+      }
+      resetTimer = setTo(() => {
+        resetTimer = null;
+        isCollapsing = false;
+      }, 30);
+    }
+  };
+
+  const observer = new MO(collapse);
+  if (doc.body) {
+    observer.observe(doc.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['aria-expanded'],
+    });
+  }
+  const intervalId = setInt(collapse, 100);
+
+  w.__stopAutoCollapseTrace = (): void => {
+    if (stopped) return;
+    stopped = true;
+    observer.disconnect();
+    clrInt(intervalId);
+    if (resetTimer !== null) {
+      clrTo(resetTimer);
+      resetTimer = null;
+    }
+    isCollapsing = false;
+  };
+}
 
 function parseEnvFile(filePath: string): void {
   if (!fs.existsSync(filePath)) return;
@@ -318,168 +413,13 @@ export function parseArgs(rawArgs: string[] = process.argv.slice(2)): DemoOption
   };
 }
 
-export const SCENE_1_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'welcome',
-    narration:
-      'Welcome to Yvoke Desktop, the local AI workspace grounded in your enterprise knowledge base.',
-  },
-  {
-    key: 'sidebar',
-    narration:
-      'On the left, the sidebar organizes your conversation history into clear timeframes,',
-  },
-  {
-    key: 'search',
-    narration: 'with instant search across past discussions.',
-  },
-  {
-    key: 'profile',
-    narration:
-      'Along the bottom, check your active account, with quick access to Settings.',
-  },
-];
-
-export const SCENE_2_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'intro',
-    narration: 'Opening Settings reveals full control over your environment.',
-  },
-  {
-    key: 'server',
-    narration: 'Under Server, configure backend endpoints, transport, and authentication.',
-  },
-  {
-    key: 'models',
-    narration: 'Models lets you define Claude model versions and default thinking effort.',
-  },
-  {
-    key: 'agents',
-    narration: 'Agents configures multi-agent roles, turns, and automatic playbook validation.',
-  },
-  {
-    key: 'webSearch',
-    narration: 'Web Search toggles web access while displaying the allowed domains,',
-  },
-  {
-    key: 'appearance',
-    narration: 'Appearance customizes themes and density,',
-  },
-  {
-    key: 'about',
-    narration: 'while About lets you verify your credentials and check for updates.',
-  },
-];
-
-export const SCENE_3_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'newConv',
-    narration: 'Starting a new conversation opens the main workspace.',
-  },
-  {
-    key: 'playbooks',
-    narration:
-      'The Playbook picker scopes the assistant to focused knowledge domains, from getting-started manuals to database migration history.',
-  },
-  {
-    key: 'composer',
-    narration:
-      'Below, the composer provides rich prompt input, image attachments, seamless single-agent or multi-agent mode selection, and granular model and thinking controls.',
-  },
-];
-
-export const SCENE_4_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'ask',
-    narration:
-      'Here, a consultant asks when the table POLPlaybook was introduced under the getting-started playbook.',
-  },
-  {
-    key: 'catch',
-    narration:
-      'Yvoke determines that the selected playbook should not be used for this question, and',
-  },
-  {
-    key: 'recommend',
-    narration: 'it recommends using the oim-db-history playbook instead.',
-  },
-  {
-    key: 'response',
-    narration:
-      'Now, we wait for the response as Yvoke queries the database history and streams the answer.',
-  },
-];
-
-export const SCENE_5_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'ask',
-    narration:
-      'In this conversation, we explore iterative follow-ups and search hints.',
-  },
-  {
-    key: 'response1',
-    narration:
-      'Now, we wait for the response as Yvoke queries the manuals and streams the explanation.',
-  },
-  {
-    key: 'citations',
-    narration:
-      'Notice that every statement that comes from documentation is cited. Clicking a citation link reveals the exact source passage from the manual.',
-  },
-  {
-    key: 'followup',
-    narration:
-      'Next, we prompt the assistant to search Teams and Confluence knowledge,',
-  },
-  {
-    key: 'response2',
-    narration:
-      'effortlessly combining official documentation with real-world operational experience as Yvoke completes the answer.',
-  },
-];
-
-export const SCENE_6_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'ask',
-    narration:
-      'When an ambiguous query is made, Yvoke surfaces an interactive clarification card to confirm scope.',
-  },
-  {
-    key: 'option',
-    narration:
-      'Selecting an option narrows the query to the chosen domain, streaming the relevant table and column modifications.',
-  },
-  {
-    key: 'trace',
-    narration:
-      'Opening the trace reveals the underlying tool calls and database queries executed to retrieve the schema history.',
-  },
-];
-
-export const SCENE_7_SEGMENTS: { key: string; narration: string }[] = [
-  {
-    key: 'mode',
-    narration:
-      'When queries span multiple knowledge areas and rigorous review is essential, Multi-Agent mode coordinates specialized roles.',
-  },
-  {
-    key: 'prompt',
-    narration: 'Specialists investigate each connector architecture in parallel,',
-  },
-  {
-    key: 'review',
-    narration: 'while an independent Reviewer gate guards against hallucinations',
-  },
-  {
-    key: 'approval',
-    narration: 'and approves the synthesized response.',
-  },
-  {
-    key: 'outro',
-    narration:
-      'Thank you for watching this overview of Yvoke Desktop. Experience grounded, verifiable intelligence across your knowledge base.',
-  },
-];
+export const SCENE_1_SEGMENTS: SceneSegment[] = getSceneSegments('scene-1');
+export const SCENE_2_SEGMENTS: SceneSegment[] = getSceneSegments('scene-2');
+export const SCENE_3_SEGMENTS: SceneSegment[] = getSceneSegments('scene-3');
+export const SCENE_4_SEGMENTS: SceneSegment[] = getSceneSegments('scene-4');
+export const SCENE_5_SEGMENTS: SceneSegment[] = getSceneSegments('scene-5');
+export const SCENE_6_SEGMENTS: SceneSegment[] = getSceneSegments('scene-6');
+export const SCENE_7_SEGMENTS: SceneSegment[] = getSceneSegments('scene-7');
 
 export const SCENE_NARRATIONS: string[] = STORYBOARD_BEATS.map((b) => b.narration);
 
@@ -554,9 +494,7 @@ export function seedUserData(
   const settings = {
     settingsVersion: 1,
     serverAuthMode: 'dev',
-    authMode: 'dev',
     serverBaseUrl: backendUrl,
-    devToken: 'dev-demo-token',
     mcpTransport: 'http',
     defaultModel: model,
     defaultThinkingLevel: thinkingLevel,
@@ -1102,166 +1040,12 @@ export async function runDemoVideoGenerator(): Promise<void> {
 
     // Global auto-collapse trace observer: collapses any live expanded trace bar
     // immediately upon appearance, ensuring traces stay compact until explicitly inspected.
-    await appPage.evaluate(() => {
-      (window as any).__autoCollapseTrace = true;
-      let isCollapsing = false;
-      const collapse = () => {
-        if (!(window as any).__autoCollapseTrace || isCollapsing) return;
-        const expandedButtons = document.querySelectorAll('button.trace-bar[aria-expanded="true"]');
-        if (expandedButtons.length > 0) {
-          isCollapsing = true;
-          expandedButtons.forEach((btn: any) => {
-            btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-            btn?.click?.();
-          });
-          setTimeout(() => {
-            isCollapsing = false;
-          }, 30);
-        }
-      };
-      const observer = new MutationObserver(collapse);
-      observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['aria-expanded'],
-      });
-      setInterval(collapse, 100);
-    });
+    await appPage.evaluate(installAutoCollapseTraceObserver, undefined);
 
     console.log(`\n[4/4] Executing ${totalScenes}-scene choreographies...`);
 
     const sceneTimings: { startMs: number; endMs: number }[] = [];
-    const subtitleCues: SubtitleCue[] = [];
     const accelerationIntervals: AccelerationInterval[] = [];
-
-    const runSceneWithPadding = async (
-      sceneIdx: number,
-      name: string,
-      actionFn: () => Promise<void>,
-    ): Promise<void> => {
-      console.log(`  Running Scene ${sceneIdx + 1}/${totalScenes}: ${name}`);
-      const initialCueCount = subtitleCues.length;
-      const sceneStartMs = Date.now() - tVideoStart;
-      await actionFn();
-
-      // If this scene used segments, rebuild sceneAudios[sceneIdx] from updated/padded segments
-      if (sceneIdx === 0 && scene1SegmentAudios.size > 0) {
-        const segs = SCENE_1_SEGMENTS.map((s) => scene1SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[0] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 1 && scene2SegmentAudios.size > 0) {
-        const segs = SCENE_2_SEGMENTS.map((s) => scene2SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[1] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 2 && scene3SegmentAudios.size > 0) {
-        const segs = SCENE_3_SEGMENTS.map((s) => scene3SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[2] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 3 && scene4SegmentAudios.size > 0) {
-        const segs = SCENE_4_SEGMENTS.map((s) => scene4SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[3] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 4 && scene5SegmentAudios.size > 0) {
-        const segs = SCENE_5_SEGMENTS.map((s) => scene5SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[4] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 5 && scene6SegmentAudios.size > 0) {
-        const segs = SCENE_6_SEGMENTS.map((s) => scene6SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[5] = combineSynthesizeResults(segs);
-      } else if (sceneIdx === 6 && scene7SegmentAudios.size > 0) {
-        const segs = SCENE_7_SEGMENTS.map((s) => scene7SegmentAudios.get(s.key)).filter(
-          Boolean,
-        ) as SynthesizeResult[];
-        if (segs.length > 0) sceneAudios[6] = combineSynthesizeResults(segs);
-      }
-
-      const sceneStartSec = sceneStartMs / 1000;
-      const sceneEndSec = (Date.now() - tVideoStart) / 1000;
-      const effectiveSceneElapsedSec =
-        remapTimestamp(sceneEndSec, accelerationIntervals) -
-        remapTimestamp(sceneStartSec, accelerationIntervals);
-      const audioDuration = sceneAudios[sceneIdx]?.durationSeconds ?? 0;
-      const beat = STORYBOARD_BEATS[sceneIdx];
-      const targetDurationSec = beat
-        ? parseTimeRange(beat.timeRange).endSec - parseTimeRange(beat.timeRange).startSec
-        : 0;
-      const minPadding = options.skipTts ? (sceneIdx === 0 ? 5.5 : 4.0) : 0;
-      const minRequiredSec = options.skipTts ? targetDurationSec : audioDuration;
-      const paddingWaitSec = Math.max(
-        minPadding,
-        Math.max(0, minRequiredSec - effectiveSceneElapsedSec),
-      );
-
-      if (paddingWaitSec > 0) {
-        await appPage.waitForTimeout(paddingWaitSec * 1000);
-      }
-
-      // Ensure scene audio buffer duration matches total video time spent in this scene
-      if (sceneAudios[sceneIdx]) {
-        const totalEffectiveSceneTimeSec = effectiveSceneElapsedSec + paddingWaitSec;
-        if (totalEffectiveSceneTimeSec > sceneAudios[sceneIdx].durationSeconds) {
-          sceneAudios[sceneIdx] = padSynthesizeResult(
-            sceneAudios[sceneIdx],
-            totalEffectiveSceneTimeSec,
-          );
-        }
-      }
-
-      const sceneEndMs = Date.now() - tVideoStart;
-      sceneTimings.push({ startMs: sceneStartMs, endMs: sceneEndMs });
-      if (subtitleCues.length === initialCueCount && SCENE_NARRATIONS[sceneIdx]) {
-        subtitleCues.push({
-          startTimeMs: sceneStartMs,
-          endTimeMs: sceneEndMs,
-          text: SCENE_NARRATIONS[sceneIdx],
-        });
-      }
-    };
-
-    const runSegment = async (
-      segAudioMap: Map<string, SynthesizeResult>,
-      key: string,
-      defaultDurationSec: number,
-      actionFn: () => Promise<void>,
-      narrationText?: string,
-    ): Promise<void> => {
-      const segStartMs = Date.now() - tVideoStart;
-      const tStart = Date.now();
-      await actionFn();
-      const existingAudio = segAudioMap.get(key);
-      const segSec = existingAudio?.durationSeconds ?? defaultDurationSec;
-      const segStartSec = segStartMs / 1000;
-      const segEndSec = (Date.now() - tVideoStart) / 1000;
-      const effectiveElapsedSec =
-        remapTimestamp(segEndSec, accelerationIntervals) -
-        remapTimestamp(segStartSec, accelerationIntervals);
-      const remainingSec = segSec - effectiveElapsedSec;
-      if (remainingSec > 0) {
-        await appPage.waitForTimeout(remainingSec * 1000);
-      } else if (existingAudio && effectiveElapsedSec > segSec) {
-        // Visual action took longer than spoken narration!
-        // Pad the segment audio buffer with silence matching effective video duration
-        const padded = padSynthesizeResult(existingAudio, effectiveElapsedSec);
-        segAudioMap.set(key, padded);
-      }
-      const segEndMs = Date.now() - tVideoStart;
-      if (narrationText) {
-        const speechSec = existingAudio?.durationSeconds ?? defaultDurationSec;
-        subtitleCues.push({
-          startTimeMs: segStartMs,
-          endTimeMs: segStartMs + Math.round(speechSec * 1000),
-          text: narrationText,
-        });
-      }
-    };
 
     const selectSidebarThread = async (text?: string): Promise<void> => {
       let thread = text
@@ -1290,6 +1074,79 @@ export async function runDemoVideoGenerator(): Promise<void> {
     initialDelaySec = (Date.now() - tVideoStart) / 1000;
     console.log(`  Initial workspace settle delay: ${initialDelaySec.toFixed(2)}s`);
 
+    const initialSilence = createSilencePcm(initialDelaySec);
+    const timelineSync = createTimelineSyncController({
+      initialSilencePcm: initialSilence,
+      skipTts: options.skipTts,
+      nowSec: () => (Date.now() - tVideoStart) / 1000,
+      waitSec: async (sec: number) => {
+        await appPage.waitForTimeout(sec * 1000);
+      },
+      remapSec: (rawSec: number) => remapTimestamp(rawSec, accelerationIntervals),
+    });
+
+    const rebuildSceneAudio = (sceneIdx: number): void => {
+      const pairs: Array<[SceneSegment[], Map<string, SynthesizeResult>]> = [
+        [SCENE_1_SEGMENTS, scene1SegmentAudios],
+        [SCENE_2_SEGMENTS, scene2SegmentAudios],
+        [SCENE_3_SEGMENTS, scene3SegmentAudios],
+        [SCENE_4_SEGMENTS, scene4SegmentAudios],
+        [SCENE_5_SEGMENTS, scene5SegmentAudios],
+        [SCENE_6_SEGMENTS, scene6SegmentAudios],
+        [SCENE_7_SEGMENTS, scene7SegmentAudios],
+      ];
+      const pair = pairs[sceneIdx];
+      if (!pair) return;
+      const [segments, audioMap] = pair;
+      if (audioMap.size === 0) return;
+      const segs = segments
+        .map((s) => audioMap.get(s.key))
+        .filter((s): s is SynthesizeResult => Boolean(s));
+      if (segs.length > 0) {
+        sceneAudios[sceneIdx] = combineSynthesizeResults(segs);
+      }
+    };
+
+    const runSceneWithPadding = async (
+      sceneIdx: number,
+      name: string,
+      actionFn: () => Promise<void>,
+    ): Promise<void> => {
+      console.log(`  Running Scene ${sceneIdx + 1}/${totalScenes}: ${name}`);
+      const beat = STORYBOARD_BEATS[sceneIdx];
+      const targetDurationSec = beat
+        ? parseTimeRange(beat.timeRange).endSec - parseTimeRange(beat.timeRange).startSec
+        : 0;
+      const timing = await timelineSync.runSceneWithPadding({
+        sceneIdx,
+        targetDurationSec,
+        sceneNarration: SCENE_NARRATIONS[sceneIdx],
+        actionFn,
+        buildSceneAudio: () => rebuildSceneAudio(sceneIdx),
+        getSceneAudio: () => sceneAudios[sceneIdx],
+        setSceneAudio: (audio) => {
+          sceneAudios[sceneIdx] = audio;
+        },
+      });
+      sceneTimings.push(timing);
+    };
+
+    const runSegment = async (
+      segAudioMap: Map<string, SynthesizeResult>,
+      key: string,
+      defaultDurationSec: number,
+      actionFn: () => Promise<void>,
+      narrationText?: string,
+    ): Promise<void> => {
+      await timelineSync.runSegment({
+        segAudioMap,
+        key,
+        defaultDurationSec,
+        actionFn,
+        narrationText,
+      });
+    };
+
     // =========================================================================
     // Scene 1: App & Sidebar Overview
     // =========================================================================
@@ -1299,7 +1156,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene1SegmentAudios,
           'welcome',
-          6.0,
+          getSegmentDuration(SCENE_1_SEGMENTS, 'welcome'),
           async () => {
             // App is already displaying an active conversation with full chat view!
             // Smoothly glide mouse across active message response and trace bar
@@ -1308,14 +1165,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await glideMouse(appPage, traceBar, 25, { delayMs: 400 });
             }
           },
-          SCENE_1_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_1_SEGMENTS, 'welcome'),
         );
 
         // 2. Sidebar & Threads
         await runSegment(
           scene1SegmentAudios,
           'sidebar',
-          5.3,
+          getSegmentDuration(SCENE_1_SEGMENTS, 'sidebar'),
           async () => {
             // Hover over the header app title "YVOKE"
             const appTitle = appPage.locator('.thread-list-header .app-title').first();
@@ -1341,14 +1198,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               }
             }
           },
-          SCENE_1_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_1_SEGMENTS, 'sidebar'),
         );
 
         // 3. Instant Search
         await runSegment(
           scene1SegmentAudios,
           'search',
-          3.4,
+          getSegmentDuration(SCENE_1_SEGMENTS, 'search'),
           async () => {
             const searchInput = appPage
               .locator('.thread-search input, input[placeholder*="Search"]')
@@ -1366,27 +1223,34 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await appPage.waitForTimeout(200);
             }
           },
-          SCENE_1_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_1_SEGMENTS, 'search'),
         );
 
-        // 4. Profile & Settings
+        // 4. Dual-Account Footer & Settings
         await runSegment(
           scene1SegmentAudios,
           'profile',
-          5.0,
+          getSegmentDuration(SCENE_1_SEGMENTS, 'profile'),
           async () => {
-            const accountChip = appPage
-              .locator('.thread-list-footer .account-chip, .account-mode')
-              .first();
-            if ((await accountChip.count()) > 0) {
-              await glideMouse(appPage, accountChip, 20, { delayMs: 400 });
+            const accountRows = appPage.locator('.thread-list-footer .account-status-row');
+            const rowCount = await accountRows.count();
+            if (rowCount > 0) {
+              await glideMouse(appPage, accountRows.first(), 20, { delayMs: 350, optional: true });
+              if (rowCount > 1) {
+                await glideMouse(appPage, accountRows.nth(1), 20, { delayMs: 350, optional: true });
+              }
+            } else {
+              const footerAccountBtn = appPage
+                .locator('.thread-list-footer button.footer-account-btn')
+                .first();
+              if ((await footerAccountBtn.count()) > 0) {
+                await glideMouse(appPage, footerAccountBtn, 20, { delayMs: 400, optional: true });
+              }
             }
 
-            const logoutBtn = appPage
-              .locator('button[data-tip*="Sign out"], .footer-actions button')
-              .first();
-            if ((await logoutBtn.count()) > 0) {
-              await glideMouse(appPage, logoutBtn, 20, { delayMs: 350 });
+            const appVersion = appPage.locator('.footer-sub-meta .app-version').first();
+            if ((await appVersion.count()) > 0) {
+              await glideMouse(appPage, appVersion, 20, { delayMs: 300, optional: true });
             }
 
             const settingsBtn = appPage
@@ -1396,7 +1260,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await glideMouse(appPage, settingsBtn, 20, { delayMs: 400 });
             }
           },
-          SCENE_1_SEGMENTS[3].narration,
+          getSegmentNarration(SCENE_1_SEGMENTS, 'profile'),
         );
       });
     }
@@ -1418,7 +1282,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
             if (contentSelector) {
               const target = appPage.locator(contentSelector).first();
               if ((await target.count()) > 0) {
-                await glideMouse(appPage, target, 20, { delayMs: 200 });
+                await glideMouse(appPage, target, 20, { delayMs: 200, optional: true });
               }
             }
           }
@@ -1428,7 +1292,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene2SegmentAudios,
           'intro',
-          3.2,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'intro'),
           async () => {
             const settingsBtn = appPage
               .locator('button[data-tip="Settings"], .settings-button')
@@ -1441,118 +1305,150 @@ export async function runDemoVideoGenerator(): Promise<void> {
               .waitFor({ state: 'visible', timeout: 3000 })
               .catch(() => {});
           },
-          SCENE_2_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'intro'),
         );
 
         // 2. Server: "Under Server, configure backend endpoints, transport, and authentication."
         await runSegment(
           scene2SegmentAudios,
           'server',
-          3.5,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'server'),
           async () => {
-            await visitPane('Server', '.settings-field input');
+            await visitPane('Server', '.settings-field input, .seg');
           },
-          SCENE_2_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'server'),
         );
 
-        // 3. Models: "Models lets you define Claude model versions and default thinking effort."
+        // 3. Accounts: "Under Accounts, manage your Yvoke and Claude sign-ins and verify active credentials on demand."
+        await runSegment(
+          scene2SegmentAudios,
+          'accounts',
+          getSegmentDuration(SCENE_2_SEGMENTS, 'accounts'),
+          async () => {
+            await visitPane('Accounts', '.about-grid');
+            const credBtn = appPage.locator('.check-credentials-btn').first();
+            if ((await credBtn.count()) > 0) {
+              await glideMouse(appPage, credBtn, 15, { click: true, delayMs: 200 });
+              await appPage
+                .locator('.about-grid .cred-badge, .settings-pane .banner.error')
+                .first()
+                .waitFor({
+                  state: 'visible',
+                  timeout: options.skipBackend ? 5000 : 45000,
+                })
+                .catch(() => {});
+              if (!options.skipBackend) {
+                await appPage
+                  .locator('.about-grid .cred-badge')
+                  .nth(1)
+                  .waitFor({ state: 'visible', timeout: 5000 })
+                  .catch(() => {});
+              }
+              await appPage.waitForTimeout(700);
+            }
+          },
+          getSegmentNarration(SCENE_2_SEGMENTS, 'accounts'),
+        );
+
+        // 4. Models: "Models lets you define Claude model versions and default thinking effort."
         await runSegment(
           scene2SegmentAudios,
           'models',
-          4.2,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'models'),
           async () => {
             await visitPane('Models', '.chip-list, .seg');
           },
-          SCENE_2_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'models'),
         );
 
-        // 4. Agents: "Agents configures multi-agent roles, turns, and automatic playbook validation."
+        // 5. Agents: "Agents configures multi-agent roles, turns, and automatic playbook validation."
         await runSegment(
           scene2SegmentAudios,
           'agents',
-          4.0,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'agents'),
           async () => {
-            await visitPane('Agents', '.check-field input, .role-card');
+            await visitPane('Agents', '.check-field input');
+            const excludedList = appPage.locator('.settings-domain-list').first();
+            if ((await excludedList.count()) > 0) {
+              await excludedList.scrollIntoViewIfNeeded().catch(() => {});
+              await glideMouse(appPage, excludedList, 20, { delayMs: 250, optional: true });
+            }
+            const roleCard = appPage.locator('.role-card').first();
+            if ((await roleCard.count()) > 0) {
+              await roleCard.scrollIntoViewIfNeeded().catch(() => {});
+              await glideMouse(appPage, roleCard, 20, { delayMs: 250, optional: true });
+            }
           },
-          SCENE_2_SEGMENTS[3].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'agents'),
         );
 
-        // 5. Web search: "Web Search toggles web access while displaying the allowed domains,"
+        // 6. Web search: "Web Search toggles web access while displaying the allowed domains,"
         await runSegment(
           scene2SegmentAudios,
           'webSearch',
-          2.8,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'webSearch'),
           async () => {
-            await visitPane('Web search', '.domain-row, .settings-field');
+            await visitPane('Web search', '.settings-domain-list li, .settings-field');
           },
-          SCENE_2_SEGMENTS[4].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'webSearch'),
         );
 
-        // 6. Appearance: "Appearance customizes themes and density,"
+        // 7. Appearance: "Appearance customizes themes and density,"
         await runSegment(
           scene2SegmentAudios,
           'appearance',
-          2.8,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'appearance'),
           async () => {
-            await visitPane('Appearance', '.theme-choices, .density-choice');
+            await visitPane('Appearance', '.theme-choices, .seg');
           },
-          SCENE_2_SEGMENTS[5].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'appearance'),
         );
 
-        // 7. About: "while About lets you verify your credentials and check for updates."
+        // 8. About: "while About lets you check for updates and access diagnostic logs."
         await runSegment(
           scene2SegmentAudios,
           'about',
-          6.0,
+          getSegmentDuration(SCENE_2_SEGMENTS, 'about'),
           async () => {
             await visitPane('About', '.about-version-row');
             await appPage.waitForTimeout(300);
 
-            // 1. Click Check for Updates and wait for response badge
+            // 1. Click Check for Updates and wait for response badge or error banner
             const updateBtn = appPage.locator('.check-updates-btn').first();
             if ((await updateBtn.count()) > 0) {
               await glideMouse(appPage, updateBtn, 15, { click: true, delayMs: 200 });
-              // Wait for update check to complete and status badge or re-enabled button
               await appPage
-                .locator('.about-version-row .cred-badge, .check-updates-btn:not([disabled])')
+                .locator('.about-version-row .cred-badge, .settings-pane .banner.error')
                 .first()
-                .waitFor({ state: 'visible', timeout: 6000 })
+                .waitFor({
+                  state: 'visible',
+                  timeout: options.skipBackend ? 4000 : 15000,
+                })
                 .catch(() => {});
               await appPage.waitForTimeout(350);
             }
 
-            // 2. Click Check Credentials and wait for verification response
-            const credBtn = appPage.locator('.check-credentials-btn').first();
-            if ((await credBtn.count()) > 0) {
-              await glideMouse(appPage, credBtn, 15, { click: true, delayMs: 200 });
-              // Wait for credential verification to finish and verified badges to appear
-              await appPage
-                .locator('.check-credentials-btn:not([disabled])')
-                .waitFor({ state: 'attached', timeout: 6000 })
-                .catch(() => {});
-              const verifiedBadges = appPage.locator('.cred-badge.verified').first();
-              if ((await verifiedBadges.count()) > 0) {
-                await verifiedBadges.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
-              }
-              // Visual pause: let the viewer clearly see both successful results on screen
-              await appPage.waitForTimeout(700);
+            // 2. Hover Open Logs Folder (NEVER click — avoids opening OS file manager popup)
+            const openLogsBtn = appPage.locator('.open-logs-btn').first();
+            if ((await openLogsBtn.count()) > 0) {
+              await glideMouse(appPage, openLogsBtn, 15, { delayMs: 350, optional: true });
             }
 
             // 3. Close Settings and return to main workspace
-            const cancelBtn = appPage
-              .locator('.dialog-actions button')
-              .filter({ hasText: 'Cancel' })
+            const closeBtn = appPage
+              .locator('.settings-footer .dialog-actions button')
+              .filter({ hasText: /^(Close|Cancel)$/ })
               .first();
-            if ((await cancelBtn.count()) > 0) {
-              await glideMouse(appPage, cancelBtn, 20, { click: true, delayMs: 200 });
+            if ((await closeBtn.count()) > 0) {
+              await glideMouse(appPage, closeBtn, 20, { click: true, delayMs: 200 });
               await appPage
                 .locator('.settings-view')
                 .waitFor({ state: 'detached', timeout: 3000 })
                 .catch(() => {});
-              await appPage.waitForTimeout(600);
+              await appPage.waitForTimeout(400);
             }
           },
-          SCENE_2_SEGMENTS[6].narration,
+          getSegmentNarration(SCENE_2_SEGMENTS, 'about'),
         );
       });
     }
@@ -1566,7 +1462,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene3SegmentAudios,
           'newConv',
-          3.0,
+          getSegmentDuration(SCENE_3_SEGMENTS, 'newConv'),
           async () => {
             const newBtn = appPage
               .locator(
@@ -1582,14 +1478,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(400);
           },
-          SCENE_3_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_3_SEGMENTS, 'newConv'),
         );
 
         // 2. Playbook picker
         await runSegment(
           scene3SegmentAudios,
           'playbooks',
-          6.0,
+          getSegmentDuration(SCENE_3_SEGMENTS, 'playbooks'),
           async () => {
             const picker = appPage.locator('.picker, .picker-list').first();
             if ((await picker.count()) > 0) {
@@ -1621,14 +1517,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               }
             }
           },
-          SCENE_3_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_3_SEGMENTS, 'playbooks'),
         );
 
         // 3. Composer
         await runSegment(
           scene3SegmentAudios,
           'composer',
-          8.0,
+          getSegmentDuration(SCENE_3_SEGMENTS, 'composer'),
           async () => {
             const composer = appPage.locator('.composer').first();
             if ((await composer.count()) > 0) {
@@ -1643,9 +1539,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               }
 
               const modeSelect = appPage
-                .locator(
-                  'select.composer-select[data-tip*="Multi-agent"], select.composer-select[aria-label="Agent mode"]',
-                )
+                .locator('select.composer-select[aria-label="Agent mode"]')
                 .first();
               if ((await modeSelect.count()) > 0) {
                 await glideMouse(appPage, modeSelect, 20, { delayMs: 350 });
@@ -1675,7 +1569,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               }
             }
           },
-          SCENE_3_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_3_SEGMENTS, 'composer'),
         );
       });
     }
@@ -1705,7 +1599,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene4SegmentAudios,
           'ask',
-          6.5,
+          getSegmentDuration(SCENE_4_SEGMENTS, 'ask'),
           async () => {
             const picker = appPage.locator('.picker');
             if ((await picker.count()) === 0 || !(await picker.isVisible())) {
@@ -1720,9 +1614,11 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await appPage.waitForTimeout(200);
             }
             const gettingStartedRow = appPage
-              .locator('button.picker-row')
+              .locator('button.picker-row, .picker-row')
               .filter({
-                has: appPage.locator('.picker-row-title', { hasText: /^oim-getting-started$/ }),
+                has: appPage.locator('.picker-row-title', {
+                  hasText: buildPlaybookTitlePattern('oim-getting-started'),
+                }),
               })
               .first();
             if ((await gettingStartedRow.count()) > 0) {
@@ -1750,7 +1646,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await glideMouse(appPage, sendBtn, 20, { click: true, delayMs: 200 });
             }
           },
-          SCENE_4_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_4_SEGMENTS, 'ask'),
         );
 
         // 2. Preflight validation detection: wait for card to appear FIRST, then speak 4.2
@@ -1775,7 +1671,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
                 </div>
                 <div class="preflight-card-reason">Question queries table migration history. We recommend switching from oim-getting-started to oim-db-history.</div>
                 <div class="preflight-card-actions">
-                  <button class="primary demo-switch-btn">Switch to Database History</button>
+                  <button class="primary demo-switch-btn">Switch to oim-db-history</button>
                   <button class="demo-send-anyway-btn">Send anyway</button>
                 </div>
               `;
@@ -1788,7 +1684,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene4SegmentAudios,
           'catch',
-          5.0,
+          getSegmentDuration(SCENE_4_SEGMENTS, 'catch'),
           async () => {
             const cardElement = appPage
               .locator('.preflight-card, #demo-preflight-recommendation')
@@ -1798,14 +1694,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(400);
           },
-          SCENE_4_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_4_SEGMENTS, 'catch'),
         );
 
-        // 3. Recommendation & acceptance: cursor clicks "Switch to Database History"
+        // 3. Recommendation & acceptance: cursor clicks "Switch to oim-db-history"
         await runSegment(
           scene4SegmentAudios,
           'recommend',
-          4.0,
+          getSegmentDuration(SCENE_4_SEGMENTS, 'recommend'),
           async () => {
             const activeCard = appPage
               .locator('.preflight-card, #demo-preflight-recommendation')
@@ -1821,14 +1717,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             );
             await appPage.waitForTimeout(300);
           },
-          SCENE_4_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_4_SEGMENTS, 'recommend'),
         );
 
         // 4. Response waiting & streaming: speak 4.4, wait until response is finished (Send button reappears from Stop)
         await runSegment(
           scene4SegmentAudios,
           'response',
-          5.5,
+          getSegmentDuration(SCENE_4_SEGMENTS, 'response'),
           async () => {
             // Ensure turn start is registered
             await appPage
@@ -1854,7 +1750,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(800);
           },
-          SCENE_4_SEGMENTS[3].narration,
+          getSegmentNarration(SCENE_4_SEGMENTS, 'response'),
         );
       });
     }
@@ -1868,7 +1764,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene5SegmentAudios,
           'ask',
-          6.0,
+          getSegmentDuration(SCENE_5_SEGMENTS, 'ask'),
           async () => {
             await startNewConversation();
 
@@ -1880,9 +1776,11 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await appPage.waitForTimeout(200);
             }
             const fullRow = appPage
-              .locator('button.picker-row')
+              .locator('button.picker-row, .picker-row')
               .filter({
-                has: appPage.locator('.picker-row-title', { hasText: /^oim-full$/ }),
+                has: appPage.locator('.picker-row-title', {
+                  hasText: buildPlaybookTitlePattern('oim-full'),
+                }),
               })
               .first();
             if ((await fullRow.count()) > 0) {
@@ -1940,14 +1838,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               }
             }
           },
-          SCENE_5_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_5_SEGMENTS, 'ask'),
         );
 
         // 2. Response 1 Streaming & Waiting for Completion
         await runSegment(
           scene5SegmentAudios,
           'response1',
-          7.0,
+          getSegmentDuration(SCENE_5_SEGMENTS, 'response1'),
           async () => {
             // Safety check: if preflight card is still visible, click "Send anyway"
             const preflightCard = appPage.locator('.preflight-card').first();
@@ -1980,14 +1878,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await glideMouse(appPage, firstMsg, 20, { delayMs: 400 });
             }
           },
-          SCENE_5_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_5_SEGMENTS, 'response1'),
         );
 
         // 3. Citations Modal Inspection
         await runSegment(
           scene5SegmentAudios,
           'citations',
-          7.0,
+          getSegmentDuration(SCENE_5_SEGMENTS, 'citations'),
           async () => {
             // Locate citation link in assistant message
             const citationLink = appPage
@@ -2032,30 +1930,40 @@ export async function runDemoVideoGenerator(): Promise<void> {
               // Continue if already rendered
             }
 
-            // Click close button on the citation modal
-            const closeBtn = appPage
-              .locator('.citation-overlay .close-btn, .citation-modal-header button, .modal-close')
-              .first();
+            // Click close button on the citation modal and wait for clean React unmount
+            const closeBtn = appPage.locator('.citation-modal-header button').first();
             if ((await closeBtn.count()) > 0) {
               await glideMouse(appPage, closeBtn, 20, { click: true, delayMs: 250 });
             }
-            await appPage.evaluate(() => {
-              const overlay = document.querySelector('.citation-overlay');
-              if (overlay) {
-                (overlay.querySelector('.close-btn, button') as any)?.click?.();
-                overlay.remove();
-              }
-            });
+            const citationOverlay = appPage.locator('.citation-overlay').first();
+            await citationOverlay
+              .waitFor({ state: 'detached', timeout: 2000 })
+              .catch(() => {});
+            if (
+              (await citationOverlay.count()) > 0 &&
+              (await citationOverlay.isVisible().catch(() => false))
+            ) {
+              await appPage.keyboard.press('Escape').catch(() => {});
+              await citationOverlay
+                .waitFor({ state: 'detached', timeout: 1000 })
+                .catch(() => {});
+            }
+            // Only remove synthetic fallback modal — never detach React-managed .citation-overlay
+            await appPage
+              .evaluate(() => {
+                document.getElementById('demo-citation-modal')?.remove();
+              })
+              .catch(() => {});
             await appPage.waitForTimeout(400);
           },
-          SCENE_5_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_5_SEGMENTS, 'citations'),
         );
 
         // 4. Follow-up Query with Teams/Confluence Search Hints
         await runSegment(
           scene5SegmentAudios,
           'followup',
-          7.5,
+          getSegmentDuration(SCENE_5_SEGMENTS, 'followup'),
           async () => {
             // Scroll to the bottom before asking follow-up question
             const messagesArea = appPage.locator('.messages').first();
@@ -2090,14 +1998,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await glideMouse(appPage, sendBtn, 20, { click: true, delayMs: 200 });
             }
           },
-          SCENE_5_SEGMENTS[3].narration,
+          getSegmentNarration(SCENE_5_SEGMENTS, 'followup'),
         );
 
         // 5. Response 2 Streaming & Waiting for Completion
         await runSegment(
           scene5SegmentAudios,
           'response2',
-          7.0,
+          getSegmentDuration(SCENE_5_SEGMENTS, 'response2'),
           async () => {
             // Ensure turn start is registered
             await appPage
@@ -2118,7 +2026,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(600);
           },
-          SCENE_5_SEGMENTS[4].narration,
+          getSegmentNarration(SCENE_5_SEGMENTS, 'response2'),
         );
       });
     }
@@ -2132,7 +2040,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene6SegmentAudios,
           'ask',
-          9.0,
+          getSegmentDuration(SCENE_6_SEGMENTS, 'ask'),
           async () => {
             await startNewConversation();
 
@@ -2144,9 +2052,11 @@ export async function runDemoVideoGenerator(): Promise<void> {
               await appPage.waitForTimeout(200);
             }
             const dbHistoryRow = appPage
-              .locator('button.picker-row')
+              .locator('button.picker-row, .picker-row')
               .filter({
-                has: appPage.locator('.picker-row-title', { hasText: /^oim-db-history$/ }),
+                has: appPage.locator('.picker-row-title', {
+                  hasText: buildPlaybookTitlePattern('oim-db-history'),
+                }),
               })
               .first();
             if ((await dbHistoryRow.count()) > 0) {
@@ -2263,14 +2173,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(400);
           },
-          SCENE_6_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_6_SEGMENTS, 'ask'),
         );
 
         // 2. Select option and stream answer
         await runSegment(
           scene6SegmentAudios,
           'option',
-          14.0,
+          getSegmentDuration(SCENE_6_SEGMENTS, 'option'),
           async () => {
             const card = appPage
               .locator('.clarifying-question-card:not(.answered), .clarifying-question-card, #demo-clarifying-card')
@@ -2338,65 +2248,71 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }).catch(() => {});
             await appPage.waitForTimeout(600);
           },
-          SCENE_6_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_6_SEGMENTS, 'option'),
         );
 
         // 3. Trace inspection
         await runSegment(
           scene6SegmentAudios,
           'trace',
-          12.0,
+          getSegmentDuration(SCENE_6_SEGMENTS, 'trace'),
           async () => {
-            // Disable global auto-collapse so the opened trace stays open for viewer inspection
+            // Pause global auto-collapse during trace inspection and always restore in finally
             await appPage.evaluate(() => {
               (window as any).__autoCollapseTrace = false;
             }).catch(() => {});
 
-            // Find TraceBar button of the final response (currently collapsed)
-            const traceBar = appPage.locator('button.trace-bar').last();
-            if ((await traceBar.count()) > 0) {
-              await traceBar.scrollIntoViewIfNeeded().catch(() => {});
-              await glideMouse(appPage, traceBar, 20, { click: true, delayMs: 400 });
-              await appPage.waitForTimeout(600);
+            try {
+              // Find TraceBar button of the final response (currently collapsed)
+              const traceBar = appPage.locator('button.trace-bar').last();
+              if ((await traceBar.count()) > 0) {
+                await traceBar.scrollIntoViewIfNeeded().catch(() => {});
+                await glideMouse(appPage, traceBar, 20, { click: true, delayMs: 400 });
+                await appPage.waitForTimeout(600);
 
-              // Expand tool step to show queries / tool calls (specifically the database query tool, not ToolSearch)
-              const toolStep = appPage
-                .locator('button.trace-step')
-                .filter({ hasText: /query_json|json_objects|get_json_schema/i })
-                .last();
-              const fallbackStep = appPage
-                .locator('button.trace-step')
-                .filter({ hasNotText: /ToolSearch/i })
-                .filter({ hasText: /mcp|query|fetch|search|get/i })
-                .first();
-              const targetStep =
-                (await toolStep.count()) > 0
-                  ? toolStep
-                  : (await fallbackStep.count()) > 0
-                    ? fallbackStep
-                    : appPage.locator('button.trace-step').nth(1);
+                // Expand tool step to show queries / tool calls (specifically the database query tool, not ToolSearch)
+                const toolStep = appPage
+                  .locator('button.trace-step')
+                  .filter({ hasText: /query_json|json_objects|get_json_schema/i })
+                  .last();
+                const fallbackStep = appPage
+                  .locator('button.trace-step')
+                  .filter({ hasNotText: /ToolSearch/i })
+                  .filter({ hasText: /mcp|query|fetch|search|get/i })
+                  .first();
+                const targetStep =
+                  (await toolStep.count()) > 0
+                    ? toolStep
+                    : (await fallbackStep.count()) > 0
+                      ? fallbackStep
+                      : appPage.locator('button.trace-step').nth(1);
 
-              const stepToClick =
-                (await targetStep.count()) > 0
-                  ? targetStep
-                  : appPage.locator('button.trace-step').first();
+                const stepToClick =
+                  (await targetStep.count()) > 0
+                    ? targetStep
+                    : appPage.locator('button.trace-step').first();
 
-              if ((await stepToClick.count()) > 0) {
-                await stepToClick.scrollIntoViewIfNeeded().catch(() => {});
-                await glideMouse(appPage, stepToClick, 20, { click: true, delayMs: 400 });
-                await appPage.waitForTimeout(800);
+                if ((await stepToClick.count()) > 0) {
+                  await stepToClick.scrollIntoViewIfNeeded().catch(() => {});
+                  await glideMouse(appPage, stepToClick, 20, { click: true, delayMs: 400 });
+                  await appPage.waitForTimeout(800);
 
-                // Hover gently over trace step body showing transparent queries
-                const stepBody = appPage.locator('.trace-step-body').last();
-                if ((await stepBody.count()) > 0) {
-                  await stepBody.scrollIntoViewIfNeeded().catch(() => {});
-                  await glideMouse(appPage, stepBody, 20, { delayMs: 600 });
+                  // Hover gently over trace step body showing transparent queries
+                  const stepBody = appPage.locator('.trace-step-body').last();
+                  if ((await stepBody.count()) > 0) {
+                    await stepBody.scrollIntoViewIfNeeded().catch(() => {});
+                    await glideMouse(appPage, stepBody, 20, { delayMs: 600 });
+                  }
                 }
               }
+              await appPage.waitForTimeout(1500);
+            } finally {
+              await appPage.evaluate(() => {
+                (window as any).__autoCollapseTrace = true;
+              }).catch(() => {});
             }
-            await appPage.waitForTimeout(1500);
           },
-          SCENE_6_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_6_SEGMENTS, 'trace'),
         );
       });
     }
@@ -2412,13 +2328,16 @@ export async function runDemoVideoGenerator(): Promise<void> {
         await runSegment(
           scene7SegmentAudios,
           'mode',
-          9.0,
+          getSegmentDuration(SCENE_7_SEGMENTS, 'mode'),
           async () => {
             await startNewConversation();
 
             const modeSelect = appPage
-              .locator('select.composer-select, select[aria-label="Agent mode"]')
+              .locator(
+                'select.composer-select[aria-label="Agent mode"], select[aria-label="Agent mode"]',
+              )
               .first();
+            await modeSelect.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
             if ((await modeSelect.count()) > 0) {
               await glideMouse(appPage, modeSelect, 20, { delayMs: 250 });
               await selectAgentMode(appPage, 'orchestrator');
@@ -2434,14 +2353,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(600);
           },
-          SCENE_7_SEGMENTS[0].narration,
+          getSegmentNarration(SCENE_7_SEGMENTS, 'mode'),
         );
 
         // 7.2: Type prompt & dispatch turn
         await runSegment(
           scene7SegmentAudios,
           'prompt',
-          11.0,
+          getSegmentDuration(SCENE_7_SEGMENTS, 'prompt'),
           async () => {
             await typeInComposer(
               appPage,
@@ -2472,14 +2391,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(500);
           },
-          SCENE_7_SEGMENTS[1].narration,
+          getSegmentNarration(SCENE_7_SEGMENTS, 'prompt'),
         );
 
         // 7.3: Specialist parallel execution & Reviewer gate validation
         await runSegment(
           scene7SegmentAudios,
           'review',
-          13.0,
+          getSegmentDuration(SCENE_7_SEGMENTS, 'review'),
           async () => {
             const subagents = appPage.locator('.subagent-card');
             // Wait up to 20s for subagents to be rendered
@@ -2522,14 +2441,14 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(500);
           },
-          SCENE_7_SEGMENTS[2].narration,
+          getSegmentNarration(SCENE_7_SEGMENTS, 'review'),
         );
 
         // 7.4: Reviewer approval & markdown comparison table
         await runSegment(
           scene7SegmentAudios,
           'approval',
-          12.0,
+          getSegmentDuration(SCENE_7_SEGMENTS, 'approval'),
           async () => {
             // Inspect the approved verdict badge on Reviewer card
             const verdictBadge = appPage
@@ -2544,7 +2463,7 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
 
             // Scroll down to and inspect the synthesized markdown comparison table
-            const table = appPage.locator('.message.assistant .markdown-body table').last();
+            const table = appPage.locator('.message.assistant .markdown table').last();
             if ((await table.count()) > 0) {
               await table.scrollIntoViewIfNeeded().catch(() => {});
               await glideMouse(appPage, table, 20, { delayMs: 600 });
@@ -2557,26 +2476,31 @@ export async function runDemoVideoGenerator(): Promise<void> {
             }
             await appPage.waitForTimeout(800);
           },
-          SCENE_7_SEGMENTS[3].narration,
+          getSegmentNarration(SCENE_7_SEGMENTS, 'approval'),
         );
 
         // 7.5: Outro resting glide & conclusion
         await runSegment(
           scene7SegmentAudios,
           'outro',
-          10.0,
+          getSegmentDuration(SCENE_7_SEGMENTS, 'outro'),
           async () => {
             // Glide smoothly to center resting position
             await appPage.mouse.move(640, 360, { steps: 25 });
             await appPage.waitForTimeout(1500);
           },
-          SCENE_7_SEGMENTS[4].narration,
+          getSegmentNarration(SCENE_7_SEGMENTS, 'outro'),
         );
       });
     }
 
     // Buffer pause to ensure final scene frames settle and are not truncated
     await appPage.waitForTimeout(1000);
+
+    // Stop global auto-collapse observer cleanly before closing page
+    await appPage
+      .evaluate(() => (window as any).__stopAutoCollapseTrace?.())
+      .catch(() => {});
 
     // Retrieve recorded video path
     const video = appPage.video();
@@ -2593,14 +2517,13 @@ export async function runDemoVideoGenerator(): Promise<void> {
     let combinedAudioPath: string | undefined;
     if (!options.skipTts && sceneAudios.length > 0) {
       combinedAudioPath = path.join(recordingsDir, 'narration.wav');
-      // Prepend initial delay silence so speech matches visual action start
-      const initialSilence = createSilencePcm(initialDelaySec);
       // Append 1.0s silence buffer to match the final appPage.waitForTimeout(1000)
       const silenceEnd = createSilencePcm(1.0);
       const activeAudios = (options.scenes
         ? options.scenes.map((s) => sceneAudios[s - 1])
         : SCENE_NARRATIONS.map((_, idx) => (shouldRunScene(idx) ? sceneAudios[idx] : undefined))
       ).filter(Boolean) as SynthesizeResult[];
+      // Reuse exact quantized initialSilence passed into createTimelineSyncController
       const combinedPcm = Buffer.concat([
         initialSilence,
         ...activeAudios.map((a) => a.pcmBuffer),
@@ -2610,12 +2533,8 @@ export async function runDemoVideoGenerator(): Promise<void> {
       fs.writeFileSync(combinedAudioPath, combinedWav);
     }
 
-    // Generate SRT subtitles from recorded segment/scene cues remapped to accelerated timeline
-    const finalSubtitleCues =
-      accelerationIntervals.length > 0
-        ? remapSubtitleCues(subtitleCues, accelerationIntervals)
-        : subtitleCues;
-    const srtContent = generateSrt(finalSubtitleCues);
+    // Generate SRT subtitles directly from effective-coordinate cues tracked by timelineSync
+    const srtContent = generateSrt(timelineSync.getSubtitleCues());
     const srtPath = path.join(recordingsDir, 'subtitles.srt');
     fs.writeFileSync(srtPath, srtContent, 'utf8');
 
